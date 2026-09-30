@@ -61,7 +61,32 @@ h2 { margin-bottom: 10px; font-size: 22px; letter-spacing: -.025em; }
 .error-message { color: #ff8e8e; font-size: 12px; }
 .main-footer { margin-top: auto; padding-top: 42px; display: flex; justify-content: space-between; color: #5d6a72; font-family: "DM Mono", monospace; font-size: 10px; }
 
+.session-panel { margin-top: 42px; padding: 24px; border: 1px solid #2a343b; border-radius: 10px; background: #151b20; }
+.session-heading { margin-bottom: 20px; }
+.session-status { display: inline-flex; align-items: center; gap: 8px; padding: 7px 10px; color: #87949b; border: 1px solid #303a42; border-radius: 99px; font-family: "DM Mono", monospace; font-size: 10px; }
+.status-running .status-dot { background: #d6ff5f; box-shadow: 0 0 0 3px #d6ff5f18; }
+.status-succeeded .status-dot { background: #83d9af; }
+.status-failed .status-dot { background: #ff8e8e; }
+.status-stopped .status-dot { background: #e3bc70; }
+.session-controls { display: grid; grid-template-columns: 1fr 1fr auto; align-items: end; gap: 12px; }
+.session-controls label { display: flex; flex-direction: column; gap: 7px; min-width: 0; color: #7f8c94; font-family: "DM Mono", monospace; font-size: 10px; }
+.session-controls input { width: 100%; min-width: 0; padding: 10px 11px; color: #e8edf1; background: #101418; border: 1px solid #303a42; border-radius: 6px; outline: none; font-family: "DM Mono", monospace; font-size: 11px; }
+.session-controls input:focus { border-color: #829e43; box-shadow: 0 0 0 2px #d6ff5f18; }
+.session-controls input::placeholder { color: #53616a; }
+.session-actions { display: flex; gap: 8px; }
+.primary-button:disabled, .secondary-button:disabled { cursor: default; opacity: .45; }
+.secondary-button { padding: 11px 15px; color: #c7d0d5; background: transparent; border: 1px solid #3a464e; border-radius: 7px; cursor: pointer; font-size: 12px; font-weight: 600; }
+.session-meta { margin-top: 15px; color: #617078; font-family: "DM Mono", monospace; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.terminal-panel { min-height: 330px; margin-top: 14px; display: flex; flex-direction: column; overflow: hidden; border: 1px solid #2a343b; border-radius: 10px; background: #0d1114; }
+.terminal-header { display: flex; justify-content: space-between; padding: 10px 14px; color: #6f7d85; border-bottom: 1px solid #252e34; font-family: "DM Mono", monospace; font-size: 10px; letter-spacing: .1em; }
+.terminal-host { flex: 1; min-height: 285px; padding: 13px 14px; }
+.terminal-host .xterm { height: 100%; }
+.terminal-host .xterm-viewport { background: #0d1114 !important; }
+.error-message { margin: 12px 0 0; color: #ff8e8e; font-size: 12px; }
+
 @media (max-width: 1050px) {
   .main-panel { padding-right: 42px; padding-left: 42px; }
   .hero-signal { margin-right: 0; transform: scale(.8); }
+  .session-controls { grid-template-columns: 1fr 1fr; }
+  .session-actions { grid-column: 1 / -1; }
 }
