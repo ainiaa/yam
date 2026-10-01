@@ -1,3 +1,8 @@
+mod agent_bridge;
+mod agent_events;
+pub fn agent_helper_entry() -> bool {
+    agent_bridge::helper_entry()
+}
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -20,6 +25,7 @@ mod windows_notifications;
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
 const MAX_SESSION_LOG_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_SESSION_HISTORY_BYTES: u64 = 32 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct HealthReport {
@@ -138,6 +144,72 @@ fn agent_command(executable: &Path, launch: &AgentLaunch) -> Result<CommandBuild
         builder.arg(prompt);
     }
     Ok(builder)
+}
+
+fn valid_resume_id(id: &str) -> bool {
+    id.len() == 36
+        && id.bytes().enumerate().all(|(index, b)| {
+            if [8, 13, 18, 23].contains(&index) {
+                b == b'-'
+            } else {
+                b.is_ascii_hexdigit()
+            }
+        })
+}
+fn resume_source(
+    history: &HistoryStore,
+    session_id: &str,
+) -> Result<(String, AgentLaunch, String), String> {
+    let record = history
+        .list()?
+        .into_iter()
+        .find(|record| record.summary.session_id == session_id)
+        .ok_or("Resume source is missing from YAM history")?;
+    if matches!(record.status.as_str(), "starting" | "running") {
+        return Err("This conversation is already running; select its terminal".into());
+    }
+    let mut launch = record
+        .summary
+        .launch
+        .ok_or("This history has no supported Agent conversation")?;
+    if record.summary.command.is_some()
+        || launch.adapter != "codex"
+        || launch.mode != "interactive"
+        || !launch.extra_args.trim().is_empty()
+    {
+        return Err(
+            "Native resume is currently supported for default Codex interactive sessions only"
+                .into(),
+        );
+    }
+    let id = record
+        .agent
+        .agent_session_id
+        .filter(|id| valid_resume_id(id))
+        .ok_or("No trusted native conversation ID is available")?;
+    if record.agent.generation.is_empty() {
+        return Err("Conversation identity was not established by a YAM launch".into());
+    }
+    validate_working_directory(&record.summary.cwd)?;
+    launch.prompt = None;
+    Ok((record.summary.cwd, launch, id))
+}
+fn resume_command(
+    executable: &Path,
+    launch: &AgentLaunch,
+    id: &str,
+) -> Result<CommandBuilder, String> {
+    if !valid_resume_id(id)
+        || launch.adapter != "codex"
+        || launch.mode != "interactive"
+        || !launch.extra_args.trim().is_empty()
+        || launch.prompt.is_some()
+    {
+        return Err("Invalid native resume request".into());
+    }
+    let mut command = agent_command(executable, launch)?;
+    command.args(["resume", id]);
+    Ok(command)
 }
 
 struct AgentProtocol {
@@ -281,6 +353,8 @@ pub struct SessionRecord {
     pub output_end_offset: u64,
     #[serde(default)]
     pub notification_pending: bool,
+    #[serde(default)]
+    pub agent: agent_events::AgentState,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -459,7 +533,41 @@ impl WindowsJob {
     }
 }
 
+#[derive(Debug)]
+struct ResumeClaim {
+    claims: Arc<Mutex<std::collections::HashSet<String>>>,
+    id: String,
+}
+impl ResumeClaim {
+    fn acquire(
+        claims: Arc<Mutex<std::collections::HashSet<String>>>,
+        id: &str,
+    ) -> Result<Self, String> {
+        if !claims
+            .lock()
+            .map_err(|_| "Resume ownership lock poisoned")?
+            .insert(id.into())
+        {
+            return Err(
+                "This conversation is already being resumed; select its running terminal".into(),
+            );
+        }
+        Ok(Self {
+            claims,
+            id: id.into(),
+        })
+    }
+}
+impl Drop for ResumeClaim {
+    fn drop(&mut self) {
+        if let Ok(mut claims) = self.claims.lock() {
+            claims.remove(&self.id);
+        }
+    }
+}
+
 struct Session {
+    _resume_claim: Option<ResumeClaim>,
     summary: SessionSummary,
     master: Mutex<Box<dyn MasterPty + Send>>,
     writer: Mutex<Box<dyn Write + Send>>,
@@ -479,21 +587,25 @@ struct Session {
 }
 
 pub struct SessionManager {
+    resume_claims: Arc<Mutex<std::collections::HashSet<String>>>,
     sessions: Arc<Mutex<HashMap<String, Arc<Session>>>>,
     shutting_down: AtomicBool,
     shutdown_complete: AtomicBool,
     notification_selection: Mutex<Option<String>>,
     history: Mutex<Option<Arc<HistoryStore>>>,
+    agent_bridge: Mutex<Option<agent_bridge::Bridge>>,
 }
 
 impl Default for SessionManager {
     fn default() -> Self {
         Self {
+            resume_claims: Arc::new(Mutex::new(std::collections::HashSet::new())),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             shutting_down: AtomicBool::new(false),
             shutdown_complete: AtomicBool::new(false),
             notification_selection: Mutex::new(None),
             history: Mutex::new(None),
+            agent_bridge: Mutex::new(None),
         }
     }
 }
@@ -527,6 +639,14 @@ impl SessionManager {
                 return Err("Session cleanup timed out; the application remains open".into());
             }
         }
+        let mut runtime = self
+            .agent_bridge
+            .lock()
+            .map_err(|_| "Agent bridge lock poisoned")?;
+        if let Some(bridge) = runtime.as_ref() {
+            bridge.stop_until(deadline)?;
+        }
+        runtime.take();
         self.shutdown_complete.store(true, Ordering::Release);
         Ok(())
     }
@@ -536,6 +656,19 @@ struct HistoryStore {
     root: PathBuf,
     records: Mutex<Vec<SessionRecord>>,
 }
+fn bounded_history(path: &Path) -> Result<String, String> {
+    let mut bytes = Vec::new();
+    File::open(path)
+        .and_then(|file| {
+            file.take(MAX_SESSION_HISTORY_BYTES + 1)
+                .read_to_end(&mut bytes)
+        })
+        .map_err(|error| format!("Failed to read session history: {error}"))?;
+    if bytes.len() as u64 > MAX_SESSION_HISTORY_BYTES {
+        return Err("Session history exceeds its 32 MiB budget; preserve the file and archive history before retrying".into());
+    }
+    String::from_utf8(bytes).map_err(|_| "Session history has invalid encoding".into())
+}
 
 impl HistoryStore {
     fn open(root: PathBuf) -> Result<Self, String> {
@@ -543,13 +676,12 @@ impl HistoryStore {
             .map_err(|error| format!("Failed to create session data directory: {error}"))?;
         let records_path = root.join("sessions.json");
         let records = if records_path.exists() {
-            let contents = fs::read_to_string(&records_path)
-                .map_err(|error| format!("Failed to read session history: {error}"))?;
+            let contents = bounded_history(&records_path)?;
             match serde_json::from_str::<Vec<SessionRecord>>(&contents) {
                 Ok(records) => records,
                 Err(error) => {
                     let backup = root.join("sessions.json.bak");
-                    let backup_contents = fs::read_to_string(&backup).map_err(|_| {
+                    let backup_contents = bounded_history(&backup).map_err(|_| {
                         format!(
                             "Session history is corrupt ({error}). Original file preserved at {}",
                             records_path.display()
@@ -573,6 +705,29 @@ impl HistoryStore {
         } else {
             Vec::new()
         };
+        if records_path.exists() {
+            let original = bounded_history(&records_path)?;
+            let json: serde_json::Value =
+                serde_json::from_str(&original).map_err(|e| e.to_string())?;
+            if json
+                .as_array()
+                .is_some_and(|records| records.iter().any(|record| record.get("agent").is_none()))
+            {
+                let backup = root.join("sessions.before-agent-events.json");
+                if backup.exists() {
+                    serde_json::from_str::<Vec<SessionRecord>>(&bounded_history(&backup)?).map_err(|_|"Pre-upgrade history backup is invalid; preserve it and repair before continuing")?;
+                } else {
+                    let mut file = OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&backup)
+                        .map_err(|e| format!("Cannot preserve pre-upgrade history: {e}"))?;
+                    file.write_all(original.as_bytes())
+                        .and_then(|_| file.sync_all())
+                        .map_err(|e| format!("Cannot flush pre-upgrade history: {e}"))?;
+                }
+            }
+        }
         Ok(Self {
             root,
             records: Mutex::new(records),
@@ -587,6 +742,11 @@ impl HistoryStore {
         let temp_path = self.root.join("sessions.json.tmp");
         let data = serde_json::to_vec_pretty(records)
             .map_err(|error| format!("Failed to encode session history: {error}"))?;
+        if data.len() as u64 > MAX_SESSION_HISTORY_BYTES {
+            return Err(
+                "Session history budget reached; unread agent receipts were preserved".into(),
+            );
+        }
         let mut file = File::create(&temp_path)
             .map_err(|error| format!("Failed to write session history: {error}"))?;
         file.write_all(&data)
@@ -629,6 +789,7 @@ impl HistoryStore {
             ended_at: None,
             output_end_offset: 0,
             notification_pending: false,
+            agent: agent_events::AgentState::default(),
         });
         self.save_locked(&updated)?;
         *records = updated;
@@ -762,6 +923,66 @@ impl SessionManager {
         store.recover_running()?;
         *history = Some(Arc::clone(&store));
         Ok(store)
+    }
+    fn start_agent_runtime(
+        &self,
+        app: &AppHandle,
+        history: Arc<HistoryStore>,
+    ) -> Result<(), String> {
+        let mut runtime = self
+            .agent_bridge
+            .lock()
+            .map_err(|_| "Agent bridge lock poisoned")?;
+        agent_bridge::Bridge::retire_stopped(&mut runtime)?;
+        if runtime.is_none() {
+            let emitter = app.clone();
+            *runtime = Some(agent_bridge::Bridge::start(
+                history.clone(),
+                move |id, error| {
+                    let event = if error.is_some() {
+                        "session-error"
+                    } else {
+                        "agent-state"
+                    };
+                    let _ = emitter.emit(
+                        event,
+                        SessionMessage {
+                            session_id: id.into(),
+                            data: error.unwrap_or_else(|| "updated".into()),
+                        },
+                    );
+                    if event == "session-error" {
+                        let _ = emitter.emit(
+                            "agent-state",
+                            SessionMessage {
+                                session_id: id.into(),
+                                data: "degraded".into(),
+                            },
+                        );
+                    }
+                },
+            )?);
+        }
+        let bridge = runtime.as_ref().ok_or("Agent bridge unavailable")?;
+        bridge.start_delivery(app.clone())
+    }
+    fn connect_agent(
+        &self,
+        app: &AppHandle,
+        history: Arc<HistoryStore>,
+        id: &str,
+        prepared: &agent_bridge::Prepared,
+        builder: &mut CommandBuilder,
+    ) -> Result<(), String> {
+        self.start_agent_runtime(app, history.clone())?;
+        let runtime = self
+            .agent_bridge
+            .lock()
+            .map_err(|_| "Agent bridge lock poisoned")?;
+        let bridge = runtime.as_ref().ok_or("Agent bridge unavailable")?;
+        history.configure_agent(id, &prepared.generation)?;
+        bridge.register(id, &prepared.token, &prepared.generation)?;
+        prepared.install(builder, bridge.address)
     }
 }
 
@@ -1511,11 +1732,25 @@ fn create_session(
     cwd: Option<String>,
     command: Option<String>,
     launch: Option<AgentLaunch>,
+    resume_from: Option<String>,
 ) -> Result<SessionSummary, String> {
     if manager.shutting_down.load(Ordering::Acquire) {
         return Err("Application is closing".into());
     }
     let history = manager.history(&app)?;
+    let (cwd, launch, resume_id) = if let Some(source) = resume_from {
+        if cwd.is_some() || command.is_some() || launch.is_some() {
+            return Err("Resume cannot override the stored conversation launch".into());
+        }
+        let (cwd, launch, id) = resume_source(&history, &source)?;
+        (Some(cwd), Some(launch), Some(id))
+    } else {
+        (cwd, launch, None)
+    };
+    let resume_claim = resume_id
+        .as_deref()
+        .map(|id| ResumeClaim::acquire(manager.resume_claims.clone(), id))
+        .transpose()?;
     let id = next_session_id();
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -1537,7 +1772,16 @@ fn create_session(
                 launch.adapter
             )
         })?;
-        agent_command(&executable, launch)?
+        if let Some(id) = resume_id.as_deref() {
+            agent_bridge::validate_resume(
+                &executable,
+                Path::new(cwd.as_deref().ok_or("Resume directory is missing")?),
+                id,
+            )?;
+            resume_command(&executable, launch, id)?
+        } else {
+            agent_command(&executable, launch)?
+        }
     } else {
         shell_command(command.as_deref())
     };
@@ -1551,6 +1795,14 @@ fn create_session(
         });
     validate_working_directory(&working_directory)?;
     builder.cwd(&working_directory);
+    let integration = launch
+        .as_ref()
+        .filter(|launch| launch.mode == "interactive")
+        .map(|launch| {
+            find_executable(&launch.adapter)
+                .ok_or_else(|| "Agent executable unavailable".to_string())
+                .and_then(|exe| agent_bridge::prepare(&exe, launch, Path::new(&working_directory)))
+        });
 
     let summary = SessionSummary {
         session_id: id,
@@ -1583,6 +1835,25 @@ fn create_session(
         return Err("Application is closing".into());
     }
     history.start(&summary)?;
+    if let Some(integration) = integration {
+        match integration {
+            Ok(prepared) => {
+                if let Err(reason) = manager.connect_agent(
+                    &app,
+                    history.clone(),
+                    &summary.session_id,
+                    &prepared,
+                    &mut builder,
+                ) {
+                    history.unavailable_agent(&summary.session_id, &reason)?;
+                }
+            }
+            Err(reason) => history.unavailable_agent(&summary.session_id, &reason)?,
+        }
+    }
+    if let Some(native_id) = resume_id.as_deref() {
+        history.bind_resume_identity(&summary.session_id, native_id)?;
+    }
     #[allow(unused_mut)]
     let mut child = match pair.slave.spawn_command(builder) {
         Ok(child) => child,
@@ -1630,6 +1901,7 @@ fn create_session(
         }
     };
     let session = Arc::new(Session {
+        _resume_claim: resume_claim,
         summary: summary.clone(),
         master: Mutex::new(pair.master),
         writer: Mutex::new(writer),
@@ -1770,35 +2042,101 @@ async fn notify_session(
     manager: State<'_, SessionManager>,
     session_id: String,
     title: String,
+    expected_status: String,
 ) -> Result<(), String> {
     if title.chars().count() > 200 {
         return Err("Notification title is too long".into());
     }
-    let record = manager
-        .history(&app)?
-        .list()?
-        .into_iter()
-        .find(|record| record.summary.session_id == session_id)
-        .ok_or_else(|| "Unknown notification session".to_string())?;
-    let body = record
-        .reason
-        .unwrap_or_else(|| format!("Session {}", record.status));
+    let history = manager.history(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
-        #[cfg(target_os = "macos")]
-        {
-            mac_notifications::send(app, session_id, title, body)
-        }
-        #[cfg(windows)]
-        {
-            windows_notifications::send(app, session_id, title, body)
-        }
-        #[cfg(target_os = "linux")]
-        {
-            linux_notifications::send(app, session_id, title, body)
-        }
+        history
+            .native_delivery(
+                &session_id,
+                agent_events::NativeSource::Lifecycle(&expected_status),
+                |record| {
+                    let body = record
+                        .reason
+                        .clone()
+                        .unwrap_or_else(|| format!("Session {}", record.status));
+                    send_native_notification(app, session_id.clone(), title, body)
+                },
+            )
+            .map(|_| ())
     })
     .await
     .map_err(|error| format!("Notification worker failed: {error}"))?
+}
+fn send_native_notification(
+    app: AppHandle,
+    session_id: String,
+    title: String,
+    body: String,
+) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        mac_notifications::send(app, session_id, title, body)
+    }
+    #[cfg(windows)]
+    {
+        windows_notifications::send(app, session_id, title, body)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux_notifications::send(app, session_id, title, body)
+    }
+}
+
+#[tauri::command]
+fn set_agent_notification_context(
+    app: AppHandle,
+    manager: State<'_, SessionManager>,
+    selected: Option<String>,
+    paused: bool,
+) -> Result<(), String> {
+    let history = manager.history(&app)?;
+    let records = history.list()?;
+    if selected
+        .as_ref()
+        .is_some_and(|id| !records.iter().any(|r| r.summary.session_id == *id))
+    {
+        return Err("Unknown selected agent session".into());
+    }
+    manager.start_agent_runtime(&app, history)?;
+    let runtime = manager
+        .agent_bridge
+        .lock()
+        .map_err(|_| "Agent bridge lock poisoned")?;
+    let bridge = runtime.as_ref().ok_or("Agent bridge unavailable")?;
+    *bridge
+        .context
+        .lock()
+        .map_err(|_| "Agent context lock poisoned")? = (true, selected, paused);
+    Ok(())
+}
+#[tauri::command]
+fn retry_agent_notifications(manager: State<'_, SessionManager>) -> Result<(), String> {
+    let runtime = manager
+        .agent_bridge
+        .lock()
+        .map_err(|_| "Agent bridge lock poisoned")?;
+    runtime
+        .as_ref()
+        .ok_or("Agent bridge unavailable")?
+        .retry
+        .fetch_add(1, Ordering::AcqRel);
+    Ok(())
+}
+#[tauri::command]
+fn read_agent_receipt(
+    app: AppHandle,
+    manager: State<'_, SessionManager>,
+    session_id: String,
+    receipt: String,
+    revision: u64,
+) -> Result<(), String> {
+    manager
+        .history(&app)?
+        .read_agent_receipt(&session_id, &receipt, revision)
 }
 
 #[tauri::command]
@@ -1990,6 +2328,9 @@ pub fn run() {
             list_sessions,
             notify_session,
             acknowledge_notification,
+            set_agent_notification_context,
+            retry_agent_notifications,
+            read_agent_receipt,
             pending_notification_selection,
             acknowledge_notification_selection,
             read_session_log,
@@ -2037,6 +2378,8 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    use super::MAX_SESSION_HISTORY_BYTES;
+    use std::fs;
     #[cfg(unix)]
     use std::io::Read;
 
@@ -2148,6 +2491,40 @@ mod tests {
         };
         (root, summary)
     }
+    #[test]
+    fn history_upgrade_keeps_an_immutable_pre_agent_backup_and_defaults_old_fields() {
+        let (root, summary) = test_history();
+        let history = HistoryStore::open(root.clone()).unwrap();
+        history.start(&summary).unwrap();
+        let mut old: serde_json::Value =
+            serde_json::from_slice(&fs::read(history.records_path()).unwrap()).unwrap();
+        old[0].as_object_mut().unwrap().remove("agent");
+        let original = serde_json::to_vec(&old).unwrap();
+        fs::write(history.records_path(), &original).unwrap();
+        let upgraded = HistoryStore::open(root.clone()).unwrap();
+        assert_eq!(upgraded.list().unwrap()[0].agent.integration, "unavailable");
+        let backup = root.join("sessions.before-agent-events.json");
+        assert_eq!(fs::read(&backup).unwrap(), original);
+        upgraded
+            .configure_agent(&summary.session_id, "new-launch")
+            .unwrap();
+        HistoryStore::open(root.clone()).unwrap();
+        assert_eq!(fs::read(&backup).unwrap(), original);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn history_budget_failure_preserves_the_existing_file_and_in_memory_state() {
+        let (root, summary) = test_history();
+        let history = HistoryStore::open(root.clone()).unwrap();
+        history.start(&summary).unwrap();
+        let original = fs::read(history.records_path()).unwrap();
+        let mut oversized = summary.clone();
+        oversized.cwd = "x".repeat(MAX_SESSION_HISTORY_BYTES as usize);
+        assert!(history.start(&oversized).is_err());
+        assert_eq!(fs::read(history.records_path()).unwrap(), original);
+        assert_eq!(history.list().unwrap()[0].summary.cwd, summary.cwd);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     fn test_session(
         command: &str,
@@ -2181,6 +2558,7 @@ mod tests {
             .open(history.log_path(&summary.session_id))
             .unwrap();
         let session = std::sync::Arc::new(super::Session {
+            _resume_claim: None,
             summary,
             master: std::sync::Mutex::new(pair.master),
             writer: std::sync::Mutex::new(writer),
@@ -2489,6 +2867,118 @@ mod tests {
             owned.contains(&(descendant as u32)),
             "orphan lost when the shell exited"
         );
+    }
+
+    #[test]
+    fn a_running_resume_claim_blocks_duplicate_conversations_until_cleanup() {
+        let claims = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+        let first = super::ResumeClaim::acquire(claims.clone(), "native-one").unwrap();
+        assert!(super::ResumeClaim::acquire(claims.clone(), "native-one").is_err());
+        let other = super::ResumeClaim::acquire(claims.clone(), "native-other").unwrap();
+        drop(first);
+        assert!(super::ResumeClaim::acquire(claims.clone(), "native-one").is_ok());
+        assert!(super::ResumeClaim::acquire(claims.clone(), "native-other").is_err());
+        drop(other);
+        assert!(claims.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn resume_uses_trusted_history_and_never_replays_an_original_prompt_or_shell() {
+        let root = std::env::temp_dir().join(next_session_id());
+        let store = HistoryStore::open(root.clone()).unwrap();
+        let native_id = "01a0f6ec-5463-78c3-a404-5a7ad3b933fe";
+        let summary = SessionSummary {
+            session_id: "resume-source".into(),
+            cwd: root.to_string_lossy().into(),
+            command: None,
+            status: "stopped".into(),
+            launch: Some(super::AgentLaunch {
+                adapter: "codex".into(),
+                mode: "interactive".into(),
+                extra_args: String::new(),
+                prompt: Some("never resend".into()),
+            }),
+        };
+        store.start(&summary).unwrap();
+        store
+            .configure_agent(&summary.session_id, "trusted-launch")
+            .unwrap();
+        store.records.lock().unwrap()[0].agent.agent_session_id = Some(native_id.into());
+        let (cwd, launch, id) = super::resume_source(&store, &summary.session_id).unwrap();
+        assert_eq!(cwd, summary.cwd);
+        assert_eq!(id, native_id);
+        assert_eq!(launch.prompt, None);
+        let mut resumed = summary.clone();
+        resumed.session_id = "resume-next".into();
+        store.start(&resumed).unwrap();
+        store
+            .bind_resume_identity(&resumed.session_id, native_id)
+            .unwrap();
+        let reopened = HistoryStore::open(root.clone()).unwrap();
+        assert_eq!(
+            super::resume_source(&reopened, &resumed.session_id)
+                .unwrap()
+                .2,
+            native_id
+        );
+        assert_eq!(
+            reopened
+                .list()
+                .unwrap()
+                .iter()
+                .find(|record| record.summary.session_id == resumed.session_id)
+                .unwrap()
+                .agent
+                .integration,
+            "unavailable"
+        );
+        let command = super::resume_command(std::path::Path::new("codex"), &launch, &id).unwrap();
+        let argv: Vec<_> = command
+            .get_argv()
+            .iter()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(&argv[1..], &["resume", native_id]);
+        assert!(super::resume_source(&store, "missing").is_err());
+        store
+            .update(&summary.session_id, "running", None, None, None)
+            .unwrap();
+        assert!(super::resume_source(&store, &summary.session_id)
+            .unwrap_err()
+            .contains("already running"));
+        store
+            .update(&summary.session_id, "stopped", None, None, None)
+            .unwrap();
+        store.records.lock().unwrap()[0].agent.agent_session_id = Some("--last".into());
+        assert!(super::resume_source(&store, &summary.session_id).is_err());
+        for bad in [
+            "",
+            "--last",
+            "not-a-uuid",
+            "01a0f6ec-5463-78c3-a404-5a7ad3b933fg",
+        ] {
+            assert!(super::resume_command(std::path::Path::new("codex"), &launch, bad).is_err());
+        }
+        store.records.lock().unwrap()[0].agent.agent_session_id = Some(native_id.into());
+        for (adapter, mode, args) in [
+            ("claude", "interactive", ""),
+            ("codex", "task", ""),
+            ("codex", "interactive", "--model custom"),
+        ] {
+            let mut records = store.records.lock().unwrap();
+            let launch = records[0].summary.launch.as_mut().unwrap();
+            launch.adapter = adapter.into();
+            launch.mode = mode.into();
+            launch.extra_args = args.into();
+            drop(records);
+            assert!(super::resume_source(&store, &summary.session_id).is_err());
+        }
+        let mut records = store.records.lock().unwrap();
+        records[0].summary = summary.clone();
+        records[0].summary.cwd = root.join("missing").to_string_lossy().into();
+        drop(records);
+        assert!(super::resume_source(&store, &summary.session_id).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

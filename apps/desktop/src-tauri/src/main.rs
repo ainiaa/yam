@@ -2,5 +2,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
+    if yam_desktop_lib::agent_helper_entry() {
+        return;
+    }
     yam_desktop_lib::run()
 }

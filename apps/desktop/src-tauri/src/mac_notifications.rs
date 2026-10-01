@@ -7,7 +7,7 @@ use objc2::{
 };
 use objc2_foundation::{MainThreadMarker, NSBundle, NSError, NSObject, NSObjectProtocol, NSString};
 use objc2_user_notifications::{
-    UNAuthorizationOptions, UNMutableNotificationContent, UNNotification,
+    UNAuthorizationOptions, UNErrorCode, UNMutableNotificationContent, UNNotification,
     UNNotificationDismissActionIdentifier, UNNotificationPresentationOptions,
     UNNotificationRequest, UNNotificationResponse, UNNotificationSound, UNUserNotificationCenter,
     UNUserNotificationCenterDelegate,
@@ -146,6 +146,11 @@ pub fn send(
 
 fn authorization_result(granted: bool, error: Option<&NSError>) -> Result<(), String> {
     if let Some(error) = error {
+        if error.domain().to_string() == "UNErrorDomain"
+            && error.code() == UNErrorCode::NotificationsNotAllowed.0
+        {
+            return Err("macOS notification permission was denied".into());
+        }
         Err(format!(
             "macOS notification authorization failed: {}",
             error.localizedDescription()
@@ -159,6 +164,11 @@ fn authorization_result(granted: bool, error: Option<&NSError>) -> Result<(), St
 
 fn delivery_result(error: Option<&NSError>) -> Result<(), String> {
     if let Some(error) = error {
+        if error.domain().to_string() == "UNErrorDomain"
+            && error.code() == UNErrorCode::NotificationsNotAllowed.0
+        {
+            return Err("macOS notification permission was denied".into());
+        }
         Err(format!(
             "macOS notification delivery failed: {}",
             error.localizedDescription()
@@ -249,6 +259,19 @@ mod tests {
                 .unwrap_err()
                 .contains("denied"));
             assert!(delivery_result(None).is_ok());
+            let denied = unsafe {
+                NSError::errorWithDomain_code_userInfo(
+                    &NSString::from_str("UNErrorDomain"),
+                    1,
+                    None,
+                )
+            };
+            assert!(authorization_result(false, Some(&denied))
+                .unwrap_err()
+                .contains("permission was denied"));
+            assert!(delivery_result(Some(&denied))
+                .unwrap_err()
+                .contains("permission was denied"));
             let error = unsafe {
                 NSError::errorWithDomain_code_userInfo(
                     &NSString::from_str("YAMNotificationTest"),

@@ -50,3 +50,9 @@ Rust覆盖率工具不兼容：rustc LLVM22生成profraw格式10，已安装Appl
 
 
 最终代码9affe4a的[CI36815933487](https://github.com/ainiaa/yam/actions/runs/36815933487)三平台全部success，包含最新并发回执修复和Linux原生DBus错误回归。macOS app、Linux deb及Windows nsis测试产物均已保存；这是本轮最终源码CI证据。没有执行正式发布。
+
+## 2026-10-01 本阶段补充证据
+
+隔离 com.yam.validation 原生包、本机 Codex 0.159.3：持续 CLI 的两次后台 response_finished 获得独立 accepted 回执，前台抑制仍未读；具体收件箱点击只读对应 revision，真实 Esc 中断独立记录。用户授权只开启隔离包通知，测试后 4 个临时 Helper 信任全部撤销。accepted 不证明横幅可见或点击完成；CUA 仍无法读取真实通知列表，点击/退出后唤醒继续未覆盖。
+
+主动 resume 的后端校验、重复占用/清理释放及原生上下文续答通过；模式记忆和主要导航快捷键通过 macOS 原生验证。详见 yam-next-stage-execution.md。Windows/Linux 真桌面、正式签名/公证、旧通知/安装路径迁移、cmux 同场景性能对照仍未验收；本轮 CI 包也只用于测试，不属于正式分发。

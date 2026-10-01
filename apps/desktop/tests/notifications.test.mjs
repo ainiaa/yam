@@ -113,11 +113,32 @@ function notificationHarness(options = {}) {
    if (options.receiptError) throw options.receiptError;
   }
  };
- const factory = new Function('invoke','notifications','retryNotifications','document','sessionId','titlesRef','projectName','statusLabels','terminalStatuses','setNotificationError','discardAttentionRetries', `${coordinatorJs}; return notifySession;`);
- const notify = factory(invoke,{current:q},{current:pending},{hasFocus:()=>false},{current:null},{current:{}},()=> 'repo',{},terminalStatuses,error=>errors.push(error),discardAttentionRetries);
+ const paused={current:options.paused??false};
+ const factory = new Function('invoke','notifications','retryNotifications','document','sessionId','titlesRef','projectName','statusLabels','terminalStatuses','setNotificationError','discardAttentionRetries','pausedRef', `${coordinatorJs}; return notifySession;`);
+ const notify = factory(invoke,{current:q},{current:pending},{hasFocus:()=>false},{current:null},{current:{}},()=> 'repo',{},terminalStatuses,error=>errors.push(error),discardAttentionRetries,paused);
+ if(options.pauseRef)options.pauseRef.current=paused;
  return {notify,q,pending,sends,receipts,errors};
 }
 const notificationEvent = status => ({session_id:'s-one',status,exit_code:null,reason:null});
+test('pausing preserves required notifications, excludes unrelated statuses and resumes pending delivery',async()=>{
+ const ref={current:null};const h=notificationHarness({paused:true,pauseRef:ref});
+ await h.notify(notificationEvent('running'));assert.equal(h.pending.size,0);
+ await h.notify(notificationEvent('succeeded'));assert.equal(h.sends.length,0);assert.equal(h.receipts.length,0);assert.equal(h.pending.size,1);
+ ref.current.current=false;await h.notify(notificationEvent('succeeded'));assert.equal(h.sends.length,1);assert.equal(h.pending.size,0);
+});
+test('pausing while session metadata loads defers delivery without consuming its receipt',async()=>{
+ let release;const ref={current:null};
+ const options={pauseRef:ref,listSessions:()=>new Promise(resolve=>release=resolve)};
+ const h=notificationHarness(options);
+ const sending=h.notify(notificationEvent('succeeded'));
+ ref.current.current=true;
+ release([{summary:{session_id:'s-one',cwd:'/repo'},status:'succeeded'}]);
+ await sending;
+ assert.equal(h.sends.length,0);assert.equal(h.receipts.length,0);assert.equal(h.pending.size,1);
+ options.listSessions=null;ref.current.current=false;
+ await h.notify(notificationEvent('succeeded'));
+ assert.equal(h.sends.length,1);assert.equal(h.receipts.length,1);assert.equal(h.pending.size,0);
+});
 test('repeated stale attention never acknowledges an undelivered terminal notification', async () => {
  const h = notificationHarness({status:'succeeded'});
  await h.notify(notificationEvent('idle_attention'));

@@ -21,6 +21,8 @@ import {
   TerminalSquare,
   Play,
   Pencil,
+  Bell,
+  BellOff,
 } from "lucide-react";
 import {
   groupProjects,
@@ -34,6 +36,8 @@ import {
   type Project,
 } from "./workspaces";
 import { OutputBuffer, consumeOutput, replayOutput, type OutputChunk, type LogSnapshot } from "./session-stream";
+import { TerminalViews } from "./terminal-views";
+import {agentLabel,unreadCount,nextAttention,defaultShortcuts,isShortcuts,shortcutAction,isLaunchMode,type Shortcuts,type AgentState,type AgentReceipt} from "./agent-events";
 import { NotificationQueue, inferAgentPhase, discardAttentionRetries, terminalStatuses } from "./notifications";
 import "@xterm/xterm/css/xterm.css";
 import "./App.css";
@@ -64,6 +68,7 @@ type SessionRecord = {
   started_at: number;
   ended_at: number | null;
   notification_pending?: boolean;
+  agent?: AgentState;
 };
 
 type AgentAdapter = {
@@ -81,6 +86,8 @@ type SessionStateEvent = {
   reason: string | null;
 };
 
+type TerminalView = { instance: Terminal; fit: FitAddon; element: HTMLDivElement; cursor: number | null; ready: boolean; replayVersion:number; firstAttachment:boolean; parsing:Promise<void>|null; finishReplay:(()=>void)|null; live: boolean; status:string|null; notice: string | null; dispose(): void };
+
 type AgentPhase = "idle" | "working" | "waiting";
 
 const statusLabels: Record<string, string> = {
@@ -93,10 +100,16 @@ const statusLabels: Record<string, string> = {
 };
 
 function App() {
+  // ponytail: 16 views measured at ~8.7 MB JS heap in Chromium; native WebKit stress validation remains separate.
+  const terminalViews = useRef(new TerminalViews<TerminalView>(16));
+  const createView = useRef<((id: string) => TerminalView) | null>(null);
+  const creatingSession = useRef(false);
   const terminalHost = useRef<HTMLDivElement>(null);
   const terminal = useRef<Terminal | null>(null);
   const fitAddon = useRef<FitAddon | null>(null);
   const sessionId = useRef<string | null>(null);
+  const previousSession = useRef<string | null>(null);
+  const searchInput = useRef<HTMLInputElement>(null);
   const pendingOutput = useRef(new OutputBuffer());
   const outputCursor = useRef<number | null>(null);
   const selectedRecord = useRef<SessionRecord | null>(null);
@@ -111,14 +124,16 @@ function App() {
   const [statusFilter, setStatusFilter] = useState("all");
   const projectDialog = useRef<HTMLDialogElement>(null);
   const selectionVersion = useRef(0);
+  const historyRefreshVersion = useRef(0);
   const [health, setHealth] = useState<HealthReport | null>(null);
+  const [terminalNotice, setTerminalNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notificationError, setNotificationError] = useState<string | null>(null);
   const [cwd, setCwd] = useState("");
   const [command, setCommand] = useState("");
   const [prompt, setPrompt] = useState("");
   const [adapterArgs, setAdapterArgs] = useState("");
-  const [launchMode, setLaunchMode] = useState<"task" | "interactive">("task");
+  const [launchMode, setLaunchMode] = useState<"task" | "interactive">(()=>readPreference("yam.launchMode","task",isLaunchMode));
   const [adapters, setAdapters] = useState<AgentAdapter[]>([]);
   const [selectedAdapter, setSelectedAdapter] = useState("shell");
   const [session, setSession] = useState<SessionSummary | null>(null);
@@ -127,6 +142,10 @@ function App() {
   const [starting, setStarting] = useState(false);
   const [history, setHistory] = useState<SessionRecord[]>([]);
   const [historyQuery, setHistoryQuery] = useState("");
+  const [inboxOpen,setInboxOpen]=useState(false);
+  const [shortcuts,setShortcuts]=useState<Shortcuts>(()=>readPreference("yam.shortcuts",defaultShortcuts,isShortcuts));
+  const [notificationsPaused,setNotificationsPaused]=useState(()=>readPreference("yam.notificationsPaused",false,(value):value is boolean=>typeof value==="boolean"));
+  const pausedRef=useRef(notificationsPaused);pausedRef.current=notificationsPaused;
   const [projects, setProjects] = useState<Project[]>(() =>
     readPreference("yam.projects", [], isProjects),
   );
@@ -158,6 +177,17 @@ function App() {
   const titlesRef = useRef(sessionTitles);
   titlesRef.current = sessionTitles;
 
+  useEffect(()=>{
+    try {localStorage.setItem("yam.launchMode",JSON.stringify(launchMode));localStorage.setItem("yam.shortcuts",JSON.stringify(shortcuts));}
+    catch(reason){setError(`Failed to save session preferences: ${String(reason)}`);}
+  },[launchMode,shortcuts]);
+
+  useEffect(()=>{
+    try {localStorage.setItem("yam.notificationsPaused",JSON.stringify(notificationsPaused));}
+    catch(reason){setError(`Failed to save notification preference: ${String(reason)}`);}
+    void invoke("set_agent_notification_context",{selected:session?.session_id??null,paused:notificationsPaused}).catch(reason=>setError(String(reason)));
+  },[session?.session_id,notificationsPaused]);
+
   useEffect(() => {
     try {
       localStorage.setItem("yam.projects", JSON.stringify(projects));
@@ -169,11 +199,14 @@ function App() {
   }, [projects, sidebarOpen, sessionTitles]);
 
   async function refreshHistory() {
+    const version=++historyRefreshVersion.current;
     try {
       const records = await invoke<SessionRecord[]>("list_sessions");
+      if(version!==historyRefreshVersion.current)return;
       setHistory(records);
       for (const record of records) if (record.notification_pending) void notifySession({ session_id: record.summary.session_id, status: record.status, exit_code: record.exit_code, reason: record.reason });
     } catch (reason: unknown) {
+      if(version!==historyRefreshVersion.current)return;
       setError(reason instanceof Error ? reason.message : String(reason));
     }
   }
@@ -185,6 +218,7 @@ function App() {
         notifications.current.clearFailure(oldKey);
     }
     const key = `${event.session_id}:${event.status}`;
+    if(pausedRef.current){retryNotifications.current.set(key,event);return;}
     if (!notifications.current.canRetry(key)) return;
     if (document.hasFocus() && sessionId.current === event.session_id) {
       notifications.current.suppress(key);
@@ -195,12 +229,12 @@ function App() {
     retryNotifications.current.set(key, event);
     try {
       const record = (await invoke<SessionRecord[]>("list_sessions")).find(item => item.summary.session_id === event.session_id);
-      if (!notifications.current.canRetry(key)) return;
+      if (pausedRef.current || !notifications.current.canRetry(key)) return;
       const superseded = event.status === "idle_attention" && record && terminalStatuses.has(record.status);
       const delivered = superseded || await notifications.current.deliver(key, async () => {
         const taskName = titlesRef.current[event.session_id] || record?.summary.launch?.adapter || "Session";
         const title = `${projectName(record?.summary.cwd ?? "")} · ${taskName} · ${statusLabels[event.status] ?? "Needs attention"}`.slice(0, 200);
-        await invoke("notify_session", { sessionId: event.session_id, title });
+        await invoke("notify_session", { sessionId: event.session_id, title, expectedStatus:event.status });
       }, event.session_id);
       if (delivered) {
         // Completion can arrive while the OS is sending the older attention request.
@@ -262,7 +296,11 @@ function App() {
   useEffect(() => {
     if (!terminalHost.current) return;
 
-    const instance = new Terminal({
+    createView.current = (id) => {
+      const element = document.createElement("div");
+      element.className = "terminal-view";
+      terminalHost.current!.append(element);
+      const instance = new Terminal({
       convertEol: true,
       cursorBlink: true,
       fontFamily: "SFMono-Regular, Menlo, Consolas, monospace",
@@ -279,40 +317,39 @@ function App() {
         brightGreen: "#a3dfb5",
       },
     });
-    const fit = new FitAddon();
-    instance.loadAddon(fit);
-    instance.open(terminalHost.current);
-    terminal.current = instance;
-    fitAddon.current = fit;
-
-    const onData = instance.onData((data) => {
-      const id = sessionId.current;
-      if (id && outputCursor.current !== null)
-        void invoke("write_session", { sessionId: id, data }).catch(
-          (reason: unknown) => setError(String(reason)),
-        );
-    });
+      const fit = new FitAddon();
+      try { instance.loadAddon(fit); instance.open(element); }
+      catch (reason) { instance.dispose(); element.remove(); throw reason; }
+      const view: TerminalView = {
+        instance, fit, element, cursor: null, ready:false, replayVersion:0, firstAttachment:false, parsing:null, finishReplay:null, live:false, status:null, notice:null,
+        dispose() { view.finishReplay?.(); onData.dispose(); instance.dispose(); element.remove(); },
+      };
+      const onData = instance.onData(data => {
+        if (view.cursor !== null && (view.ready || view.firstAttachment) && view.live)
+          void invoke("write_session", { sessionId:id, data }).catch(reason => setError(String(reason)));
+      });
+      element.style.visibility = "hidden";
+      element.inert = true;
+      return view;
+    };
     const resize = () => {
-      fit.fit();
-      const id = sessionId.current;
-      if (id) {
-        void invoke("resize_session", {
-          sessionId: id,
-          cols: instance.cols,
-          rows: instance.rows,
-        }).catch(() => undefined);
+      for (const view of terminalViews.current.all) {
+        view.fit.fit();
+        // Hidden views keep the same measurable layout as the visible view.
+        if (view.instance.cols > 0 && view.instance.rows > 0 && view.cursor !== null)
+          void invoke("resize_session", { sessionId:view.element.dataset.sessionId, cols:view.instance.cols, rows:view.instance.rows }).catch(() => undefined);
       }
     };
     window.addEventListener("resize", resize);
     const observer = new ResizeObserver(resize);
     observer.observe(terminalHost.current);
-    requestAnimationFrame(resize);
 
     const extraListeners: UnlistenFn[] = [];
     const retryTimer = window.setInterval(() => {
       for (const event of retryNotifications.current.values()) void notifySession(event);
     }, 15000);
     for (const [name, callback] of [
+      ["agent-state", (_payload: { session_id: string; data: string }) => {void refreshHistory();}],
       ["session-error", (payload: { session_id: string; data: string }) => setError(payload.data)],
       ["session-phase", (payload: { session_id: string; data: string }) => {
         if (payload.session_id === sessionId.current && ["working", "waiting"].includes(payload.data)) setAgentPhase(payload.data as AgentPhase);
@@ -353,15 +390,23 @@ function App() {
     let active = true;
     void listen<SessionOutput>("session-output", (event) => {
       if (!active) return;
-      if (event.payload.session_id === sessionId.current && outputCursor.current !== null) {
+      const view = terminalViews.current.get(event.payload.session_id);
+      if (view && view.cursor !== null) {
         try {
-          const next = consumeOutput(outputCursor.current, event.payload);
-          outputCursor.current = next.nextOffset;
-          updateAgentPhase(next.data);
-          instance.write(next.data);
+          const next = consumeOutput(view.cursor, event.payload);
+          view.cursor = next.nextOffset;
+          view.instance.write(next.data);
+          if (event.payload.session_id === sessionId.current) {
+            outputCursor.current = view.cursor;
+            updateAgentPhase(next.data);
+          }
         } catch {
+          view.cursor = null;
+          view.ready = false;
+          view.firstAttachment = false;
+          if (event.payload.session_id === sessionId.current) outputCursor.current = null;
           pendingOutput.current.push(event.payload);
-          if (selectedRecord.current) void openHistory(selectedRecord.current);
+          setError("Terminal output gap. Select the session to reload its recorded log; full live TUI state cannot be recovered from a log tail.");
         }
         return;
       }
@@ -372,6 +417,10 @@ function App() {
     });
     void listen<SessionStateEvent>("session-state", (event) => {
       if (!active) return;
+      const live = ["starting", "running"].includes(event.payload.status);
+      terminalViews.current.setRunning(event.payload.session_id, live);
+      const view = terminalViews.current.get(event.payload.session_id);
+      if (view) { view.live = live; view.status = event.payload.status; }
       void notifySession(event.payload);
       void refreshHistory();
       if (terminalStatuses.has(event.payload.status) && event.payload.session_id !== sessionId.current)
@@ -380,7 +429,8 @@ function App() {
         pendingState.current.set(event.payload.session_id, event.payload);
         return;
       }
-      applyStateEvent(instance, event.payload);
+      pendingState.current.delete(event.payload.session_id);
+      if (terminal.current) applyStateEvent(terminal.current, event.payload);
     }).then((unlisten) => {
       if (active) unlistenState = unlisten;
       else unlisten();
@@ -390,12 +440,12 @@ function App() {
       active = false;
       window.clearInterval(retryTimer);
       extraListeners.forEach(unlisten => unlisten());
-      onData.dispose();
+      createView.current = null;
       window.removeEventListener("resize", resize);
       observer.disconnect();
       unlistenOutput?.();
       unlistenState?.();
-      instance.dispose();
+      terminalViews.current.clear();
       terminal.current = null;
       fitAddon.current = null;
       pendingOutput.current.clear();
@@ -416,8 +466,9 @@ function App() {
     void refreshHistory();
   }
 
-  async function startSession(overrides?: { cwd?: string; command?: string; launch?: AgentLaunch | null }) {
-    if (starting) return;
+  async function startSession(overrides?: { cwd?: string; command?: string; launch?: AgentLaunch | null; resumeFrom?: string }) {
+    if (starting || creatingSession.current) return;
+    if (!terminalViews.current.canOpen) { setError("Terminal limit reached. Stop an open session before starting another."); return; }
     const adapter = adapters.find((item) => item.id === selectedAdapter);
     const customCommand = (overrides?.command ?? command).trim();
     const workingDirectory = (overrides?.cwd ?? cwd).trim();
@@ -429,10 +480,11 @@ function App() {
       setError(`${adapter.label} was not found on PATH`);
       return;
     }
+    creatingSession.current = true;
     setStarting(true);
     setError(null);
     try {
-      const next = await invoke<SessionSummary>("create_session", {
+      const next = await invoke<SessionSummary>("create_session", overrides?.resumeFrom ? {resumeFrom:overrides.resumeFrom,cwd:null,command:null,launch:null} : {
         cwd: workingDirectory || null,
         command: customCommand || null,
         launch: overrides ? overrides.launch ?? null :
@@ -449,19 +501,20 @@ function App() {
       setSessionTitles((previous) => ({
         ...previous,
         [next.session_id]:
-          !overrides && selectedAdapter !== "shell" && prompt.trim()
+          overrides?.resumeFrom ? `Continue ${next.launch?.adapter ?? "conversation"}` : !overrides && selectedAdapter !== "shell" && prompt.trim()
             ? prompt.trim()
             : customCommand ||
               (overrides ? "Interactive shell" : adapter?.label) ||
               "Interactive shell",
       }));
       launchDialog.current?.close();
-      await openHistory({summary:next, status:next.status, exit_code:null, reason:null, started_at:Date.now()/1000, ended_at:null});
+      await openHistory({summary:next, status:next.status, exit_code:null, reason:null, started_at:Date.now()/1000, ended_at:null},true);
       void refreshHistory();
     } catch (reason: unknown) {
       setError(reason instanceof Error ? reason.message : String(reason));
       terminal.current?.writeln(`\r\n[Failed to start] ${String(reason)}`);
     } finally {
+      creatingSession.current = false;
       setStarting(false);
     }
   }
@@ -476,43 +529,106 @@ function App() {
     }
   }
 
-  async function openHistory(record: SessionRecord) {
-    const version = ++selectionVersion.current;
+  function createTerminalView(id: string): TerminalView {
+    if (!createView.current) throw new Error("Terminal is not ready");
+    const view = createView.current(id);
+    view.element.dataset.sessionId = id;
+    return view;
+  }
+
+  async function openHistory(record: SessionRecord, firstAttachment=false) {
+    const focusOrigin = document.activeElement;
     const id = record.summary.session_id;
+    const existing = terminalViews.current.get(id);
+    if (creatingSession.current && !existing && !firstAttachment) {
+      setError("A session is starting. Select an already open terminal or wait for startup to finish.");
+      return;
+    }
+    const status = existing?.status ?? record.status;
+    let view: TerminalView;
+    try {
+      view = terminalViews.current.open(id, existing?.live ?? ["starting", "running"].includes(status), () => createTerminalView(id));
+    } catch (reason) { setError(String(reason)); return; }
+    const version = ++selectionVersion.current;
+    view.status = status;
+    view.live = ["starting", "running"].includes(status);
+    setTerminalNotice(view.notice);
+    for (const other of terminalViews.current.all) {
+      other.element.style.visibility = other === view ? "visible" : "hidden";
+      other.element.inert = other !== view || !view.ready;
+    }
+    terminal.current = view.instance;
+    fitAddon.current = view.fit;
+    if(sessionId.current && sessionId.current!==id)previousSession.current=sessionId.current;
     sessionId.current = id;
-    selectedRecord.current = record;
-    outputCursor.current = null;
+    selectedRecord.current = {...record, status};
+    outputCursor.current = view.cursor;
     setSession(record.summary);
     setActiveProject(record.summary.cwd);
-    setSessionStatus(record.status);
+    setSessionStatus(status);
+    setAgentPhase("idle");
+    agentOutputWindow.current = "";
     try {
       let replay: ReturnType<typeof replayOutput> | null = null;
+      if (view.cursor === null) {
+        const replayVersion = view.replayVersion = (view.replayVersion ?? 0) + 1;
+        view.finishReplay?.();
+        view.finishReplay = null;
+        view.ready = false;
+        // Only the creator can authorize startup query responses; cold history suppresses old queries.
+        view.firstAttachment ||= firstAttachment;
       for (let attempt = 0; attempt < 3; attempt++) {
         const snapshot = await invoke<LogSnapshot>("read_session_snapshot", { sessionId: id });
         if (version !== selectionVersion.current) return;
-        if (snapshot.status) {
+        if (snapshot.status && !pendingState.current.has(id)) {
+          view.live = ["starting", "running"].includes(snapshot.status);
+          view.status = snapshot.status;
+          terminalViews.current.setRunning(id, view.live);
           setSessionStatus(snapshot.status);
           selectedRecord.current = {...record, status:snapshot.status};
+        }
+        if (snapshot.offset > 0 || !view.live) {
+          view.notice = "Recorded log only: cold replay may omit earlier output and cannot fully restore alternate-screen, cursor or terminal parser state.";
+          setTerminalNotice(view.notice);
         }
         try { replay = replayOutput(snapshot, pendingOutput.current.drain(id)); break; }
         catch (reason) { if (attempt === 2) throw reason; }
       }
       if (!replay || version !== selectionVersion.current) return;
-      outputCursor.current = replay.nextOffset;
+      view.cursor = replay.nextOffset;
+      outputCursor.current = view.cursor;
       setAgentPhase("idle");
       agentOutputWindow.current = "";
-      terminal.current?.reset();
-      terminal.current?.write(replay.data || (terminalStatuses.has(selectedRecord.current?.status ?? record.status) ? "(No output recorded)\r\n" : ""));
+      view.instance.reset();
+      const replayData = replay.data || (terminalStatuses.has(selectedRecord.current?.status ?? record.status) ? "(No output recorded)\r\n" : "");
+      const parsing=new Promise<void>(resolve => {view.finishReplay=resolve;view.instance.write(replayData, () => {
+        if (view.replayVersion === replayVersion) {
+          view.ready = true;
+          view.firstAttachment=false;
+          view.element.inert = sessionId.current !== id;
+          view.finishReplay=null;
+        }
+        resolve();
+      });});
+      view.parsing=parsing;
+      await parsing;
+      if (view.parsing === parsing) view.parsing=null;
       updateAgentPhase(replay.data);
+      }
+      await view.parsing;
+      if (version !== selectionVersion.current) return;
       const bufferedState = pendingState.current.get(id);
       if (bufferedState) {
         pendingState.current.delete(id);
+        view.live=["starting","running"].includes(bufferedState.status);
+        view.status=bufferedState.status;
+        terminalViews.current.setRunning(id,view.live);
         if (terminal.current) applyStateEvent(terminal.current, bufferedState);
       }
       requestAnimationFrame(() => {
         if (version !== selectionVersion.current) return;
         fitAddon.current?.fit();
-        terminal.current?.focus();
+        if (document.activeElement === focusOrigin || (focusOrigin?.isConnected === false && document.activeElement === document.body)) terminal.current?.focus();
         if (terminal.current && !terminalStatuses.has(selectedRecord.current?.status ?? record.status)) {
           void invoke("resize_session", { sessionId:id, cols:terminal.current.cols, rows:terminal.current.rows })
             .catch((reason: unknown) => setError(String(reason)));
@@ -520,11 +636,15 @@ function App() {
       });
     } catch (reason: unknown) {
       if (version !== selectionVersion.current) return;
-      sessionId.current = null;
+      view.cursor = null;
+      view.firstAttachment=false;
+      outputCursor.current = null;
       setSessionStatus("unavailable");
       setError(reason instanceof Error ? reason.message : String(reason));
     }
   }
+
+  function resumeSelectedSession(){if(session)void startSession({resumeFrom:session.session_id});}
 
   function rerunSelectedSession() {
     if (!session) return;
@@ -545,7 +665,7 @@ function App() {
       ...project,
       sessions: project.sessions.filter(
         (record) =>
-          matchesStatus(record.status, statusFilter) && (!normalizedQuery ||
+          (statusFilter==="attention" ? unreadCount(record.agent)>0||matchesStatus(record.status,statusFilter) : matchesStatus(record.status, statusFilter)) && (!normalizedQuery ||
           `${project.name} ${project.path} ${titleFor(record.summary)} ${record.summary.session_id}`
             .toLowerCase()
             .includes(normalizedQuery)),
@@ -568,6 +688,29 @@ function App() {
     setError(null);
     launchDialog.current?.showModal();
   }
+  const currentAgent=history.find(record=>record.summary.session_id===session?.session_id)?.agent;
+  const unreadTotal=history.reduce((sum,record)=>sum+unreadCount(record.agent),0);
+  async function openReceipt(record:SessionRecord,entry:AgentReceipt){
+    await openHistory(record);
+    const view=terminalViews.current.get(record.summary.session_id);
+    if(sessionId.current!==record.summary.session_id||!view?.ready||view.cursor===null)return;
+    try {await invoke("read_agent_receipt",{sessionId:record.summary.session_id,receipt:entry.id,revision:entry.revision});await refreshHistory();}
+    catch(reason){setError(String(reason));}
+  }
+  function jumpToAttention(){const next=nextAttention(history,sessionId.current);if(next)void openHistory(next);}
+  function handleShortcut(event:KeyboardEvent){
+    const blocked=!!document.querySelector("dialog[open]")||(event.target instanceof Element&&!!event.target.closest("[data-shortcuts]"));
+    const action=shortcutAction(event,shortcuts,blocked);
+    if(!action)return;
+    event.preventDefault();event.stopPropagation();
+    if(action==='attention')jumpToAttention();
+    else if(action==='previous'){const previous=history.find(record=>record.summary.session_id===previousSession.current);if(previous)void openHistory(previous);}
+    else if(action==='search'){setSidebarOpen(true);requestAnimationFrame(()=>{searchInput.current?.focus();searchInput.current?.select();});}
+    else setNotificationsPaused(value=>!value);
+  }
+  useEffect(()=>{
+    window.addEventListener("keydown",handleShortcut,true);return()=>window.removeEventListener("keydown",handleShortcut,true);
+  },[history,shortcuts]);
 
   function addProject() {
     setProjectError(null);
@@ -637,6 +780,12 @@ function App() {
         <div className="search-field">
           <Search aria-hidden="true" />
           <input
+            ref={searchInput}
+            onKeyDown={event=>{
+              if(event.nativeEvent.isComposing)return;
+              if(event.key==='Enter'){const match=visibleProjects.flatMap(project=>project.sessions)[0];if(match){event.preventDefault();void openHistory(match);}}
+              else if(event.key==='Escape'){setHistoryQuery("");terminal.current?.focus();}
+            }}
             value={historyQuery}
             onChange={(event) => setHistoryQuery(event.target.value)}
             placeholder="Search"
@@ -657,6 +806,27 @@ function App() {
           <option value="all">All sessions</option><option value="active">Active</option>
           <option value="attention">Needs attention</option><option value="succeeded">Completed</option><option value="stopped">Stopped</option>
         </select>
+        <button type="button" className="secondary-button inbox-toggle" onClick={()=>setInboxOpen(value=>!value)} aria-expanded={inboxOpen}>Inbox · {unreadTotal} unread</button>
+        <button type="button" className="secondary-button inbox-toggle" onClick={jumpToAttention} disabled={!nextAttention(history,session?.session_id??null)} title={`Ctrl/Cmd+Shift+${shortcuts.attention}`}>Next attention</button>
+        {inboxOpen && <section className="agent-inbox" aria-label="Agent round inbox">
+          {history.flatMap(record=>(record.agent?.inbox??[]).filter(entry=>!entry.read).map(entry=><button type="button" key={`${record.summary.session_id}:${entry.id}`} onClick={()=>void openReceipt(record,entry)}>
+            <strong>{titleFor(record.summary)}</strong><span>{agentLabel({...record.agent!,phase:entry.kind},record.status)} · {entry.delivery}</span>
+            {entry.error && <span>{entry.error}</span>}
+          </button>))}
+          {!unreadTotal && <p>No unread rounds</p>}
+        </section>}
+        <details className="advanced-options" data-shortcuts>
+          <summary>Keyboard shortcuts</summary>
+          <p>Cmd on macOS / Ctrl elsewhere + Shift + key</p>
+          {(Object.keys(shortcuts) as (keyof Shortcuts)[]).map(action=><label key={action}>
+            <span>{{attention:"Next attention",previous:"Previous session",search:"Quick search",pause:"Pause / resume notifications"}[action]}</span>
+            <input aria-label={`${action} shortcut key`} value={shortcuts[action]} maxLength={1} onChange={event=>{
+              const next={...shortcuts,[action]:event.target.value};
+              if(isShortcuts(next)){setShortcuts(next);setError(null);}else setError("Use different letters or [ / ] for each shortcut.");
+            }}/>
+          </label>)}
+          <button type="button" className="secondary-button" onClick={()=>{setShortcuts(defaultShortcuts);setError(null);}}>Reset shortcuts</button>
+        </details>
         <div className="section-label">
           <span>Projects</span>
           <button
@@ -733,6 +903,7 @@ function App() {
                         />
                         <span className="session-title">
                           {titleFor(record.summary)}
+                          {record.summary.launch?.mode==="interactive" && <small title={record.agent?.integration}>{agentLabel(record.agent,record.status)}{unreadCount(record.agent)>0?` · ${unreadCount(record.agent)} unread`:""}</small>}
                         </span>
                         <time
                           dateTime={new Date(
@@ -804,6 +975,9 @@ function App() {
             )}
           </div>
           <div className="toolbar">
+            {session?.launch?.mode==="interactive" && <span className="round-status" role="status" title="Last confirmed CLI event; missing hooks can leave this status stale.">{agentLabel(currentAgent,sessionStatus)}</span>}
+            <button type="button" className="icon-button" aria-pressed={notificationsPaused} aria-label={notificationsPaused?"Resume notifications":"Pause notifications"} title={notificationsPaused?"Resume notifications":"Pause notifications"} onClick={()=>setNotificationsPaused(value=>!value)}>{notificationsPaused?<BellOff/>:<Bell/>}</button>
+            {history.some(record=>record.agent?.inbox.some(entry=>entry.delivery==="failed")) && <button type="button" className="icon-button" aria-label="Retry round notifications" title="Retry round notifications" onClick={()=>void invoke("retry_agent_notifications").catch(reason=>setError(String(reason)))}><RotateCcw/></button>}
             {session && (
               <span
                 className={`session-status status-${sessionStatus}`}
@@ -830,6 +1004,7 @@ function App() {
             >
               <RotateCcw />
             </button>
+            {session?.launch?.mode==='interactive' && <button type="button" className="icon-button" aria-label="Continue conversation" title="Continue original Codex conversation (new process)" disabled={isRunning||starting||session.launch.adapter!=='codex'||!currentAgent?.agent_session_id} onClick={resumeSelectedSession}><Play/></button>}
             <button className="icon-button" aria-label="Rename session" title="Rename session" disabled={!session}
               onClick={() => { if (session) { setRenameTitle(titleFor(session)); setRenameError(null); renameDialog.current?.showModal(); } }}><Pencil /></button>
             <button
@@ -850,7 +1025,7 @@ function App() {
               {session.cwd}
             </span>
             <div className="terminal-tools">
-              {isRunning && agentPhase !== "idle" && (
+              {isRunning && session.launch?.mode !== "interactive" && agentPhase !== "idle" && (
                 <span className="agent-phase">
                   {agentPhase === "working" ? "Working" : "Waiting for input"}
                 </span>
@@ -910,6 +1085,7 @@ function App() {
             </div>
           )}
         </section>
+        {terminalNotice && <div className="terminal-notice" role="status">{terminalNotice}</div>}
         {notificationError && (
           <div className="error-banner" role="alert">
             <span>{notificationError}</span>
@@ -1013,9 +1189,10 @@ function App() {
               <label>
                 <span>Run mode</span>
                 <select value={launchMode} onChange={(event) => setLaunchMode(event.target.value as "task" | "interactive")}>
-                  <option value="task">Single task · reports completion</option>
-                  <option value="interactive">Interactive terminal</option>
+                  <option value="task">Run one task · reports completion</option>
+                  <option value="interactive">Continuous conversation</option>
                 </select>
+                <small>{launchMode==='task'?"Reports when the command exits; each launch starts a new task.":selectedAdapter==='codex'?"Round reminders require supported CLI hooks and trust. If unavailable, only exit / idle reminders are supported.":"Round integration is unavailable for this adapter; only exit / idle reminders are supported."}</small>
               </label>
             )}
             {selectedAdapter !== "shell" && (
