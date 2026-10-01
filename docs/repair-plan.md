@@ -62,31 +62,31 @@
 
 文件：`apps/desktop/src/App.tsx`、`apps/desktop/src/session-stream.ts`、`apps/desktop/src/notifications.ts`、`apps/desktop/tests/session-stream.test.mjs`、`apps/desktop/tests/notifications.test.mjs`、`apps/desktop/src-tauri/src/lib.rs`
 
-- [ ] 写入正常、边界、异常回归测试
-- [ ] 运行测试并观察失败
-- [ ] 最小修复实现
-- [ ] 定向测试、构建通过
-- [ ] 复核并记录证据
+- [x] 写入正常、边界、异常回归测试
+- [x] 运行测试并观察失败
+- [x] 最小修复实现
+- [x] 定向测试、构建通过
+- [ ] 系统通知中心实际点击与退出后点击验收（代码和发送回执已验证，点击还待可操作通知中心）
 
 ### T6：项目和会话操作
 
 文件：`apps/desktop/src/App.tsx`、`apps/desktop/src/App.css`、`apps/desktop/src/workspaces.ts`、`apps/desktop/tests/workspaces.test.mjs`、`apps/desktop/src-tauri/src/lib.rs`、`apps/desktop/src-tauri/Cargo.toml`、`apps/desktop/src-tauri/Cargo.lock`、`apps/desktop/src-tauri/capabilities/default.json`、`apps/desktop/package.json`、`apps/desktop/pnpm-lock.yaml`
 
-- [ ] 写入正常、边界、异常回归测试
-- [ ] 运行测试并观察失败
-- [ ] 最小修复实现
-- [ ] 定向测试、构建通过
-- [ ] 复核并记录证据
+- [x] 写入正常、边界、异常回归测试
+- [x] 运行测试并观察失败
+- [x] 最小修复实现
+- [x] 定向测试、构建通过
+- [x] 复核并记录证据
 
 ### T7：综合验收与持续验证
 
 文件：`.github/workflows/ci.yml`、`apps/desktop/package.json`、`README.md`、`docs`
 
-- [ ] 写入正常、边界、异常回归测试
-- [ ] 运行测试并观察失败
-- [ ] 最小修复实现
-- [ ] 定向测试、构建通过
-- [ ] 复核并记录证据
+- [x] 写入正常、边界、异常回归测试
+- [x] 运行测试并观察失败
+- [x] 最小修复实现
+- [x] 定向测试、构建通过
+- [x] 复核并记录证据
 
 ## 约束与证据边界
 
@@ -142,7 +142,7 @@ Windows补充：原生Job Object绑定会话进程，停止和自然退出终止
 首轮记录：当时只有notify-rust直接声明已获批准，opener为已有依赖minor版本对齐。目录dialog依赖尚未加入。代码留在codex/reliability-closure工作区，未提交、未推送、未发布。
 
 
-## 授权后续修记录（2026-10-01，进行中）
+## 授权后续修记录（2026-10-01）
 
 用户已批准必要依赖及提交推送修复分支。首轮修复已提交2a145ba并推送；真实CI [36806784559](https://github.com/ainiaa/yam/actions/runs/36806784559) macOS通过，Windows暴露Unix测试import未按平台限定，Linux32/33测试通过但PTY fixture保留slave使read_to_end永远等EOF。旧run已取消，已修复两项并等待新head验证。
 
@@ -153,3 +153,14 @@ Windows补充：原生Job Object绑定会话进程，停止和自然退出终止
 冷启动通知代理在Tauri Builder.build插件初始化阶段注册，早于事件循环开始；点击目标先保存在后端，前端注册监听后再读取，成功打开后确认，旧确认不覆盖新点击。URL仅接受yam://session/s-...并核实历史记录存在，不执行URL内容。解析与暂存回执正常/边界/异常测试已补。
 
 Linux不支持退出后激活的generic freedesktop通知服务明确返回错误，保留重试。Windows/Linux CI验证编译、测试和进程清理，不等价于交互桌面通知点击实测。原生通知发送与历史回执持久化仍不是原子事务，崩溃窗口可重复。
+
+
+### 最新验收结果
+
+代码提交 `da5f82a` 的 [CI 36809071640](https://github.com/ainiaa/yam/actions/runs/36809071640) 三平台全部success：macOS Rust45/45、Linux44/44、Windows35/35；三平台前端13项测试、生产构建、Rust fmt及Clippy -D warnings全部通过。Linux旧PTY EOF卡死已消失；Windows Job关闭测试改为先确认进程running、再验证3秒内退出，不依赖OS未规定的终止退出码。Linux元数据的路径校验显式按Linux路径语法，跨平台运行测试不误用Windows规则。
+
+macOS原生新增实测：目录对话框取消不改值，选择项目根目录正确回填并保存；UNUserNotificationCenter权限关闭时明确报错且pending保留，临时启用YAM权限后系统接受请求并将历史回执持久化为false；本次验收的权限、提醒样式与通知中心快捷键开关都已恢复原设置。调试包先用ad-hoc签名绑定com.yam.desktop进行SDK验收，发布仍使用自己的正式签名身份，不在产品配置中硬编码调试签名。
+
+macOS系统协议冷启动实测通过：先Cmd+Q退出并确认进程不存在，再在Chrome输入yam://session/s-1a0f56ef9fd-2并确认系统打开YAM；进程由系统重新启动，前端准确选中对应Completed会话、日志中文emoji正确显示。测试浏览器标签页已关闭。此项证明系统启动与前端就绪前暂存路由，不替代UNUserNotificationCenter旧通知响应的直接点击验收。
+
+剩余验收边界：Windows/Linux没有本地交互桌面，CI不验证通知中心真实鼠标点击；macOS屏幕共享抑制横幅，当前CUA只返回日历/天气桌面小组件，不能展开菜单栏通知中心。已请求用户展开通知中心，之后继续活进程及退出后点击验收；这里保留T5最后一个复核项，不虚标通过。通知冷启动实现、依赖、目录选择、三平台编译和测试都已完成，不再作为待开发缺口。CodeGraph/coverage仍是未配置工具闸门，不是已运行覆盖率结果。

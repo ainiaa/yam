@@ -22,5 +22,8 @@
 - `read_session_log(session_id)` 返回指定会话的日志内容。
 - `create_session` 增加可选 `launch`；结构化提示词以 argv 传入，旧 shell/custom command 入口保留。
 - `read_session_snapshot` 返回 data、offset、end_offset、status。
-- `notify_session` 返回原生发送错误并监听点击；`acknowledge_notification` 持久化回执。
+- `notify_session` 返回OS授权与发送错误；`acknowledge_notification` 仅在发送成功后持久化回执。
+- 通知激活：macOS持有UNUserNotificationCenter delegate，Windows使用yam协议toast，Linux使用兼容portal/GNOME持久化action与D-Bus启动服务；不支持冷启动的Linux通知后端明确报错。
+- 原生通知代理在Builder.build插件初始化阶段注册。`pending_notification_selection` 在前端就绪前保留点击目标，`acknowledge_notification_selection` 只清除同一目标；链接仅选择已有会话，不能执行命令。
+- 系统目录选择结果复用`validate_project_directory`；取消不修改现值。
 - `write_session`、`resize_session`、`stop_session` 保留原有参数。
