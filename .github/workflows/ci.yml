@@ -14,7 +14,7 @@ jobs:
           - os: ubuntu-22.04
             bundle: deb
             bundle_dir: deb
-            smoke_executable: src-tauri/target/debug/yam-desktop
+            smoke_executable: src-tauri/target/ci-installed/usr/bin/yam-desktop
           - os: windows-latest
             bundle: nsis
             bundle_dir: nsis
@@ -60,7 +60,9 @@ jobs:
         run: python3 ../../scripts/background-platform-smoke.py --desktop --executable "${{ matrix.smoke_executable }}" --identifier com.yam.platform-validation
       - name: Validate Linux background process lifecycle in a virtual display
         if: runner.os == 'Linux'
-        run: xvfb-run -a python3 ../../scripts/background-platform-smoke.py --desktop --executable "${{ matrix.smoke_executable }}" --identifier com.yam.platform-validation
+        run: |
+          python3 -c "import pathlib,subprocess; packages=list(pathlib.Path('src-tauri/target/debug/bundle/deb').glob('*.deb')); assert len(packages)==1; subprocess.run(['dpkg-deb','--extract',str(packages[0]),'src-tauri/target/ci-installed'],check=True)"
+          dbus-run-session -- xvfb-run -a python3 ../../scripts/background-platform-smoke.py --desktop --executable "${{ matrix.smoke_executable }}" --identifier com.yam.platform-validation
       - name: Sign and archive macOS test package
         if: runner.os == 'macOS'
         run: |

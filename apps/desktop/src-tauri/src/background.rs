@@ -1074,6 +1074,7 @@ pub(super) fn run() -> Result<(), String> {
     configure_owner_app(&mut context.config_mut().app);
     let owner: Arc<std::sync::Mutex<Option<Server>>> = Arc::new(std::sync::Mutex::new(None));
     let setup_owner = owner.clone();
+    eprintln!("[YAM] Creating background event loop");
     tauri::Builder::default()
         .manage(super::SessionManager {
             background_owner: true,

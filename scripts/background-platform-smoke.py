@@ -53,7 +53,12 @@ def main():
    target=folder/name
    command=' '.join('"'+str(value)+'"' for value in [pathlib.Path(os.sys.executable),fixture,target]) if os.name=='nt' else ' '.join(shlex.quote(str(value)) for value in [pathlib.Path(os.sys.executable),fixture,target])
    summary=call('create_session',{'cwd':str(folder),'command':command});session=summary['session_id']
-   smoke.wait_until(lambda:marker(target),10)
+   try:smoke.wait_until(lambda:marker(target),10)
+   except AssertionError:
+    record=next(r for r in call('list_sessions') if r['summary']['session_id']==session)
+    snapshot=call('read_session_snapshot',{'session_id':session})
+    print(json.dumps({'fixture_start_failure':True,'status':record['status'],'reason':record.get('reason'),'fixture_terminal_excerpt':snapshot['data'][-1024:]}),file=sys.stderr)
+    raise
    smoke.wait_until(lambda:'NATIVE_CONTINUITY' in call('read_terminal_frame',{'session_id':session})['projection']['data'],10)
    frame=call('read_terminal_frame',{'session_id':session});assert '中😀' in frame['projection']['data']
    return session,target
