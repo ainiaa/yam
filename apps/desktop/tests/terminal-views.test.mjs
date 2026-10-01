@@ -269,3 +269,25 @@ test('a late running projection cannot revive a newer stopped lifecycle',async()
  release(full('a'));await loading;
  assert.equal(view.live,false);assert.equal(view.status,'stopped');
 });
+
+
+test('actual background recovery invalidates old frames without claiming a buffer overflow',()=>{
+ let callback;
+ function locate(node){
+  if(ts.isCallExpression(node)&&node.expression.getText(source)==='listen'&&node.arguments[0]?.text==='background-gap')callback=node.arguments[1].getText(source);
+  ts.forEachChild(node,locate);
+ }
+ locate(source);assert.ok(callback);
+ const callbackJs=ts.transpileModule('const callback='+callback,{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText;
+ for(const missing of [false,true]){
+  const view={cursor:9,ready:true,firstAttachment:true,dirty:false,lifecycleRevision:4,viewportRevision:2};
+  let clears=0,refreshes=0,reopens=0;const errors=[];
+  const args={terminalViews:{current:{all:[view]}},outputCursor:{current:9},pendingOutput:{current:{clear(){clears++}}},setError:message=>errors.push(message),refreshHistory(){refreshes++},selectedRecord:{current:{id:'a'}},openHistory(){reopens++}};
+  const onGap=new Function(...Object.keys(args),callbackJs+';return callback')(...Object.values(args));
+  onGap({payload:{missing_events:missing}});
+  assert.equal(view.cursor,null);assert.equal(view.ready,false);assert.equal(view.dirty,true);
+  assert.equal(view.lifecycleRevision,5);assert.equal(view.viewportRevision,3);
+  assert.equal(args.outputCursor.current,null);assert.equal(clears,1);assert.equal(refreshes,1);assert.equal(reopens,1);
+  assert.equal(errors.length,missing?1:0);
+ }
+});

@@ -392,14 +392,15 @@ function App() {
     ] as const) void listen<{ session_id: string; data: string }>(name, event => callback(event.payload)).then(unlisten => {
       if (active) extraListeners.push(unlisten); else unlisten();
     });
-    void listen("background-gap", () => {
+    void listen<{missing_events:boolean}>("background-gap", event => {
       for (const view of terminalViews.current.all) {
         view.cursor = null; view.ready = false; view.firstAttachment = false;
+        view.lifecycleRevision++; view.viewportRevision++;
       }
       outputCursor.current = null;
       pendingOutput.current.clear();
       for (const view of terminalViews.current.all) view.dirty=true;
-      setError("Background event buffer exceeded its limit. Reloading the latest terminal state.");
+      if(event.payload?.missing_events!==false) setError("Background event buffer exceeded its limit. Reloading the latest terminal state.");
       void refreshHistory();
       if (selectedRecord.current) void openHistory(selectedRecord.current);
     }).then(unlisten => { if (active) extraListeners.push(unlisten); else unlisten(); });

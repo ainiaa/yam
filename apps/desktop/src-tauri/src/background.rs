@@ -941,7 +941,10 @@ pub(super) fn attach(app: &tauri::AppHandle) -> Result<(), String> {
             ) {
                 Ok((page, reconnected)) => {
                     if page.gap || reconnected {
-                        let _ = app.emit("background-gap", ());
+                        let _ = app.emit(
+                            "background-gap",
+                            serde_json::json!({"missing_events":page.gap}),
+                        );
                     }
                     cursor = page.cursor;
                     for event in page.events {

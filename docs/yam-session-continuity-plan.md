@@ -222,3 +222,5 @@ Windows 输入已先增加原生匿名管道堵塞/Unicode/取消回归，再实
 45c599b 的三平台 CI 已全部成功（run 36927857344）：macOS app、Linux deb、Windows NSIS 调试包均产出；Windows 130 Rust 测试通过，原生 synchronous_windows_pipe_input_can_be_cancelled_without_waiting_for_the_reader 明确通过，验证同步管道在读端 300ms 后才排空时能先按 40ms 截止取消。该结论关闭原生同步输入子项，不能推广成 Windows 全桌面/通知点击或后台进程重开已实际验收。
 
 继续复核发现事件轮询一次暂时错误会永久停止。新增先红后绿回归，将只读 poll_events 限制为最多 3 次重连，始终沿用同一认证实例/客户端/游标，不重新发现连接文件或启动任何后台；成功恢复后发 background-gap 重新同步。真实认证服务回归证明瞬时错误后恢复、持续错误只尝试 3 次、替代后台不能被旧连接接受。增加 Windows 两个服务 child 的 CREATE_NO_WINDOW 共享启动选项，原生 test 子进程通过 GetConsoleWindow 和唯一成功标记核对实际行为，尚待本轮 Windows CI 执行。本机当前 155 Rust、77 Node、19 Python 检查通过，Clippy -D warnings 通过。
+
+重连界面回归补证：实际 App.tsx background-gap 回调此前没有作废进行中的帧读取，且会把普通恢复误写为“缓冲区超限”。新增 AST 提取真实回调的回归先失败后修复：gap 时递增生命周期/视口请求版本，使恢复前的帧失效；后台带 missing_events 布尔值，仅真实缺口保留超限提示，正常有限重连不显示假错误。当前 155 Rust、78 Node、19 Python 检查通过；Node coverage 仍仅工具类范围。最新前端构建通过，最终原生包与同一源码三平台 CI 继续执行。
