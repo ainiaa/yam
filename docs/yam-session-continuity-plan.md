@@ -212,3 +212,5 @@ P4 最新有限回调实现后的真实 OpenCode 扩展 13 事件已通过，原
 最终原生包 178.52 MiB（debug）通过 --desktop 烟测，样本 s-1a0f946dd3f-0：真实 GUI 退出/重开、后台/任务 PID 保持、输入接管、后台双轮查询、停止和整个后台重启后的保存场景等价全部通过；本次未带 --idle-check，JSON 的 connected_idle_retains_owner=false 表示未执行该子项，两次 65 秒通过证据见前文。准备将当前可审阅实现检查点提交并推送既有修复分支以执行三平台 CI，不合并或发布。
 
 三平台 CI 已由 71ab941 推送启动（run 36926048286），macOS 安装步骤暴露 @xterm/xterm lock importer specifier 仍为 ^6.0.0，而 package 已固定 6.0.0。本地 pnpm install --frozen-lockfile 同样红灯；仅将 importer specifier 同步为已批准的 6.0.0，不变更已解析版本/依赖图。离线冻结安装通过，不放宽 CI 的 frozen-lockfile 检查。
+
+Windows CI 进一步暴露打包脚本使用默认 cp1252 解码 xterm UTF-8 JavaScript（run 36926250696，build:terminal，byte 0x90/position 83026）。新增真实打包回归将缺省文本编码强制为 cp1252：针对修复前脚本运行复现相同 UnicodeDecodeError；全部文件/协议文本显式 UTF-8 后通过原生 SEA 生成和中文/emoji probe。未添加依赖，也未使用 PYTHONUTF8 环境绕开源代码问题。Windows 完整 CI 将由本次修复再次验证，当前不能宣称已通过。

@@ -29,7 +29,7 @@ def main():
     root=desktop/'src-tauri/target/terminal-runtime';root.mkdir(parents=True,exist_ok=True)
     native=platform_name(platform.system(),platform.machine());suffix='.zip' if native.startswith('win-') else '.tar.gz'
     name='node-v'+VERSION+'-'+native+suffix
-    digest=json.loads(pathlib.Path(__file__).with_name('node-runtime-checksums.json').read_text())[name]
+    digest=json.loads(pathlib.Path(__file__).with_name('node-runtime-checksums.json').read_text(encoding='utf-8'))[name]
     archive=root/name
     if not archive.exists() or hashlib.sha256(archive.read_bytes()).hexdigest()!=digest:
         def chunks():
@@ -55,28 +55,28 @@ def main():
     runtime.chmod(0o755)
     env=os.environ.copy()
     for key in ['NODE_OPTIONS','NODE_PATH','NODE_SEA_OPTIONS']:env.pop(key,None)
-    assert subprocess.check_output([str(runtime),'--version'],env=env,text=True).strip()=='v'+VERSION
-    sources=[];licenses=[(root/'NODE-LICENSE').read_text()]
+    assert subprocess.check_output([str(runtime),'--version'],env=env,text=True,encoding='utf-8').strip()=='v'+VERSION
+    sources=[];licenses=[(root/'NODE-LICENSE').read_text(encoding='utf-8')]
     for name,package,file,version in [('headless','@xterm/headless','lib-headless/xterm-headless.js','6.0.0'),('serializer','@xterm/addon-serialize','lib/addon-serialize.js','0.14.0')]:
-        module=desktop/'node_modules'/package;assert json.loads((module/'package.json').read_text())['version']==version
-        source=(module/file).read_text();sources.append(f'const {name}=(()=>{{const module={{exports:{{}}}};const exports=module.exports;\n{source}\nreturn module.exports;}})();\n')
-        licenses.append(package+' '+version+'\n'+(desktop/'terminal-licenses/XTERM-LICENSE').read_text())
-    source=(desktop/'terminal-service.cjs').read_text().replace("require('@xterm/headless')",'headless').replace("require('@xterm/addon-serialize')",'serializer')
-    entry=root/'terminal-entry.cjs';entry.write_text(''.join(sources)+source)
+        module=desktop/'node_modules'/package;assert json.loads((module/'package.json').read_text(encoding='utf-8'))['version']==version
+        source=(module/file).read_text(encoding='utf-8');sources.append(f'const {name}=(()=>{{const module={{exports:{{}}}};const exports=module.exports;\n{source}\nreturn module.exports;}})();\n')
+        licenses.append(package+' '+version+'\n'+(desktop/'terminal-licenses/XTERM-LICENSE').read_text(encoding='utf-8'))
+    source=(desktop/'terminal-service.cjs').read_text(encoding='utf-8').replace("require('@xterm/headless')",'headless').replace("require('@xterm/addon-serialize')",'serializer')
+    entry=root/'terminal-entry.cjs';entry.write_text(''.join(sources)+source,encoding='utf-8')
     subprocess.run([str(runtime),'--check',str(entry)],env=env,check=True,capture_output=True)
     destination=(args.output or root/('yam-terminal.exe' if native.startswith('win-') else 'yam-terminal')).resolve()
     destination.parent.mkdir(parents=True,exist_ok=True)
     temporary=destination.with_name(destination.stem+'.building'+destination.suffix)
-    config=root/'sea.json';config.write_text(json.dumps({'main':str(entry),'output':str(temporary),'disableExperimentalSEAWarning':True,'useCodeCache':False,'useSnapshot':False,'execArgvExtension':'none'}))
+    config=root/'sea.json';config.write_text(json.dumps({'main':str(entry),'output':str(temporary),'disableExperimentalSEAWarning':True,'useCodeCache':False,'useSnapshot':False,'execArgvExtension':'none'}),encoding='utf-8')
     try:
         subprocess.run([str(runtime),'--build-sea',str(config)],env=env,check=True,capture_output=True,timeout=120)
         if native.startswith('darwin-'):subprocess.run(['/usr/bin/codesign','--force','--sign','-',str(temporary)],check=True,capture_output=True)
         probe_env={**env,'YAM_TERMINAL_INSTANCE':'e'*64};probe_env['PATH']='/usr/bin:/bin' if os.name!='nt' else env.get('PATH','')
         requests=[{'id':1,'op':'create','session':'probe','cols':20,'rows':8},{'id':2,'op':'write','session':'probe','data':'5Lit5paHIPCfmIA='},{'id':3,'op':'snapshot','session':'probe'}]
-        result=subprocess.run([str(temporary)],env=probe_env,input=''.join(json.dumps(r)+'\n' for r in requests),text=True,capture_output=True,timeout=10,check=True)
+        result=subprocess.run([str(temporary)],env=probe_env,input=''.join(json.dumps(r)+'\n' for r in requests),text=True,encoding='utf-8',capture_output=True,timeout=10,check=True)
         frames=[json.loads(line) for line in result.stdout.splitlines()];assert len(frames)==4 and all(f.get('ok',True) for f in frames)
         assert '中文 😀' in frames[-1]['data']['data'] and frames[-1]['data']['instance']=='e'*64
-        temporary.replace(destination);(root/'THIRD-PARTY-NOTICES.txt').write_text('\n\n'.join(licenses))
+        temporary.replace(destination);(root/'THIRD-PARTY-NOTICES.txt').write_text('\n\n'.join(licenses),encoding='utf-8')
         print(json.dumps({'platform':native,'runtime':VERSION,'sha256_verified':True,'standalone_probe':True,'binary_bytes':destination.stat().st_size,'output':str(destination)}))
     finally:temporary.unlink(missing_ok=True)
 

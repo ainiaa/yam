@@ -1,5 +1,6 @@
 """Author: Jeff.Liu. Runtime trust and packaging regression checks."""
-import importlib.util,pathlib,tempfile,unittest,hashlib
+import importlib.util,pathlib,tempfile,unittest,hashlib,io,sys,os
+from unittest import mock
 path=pathlib.Path(__file__).with_name('build-terminal-runtime.py')
 spec=importlib.util.spec_from_file_location('terminal_runtime',path);runtime=importlib.util.module_from_spec(spec);spec.loader.exec_module(runtime)
 class RuntimeTests(unittest.TestCase):
@@ -8,6 +9,18 @@ class RuntimeTests(unittest.TestCase):
   self.assertEqual(runtime.platform_name('Windows','AMD64'),'win-x64')
   self.assertEqual(runtime.platform_name('Linux','aarch64'),'linux-arm64')
   with self.assertRaises(ValueError):runtime.platform_name('Darwin','universal')
+ @unittest.skipUnless(any((path.resolve().parents[1]/'apps/desktop/src-tauri/target/terminal-runtime'/name).exists() for name in ['node','node.exe']), 'Packaged native runtime cache is required for the encoding smoke')
+ def test_native_builder_preserves_unicode_with_legacy_default_encoding(self):
+  original=io.open
+  def legacy_open(file,mode='r',buffering=-1,encoding=None,errors=None,newline=None,closefd=True,opener=None):
+   if 'b' not in mode and encoding in (None,'locale'):encoding='cp1252'
+   return original(file,mode,buffering,encoding,errors,newline,closefd,opener)
+  with tempfile.TemporaryDirectory() as directory:
+   output=pathlib.Path(directory)/('terminal.exe' if os.name=='nt' else 'terminal')
+   with mock.patch('io.open',legacy_open),mock.patch.object(sys,'argv',[str(path),'--output',str(output)]):
+    runtime.main()
+   self.assertTrue(output.is_file())
+   self.assertGreater(output.stat().st_size,0)
  def test_checksum_failure_preserves_the_existing_archive(self):
   with tempfile.TemporaryDirectory() as directory:
    target=pathlib.Path(directory)/'runtime.tar.gz';target.write_bytes(b'old')
