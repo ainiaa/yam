@@ -2488,6 +2488,76 @@ fn write_input_until(
     Ok(())
 }
 
+#[cfg(windows)]
+fn write_windows_input(
+    writer: &mut dyn Write,
+    bytes: &[u8],
+    deadline: Instant,
+    cancelled: &AtomicBool,
+) -> Result<(), String> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentThreadId() -> u32;
+        fn OpenThread(access: u32, inherit: i32, id: u32) -> RawHandle;
+        fn CancelSynchronousIo(thread: RawHandle) -> i32;
+    }
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+        return Err("Terminal input cancelled before writing; no bytes were accepted".into());
+    }
+    // THREAD_TERMINATE is the documented access required to cancel this thread's synchronous I/O.
+    let raw = unsafe { OpenThread(0x0001, 0, GetCurrentThreadId()) };
+    if raw.is_null() {
+        return Err("Cannot enable cancellable terminal input".into());
+    }
+    let handle = unsafe { OwnedHandle::from_raw_handle(raw) };
+    let done = AtomicBool::new(false);
+    struct Finished<'a>(&'a AtomicBool);
+    impl Drop for Finished<'_> {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+    thread::scope(|scope| {
+        let done_ref = &done;
+        scope.spawn(move || {
+            let mut reported = false;
+            while !done_ref.load(Ordering::Acquire) {
+                if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+                    // Retry when cancellation races with entry into WriteFile. Never cancel another thread.
+                    if unsafe { CancelSynchronousIo(handle.as_raw_handle()) } == 0 {
+                        let error = std::io::Error::last_os_error();
+                        if error.raw_os_error() != Some(1168) && !reported {
+                            eprintln!("[YAM] Terminal input cancellation failed: {error}");
+                            reported = true;
+                        }
+                    }
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+        });
+        let _finished = Finished(&done);
+        let mut written = 0;
+        let failure = |reason: &str, written: usize| {
+            format!("Terminal input {reason}; confirmed prefix {written}/{} bytes, last write may be partially accepted; do not resend input", bytes.len())
+        };
+        while written < bytes.len() {
+            if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+                return Err(failure("cancelled or deadline reached", written));
+            }
+            match writer.write(&bytes[written..]) {
+                Ok(0) => return Err(failure("writer closed", written)),
+                Ok(size) => written += size,
+                Err(error) => return Err(failure(&error.to_string(), written)),
+            }
+        }
+        Ok(())
+    })
+}
+
 #[tauri::command]
 fn write_session(
     manager: State<'_, SessionManager>,
@@ -2521,9 +2591,12 @@ fn write_session(
         &session.stop_requested,
     )?;
     #[cfg(windows)]
-    writer
-        .write_all(data.as_bytes())
-        .map_err(|error| format!("Failed to write to session: {error}"))?;
+    write_windows_input(
+        writer.as_mut(),
+        data.as_bytes(),
+        deadline,
+        &session.stop_requested,
+    )?;
     if let Ok(mut activity) = session.last_activity.lock() {
         *activity = Instant::now();
     }
@@ -3332,6 +3405,70 @@ mod tests {
         .contains("deadline"));
         assert!(started.elapsed() < std::time::Duration::from_millis(300));
     }
+    #[cfg(windows)]
+    #[test]
+    fn synchronous_windows_pipe_input_can_be_cancelled_without_waiting_for_the_reader() {
+        use std::os::windows::io::{FromRawHandle, RawHandle};
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn CreatePipe(
+                read: *mut RawHandle,
+                write: *mut RawHandle,
+                attributes: *const std::ffi::c_void,
+                size: u32,
+            ) -> i32;
+        }
+        let mut read = std::ptr::null_mut();
+        let mut write = std::ptr::null_mut();
+        assert_ne!(
+            unsafe { CreatePipe(&mut read, &mut write, std::ptr::null(), 4096) },
+            0
+        );
+        let mut reader = unsafe { std::fs::File::from_raw_handle(read) };
+        let mut writer = unsafe { std::fs::File::from_raw_handle(write) };
+        let drain = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let mut data = Vec::new();
+            std::io::Read::read_to_end(&mut reader, &mut data).unwrap();
+            data
+        });
+        let started = std::time::Instant::now();
+        let result = super::write_windows_input(
+            &mut writer,
+            &vec![b'x'; 2 * 1024 * 1024],
+            started + std::time::Duration::from_millis(40),
+            &std::sync::atomic::AtomicBool::new(false),
+        );
+        let elapsed = started.elapsed();
+        drop(writer);
+        let received = drain.join().unwrap();
+        assert!(result.unwrap_err().contains("do not resend"));
+        assert!(
+            elapsed < std::time::Duration::from_millis(250),
+            "input waited for the reader: {elapsed:?}"
+        );
+        assert!(received.len() < 2 * 1024 * 1024);
+        let mut output = Vec::new();
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        super::write_windows_input(
+            &mut output,
+            "中文😀".as_bytes(),
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+            &cancelled,
+        )
+        .unwrap();
+        assert_eq!(output, "中文😀".as_bytes());
+        cancelled.store(true, std::sync::atomic::Ordering::Release);
+        assert!(super::write_windows_input(
+            &mut output,
+            b"extra",
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+            &cancelled
+        )
+        .is_err());
+        assert_eq!(output, "中文😀".as_bytes());
+    }
+
     #[cfg(unix)]
     #[test]
     fn saved_terminal_frames_reject_links_public_files_and_oversized_content() {

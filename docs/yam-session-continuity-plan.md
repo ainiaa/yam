@@ -214,3 +214,7 @@ P4 最新有限回调实现后的真实 OpenCode 扩展 13 事件已通过，原
 三平台 CI 已由 71ab941 推送启动（run 36926048286），macOS 安装步骤暴露 @xterm/xterm lock importer specifier 仍为 ^6.0.0，而 package 已固定 6.0.0。本地 pnpm install --frozen-lockfile 同样红灯；仅将 importer specifier 同步为已批准的 6.0.0，不变更已解析版本/依赖图。离线冻结安装通过，不放宽 CI 的 frozen-lockfile 检查。
 
 Windows CI 进一步暴露打包脚本使用默认 cp1252 解码 xterm UTF-8 JavaScript（run 36926250696，build:terminal，byte 0x90/position 83026）。新增真实打包回归将缺省文本编码强制为 cp1252：针对修复前脚本运行复现相同 UnicodeDecodeError；全部文件/协议文本显式 UTF-8 后通过原生 SEA 生成和中文/emoji probe。未添加依赖，也未使用 PYTHONUTF8 环境绕开源代码问题。Windows 完整 CI 将由本次修复再次验证，当前不能宣称已通过。
+
+53e140f 的 macOS CI 已通过、Linux 已进入包上传；Windows SEA UTF-8 打包通过后暴露测试 cfg(unix) 误附到 viewport 测试，而 fork/pipe 继承锁测试未限定 Unix。将 cfg 移到实际 Unix-only 测试，保留 viewport 的跨平台覆盖，修复真实 Windows 编译红灯，不跳过平台业务检查。
+
+Windows 输入已先增加原生匿名管道堵塞/Unicode/取消回归，再实现当前写线程的 CancelSynchronousIo 截止与 stop 取消；使用本进程当前线程 handle，不终止线程/任务，不添加依赖。取消与 WriteFile 入口竞争时重试，无法确认取消时记录错误；错误保留已确认前缀并说明最后一次写入可能部分接受，禁止整段自动重发。该 API 标记取消后并不保证所有类型 I/O 都立即完成，因此只在 Windows CI 原生管道回归通过后才能收口此子项。本机 macOS 无法执行这项 Windows 测试，当前仍 uncovered；Microsoft 原生契约：https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-cancelsynchronousio 。

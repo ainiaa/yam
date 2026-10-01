@@ -1277,7 +1277,6 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(unix)]
     #[test]
     fn viewport_command_cannot_accept_input_bytes_or_an_unbounded_target() {
         assert!(validate_command(
@@ -1291,6 +1290,7 @@ mod tests {
         )
         .is_err());
     }
+    #[cfg(unix)]
     #[test]
     fn dropping_owner_explicitly_unlocks_even_while_a_forked_child_retains_the_file() {
         let root =
