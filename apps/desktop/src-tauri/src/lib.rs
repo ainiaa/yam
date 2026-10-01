@@ -5,7 +5,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -23,11 +23,234 @@ pub struct HealthReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentLaunch {
+    pub adapter: String,
+    pub mode: String,
+    pub extra_args: String,
+    pub prompt: Option<String>,
+}
+
+fn parse_agent_args(input: &str) -> Result<Vec<String>, String> {
+    if input.contains('\0') || input.len() > 65536 {
+        return Err("Invalid CLI arguments".into());
+    }
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut started = false;
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if Some(ch) == quote {
+            quote = None;
+        } else if quote.is_none() && (ch == '\'' || ch == '"') {
+            quote = Some(ch);
+            started = true;
+        } else if ch == '\\'
+            && quote != Some('\'')
+            && chars.peek().is_some_and(|next| {
+                *next == '"' || *next == '\\' || (quote.is_none() && next.is_whitespace())
+            })
+        {
+            current.push(chars.next().expect("peeked argument character"));
+            started = true;
+        } else if quote.is_none() && ch.is_whitespace() {
+            if started {
+                args.push(std::mem::take(&mut current));
+                started = false;
+            }
+        } else {
+            current.push(ch);
+            started = true;
+        }
+    }
+    if quote.is_some() {
+        return Err("CLI arguments contain an unclosed quote".into());
+    }
+    if started {
+        args.push(current);
+    }
+    if args.len() > 128 {
+        return Err("Too many CLI arguments".into());
+    }
+    Ok(args)
+}
+
+fn agent_command(executable: &Path, launch: &AgentLaunch) -> Result<CommandBuilder, String> {
+    if !matches!(launch.adapter.as_str(), "codex" | "claude")
+        || !matches!(launch.mode.as_str(), "task" | "interactive")
+    {
+        return Err("Unknown agent or launch mode".into());
+    }
+    let prompt = launch
+        .prompt
+        .as_deref()
+        .filter(|prompt| !prompt.trim().is_empty());
+    if launch.mode == "task" && prompt.is_none() {
+        return Err("Single task mode requires a prompt".into());
+    }
+    if prompt.is_some_and(|prompt| prompt.contains('\0') || prompt.len() > 1024 * 1024) {
+        return Err("Invalid agent prompt".into());
+    }
+    let mut builder = CommandBuilder::new(executable);
+    #[cfg(windows)]
+    if executable.extension().is_some_and(|extension| {
+        extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
+    }) {
+        // npm shims are launched through Node directly; cmd.exe never interprets the user's prompt.
+        let directory = executable
+            .parent()
+            .ok_or_else(|| "Invalid CLI wrapper path".to_string())?;
+        let script = directory.join(if launch.adapter == "codex" {
+            "node_modules/@openai/codex/bin/codex.js"
+        } else {
+            "node_modules/@anthropic-ai/claude-code/cli.js"
+        });
+        if !script.is_file() {
+            return Err("This batch wrapper cannot be launched safely. Select a native CLI executable or use Custom command.".into());
+        }
+        let node = if directory.join("node.exe").is_file() {
+            directory.join("node.exe")
+        } else {
+            find_executable("node")
+                .ok_or_else(|| "Node.js is required for this npm-installed agent".to_string())?
+        };
+        builder = CommandBuilder::new(node);
+        builder.arg(script);
+    }
+    if launch.mode == "task" {
+        if launch.adapter == "codex" {
+            builder.args(["exec", "--json"]);
+        } else {
+            builder.args(["--print", "--output-format", "stream-json", "--verbose"]);
+        }
+    }
+    builder.args(parse_agent_args(&launch.extra_args)?);
+    if let Some(prompt) = prompt {
+        builder.arg("--");
+        builder.arg(prompt);
+    }
+    Ok(builder)
+}
+
+struct AgentProtocol {
+    adapter: Option<String>,
+    pending: String,
+    discarding: bool,
+    phase: String,
+    outcome: Option<String>,
+}
+
+impl AgentProtocol {
+    fn new(adapter: Option<&str>) -> Self {
+        Self {
+            adapter: adapter.map(str::to_string),
+            pending: String::new(),
+            discarding: false,
+            phase: "idle".into(),
+            outcome: None,
+        }
+    }
+    fn push(&mut self, data: &str) {
+        if self.adapter.is_none() {
+            return;
+        }
+        self.pending.push_str(data);
+        while let Some(end) = self.pending.find('\n') {
+            let line: String = self.pending.drain(..=end).collect();
+            if self.discarding {
+                self.discarding = false;
+                continue;
+            }
+            if line.len() <= 1024 * 1024 {
+                self.parse_line(line.trim());
+            }
+        }
+        // ponytail: JSONL records above 1 MiB are skipped; raise the bound if real agent fixtures require it.
+        if self.pending.len() > 1024 * 1024 {
+            self.pending.clear();
+            self.discarding = true;
+        }
+    }
+    fn finish(&mut self) {
+        let tail = std::mem::take(&mut self.pending);
+        if !self.discarding {
+            self.parse_line(tail.trim());
+        }
+    }
+    fn parse_line(&mut self, line: &str) {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            return;
+        };
+        if value
+            .get("parent_tool_use_id")
+            .is_some_and(|parent| !parent.is_null())
+        {
+            return;
+        }
+        match (self.adapter.as_deref(), value["type"].as_str()) {
+            (Some("codex"), Some("turn.started")) => {
+                self.phase = "working".into();
+                self.outcome = None;
+            }
+            (Some("codex"), Some("turn.completed")) => {
+                self.phase = "completed".into();
+                self.outcome = Some("succeeded".into());
+            }
+            (Some("codex"), Some("turn.failed")) => {
+                self.phase = "failed".into();
+                self.outcome = Some("failed".into());
+            }
+            (Some("claude"), Some("result")) => {
+                let status = if value["is_error"].as_bool() == Some(true)
+                    || value["subtype"].as_str() != Some("success")
+                {
+                    "failed"
+                } else if value["permission_denials"]
+                    .as_array()
+                    .is_some_and(|denials| !denials.is_empty())
+                {
+                    "needs_attention"
+                } else {
+                    "succeeded"
+                };
+                self.phase = match status {
+                    "succeeded" => "completed",
+                    "failed" => "failed",
+                    _ => "waiting",
+                }
+                .into();
+                self.outcome = Some(status.into());
+            }
+            (Some("claude"), Some("system")) if value["subtype"] == "permission_denied" => {
+                self.phase = "waiting".into();
+                self.outcome = Some("needs_attention".into());
+            }
+            (Some("claude"), Some("assistant" | "stream_event")) => self.phase = "working".into(),
+            _ => {}
+        }
+    }
+    fn phase(&self) -> &str {
+        &self.phase
+    }
+    fn terminal_status(&self, success: bool) -> &str {
+        if !success {
+            "failed"
+        } else if self.adapter.is_none() {
+            "succeeded"
+        } else {
+            self.outcome.as_deref().unwrap_or("needs_attention")
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionSummary {
     pub session_id: String,
     pub cwd: String,
     pub command: Option<String>,
     pub status: String,
+    #[serde(default)]
+    pub launch: Option<AgentLaunch>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -46,12 +269,81 @@ pub struct SessionRecord {
     pub reason: Option<String>,
     pub started_at: u64,
     pub ended_at: Option<u64>,
+    #[serde(default)]
+    pub output_end_offset: u64,
+    #[serde(default)]
+    pub notification_pending: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct SessionMessage {
+    session_id: String,
+    data: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct SessionOutput {
     session_id: String,
     data: String,
+    offset: u64,
+    end_offset: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct LogSnapshot {
+    data: String,
+    offset: u64,
+    end_offset: u64,
+    status: String,
+}
+
+struct SessionLog {
+    file: File,
+    end_offset: u64,
+    error: Option<String>,
+}
+
+#[derive(Default)]
+struct Utf8Decoder {
+    pending: Vec<u8>,
+}
+
+impl Utf8Decoder {
+    fn push(&mut self, bytes: &[u8]) -> String {
+        self.pending.extend_from_slice(bytes);
+        let mut result = String::new();
+        let mut consumed = 0;
+        while consumed < self.pending.len() {
+            match std::str::from_utf8(&self.pending[consumed..]) {
+                Ok(text) => {
+                    result.push_str(text);
+                    consumed = self.pending.len();
+                }
+                Err(error) => {
+                    let valid = error.valid_up_to();
+                    result.push_str(
+                        std::str::from_utf8(&self.pending[consumed..consumed + valid])
+                            .expect("valid UTF-8 prefix"),
+                    );
+                    consumed += valid;
+                    match error.error_len() {
+                        Some(length) => {
+                            result.push('�');
+                            consumed += length;
+                        }
+                        None => break,
+                    }
+                }
+            }
+        }
+        self.pending.drain(..consumed);
+        result
+    }
+    fn finish(&mut self) -> String {
+        let tail = String::from_utf8_lossy(&self.pending).into_owned();
+        self.pending.clear();
+        tail
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -62,42 +354,171 @@ struct SessionStateEvent {
     reason: Option<String>,
 }
 
+#[cfg(windows)]
+struct WindowsJob(std::os::windows::io::OwnedHandle);
+
+#[cfg(windows)]
+impl WindowsJob {
+    fn attach(process: std::os::windows::io::RawHandle) -> Result<Self, String> {
+        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+        #[repr(C)]
+        #[derive(Default)]
+        struct BasicLimits {
+            process_time: i64,
+            job_time: i64,
+            flags: u32,
+            minimum_working_set: usize,
+            maximum_working_set: usize,
+            active_processes: u32,
+            affinity: usize,
+            priority: u32,
+            scheduling: u32,
+        }
+        #[repr(C)]
+        #[derive(Default)]
+        struct ExtendedLimits {
+            basic: BasicLimits,
+            io_counters: [u64; 6],
+            process_memory: usize,
+            job_memory: usize,
+            peak_process_memory: usize,
+            peak_job_memory: usize,
+        }
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn CreateJobObjectW(
+                attributes: *const std::ffi::c_void,
+                name: *const u16,
+            ) -> std::os::windows::io::RawHandle;
+            fn SetInformationJobObject(
+                job: std::os::windows::io::RawHandle,
+                class: i32,
+                information: *const std::ffi::c_void,
+                length: u32,
+            ) -> i32;
+            fn AssignProcessToJobObject(
+                job: std::os::windows::io::RawHandle,
+                process: std::os::windows::io::RawHandle,
+            ) -> i32;
+        }
+        const EXTENDED_LIMIT_INFORMATION: i32 = 9;
+        const KILL_ON_JOB_CLOSE: u32 = 0x2000;
+        let raw = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if raw.is_null() {
+            return Err(format!(
+                "Failed to create session job: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let handle = unsafe { OwnedHandle::from_raw_handle(raw) };
+        let mut limits = ExtendedLimits::default();
+        limits.basic.flags = KILL_ON_JOB_CLOSE;
+        let configured = unsafe {
+            SetInformationJobObject(
+                handle.as_raw_handle(),
+                EXTENDED_LIMIT_INFORMATION,
+                (&limits as *const ExtendedLimits).cast(),
+                std::mem::size_of::<ExtendedLimits>() as u32,
+            )
+        };
+        if configured == 0 {
+            return Err(format!(
+                "Failed to configure session job: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        if unsafe { AssignProcessToJobObject(handle.as_raw_handle(), process) } == 0 {
+            return Err(format!(
+                "Failed to attach session process: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(Self(handle))
+    }
+    fn terminate(&self) -> Result<(), String> {
+        use std::os::windows::io::AsRawHandle;
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn TerminateJobObject(job: std::os::windows::io::RawHandle, code: u32) -> i32;
+        }
+        if unsafe { TerminateJobObject(self.0.as_raw_handle(), 1) } == 0 {
+            return Err(format!(
+                "Failed to terminate session job: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(())
+    }
+}
+
 struct Session {
     summary: SessionSummary,
     master: Mutex<Box<dyn MasterPty + Send>>,
     writer: Mutex<Box<dyn Write + Send>>,
     child: Mutex<Box<dyn Child + Send + Sync>>,
-    log: Mutex<File>,
+    #[cfg(windows)]
+    job: Option<WindowsJob>,
+    log: Mutex<SessionLog>,
+    output_done: (Mutex<bool>, Condvar),
+    cancel_output: AtomicBool,
+    protocol: Mutex<AgentProtocol>,
     history: Arc<HistoryStore>,
     stop_requested: AtomicBool,
-    timeout_requested: AtomicBool,
+    idle_notified: AtomicBool,
+    completed: (Mutex<bool>, Condvar),
     last_activity: Mutex<Instant>,
     status: Mutex<String>,
 }
 
 pub struct SessionManager {
-    sessions: Mutex<HashMap<String, Arc<Session>>>,
+    sessions: Arc<Mutex<HashMap<String, Arc<Session>>>>,
+    shutting_down: AtomicBool,
+    shutdown_complete: AtomicBool,
     history: Mutex<Option<Arc<HistoryStore>>>,
 }
 
 impl Default for SessionManager {
     fn default() -> Self {
         Self {
-            sessions: Mutex::new(HashMap::new()),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            shutting_down: AtomicBool::new(false),
+            shutdown_complete: AtomicBool::new(false),
             history: Mutex::new(None),
         }
     }
 }
 
-impl Drop for SessionManager {
-    fn drop(&mut self) {
-        let Ok(sessions) = self.sessions.get_mut() else {
-            return;
-        };
-        for session in sessions.values() {
-            session.stop_requested.store(true, Ordering::Release);
-            let _ = terminate_session(session);
+impl SessionManager {
+    fn shutdown(&self) -> Result<(), String> {
+        let sessions: Vec<_> = self
+            .sessions
+            .lock()
+            .map_err(|_| "Session manager lock poisoned".to_string())?
+            .values()
+            .cloned()
+            .collect();
+        for session in &sessions {
+            request_session_stop(session)?;
         }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        for session in &sessions {
+            let (lock, ready) = &session.completed;
+            let completed = lock
+                .lock()
+                .map_err(|_| "Completion lock poisoned".to_string())?;
+            let (completed, _) = ready
+                .wait_timeout_while(
+                    completed,
+                    deadline.saturating_duration_since(Instant::now()),
+                    |done| !*done,
+                )
+                .map_err(|_| "Completion lock poisoned".to_string())?;
+            if !*completed {
+                return Err("Session cleanup timed out; the application remains open".into());
+            }
+        }
+        self.shutdown_complete.store(true, Ordering::Release);
+        Ok(())
     }
 }
 
@@ -114,7 +535,31 @@ impl HistoryStore {
         let records = if records_path.exists() {
             let contents = fs::read_to_string(&records_path)
                 .map_err(|error| format!("Failed to read session history: {error}"))?;
-            serde_json::from_str(&contents).unwrap_or_default()
+            match serde_json::from_str::<Vec<SessionRecord>>(&contents) {
+                Ok(records) => records,
+                Err(error) => {
+                    let backup = root.join("sessions.json.bak");
+                    let backup_contents = fs::read_to_string(&backup).map_err(|_| {
+                        format!(
+                            "Session history is corrupt ({error}). Original file preserved at {}",
+                            records_path.display()
+                        )
+                    })?;
+                    let records =
+                        serde_json::from_str(&backup_contents).map_err(|backup_error| {
+                            format!("Session history and backup are corrupt: {backup_error}")
+                        })?;
+                    fs::copy(
+                        &records_path,
+                        root.join(format!("sessions.corrupt-{}", next_session_id())),
+                    )
+                    .map_err(|error| format!("Failed to preserve corrupt history: {error}"))?;
+                    fs::copy(&backup, &records_path).map_err(|error| {
+                        format!("Failed to restore session history backup: {error}")
+                    })?;
+                    records
+                }
+            }
         } else {
             Vec::new()
         };
@@ -132,10 +577,30 @@ impl HistoryStore {
         let temp_path = self.root.join("sessions.json.tmp");
         let data = serde_json::to_vec_pretty(records)
             .map_err(|error| format!("Failed to encode session history: {error}"))?;
-        fs::write(&temp_path, data)
+        let mut file = File::create(&temp_path)
             .map_err(|error| format!("Failed to write session history: {error}"))?;
+        file.write_all(&data)
+            .and_then(|_| file.sync_all())
+            .map_err(|error| format!("Failed to flush session history: {error}"))?;
+        if self.records_path().exists() {
+            let backup_temp = self.root.join("sessions.json.bak.tmp");
+            fs::copy(self.records_path(), &backup_temp)
+                .map_err(|error| format!("Failed to back up session history: {error}"))?;
+            OpenOptions::new()
+                .write(true)
+                .open(&backup_temp)
+                .and_then(|file| file.sync_all())
+                .map_err(|error| format!("Failed to flush history backup: {error}"))?;
+            fs::rename(&backup_temp, self.root.join("sessions.json.bak"))
+                .map_err(|error| format!("Failed to commit history backup: {error}"))?;
+        }
         fs::rename(&temp_path, self.records_path())
-            .map_err(|error| format!("Failed to commit session history: {error}"))
+            .map_err(|error| format!("Failed to commit session history: {error}"))?;
+        #[cfg(unix)]
+        File::open(&self.root)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| format!("Failed to flush history directory: {error}"))?;
+        Ok(())
     }
 
     fn start(&self, summary: &SessionSummary) -> Result<(), String> {
@@ -143,16 +608,21 @@ impl HistoryStore {
             .records
             .lock()
             .map_err(|_| "Session history lock poisoned".to_string())?;
-        records.retain(|record| record.summary.session_id != summary.session_id);
-        records.push(SessionRecord {
+        let mut updated = records.clone();
+        updated.retain(|record| record.summary.session_id != summary.session_id);
+        updated.push(SessionRecord {
             summary: summary.clone(),
             status: summary.status.clone(),
             exit_code: None,
             reason: None,
             started_at: unix_timestamp(),
             ended_at: None,
+            output_end_offset: 0,
+            notification_pending: false,
         });
-        self.save_locked(&records)
+        self.save_locked(&updated)?;
+        *records = updated;
+        Ok(())
     }
 
     fn update(
@@ -161,22 +631,47 @@ impl HistoryStore {
         status: &str,
         exit_code: Option<u32>,
         reason: Option<String>,
-    ) {
-        if let Ok(mut records) = self.records.lock() {
-            if let Some(record) = records
-                .iter_mut()
-                .find(|record| record.summary.session_id == session_id)
-            {
-                record.status = status.to_string();
-                record.summary.status = status.to_string();
-                record.exit_code = exit_code;
-                record.reason = reason;
-                if is_terminal(status) {
-                    record.ended_at = Some(unix_timestamp());
-                }
-                let _ = self.save_locked(&records);
-            }
+        output_end_offset: Option<u64>,
+    ) -> Result<(), String> {
+        let mut records = self
+            .records
+            .lock()
+            .map_err(|_| "Session history lock poisoned".to_string())?;
+        let mut updated = records.clone();
+        let record = updated
+            .iter_mut()
+            .find(|record| record.summary.session_id == session_id)
+            .ok_or_else(|| format!("Unknown session: {session_id}"))?;
+        record.status = status.to_string();
+        record.summary.status = status.to_string();
+        record.exit_code = exit_code;
+        record.reason = reason;
+        if let Some(offset) = output_end_offset {
+            record.output_end_offset = offset;
         }
+        if is_terminal(status) {
+            record.ended_at = Some(unix_timestamp());
+            record.notification_pending = true;
+        }
+        self.save_locked(&updated)?;
+        *records = updated;
+        Ok(())
+    }
+
+    fn acknowledge_notification(&self, session_id: &str) -> Result<(), String> {
+        let mut records = self
+            .records
+            .lock()
+            .map_err(|_| "Session history lock poisoned".to_string())?;
+        let mut updated = records.clone();
+        let record = updated
+            .iter_mut()
+            .find(|record| record.summary.session_id == session_id)
+            .ok_or_else(|| "Unknown notification session".to_string())?;
+        record.notification_pending = false;
+        self.save_locked(&updated)?;
+        *records = updated;
+        Ok(())
     }
 
     fn list(&self) -> Result<Vec<SessionRecord>, String> {
@@ -196,18 +691,21 @@ impl HistoryStore {
             .lock()
             .map_err(|_| "Session history lock poisoned".to_string())?;
         let mut changed = false;
-        for record in records.iter_mut() {
+        let mut updated = records.clone();
+        for record in updated.iter_mut() {
             if matches!(record.status.as_str(), "starting" | "running") {
                 record.status = "needs_attention".to_string();
                 record.summary.status = "needs_attention".to_string();
                 record.reason =
                     Some("The application closed while this session was running".to_string());
                 record.ended_at = Some(unix_timestamp());
+                record.notification_pending = true;
                 changed = true;
             }
         }
         if changed {
-            self.save_locked(&records)?;
+            self.save_locked(&updated)?;
+            *records = updated;
         }
         Ok(())
     }
@@ -290,13 +788,32 @@ fn validate_working_directory(path: &str) -> Result<(), String> {
 }
 
 fn append_log(log: &mut File, data: &[u8], max_bytes: u64) -> std::io::Result<()> {
+    if max_bytes == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Log size must be positive",
+        ));
+    }
     let current_size = log.metadata()?.len();
     if current_size.saturating_add(data.len() as u64) > max_bytes {
+        // Keep a contiguous tail and leave room for future chunks instead of rewriting 8 MiB per read.
+        let keep = (max_bytes / 2).min(max_bytes.saturating_sub(data.len() as u64));
+        let mut tail = vec![0; keep.min(current_size) as usize];
+        log.seek(SeekFrom::End(-(tail.len() as i64)))?;
+        log.read_exact(&mut tail)?;
+        let start = tail
+            .iter()
+            .position(|byte| byte & 0xc0 != 0x80)
+            .unwrap_or(tail.len());
         log.set_len(0)?;
         log.seek(SeekFrom::Start(0))?;
-        log.write_all(b"[YAM] Log truncated after reaching the session size limit.\r\n")?;
+        log.write_all(&tail[start..])?;
     }
-    log.write_all(data)?;
+    let mut start = data.len().saturating_sub(max_bytes as usize);
+    while start < data.len() && data[start] & 0xc0 == 0x80 {
+        start += 1;
+    }
+    log.write_all(&data[start..])?;
     log.flush()
 }
 
@@ -331,6 +848,14 @@ fn find_executable(name: &str) -> Option<PathBuf> {
     for directory in std::env::split_paths(&path) {
         let candidate = directory.join(name);
         if candidate.is_file() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if candidate.metadata().ok()?.permissions().mode() & 0o111 != 0 {
+                    return Some(candidate);
+                }
+            }
+            #[cfg(not(unix))]
             return Some(candidate);
         }
         #[cfg(windows)]
@@ -371,30 +896,163 @@ fn is_terminal(status: &str) -> bool {
     )
 }
 
-fn terminate_session(session: &Session) -> Result<(), String> {
-    let child_result = session
-        .child
-        .lock()
-        .map_err(|_| "Child lock poisoned".to_string())?
-        .kill()
-        .map_err(|error| format!("Failed to stop session: {error}"));
-
-    #[cfg(unix)]
-    {
-        let process_group = session
-            .master
-            .lock()
-            .ok()
-            .and_then(|master| master.process_group_leader());
-        if let Some(process_group) = process_group {
-            // portable-pty starts the shell in its own process group on Unix.
-            unsafe {
-                let _ = libc::kill(-process_group, libc::SIGKILL);
-            }
+#[cfg(unix)]
+fn process_tree(root: u32) -> Result<Vec<u32>, String> {
+    let output = std::process::Command::new("ps")
+        .args(["-axo", "pid=,ppid="])
+        .output()
+        .map_err(|error| format!("Failed to inspect session process tree: {error}"))?;
+    if !output.status.success() {
+        return Err("Failed to inspect session process tree".into());
+    }
+    let processes: Vec<(u32, u32)> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            Some((fields.next()?.parse().ok()?, fields.next()?.parse().ok()?))
+        })
+        .collect();
+    let mut tree = vec![root];
+    // A PTY shell owns its POSIX session; job-control children retain that SID after reparenting.
+    for &(pid, _) in &processes {
+        if pid != root && unsafe { libc::getsid(pid as i32) } == root as i32 {
+            tree.push(pid);
         }
     }
+    let mut index = 0;
+    while index < tree.len() {
+        let parent = tree[index];
+        for &(pid, ppid) in &processes {
+            if ppid == parent && !tree.contains(&pid) {
+                tree.push(pid);
+            }
+        }
+        index += 1;
+    }
+    Ok(tree)
+}
 
-    child_result
+#[cfg(unix)]
+fn signal_process(pid: u32, signal: i32) -> Result<(), String> {
+    if pid <= 1 || pid == std::process::id() {
+        return Err("Refusing unsafe process signal".into());
+    }
+    if unsafe { libc::kill(pid as i32, signal) } != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            return Err(format!("Failed to signal session process: {error}"));
+        }
+    }
+    Ok(())
+}
+
+fn cleanup_session_descendants(session: &Session) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        let root = session
+            .child
+            .lock()
+            .map_err(|_| "Child lock poisoned".to_string())?
+            .process_id()
+            .ok_or_else(|| "Session has no process ID".to_string())?;
+        let descendants = process_tree(root)?;
+        for &pid in descendants.iter().skip(1) {
+            signal_process(pid, libc::SIGSTOP)?;
+        }
+        let result: Result<(), String> = (|| {
+            for &pid in process_tree(root)?.iter().skip(1).rev() {
+                signal_process(pid, libc::SIGKILL)?;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            for &pid in descendants.iter().skip(1) {
+                let _ = signal_process(pid, libc::SIGCONT);
+            }
+        }
+        result?;
+    }
+    #[cfg(windows)]
+    if let Some(job) = &session.job {
+        job.terminate()?;
+    }
+    #[cfg(not(any(unix, windows)))]
+    let _ = session;
+    Ok(())
+}
+
+fn terminate_session(session: &Session) -> Result<(), String> {
+    let mut child = session
+        .child
+        .lock()
+        .map_err(|_| "Child lock poisoned".to_string())?;
+    if child
+        .try_wait()
+        .map_err(|error| error.to_string())?
+        .is_some()
+    {
+        return Ok(());
+    }
+    let pid = child
+        .process_id()
+        .ok_or_else(|| "Session has no process ID".to_string())?;
+    #[cfg(unix)]
+    {
+        signal_process(pid, libc::SIGSTOP)?;
+        let mut stopped = vec![pid];
+        let result: Result<(), String> = (|| {
+            // Freeze descendants before killing parents so job-control groups cannot escape.
+            for _ in 0..8 {
+                let tree = process_tree(pid)?;
+                for &member in &tree {
+                    if !stopped.contains(&member) {
+                        signal_process(member, libc::SIGSTOP)?;
+                        stopped.push(member);
+                    }
+                }
+                if process_tree(pid)?
+                    .iter()
+                    .all(|member| stopped.contains(member))
+                {
+                    for &member in stopped.iter().rev() {
+                        signal_process(member, libc::SIGKILL)?;
+                    }
+                    return Ok(());
+                }
+            }
+            Err("Session process tree kept changing; stop was not completed".into())
+        })();
+        if result.is_err() {
+            for member in stopped {
+                let _ = signal_process(member, libc::SIGCONT);
+            }
+        }
+        result
+    }
+    #[cfg(windows)]
+    {
+        if let Some(job) = &session.job {
+            return job.terminate();
+        }
+        let output = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .output()
+            .map_err(|error| format!("Failed to stop session process tree: {error}"))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "Failed to stop session process tree: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ))
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        child
+            .kill()
+            .map_err(|error| format!("Failed to stop session: {error}"))
+    }
 }
 
 fn request_session_stop(session: &Session) -> Result<(), String> {
@@ -407,6 +1065,17 @@ fn request_session_stop(session: &Session) -> Result<(), String> {
         return Ok(());
     }
 
+    let exited = session
+        .child
+        .lock()
+        .map_err(|_| "Child lock poisoned".to_string())?
+        .try_wait()
+        .map_err(|error| error.to_string())?
+        .is_some();
+    if exited {
+        cleanup_session_descendants(session)?;
+        return Ok(());
+    }
     session.stop_requested.store(true, Ordering::Release);
     match terminate_session(session) {
         Ok(()) => Ok(()),
@@ -420,6 +1089,7 @@ fn request_session_stop(session: &Session) -> Result<(), String> {
             if exited.is_some() {
                 Ok(())
             } else {
+                session.stop_requested.store(false, Ordering::Release);
                 Err(error)
             }
         }
@@ -439,12 +1109,22 @@ fn emit_state(
     }
 
     *current = status.to_string();
-    session.history.update(
+    if let Err(error) = session.history.update(
         &session.summary.session_id,
         status,
         exit_code,
         reason.clone(),
-    );
+        session.log.lock().ok().map(|log| log.end_offset),
+    ) {
+        eprintln!("[YAM] {error}");
+        let _ = app.emit(
+            "session-error",
+            SessionMessage {
+                session_id: session.summary.session_id.clone(),
+                data: error,
+            },
+        );
+    }
     let event = SessionStateEvent {
         session_id: session.summary.session_id.clone(),
         status: status.to_string(),
@@ -455,98 +1135,264 @@ fn emit_state(
     true
 }
 
-fn spawn_session_threads(app: &AppHandle, session: Arc<Session>, mut reader: Box<dyn Read + Send>) {
+fn publish_output(app: &AppHandle, session: &Session, data: String) {
+    if data.is_empty() {
+        return;
+    }
+    if let Ok(mut protocol) = session.protocol.lock() {
+        let previous = protocol.phase().to_string();
+        protocol.push(&data);
+        if protocol.phase() != previous {
+            let _ = app.emit(
+                "session-phase",
+                SessionMessage {
+                    session_id: session.summary.session_id.clone(),
+                    data: protocol.phase().to_string(),
+                },
+            );
+        }
+    }
+    let Ok(mut log) = session.log.lock() else {
+        return;
+    };
+    let offset = log.end_offset;
+    log.end_offset += data.len() as u64;
+    if let Err(error) = append_log(&mut log.file, data.as_bytes(), MAX_SESSION_LOG_BYTES) {
+        let reason = format!("Failed to persist terminal output: {error}");
+        log.error = Some(reason.clone());
+        eprintln!("[YAM] {reason}");
+        let _ = app.emit(
+            "session-error",
+            SessionMessage {
+                session_id: session.summary.session_id.clone(),
+                data: reason,
+            },
+        );
+    }
+    let _ = app.emit(
+        "session-output",
+        SessionOutput {
+            session_id: session.summary.session_id.clone(),
+            data,
+            offset,
+            end_offset: log.end_offset,
+        },
+    );
+}
+
+fn finish_session(sessions: &Mutex<HashMap<String, Arc<Session>>>, session: &Session) {
+    if let Ok(mut active) = sessions.lock() {
+        active.remove(&session.summary.session_id);
+    }
+    if let Ok(mut completed) = session.completed.0.lock() {
+        *completed = true;
+        session.completed.1.notify_all();
+    }
+}
+
+fn idle_reminder_due(session: &Session, idle: Duration, timeout: Duration) -> bool {
+    if idle < timeout {
+        session.idle_notified.store(false, Ordering::Release);
+        return false;
+    }
+    !session.idle_notified.swap(true, Ordering::AcqRel)
+}
+
+#[cfg(unix)]
+fn wait_output_ready(fd: i32, cancelled: &AtomicBool) -> std::io::Result<bool> {
+    loop {
+        if cancelled.load(Ordering::Acquire) {
+            return Ok(false);
+        }
+        let mut descriptor = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ready = unsafe { libc::poll(&mut descriptor, 1, 100) };
+        if ready > 0 {
+            return Ok(true);
+        }
+        if ready < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+    }
+}
+
+fn spawn_session_threads(
+    app: &AppHandle,
+    sessions: Arc<Mutex<HashMap<String, Arc<Session>>>>,
+    session: Arc<Session>,
+    mut reader: Box<dyn Read + Send>,
+) {
     let output_app = app.clone();
     let output_session_id = session.summary.session_id.clone();
     let output_session = Arc::clone(&session);
     thread::spawn(move || {
         let mut buffer = [0_u8; 4096];
+        let mut decoder = Utf8Decoder::default();
+        #[cfg(unix)]
+        let fd = output_session
+            .master
+            .lock()
+            .ok()
+            .and_then(|master| master.as_raw_fd());
         loop {
+            #[cfg(unix)]
+            if let Some(fd) = fd {
+                match wait_output_ready(fd, &output_session.cancel_output) {
+                    Ok(true) => {}
+                    Ok(false) => break,
+                    Err(error) => {
+                        eprintln!("[YAM] Terminal poll failed: {error}");
+                        break;
+                    }
+                }
+            }
             match reader.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(size) => {
-                    if let Ok(mut log) = output_session.log.lock() {
-                        let _ = append_log(&mut log, &buffer[..size], MAX_SESSION_LOG_BYTES);
-                    }
                     if let Ok(mut activity) = output_session.last_activity.lock() {
                         *activity = Instant::now();
                     }
-                    let output = SessionOutput {
-                        session_id: output_session_id.clone(),
-                        data: String::from_utf8_lossy(&buffer[..size]).into_owned(),
-                    };
-                    let _ = output_app.emit("session-output", output);
+                    publish_output(&output_app, &output_session, decoder.push(&buffer[..size]));
                 }
-                Err(_) => break,
+                Err(error) => {
+                    #[cfg(unix)]
+                    if error.raw_os_error() == Some(libc::EIO) {
+                        break;
+                    }
+                    let _ = output_app.emit(
+                        "session-error",
+                        SessionMessage {
+                            session_id: output_session_id.clone(),
+                            data: format!("Failed to read terminal output: {error}"),
+                        },
+                    );
+                    break;
+                }
             }
+        }
+        publish_output(&output_app, &output_session, decoder.finish());
+        if let Ok(mut protocol) = output_session.protocol.lock() {
+            protocol.finish();
+        }
+        if let Ok(mut done) = output_session.output_done.0.lock() {
+            *done = true;
+            output_session.output_done.1.notify_all();
         }
     });
 
     let wait_app = app.clone();
-    thread::spawn(move || loop {
-        let idle = session
-            .last_activity
-            .lock()
-            .map(|activity| activity.elapsed())
-            .unwrap_or_default();
-        if !session.stop_requested.load(Ordering::Acquire) && idle >= session_idle_timeout() {
-            session.timeout_requested.store(true, Ordering::Release);
-            session.stop_requested.store(true, Ordering::Release);
-        }
-        if session.stop_requested.load(Ordering::Acquire) {
-            let _ = terminate_session(&session);
-        }
+    thread::spawn(move || {
+        loop {
+            let idle = session
+                .last_activity
+                .lock()
+                .map(|activity| activity.elapsed())
+                .unwrap_or_default();
+            if idle_reminder_due(&session, idle, session_idle_timeout()) {
+                let _ = wait_app.emit("session-attention", SessionMessage {
+                session_id: session.summary.session_id.clone(),
+                data: "No recent activity. The session is still running; check whether input is needed.".into(),
+            });
+            }
 
-        let result = session
-            .child
-            .lock()
-            .map_err(|_| "child lock poisoned".to_string())
-            .and_then(|mut child| child.try_wait().map_err(|error| error.to_string()));
+            let result = session
+                .child
+                .lock()
+                .map_err(|_| "child lock poisoned".to_string())
+                .and_then(|mut child| child.try_wait().map_err(|error| error.to_string()));
 
-        match result {
-            Ok(Some(exit)) => {
-                if session.timeout_requested.load(Ordering::Acquire) {
-                    emit_state(
-                        &wait_app,
-                        &session,
-                        "needs_attention",
-                        Some(exit.exit_code()),
-                        Some("Session stopped after producing no output for too long".to_string()),
-                    );
-                } else if session.stop_requested.load(Ordering::Acquire) {
-                    emit_state(
-                        &wait_app,
-                        &session,
-                        "stopped",
-                        Some(exit.exit_code()),
-                        Some("Stopped by user".to_string()),
-                    );
-                } else if exit.success() {
-                    emit_state(
-                        &wait_app,
-                        &session,
-                        "succeeded",
-                        Some(exit.exit_code()),
-                        Some("Process exited normally".to_string()),
-                    );
-                } else {
-                    emit_state(
-                        &wait_app,
-                        &session,
-                        "failed",
-                        Some(exit.exit_code()),
-                        Some("Process exited with a non-zero code".to_string()),
-                    );
+            match result {
+                Ok(Some(exit)) => {
+                    let cleanup = cleanup_session_descendants(&session);
+                    let (lock, done) = &session.output_done;
+                    let drained = lock
+                        .lock()
+                        .ok()
+                        .and_then(|drained| {
+                            done.wait_timeout_while(drained, Duration::from_secs(2), |drained| {
+                                !*drained
+                            })
+                            .ok()
+                        })
+                        .is_some_and(|(drained, _)| *drained);
+                    if let Err(error) = cleanup {
+                        emit_state(
+                            &wait_app,
+                            &session,
+                            "failed",
+                            Some(exit.exit_code()),
+                            Some(error),
+                        );
+                    } else if !drained {
+                        session.cancel_output.store(true, Ordering::Release);
+                        emit_state(
+                            &wait_app,
+                            &session,
+                            "failed",
+                            Some(exit.exit_code()),
+                            Some("Process exited but terminal output did not close".into()),
+                        );
+                    } else if session.stop_requested.load(Ordering::Acquire) {
+                        emit_state(
+                            &wait_app,
+                            &session,
+                            "stopped",
+                            Some(exit.exit_code()),
+                            Some("Stopped by user".to_string()),
+                        );
+                    } else {
+                        let status = session
+                            .protocol
+                            .lock()
+                            .map(|protocol| protocol.terminal_status(exit.success()).to_string())
+                            .unwrap_or_else(|_| "failed".into());
+                        let reason = match status.as_str() {
+                            "succeeded" => "Task completed successfully",
+                            "needs_attention" => {
+                                "Agent needs attention or did not report a recognized task result"
+                            }
+                            _ => {
+                                "Agent reported failure or the process exited with a non-zero code"
+                            }
+                        };
+                        emit_state(
+                            &wait_app,
+                            &session,
+                            &status,
+                            Some(exit.exit_code()),
+                            Some(reason.into()),
+                        );
+                    }
+                    break;
                 }
-                break;
-            }
-            Ok(None) => thread::sleep(Duration::from_millis(40)),
-            Err(error) => {
-                emit_state(&wait_app, &session, "failed", None, Some(error));
-                break;
+                Ok(None) => thread::sleep(Duration::from_millis(40)),
+                Err(error) => {
+                    let cleanup = terminate_session(&session);
+                    let reason = match cleanup {
+                        Ok(()) => error,
+                        Err(cleanup) => format!("{error}; cleanup failed: {cleanup}"),
+                    };
+                    emit_state(&wait_app, &session, "failed", None, Some(reason));
+                    break;
+                }
             }
         }
+        finish_session(&sessions, &session);
     });
+}
+
+#[tauri::command]
+fn validate_project_directory(path: String) -> Result<(), String> {
+    if !Path::new(&path).is_absolute() {
+        return Err("Project directory must be absolute".into());
+    }
+    validate_working_directory(&path)
 }
 
 #[tauri::command]
@@ -565,7 +1411,11 @@ fn create_session(
     manager: State<'_, SessionManager>,
     cwd: Option<String>,
     command: Option<String>,
+    launch: Option<AgentLaunch>,
 ) -> Result<SessionSummary, String> {
+    if manager.shutting_down.load(Ordering::Acquire) {
+        return Err("Application is closing".into());
+    }
     let history = manager.history(&app)?;
     let id = next_session_id();
     let pty_system = native_pty_system();
@@ -578,7 +1428,20 @@ fn create_session(
         })
         .map_err(|error| format!("Failed to open PTY: {error}"))?;
 
-    let mut builder = shell_command(command.as_deref());
+    if command.is_some() && launch.is_some() {
+        return Err("Choose either an agent or a custom command".into());
+    }
+    let mut builder = if let Some(launch) = &launch {
+        let executable = find_executable(&launch.adapter).ok_or_else(|| {
+            format!(
+                "{} was not found or is not executable on PATH",
+                launch.adapter
+            )
+        })?;
+        agent_command(&executable, launch)?
+    } else {
+        shell_command(command.as_deref())
+    };
     let working_directory = cwd
         .filter(|path| !path.trim().is_empty())
         .unwrap_or_else(|| {
@@ -590,10 +1453,20 @@ fn create_session(
     validate_working_directory(&working_directory)?;
     builder.cwd(&working_directory);
 
-    let child = pair
-        .slave
-        .spawn_command(builder)
-        .map_err(|error| format!("Failed to start session: {error}"))?;
+    let summary = SessionSummary {
+        session_id: id,
+        cwd: working_directory,
+        command,
+        status: "starting".to_string(),
+        launch,
+    };
+    let log_path = history.log_path(&summary.session_id);
+    let log = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|error| format!("Failed to open session log: {error}"))?;
     let reader = pair
         .master
         .try_clone_reader()
@@ -603,37 +1476,91 @@ fn create_session(
         .take_writer()
         .map_err(|error| format!("Failed to open PTY input: {error}"))?;
 
-    let summary = SessionSummary {
-        session_id: id,
-        cwd: working_directory,
-        command,
-        status: "starting".to_string(),
-    };
-    let log_path = history.log_path(&summary.session_id);
-    let log = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .map_err(|error| format!("Failed to open session log: {error}"))?;
+    let mut active = manager
+        .sessions
+        .lock()
+        .map_err(|_| "Session manager lock poisoned".to_string())?;
+    if manager.shutting_down.load(Ordering::Acquire) {
+        return Err("Application is closing".into());
+    }
     history.start(&summary)?;
+    #[allow(unused_mut)]
+    let mut child = match pair.slave.spawn_command(builder) {
+        Ok(child) => child,
+        Err(error) => {
+            let reason = format!("Failed to start session: {error}");
+            history.update(
+                &summary.session_id,
+                "failed",
+                None,
+                Some(reason.clone()),
+                None,
+            )?;
+            let _ = app.emit(
+                "session-state",
+                SessionStateEvent {
+                    session_id: summary.session_id.clone(),
+                    status: "failed".into(),
+                    exit_code: None,
+                    reason: Some(reason.clone()),
+                },
+            );
+            return Err(reason);
+        }
+    };
+    // ponytail: portable-pty spawns before Job assignment; strict race-free ownership needs suspended spawning.
+    #[cfg(windows)]
+    let job = match child
+        .as_raw_handle()
+        .ok_or_else(|| "Session has no native process handle".to_string())
+        .and_then(WindowsJob::attach)
+    {
+        Ok(job) => Some(job),
+        Err(_) if child.try_wait().ok().flatten().is_some() => None,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            history.update(
+                &summary.session_id,
+                "failed",
+                None,
+                Some(error.clone()),
+                None,
+            )?;
+            return Err(error);
+        }
+    };
     let session = Arc::new(Session {
         summary: summary.clone(),
         master: Mutex::new(pair.master),
         writer: Mutex::new(writer),
         child: Mutex::new(child),
-        log: Mutex::new(log),
+        #[cfg(windows)]
+        job,
+        log: Mutex::new(SessionLog {
+            file: log,
+            end_offset: 0,
+            error: None,
+        }),
+        output_done: (Mutex::new(false), Condvar::new()),
+        cancel_output: AtomicBool::new(false),
+        protocol: Mutex::new(AgentProtocol::new(
+            summary
+                .launch
+                .as_ref()
+                .filter(|launch| launch.mode == "task")
+                .map(|launch| launch.adapter.as_str()),
+        )),
         history,
         stop_requested: AtomicBool::new(false),
-        timeout_requested: AtomicBool::new(false),
+        idle_notified: AtomicBool::new(false),
+        completed: (Mutex::new(false), Condvar::new()),
         last_activity: Mutex::new(Instant::now()),
         status: Mutex::new("starting".to_string()),
     });
 
-    manager
-        .sessions
-        .lock()
-        .map_err(|_| "Session manager lock poisoned".to_string())?
-        .insert(summary.session_id.clone(), Arc::clone(&session));
+    active.insert(summary.session_id.clone(), Arc::clone(&session));
+    drop(active);
     let _ = app.emit(
         "session-state",
         SessionStateEvent {
@@ -650,7 +1577,7 @@ fn create_session(
         None,
         Some("PTY started".to_string()),
     );
-    spawn_session_threads(&app, session, reader);
+    spawn_session_threads(&app, Arc::clone(&manager.sessions), session, reader);
 
     Ok(SessionSummary {
         status: "running".to_string(),
@@ -727,6 +1654,89 @@ fn stop_session(manager: State<'_, SessionManager>, session_id: String) -> Resul
 }
 
 #[tauri::command]
+fn acknowledge_notification(
+    app: AppHandle,
+    manager: State<'_, SessionManager>,
+    session_id: String,
+) -> Result<(), String> {
+    manager.history(&app)?.acknowledge_notification(&session_id)
+}
+
+#[tauri::command]
+async fn notify_session(
+    app: AppHandle,
+    manager: State<'_, SessionManager>,
+    session_id: String,
+    title: String,
+) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        static IDENTITY: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+        IDENTITY
+            .get_or_init(|| {
+                notify_rust::set_application(&app.config().identifier)
+                    .map_err(|error| format!("Notification identity setup failed: {error}"))
+            })
+            .clone()?;
+    }
+    if title.chars().count() > 200 {
+        return Err("Notification title is too long".into());
+    }
+    let record = manager
+        .history(&app)?
+        .list()?
+        .into_iter()
+        .find(|record| record.summary.session_id == session_id)
+        .ok_or_else(|| "Unknown notification session".to_string())?;
+    let body = record
+        .reason
+        .unwrap_or_else(|| format!("Session {}", record.status));
+    tauri::async_runtime::spawn_blocking(move || {
+        let handle = notify_rust::Notification::new()
+            .summary(&title)
+            .body(&body)
+            .action("default", "Open session")
+            .timeout(10000)
+            .show()
+            .map_err(|error| format!("Notification delivery failed: {error}"))?;
+        let wait = move || {
+            handle
+                .wait_for_response(move |response: &notify_rust::NotificationResponse| {
+                    if matches!(
+                        response,
+                        notify_rust::NotificationResponse::Default
+                            | notify_rust::NotificationResponse::Action(_)
+                    ) {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.unminimize();
+                            let _ = window.set_focus();
+                        }
+                        let _ = app.emit("session-notification-click", &session_id);
+                    }
+                })
+                .map_err(|error| format!("Notification response failed: {error}"))
+        };
+        // macOS show() only constructs a handle; waiting performs delivery.
+        #[cfg(target_os = "macos")]
+        {
+            wait()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            thread::spawn(move || {
+                if let Err(error) = wait() {
+                    eprintln!("{error}");
+                }
+            });
+            Ok(())
+        }
+    })
+    .await
+    .map_err(|error| format!("Notification worker failed: {error}"))?
+}
+
+#[tauri::command]
 fn list_sessions(
     app: AppHandle,
     manager: State<'_, SessionManager>,
@@ -753,9 +1763,87 @@ fn read_session_log(
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
+#[tauri::command]
+fn read_session_snapshot(
+    app: AppHandle,
+    manager: State<'_, SessionManager>,
+    session_id: String,
+) -> Result<LogSnapshot, String> {
+    let active = manager
+        .sessions
+        .lock()
+        .map_err(|_| "Session manager lock poisoned".to_string())?
+        .get(&session_id)
+        .cloned();
+    if let Some(session) = active {
+        let log = session
+            .log
+            .lock()
+            .map_err(|_| "Session log lock poisoned".to_string())?;
+        if let Some(error) = &log.error {
+            return Err(error.clone());
+        }
+        let bytes =
+            fs::read(session.history.log_path(&session_id)).map_err(|error| error.to_string())?;
+        let data =
+            String::from_utf8(bytes).map_err(|error| format!("Invalid UTF-8 log: {error}"))?;
+        let end_offset = log.end_offset;
+        drop(log);
+        Ok(LogSnapshot {
+            offset: end_offset.saturating_sub(data.len() as u64),
+            end_offset,
+            data,
+            status: session
+                .status
+                .lock()
+                .map_err(|_| "Session status lock poisoned".to_string())?
+                .clone(),
+        })
+    } else {
+        let history = manager.history(&app)?;
+        let record = history
+            .list()?
+            .into_iter()
+            .find(|record| record.summary.session_id == session_id)
+            .ok_or_else(|| format!("Unknown session: {session_id}"))?;
+        let data = read_session_log(app, manager, session_id)?;
+        let end_offset = record.output_end_offset.max(data.len() as u64);
+        Ok(LogSnapshot {
+            offset: end_offset - data.len() as u64,
+            end_offset,
+            data,
+            status: record.status,
+        })
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .menu(|app| {
+            let menu = tauri::menu::Menu::default(app)?;
+            #[cfg(target_os = "macos")]
+            if let Some(tauri::menu::MenuItemKind::Submenu(application)) = menu.items()?.first() {
+                // Native predefined Quit invokes NSApplication. Route Cmd+Q through ExitRequested.
+                let count = application.items()?.len();
+                if count > 0 {
+                    application.remove_at(count - 1)?;
+                }
+                application.append(&tauri::menu::MenuItem::with_id(
+                    app,
+                    "yam-quit",
+                    "Quit YAM",
+                    true,
+                    Some("CmdOrCtrl+Q"),
+                )?)?;
+            }
+            Ok(menu)
+        })
+        .on_menu_event(|app, event| {
+            if event.id().as_ref() == "yam-quit" {
+                app.exit(0);
+            }
+        })
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
                 if let Some(monitor) = window.current_monitor()? {
@@ -779,21 +1867,60 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             health_check,
+            validate_project_directory,
             list_adapters,
             create_session,
             write_session,
             resize_session,
             stop_session,
             list_sessions,
-            read_session_log
+            notify_session,
+            acknowledge_notification,
+            read_session_log,
+            read_session_snapshot
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running YAM");
+        .build(tauri::generate_context!())
+        .expect("error while building YAM")
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                let manager = app.state::<SessionManager>();
+                if !manager.shutdown_complete.load(Ordering::Acquire) {
+                    manager.shutting_down.store(true, Ordering::Release);
+                    if let Err(error) = manager.shutdown() {
+                        eprintln!("[YAM] Final exit cleanup failed: {error}");
+                    }
+                }
+            }
+            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+                let manager = app.state::<SessionManager>();
+                if manager.shutdown_complete.load(Ordering::Acquire) {
+                    return;
+                }
+                api.prevent_exit();
+                if !manager.shutting_down.swap(true, Ordering::AcqRel) {
+                    let app = app.clone();
+                    thread::spawn(move || match app.state::<SessionManager>().shutdown() {
+                        Ok(()) => app.exit(0),
+                        Err(error) => {
+                            app.state::<SessionManager>()
+                                .shutting_down
+                                .store(false, Ordering::Release);
+                            let _ = app.emit(
+                                "session-error",
+                                SessionMessage {
+                                    session_id: String::new(),
+                                    data: error,
+                                },
+                            );
+                        }
+                    });
+                }
+            }
+        });
 }
 
 #[cfg(test)]
 mod tests {
-    use std::fs::File;
     use std::io::Read;
 
     use portable_pty::{native_pty_system, PtySize};
@@ -856,6 +1983,7 @@ mod tests {
             cwd: "/tmp".to_string(),
             command: Some("sleep 10".to_string()),
             status: "running".to_string(),
+            launch: None,
         };
         history.start(&summary).expect("start record");
         history.recover_running().expect("recover history");
@@ -867,6 +1995,510 @@ mod tests {
             .unwrap_or_default()
             .contains("application closed"));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn test_history() -> (std::path::PathBuf, SessionSummary) {
+        let root = std::env::temp_dir().join(format!("yam-review-test-{}", next_session_id()));
+        let summary = SessionSummary {
+            session_id: "s-test".into(),
+            cwd: "/tmp".into(),
+            command: None,
+            status: "running".into(),
+            launch: None,
+        };
+        (root, summary)
+    }
+
+    fn test_session(
+        command: &str,
+    ) -> (
+        std::sync::Arc<super::Session>,
+        Box<dyn std::io::Read + Send>,
+        std::path::PathBuf,
+    ) {
+        let (root, mut summary) = test_history();
+        let history = std::sync::Arc::new(HistoryStore::open(root.clone()).unwrap());
+        summary.session_id = next_session_id();
+        history.start(&summary).unwrap();
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let child = pair
+            .slave
+            .spawn_command(shell_command(Some(command)))
+            .unwrap();
+        let reader = pair.master.try_clone_reader().unwrap();
+        let writer = pair.master.take_writer().unwrap();
+        let log = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .append(true)
+            .open(history.log_path(&summary.session_id))
+            .unwrap();
+        let session = std::sync::Arc::new(super::Session {
+            summary,
+            master: std::sync::Mutex::new(pair.master),
+            writer: std::sync::Mutex::new(writer),
+            #[cfg(windows)]
+            job: Some(super::WindowsJob::attach(child.as_raw_handle().unwrap()).unwrap()),
+            child: std::sync::Mutex::new(child),
+            log: std::sync::Mutex::new(super::SessionLog {
+                file: log,
+                end_offset: 0,
+                error: None,
+            }),
+            output_done: (std::sync::Mutex::new(false), std::sync::Condvar::new()),
+            cancel_output: std::sync::atomic::AtomicBool::new(false),
+            protocol: std::sync::Mutex::new(super::AgentProtocol::new(None)),
+            history,
+            stop_requested: std::sync::atomic::AtomicBool::new(false),
+            idle_notified: std::sync::atomic::AtomicBool::new(false),
+            completed: (std::sync::Mutex::new(false), std::sync::Condvar::new()),
+            last_activity: std::sync::Mutex::new(std::time::Instant::now()),
+            status: std::sync::Mutex::new("running".into()),
+        });
+        (session, reader, root)
+    }
+
+    #[test]
+    fn idle_reminders_do_not_stop_a_running_session_and_reset_on_activity() {
+        use std::time::Duration;
+        let (session, _, root) = test_session(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 >nul"
+        } else {
+            "sleep 30"
+        });
+        assert!(!super::idle_reminder_due(
+            &session,
+            Duration::from_secs(1),
+            Duration::from_secs(2)
+        ));
+        assert!(super::idle_reminder_due(
+            &session,
+            Duration::from_secs(2),
+            Duration::from_secs(2)
+        ));
+        assert!(!super::idle_reminder_due(
+            &session,
+            Duration::from_secs(3),
+            Duration::from_secs(2)
+        ));
+        assert!(!session
+            .stop_requested
+            .load(std::sync::atomic::Ordering::Acquire));
+        assert!(session.child.lock().unwrap().try_wait().unwrap().is_none());
+        assert!(!super::idle_reminder_due(
+            &session,
+            Duration::ZERO,
+            Duration::from_secs(2)
+        ));
+        assert!(super::idle_reminder_due(
+            &session,
+            Duration::from_secs(2),
+            Duration::from_secs(2)
+        ));
+        super::request_session_stop(&session).unwrap();
+        session.child.lock().unwrap().wait().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stop_after_natural_exit_does_not_reclassify_completion() {
+        let (session, _, root) = test_session("exit 0");
+        session.child.lock().unwrap().wait().unwrap();
+        super::request_session_stop(&session).unwrap();
+        assert!(!session
+            .stop_requested
+            .load(std::sync::atomic::Ordering::Acquire));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_stop_is_idempotent_and_finished_sessions_are_released() {
+        let manager = super::SessionManager::default();
+        let (session, _, root) = test_session(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 >nul"
+        } else {
+            "sleep 30"
+        });
+        manager
+            .sessions
+            .lock()
+            .unwrap()
+            .insert(session.summary.session_id.clone(), session.clone());
+        let workers: Vec<_> = (0..4)
+            .map(|_| {
+                let session = session.clone();
+                std::thread::spawn(move || super::request_session_stop(&session))
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap().unwrap();
+        }
+        session.child.lock().unwrap().wait().unwrap();
+        super::finish_session(&manager.sessions, &session);
+        assert!(manager.sessions.lock().unwrap().is_empty());
+        assert!(*session.completed.0.lock().unwrap());
+        assert!(manager.shutdown().is_ok());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_job_close_terminates_owned_process() {
+        use std::os::windows::io::AsRawHandle;
+        let mut child = std::process::Command::new("cmd")
+            .args(["/C", "ping -n 30 127.0.0.1 >nul"])
+            .spawn()
+            .unwrap();
+        let job = super::WindowsJob::attach(child.as_raw_handle()).unwrap();
+        drop(job);
+        assert!(!child.wait().unwrap().success());
+    }
+
+    #[test]
+    fn shutdown_started_does_not_mean_exit_is_ready() {
+        let manager = super::SessionManager::default();
+        manager
+            .shutting_down
+            .store(true, std::sync::atomic::Ordering::Release);
+        assert!(!manager
+            .shutdown_complete
+            .load(std::sync::atomic::Ordering::Acquire));
+        manager.shutdown().unwrap();
+        assert!(manager
+            .shutdown_complete
+            .load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[test]
+    fn shutdown_stops_sessions_and_waits_for_cleanup() {
+        let manager = super::SessionManager::default();
+        let (session, _, root) = test_session(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 >nul"
+        } else {
+            "sleep 30"
+        });
+        manager
+            .sessions
+            .lock()
+            .unwrap()
+            .insert(session.summary.session_id.clone(), session.clone());
+        let sessions = manager.sessions.clone();
+        let cleanup = std::thread::spawn(move || {
+            loop {
+                if session.child.lock().unwrap().try_wait().unwrap().is_some() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            super::finish_session(&sessions, &session);
+        });
+        manager.shutdown().unwrap();
+        cleanup.join().unwrap();
+        assert!(manager.sessions.lock().unwrap().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stop_cleans_background_job_groups_without_harming_other_sessions() {
+        use std::io::BufRead;
+        let (session, reader, root) =
+            test_session("set -m; trap '' HUP; sleep 30 & echo YAM_PID:$!; wait");
+        let mut reader = std::io::BufReader::new(reader);
+        let pid: i32 = loop {
+            let mut line = String::new();
+            assert!(reader.read_line(&mut line).unwrap() > 0);
+            if let Some(value) = line.trim().strip_prefix("YAM_PID:") {
+                if let Ok(pid) = value.parse() {
+                    break pid;
+                }
+            }
+        };
+        let (other, _, other_root) = test_session("sleep 30");
+        super::request_session_stop(&session).unwrap();
+        session.child.lock().unwrap().wait().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let alive = unsafe { libc::kill(pid, 0) } == 0;
+        // Always clean the fixture, including when the assertion detects the old bug.
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+        }
+        let other_running = other.child.lock().unwrap().try_wait().unwrap().is_none();
+        super::request_session_stop(&other).unwrap();
+        other.child.lock().unwrap().wait().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(other_root).unwrap();
+        assert!(!alive, "background descendant survived session stop");
+        assert!(other_running, "stop affected an unrelated session");
+    }
+
+    #[test]
+    fn corrupt_history_is_rejected_without_destroying_evidence() {
+        let (root, _) = test_history();
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("sessions.json"), b"{broken").unwrap();
+        assert!(HistoryStore::open(root.clone()).is_err());
+        assert_eq!(
+            std::fs::read(root.join("sessions.json")).unwrap(),
+            b"{broken"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn history_recovers_valid_backup_and_preserves_corrupt_primary() {
+        let (root, summary) = test_history();
+        let store = HistoryStore::open(root.clone()).unwrap();
+        store.start(&summary).unwrap();
+        std::fs::copy(root.join("sessions.json"), root.join("sessions.json.bak")).unwrap();
+        std::fs::write(root.join("sessions.json"), b"broken").unwrap();
+        let recovered = HistoryStore::open(root.clone()).unwrap();
+        assert_eq!(recovered.list().unwrap().len(), 1);
+        assert!(std::fs::read_dir(&root).unwrap().any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("sessions.corrupt-")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_history_start_does_not_create_an_in_memory_record() {
+        let (root, summary) = test_history();
+        let store = HistoryStore::open(root.clone()).unwrap();
+        std::fs::create_dir(root.join("sessions.json.tmp")).unwrap();
+        assert!(store.start(&summary).is_err());
+        assert!(store.list().unwrap().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_history_update_is_reported_and_leaves_previous_state() {
+        let (root, summary) = test_history();
+        let store = HistoryStore::open(root.clone()).unwrap();
+        store.start(&summary).unwrap();
+        std::fs::create_dir(root.join("sessions.json.tmp")).unwrap();
+        let error = store
+            .update("s-test", "succeeded", Some(0), None, None)
+            .unwrap_err();
+        assert!(error.contains("write session history"));
+        assert_eq!(store.list().unwrap()[0].status, "running");
+        assert_eq!(
+            HistoryStore::open(root.clone()).unwrap().list().unwrap()[0].status,
+            "running"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn natural_exit_cleanup_finds_orphans_in_other_job_groups() {
+        use std::os::unix::process::CommandExt;
+        let pid_file = std::env::temp_dir().join(format!("yam-pid-{}", next_session_id()));
+        let command = format!(
+            "trap '' HUP; sleep 30 & echo $! > '{}'; exit 0",
+            pid_file.display()
+        );
+        let mut builder = std::process::Command::new("/bin/sh");
+        builder.args(["-c", &command]);
+        unsafe {
+            builder.pre_exec(|| {
+                if libc::setsid() < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = builder.spawn().unwrap();
+        let parent = child.id();
+        child.wait().unwrap();
+        let descendant: i32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let owned = super::process_tree(parent).unwrap();
+        unsafe {
+            libc::kill(descendant, libc::SIGKILL);
+        }
+        std::fs::remove_file(pid_file).unwrap();
+        assert!(
+            owned.contains(&(descendant as u32)),
+            "orphan lost when the shell exited"
+        );
+    }
+
+    #[test]
+    fn agent_launch_passes_prompt_as_one_literal_argument() {
+        let prompt = "fix C:\\work & echo unsafe | 'quote' \"double\" %PATH%";
+        let launch = super::AgentLaunch {
+            adapter: "codex".into(),
+            mode: "task".into(),
+            extra_args: "--model 'test model'".into(),
+            prompt: Some(prompt.into()),
+        };
+        let builder = super::agent_command(std::path::Path::new("codex"), &launch).unwrap();
+        let args: Vec<_> = builder
+            .get_argv()
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            vec![
+                "codex",
+                "exec",
+                "--json",
+                "--model",
+                "test model",
+                "--",
+                prompt
+            ]
+        );
+    }
+
+    #[test]
+    fn agent_arguments_preserve_windows_paths_and_reject_invalid_quotes() {
+        assert_eq!(
+            super::parse_agent_args(r#"--cwd C:\work\app --label "hello world" ''"#).unwrap(),
+            vec!["--cwd", r"C:\work\app", "--label", "hello world", ""]
+        );
+        assert!(super::parse_agent_args("--model 'broken").is_err());
+        assert!(super::parse_agent_args("bad\0arg").is_err());
+        let launch = super::AgentLaunch {
+            adapter: "claude".into(),
+            mode: "task".into(),
+            extra_args: String::new(),
+            prompt: None,
+        };
+        assert!(super::agent_command(std::path::Path::new("claude"), &launch).is_err());
+    }
+
+    #[test]
+    fn agent_protocol_tracks_split_success_failure_and_missing_completion() {
+        let mut protocol = super::AgentProtocol::new(Some("codex"));
+        protocol.push("{\"type\":\"turn.star");
+        protocol.push("ted\"}\r\n{\"type\":\"turn.completed\",\"usage\":{}}\n");
+        assert_eq!(protocol.phase(), "completed");
+        assert_eq!(protocol.terminal_status(true), "succeeded");
+        assert_eq!(protocol.terminal_status(false), "failed");
+        let mut failed = super::AgentProtocol::new(Some("codex"));
+        failed.push("{\"type\":\"turn.failed\",\"error\":{\"message\":\"rate limit\"}}\n");
+        assert_eq!(failed.terminal_status(true), "failed");
+        let missing = super::AgentProtocol::new(Some("codex"));
+        assert_eq!(missing.terminal_status(true), "needs_attention");
+        assert_eq!(
+            super::AgentProtocol::new(None).terminal_status(true),
+            "succeeded"
+        );
+    }
+
+    #[test]
+    fn claude_permission_denials_require_attention_and_json_is_not_guessed() {
+        let mut protocol = super::AgentProtocol::new(Some("claude"));
+        protocol.push("Working done Completed this is only text\n");
+        assert_eq!(protocol.terminal_status(true), "needs_attention");
+        protocol.push("{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"permission_denials\":[{\"tool_name\":\"Bash\"}]}\n");
+        assert_eq!(protocol.terminal_status(true), "needs_attention");
+        let mut good = super::AgentProtocol::new(Some("claude"));
+        good.push("{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"permission_denials\":[]}\n");
+        assert_eq!(good.terminal_status(true), "succeeded");
+        good.push("{\"type\":\"result\",\"subtype\":\"error_max_turns\",\"is_error\":true}\n");
+        assert_eq!(good.terminal_status(true), "failed");
+    }
+
+    #[test]
+    fn utf8_decoder_preserves_characters_split_at_every_boundary() {
+        let original = "中文🙂\r\n".as_bytes();
+        for split in 0..=original.len() {
+            let mut decoder = super::Utf8Decoder::default();
+            let mut text = decoder.push(&original[..split]);
+            text.push_str(&decoder.push(&original[split..]));
+            text.push_str(&decoder.finish());
+            assert_eq!(text, "中文🙂\r\n");
+        }
+    }
+
+    #[test]
+    fn utf8_decoder_replaces_invalid_and_incomplete_bytes_without_panicking() {
+        let mut decoder = super::Utf8Decoder::default();
+        assert_eq!(decoder.push(&[b'a', 0xff, 0xe4]), "a�");
+        assert_eq!(decoder.finish(), "�");
+    }
+
+    #[test]
+    fn project_directory_validation_rejects_relative_files_and_missing_paths() {
+        let (root, _) = test_history();
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("file");
+        std::fs::write(&file, "test").unwrap();
+        assert!(super::validate_project_directory(root.to_string_lossy().into()).is_ok());
+        assert!(super::validate_project_directory(file.to_string_lossy().into()).is_err());
+        assert!(super::validate_project_directory(".".into()).is_err());
+        assert!(
+            super::validate_project_directory(root.join("missing").to_string_lossy().into())
+                .is_err()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn blocked_terminal_reader_can_be_cancelled() {
+        let mut descriptors = [0; 2];
+        assert_eq!(unsafe { libc::pipe(descriptors.as_mut_ptr()) }, 0);
+        let cancelled = std::sync::atomic::AtomicBool::new(true);
+        assert!(!super::wait_output_ready(descriptors[0], &cancelled).unwrap());
+        unsafe {
+            libc::close(descriptors[0]);
+            libc::close(descriptors[1]);
+        }
+    }
+
+    #[test]
+    fn notification_receipt_survives_reopen_and_unknown_receipt_is_rejected() {
+        let (root, summary) = test_history();
+        let store = HistoryStore::open(root.clone()).unwrap();
+        store.start(&summary).unwrap();
+        store
+            .update(&summary.session_id, "succeeded", Some(0), None, None)
+            .unwrap();
+        assert!(HistoryStore::open(root.clone()).unwrap().list().unwrap()[0].notification_pending);
+        assert!(store.acknowledge_notification("missing").is_err());
+        store.acknowledge_notification(&summary.session_id).unwrap();
+        assert!(!HistoryStore::open(root.clone()).unwrap().list().unwrap()[0].notification_pending);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn successful_history_update_survives_reopen() {
+        let (root, summary) = test_history();
+        let store = HistoryStore::open(root.clone()).unwrap();
+        store.start(&summary).unwrap();
+        store
+            .update(
+                "s-test",
+                "succeeded",
+                Some(0),
+                Some("done".into()),
+                Some(123),
+            )
+            .unwrap();
+        let reopened = HistoryStore::open(root.clone()).unwrap();
+        let record = reopened.list().unwrap().pop().unwrap();
+        assert_eq!(record.status, "succeeded");
+        assert_eq!(record.exit_code, Some(0));
+        assert_eq!(record.output_end_offset, 123);
+        assert!(record.ended_at.is_some());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(not(windows))]
@@ -931,13 +2563,19 @@ mod tests {
     #[test]
     fn session_logs_are_bounded_and_keep_latest_output() {
         let path = std::env::temp_dir().join(format!("yam-log-test-{}", next_session_id()));
-        let mut log = File::create(&path).expect("create log");
+        let mut log = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(true)
+            .open(&path)
+            .expect("create log");
         append_log(&mut log, b"first", 8).expect("write first chunk");
         append_log(&mut log, b"second", 8).expect("rotate log");
         drop(log);
 
         let contents = std::fs::read_to_string(&path).expect("read log");
-        assert!(contents.contains("Log truncated"));
+        assert!(contents.len() <= 8);
         assert!(contents.ends_with("second"));
         let _ = std::fs::remove_file(path);
     }

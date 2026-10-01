@@ -15,8 +15,8 @@ importers:
         specifier: ^2
         version: 2.5.0
       '@tauri-apps/plugin-opener':
-        specifier: ^2
-        version: 2.6.0
+        specifier: ^2.7.0
+        version: 2.7.0
       '@xterm/addon-fit':
         specifier: ^0.11.0
         version: 0.11.0
@@ -98,42 +98,36 @@ packages:
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [arm64]
     os: [linux]
-    libc: [glibc]
 
   '@rolldown/binding-linux-arm64-musl@1.2.11':
     resolution: {integrity: sha512-AskzJUIKRLPxkruR1wLKewGbOw+EYfU/9lOrBFj4AFrEA8hPpKFnODWNu2WLaNs0QNkEb9QIJufmVZZIL/bJlg==}
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [arm64]
     os: [linux]
-    libc: [musl]
 
   '@rolldown/binding-linux-ppc64-gnu@1.2.11':
     resolution: {integrity: sha512-qlUGAheh2yh8afH7QBgx0PrRHN85hKnNd78x8MeMhXivuevgd8vgf6/CstOzmNKY/lLTHvNTrPy98cLnAugzJw==}
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [ppc64]
     os: [linux]
-    libc: [glibc]
 
   '@rolldown/binding-linux-s390x-gnu@1.2.11':
     resolution: {integrity: sha512-secpEad+0vCbSfn8upFySkDskv+bGPk3THSDS9Y89yc4rb4kzqHp8Dmyd9BkQW4SnhNXBZCl/6CrO//hZahNJQ==}
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [s390x]
     os: [linux]
-    libc: [glibc]
 
   '@rolldown/binding-linux-x64-gnu@1.2.11':
     resolution: {integrity: sha512-mOVBT3dPpkWm8XBWPmU4bf+U6dYDLeMo/9ojUmis4N0L5uu10qra5vOyngZ7/PSdoE4G9KvRt4bloRxNjLas7A==}
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [x64]
     os: [linux]
-    libc: [glibc]
 
   '@rolldown/binding-linux-x64-musl@1.2.11':
     resolution: {integrity: sha512-Is78i9A8Ui4SqcxUwFJ9uMmjDn58IbVTjFWYdQestFEgeuEmHMLGNriXnVJKkwG2YiZjw8cP0zCTyDMdDGtOOg==}
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [x64]
     os: [linux]
-    libc: [musl]
 
   '@rolldown/binding-openharmony-arm64@1.2.11':
     resolution: {integrity: sha512-dUCXneZ87INUMyQ0D+C0HrEBNUPNXHaPmU5GTjyKTJEiussw9Kaj5Ln8UztPe4epV/ffvgNBEadksdYhmW6xJA==}
@@ -182,35 +176,30 @@ packages:
     engines: {node: '>= 10'}
     cpu: [arm64]
     os: [linux]
-    libc: [glibc]
 
   '@tauri-apps/cli-linux-arm64-musl@2.12.0':
     resolution: {integrity: sha512-5tFuk3JKMBa1M/iN4gN32OYlSfhY3aqb5PO3zCugxaT+sfecyMKpc3EM9VDbhmwWBE9QD4Tfj7wGhlqx2yy2pQ==}
     engines: {node: '>= 10'}
     cpu: [arm64]
     os: [linux]
-    libc: [musl]
 
   '@tauri-apps/cli-linux-riscv64-gnu@2.12.0':
     resolution: {integrity: sha512-LOrMyV+nb7pKq8P0BZtTBQuyzm1ORjn16R9MlupmxuT5LqxtuYJlw3VMwbaeXCToJ8jbP5u9JnkfmbqDlvETXw==}
     engines: {node: '>= 10'}
     cpu: [riscv64]
     os: [linux]
-    libc: [glibc]
 
   '@tauri-apps/cli-linux-x64-gnu@2.12.0':
     resolution: {integrity: sha512-aMIkI+X9qvD2+k80QZB3tuOYT41/cEheikC510CwAIZ31KLXORsRASYYzM4mi1/58ICmtzSLFhCC08keir7COw==}
     engines: {node: '>= 10'}
     cpu: [x64]
     os: [linux]
-    libc: [glibc]
 
   '@tauri-apps/cli-linux-x64-musl@2.12.0':
     resolution: {integrity: sha512-9gl3NhUbfuGhSKjeGCypKSdtoezOQRcDUrkhTWtLQEjnajets6peO6NadgI2DF0OzbiiFOzrnnIGMwBS+Ap6Iw==}
     engines: {node: '>= 10'}
     cpu: [x64]
     os: [linux]
-    libc: [musl]
 
   '@tauri-apps/cli-win32-arm64-msvc@2.12.0':
     resolution: {integrity: sha512-1W+v86wsYLuyBDN0iDessD4CD9o+yNyO0m8Dp3+/vfjiZrJ/v7R7/aTRBeikaq2tLGgxeag0gxnFggBNBGw91A==}
@@ -238,8 +227,8 @@ packages:
   '@tauri-apps/plugin-notification@2.5.0':
     resolution: {integrity: sha512-S19zXtRLX1YryUh532YcGnjI3fzrBGj4oUcW87ojytmOAOCVMZ2bTTHOhI0enYZPH5uDmdQw+dEGCn5wfCm3zw==}
 
-  '@tauri-apps/plugin-opener@2.6.0':
-    resolution: {integrity: sha512-KIl9qkBGyAUrbzfCtdk+NRPTXUOwpMyUKsKN57H6/qA0q8auVywXpfUyWClqX6I/iH8PHmqAUa/KK9YZPWVQew==}
+  '@tauri-apps/plugin-opener@2.7.0':
+    resolution: {integrity: sha512-mBorYfVKh9Lt7s4ZFtKbMUTxBw+Y/sVmSlKCtkkoBgMTC/DIbt/kaPm67L/2djAUqDI1wbixy5OHHVmipjuGMw==}
 
   '@types/react-dom@19.3.0':
     resolution: {integrity: sha512-ZI7bU42mZXXKHn/qNLEw2IrbiINU7X5+vfgdixBHkCNpYWXjKgfQ/P+uyGb5CjOLB9UcnTeg3rylQtV2hym44Q==}
@@ -327,28 +316,24 @@ packages:
     engines: {node: '>= 12.0.0'}
     cpu: [arm64]
     os: [linux]
-    libc: [glibc]
 
   lightningcss-linux-arm64-musl@1.33.0:
     resolution: {integrity: sha512-yiO5ROMuYQgXbC60yjZU5CYSFZGKXL0HFATXt9mHJn1+zW55oCtMI9NfcVhYLMFDL7gV7oBPon/EmMMGg2OvtQ==}
     engines: {node: '>= 12.0.0'}
     cpu: [arm64]
     os: [linux]
-    libc: [musl]
 
   lightningcss-linux-x64-gnu@1.33.0:
     resolution: {integrity: sha512-ar+Ju7LmcN0Jo4FpL4hpFybwNG9/3A/Br5KW2n2jyODg3MEZXaDYADdemoNS+BDNfMgKvylJLj4S5tyRActuAg==}
     engines: {node: '>= 12.0.0'}
     cpu: [x64]
     os: [linux]
-    libc: [glibc]
 
   lightningcss-linux-x64-musl@1.33.0:
     resolution: {integrity: sha512-RYiYbkokw0trfKqqzfF55lginwEPrD3OJDfTuJzFs1MK6iFnDenaz1fqLLtX4ITG3OktJQXOeTaw1awrBAlZPw==}
     engines: {node: '>= 12.0.0'}
     cpu: [x64]
     os: [linux]
-    libc: [musl]
 
   lightningcss-win32-arm64-msvc@1.33.0:
     resolution: {integrity: sha512-1K+MPfLSFVpphzpdbfkhlWk6wBrTObBzS2T6db10PNOZgR9GoVsAWzwNyuhUYYbTp23j+4RrncfujZ4uAzXvwA==}
@@ -564,7 +549,7 @@ snapshots:
     dependencies:
       '@tauri-apps/api': 2.12.0
 
-  '@tauri-apps/plugin-opener@2.6.0':
+  '@tauri-apps/plugin-opener@2.7.0':
     dependencies:
       '@tauri-apps/api': 2.12.0
 

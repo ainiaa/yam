@@ -4,7 +4,6 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   isPermissionGranted,
   requestPermission,
-  sendNotification,
 } from "@tauri-apps/plugin-notification";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
@@ -24,15 +23,20 @@ import {
   X,
   TerminalSquare,
   Play,
+  Pencil,
 } from "lucide-react";
 import {
   groupProjects,
+  matchesStatus,
+  validateSessionTitle,
   isProjects,
   projectKey,
   projectName,
   readPreference,
   type Project,
 } from "./workspaces";
+import { OutputBuffer, consumeOutput, replayOutput, type OutputChunk, type LogSnapshot } from "./session-stream";
+import { NotificationQueue, inferAgentPhase } from "./notifications";
 import "@xterm/xterm/css/xterm.css";
 import "./App.css";
 
@@ -44,11 +48,14 @@ type HealthReport = {
   status: string;
 };
 
+type AgentLaunch = { adapter: string; mode: "task" | "interactive"; extra_args: string; prompt: string | null };
+
 type SessionSummary = {
   session_id: string;
   cwd: string;
   command: string | null;
   status: string;
+  launch?: AgentLaunch | null;
 };
 
 type SessionRecord = {
@@ -58,6 +65,7 @@ type SessionRecord = {
   reason: string | null;
   started_at: number;
   ended_at: number | null;
+  notification_pending?: boolean;
 };
 
 type AgentAdapter = {
@@ -67,7 +75,7 @@ type AgentAdapter = {
   available: boolean;
 };
 
-type SessionOutput = { session_id: string; data: string };
+type SessionOutput = OutputChunk;
 type SessionStateEvent = {
   session_id: string;
   status: string;
@@ -93,21 +101,24 @@ const terminalStatuses = new Set([
   "needs_attention",
 ]);
 
-function shellQuote(value: string) {
-  return "'" + value.replace(/'/g, "'\\''") + "'";
-}
-
 function App() {
   const terminalHost = useRef<HTMLDivElement>(null);
   const terminal = useRef<Terminal | null>(null);
   const fitAddon = useRef<FitAddon | null>(null);
   const sessionId = useRef<string | null>(null);
-  const pendingOutput = useRef(new Map<string, string>());
+  const pendingOutput = useRef(new OutputBuffer());
+  const outputCursor = useRef<number | null>(null);
+  const selectedRecord = useRef<SessionRecord | null>(null);
   const pendingState = useRef(new Map<string, SessionStateEvent>());
   const agentOutputWindow = useRef("");
-  const notifiedSessions = useRef(new Set<string>());
+  const notifications = useRef(new NotificationQueue());
+  const retryNotifications = useRef(new Map<string, SessionStateEvent>());
   const notificationSetup = useRef(false);
   const launchDialog = useRef<HTMLDialogElement>(null);
+  const renameDialog = useRef<HTMLDialogElement>(null);
+  const [renameTitle, setRenameTitle] = useState("");
+  const [renameError, setRenameError] = useState<string | null>(null);
+  const [statusFilter, setStatusFilter] = useState("all");
   const projectDialog = useRef<HTMLDialogElement>(null);
   const selectionVersion = useRef(0);
   const [health, setHealth] = useState<HealthReport | null>(null);
@@ -116,6 +127,7 @@ function App() {
   const [command, setCommand] = useState("");
   const [prompt, setPrompt] = useState("");
   const [adapterArgs, setAdapterArgs] = useState("");
+  const [launchMode, setLaunchMode] = useState<"task" | "interactive">("task");
   const [adapters, setAdapters] = useState<AgentAdapter[]>([]);
   const [selectedAdapter, setSelectedAdapter] = useState("shell");
   const [session, setSession] = useState<SessionSummary | null>(null);
@@ -152,43 +164,52 @@ function App() {
       ),
   );
 
+  const titlesRef = useRef(sessionTitles);
+  titlesRef.current = sessionTitles;
+
   useEffect(() => {
     try {
       localStorage.setItem("yam.projects", JSON.stringify(projects));
       localStorage.setItem("yam.sidebar", JSON.stringify(sidebarOpen));
       localStorage.setItem("yam.sessionTitles", JSON.stringify(sessionTitles));
-    } catch {
-      // Preferences are optional; PTY session history is persisted by the backend.
+    } catch (reason) {
+      setError(`Failed to save project or session preferences: ${String(reason)}`);
     }
   }, [projects, sidebarOpen, sessionTitles]);
 
   async function refreshHistory() {
     try {
-      setHistory(await invoke<SessionRecord[]>("list_sessions"));
+      const records = await invoke<SessionRecord[]>("list_sessions");
+      setHistory(records);
+      for (const record of records) if (record.notification_pending) void notifySession({ session_id: record.summary.session_id, status: record.status, exit_code: record.exit_code, reason: record.reason });
     } catch (reason: unknown) {
       setError(reason instanceof Error ? reason.message : String(reason));
     }
   }
 
   async function notifySession(event: SessionStateEvent) {
-    if (
-      !terminalStatuses.has(event.status) ||
-      notifiedSessions.current.has(event.session_id)
-    )
+    if (!terminalStatuses.has(event.status) && event.status !== "idle_attention") return;
+    const key = `${event.session_id}:${event.status}`;
+    if (document.hasFocus() && sessionId.current === event.session_id) {
+      notifications.current.suppress(key);
+      try { await invoke("acknowledge_notification", {sessionId: event.session_id}); retryNotifications.current.delete(key); }
+      catch (reason) { retryNotifications.current.set(key, event); setError(String(reason)); }
       return;
-    notifiedSessions.current.add(event.session_id);
-    try {
-      let allowed = await isPermissionGranted();
-      if (!allowed) allowed = (await requestPermission()) === "granted";
-      if (allowed) {
-        await sendNotification({
-          title: `YAM · ${statusLabels[event.status] ?? event.status}`,
-          body: event.reason ?? `Session ${event.session_id} finished`,
-        });
-      }
-    } catch {
-      // Notification permission is optional; session state remains authoritative.
     }
+    retryNotifications.current.set(key, event);
+    try {
+      const delivered = await notifications.current.deliver(key, async () => {
+        if (!(await isPermissionGranted())) return;
+        const record = (await invoke<SessionRecord[]>("list_sessions")).find(item => item.summary.session_id === event.session_id);
+        const taskName = titlesRef.current[event.session_id] || record?.summary.launch?.adapter || "Session";
+        const title = `${projectName(record?.summary.cwd ?? "")} · ${taskName} · ${statusLabels[event.status] ?? "Needs attention"}`.slice(0, 200);
+        await invoke("notify_session", { sessionId: event.session_id, title });
+      });
+      if (delivered) {
+        await invoke("acknowledge_notification", {sessionId: event.session_id});
+        retryNotifications.current.delete(key);
+      }
+    } catch (reason) { setError(String(reason)); }
   }
 
   function updateAgentPhase(data: string) {
@@ -198,16 +219,9 @@ function App() {
     agentOutputWindow.current = `${agentOutputWindow.current}${clean}`.slice(
       -4096,
     );
-    if (
-      /working\s*\(|esc to interrupt|working\b/i.test(agentOutputWindow.current)
-    ) {
-      setAgentPhase("working");
-    } else if (
-      /ask (codex|claude).*anything|how can i help|›\s*$/i.test(
-        agentOutputWindow.current,
-      )
-    ) {
-      setAgentPhase("waiting");
+    if (selectedRecord.current?.summary.launch?.mode !== "task") {
+      const phase = inferAgentPhase(agentOutputWindow.current);
+      if (phase !== "idle") setAgentPhase(phase);
     }
   }
 
@@ -273,9 +287,9 @@ function App() {
 
     const onData = instance.onData((data) => {
       const id = sessionId.current;
-      if (id)
+      if (id && outputCursor.current !== null)
         void invoke("write_session", { sessionId: id, data }).catch(
-          () => undefined,
+          (reason: unknown) => setError(String(reason)),
         );
     });
     const resize = () => {
@@ -294,22 +308,45 @@ function App() {
     observer.observe(terminalHost.current);
     requestAnimationFrame(resize);
 
+    const extraListeners: UnlistenFn[] = [];
+    const retryTimer = window.setInterval(() => {
+      for (const event of retryNotifications.current.values()) void notifySession(event);
+    }, 15000);
+    for (const [name, callback] of [
+      ["session-error", (payload: { session_id: string; data: string }) => setError(payload.data)],
+      ["session-phase", (payload: { session_id: string; data: string }) => {
+        if (payload.session_id === sessionId.current && ["working", "waiting"].includes(payload.data)) setAgentPhase(payload.data as AgentPhase);
+      }],
+      ["session-attention", (payload: { session_id: string; data: string }) => {
+        if (payload.session_id === sessionId.current) setAgentPhase("waiting");
+        void notifySession({session_id: payload.session_id, status: "idle_attention", exit_code: null, reason: payload.data});
+      }],
+    ] as const) void listen<{ session_id: string; data: string }>(name, event => callback(event.payload)).then(unlisten => {
+      if (active) extraListeners.push(unlisten); else unlisten();
+    });
+    void listen<string>("session-notification-click", async event => {
+      const records = await invoke<SessionRecord[]>("list_sessions");
+      const record = records.find(item => item.summary.session_id === event.payload);
+      if (record) await openHistory(record);
+    }).then(unlisten => { if (active) extraListeners.push(unlisten); else unlisten(); });
     let unlistenOutput: UnlistenFn | undefined;
     let unlistenState: UnlistenFn | undefined;
     let active = true;
     void listen<SessionOutput>("session-output", (event) => {
       if (!active) return;
-      if (event.payload.session_id === sessionId.current) {
-        updateAgentPhase(event.payload.data);
-        instance.write(event.payload.data);
+      if (event.payload.session_id === sessionId.current && outputCursor.current !== null) {
+        try {
+          const next = consumeOutput(outputCursor.current, event.payload);
+          outputCursor.current = next.nextOffset;
+          updateAgentPhase(next.data);
+          instance.write(next.data);
+        } catch {
+          pendingOutput.current.push(event.payload);
+          if (selectedRecord.current) void openHistory(selectedRecord.current);
+        }
         return;
       }
-      const previous =
-        pendingOutput.current.get(event.payload.session_id) ?? "";
-      pendingOutput.current.set(
-        event.payload.session_id,
-        previous + event.payload.data,
-      );
+      pendingOutput.current.push(event.payload);
     }).then((unlisten) => {
       if (active) unlistenOutput = unlisten;
       else unlisten();
@@ -318,7 +355,9 @@ function App() {
       if (!active) return;
       void notifySession(event.payload);
       void refreshHistory();
-      if (event.payload.session_id !== sessionId.current) {
+      if (terminalStatuses.has(event.payload.status) && event.payload.session_id !== sessionId.current)
+        pendingOutput.current.delete(event.payload.session_id);
+      if (event.payload.session_id !== sessionId.current || outputCursor.current === null) {
         pendingState.current.set(event.payload.session_id, event.payload);
         return;
       }
@@ -330,6 +369,8 @@ function App() {
 
     return () => {
       active = false;
+      window.clearInterval(retryTimer);
+      extraListeners.forEach(unlisten => unlisten());
       onData.dispose();
       window.removeEventListener("resize", resize);
       observer.disconnect();
@@ -345,6 +386,9 @@ function App() {
 
   function applyStateEvent(instance: Terminal, event: SessionStateEvent) {
     setSessionStatus(event.status);
+    if (selectedRecord.current?.summary.session_id === event.session_id) {
+      selectedRecord.current = { ...selectedRecord.current, status:event.status, exit_code:event.exit_code, reason:event.reason };
+    }
     if (event.status !== "starting" && event.status !== "running") {
       instance.writeln(
         `\r\n[${statusLabels[event.status] ?? event.status}] ${event.reason ?? ""}`,
@@ -353,7 +397,7 @@ function App() {
     void refreshHistory();
   }
 
-  async function startSession(overrides?: { cwd?: string; command?: string }) {
+  async function startSession(overrides?: { cwd?: string; command?: string; launch?: AgentLaunch | null }) {
     if (starting) return;
     const adapter = adapters.find((item) => item.id === selectedAdapter);
     const customCommand = (overrides?.command ?? command).trim();
@@ -371,21 +415,12 @@ function App() {
     try {
       const next = await invoke<SessionSummary>("create_session", {
         cwd: workingDirectory || null,
-        command: overrides
-          ? overrides.command || null
-          : customCommand ||
-            [
-              adapter?.executable,
-              launchArgs,
-              launchPrompt ? shellQuote(launchPrompt) : "",
-            ]
-              .filter(Boolean)
-              .join(" ") ||
-            null,
+        command: customCommand || null,
+        launch: overrides ? overrides.launch ?? null :
+          !customCommand && selectedAdapter !== "shell" ? {
+            adapter:selectedAdapter, mode:launchMode, extra_args:launchArgs, prompt:launchPrompt || null,
+          } : null,
       });
-      selectionVersion.current += 1;
-      terminal.current?.reset();
-      sessionId.current = next.session_id;
       setActiveProject(next.cwd);
       setCollapsedProjects((previous) => {
         const copy = new Set(previous);
@@ -402,33 +437,8 @@ function App() {
               "Interactive shell",
       }));
       launchDialog.current?.close();
-      setSession(next);
-      setSessionStatus(next.status);
-      setAgentPhase("idle");
-      agentOutputWindow.current = "";
-      const bufferedOutput = pendingOutput.current.get(next.session_id);
-      if (bufferedOutput) {
-        updateAgentPhase(bufferedOutput);
-        terminal.current?.write(bufferedOutput);
-        pendingOutput.current.delete(next.session_id);
-      }
-      const bufferedState = pendingState.current.get(next.session_id);
-      if (bufferedState) {
-        pendingState.current.delete(next.session_id);
-        if (terminal.current) applyStateEvent(terminal.current, bufferedState);
-      }
+      await openHistory({summary:next, status:next.status, exit_code:null, reason:null, started_at:Date.now()/1000, ended_at:null});
       void refreshHistory();
-      requestAnimationFrame(() => {
-        fitAddon.current?.fit();
-        terminal.current?.focus();
-        if (terminal.current) {
-          void invoke("resize_session", {
-            sessionId: next.session_id,
-            cols: terminal.current.cols,
-            rows: terminal.current.rows,
-          }).catch(() => undefined);
-        }
-      });
     } catch (reason: unknown) {
       setError(reason instanceof Error ? reason.message : String(reason));
       terminal.current?.writeln(`\r\n[Failed to start] ${String(reason)}`);
@@ -449,60 +459,57 @@ function App() {
 
   async function openHistory(record: SessionRecord) {
     const version = ++selectionVersion.current;
+    const id = record.summary.session_id;
+    sessionId.current = id;
+    selectedRecord.current = record;
+    outputCursor.current = null;
+    setSession(record.summary);
+    setActiveProject(record.summary.cwd);
+    setSessionStatus(record.status);
     try {
-      sessionId.current = null;
-      const log = await invoke<string>("read_session_log", {
-        sessionId: record.summary.session_id,
-      });
-      if (version !== selectionVersion.current) return;
-      setSession(record.summary);
-      setActiveProject(record.summary.cwd);
-      setSessionStatus(record.status);
+      let replay: ReturnType<typeof replayOutput> | null = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const snapshot = await invoke<LogSnapshot>("read_session_snapshot", { sessionId: id });
+        if (version !== selectionVersion.current) return;
+        if (snapshot.status) {
+          setSessionStatus(snapshot.status);
+          selectedRecord.current = {...record, status:snapshot.status};
+        }
+        try { replay = replayOutput(snapshot, pendingOutput.current.drain(id)); break; }
+        catch (reason) { if (attempt === 2) throw reason; }
+      }
+      if (!replay || version !== selectionVersion.current) return;
+      outputCursor.current = replay.nextOffset;
       setAgentPhase("idle");
       agentOutputWindow.current = "";
       terminal.current?.reset();
-      terminal.current?.write(log || "(No output recorded)\r\n");
-      updateAgentPhase(log);
-      const isLive =
-        record.status === "running" || record.status === "starting";
-      if (isLive) {
-        sessionId.current = record.summary.session_id;
-        const bufferedOutput = pendingOutput.current.get(
-          record.summary.session_id,
-        );
-        if (bufferedOutput) {
-          updateAgentPhase(bufferedOutput);
-          terminal.current?.write(bufferedOutput);
-          pendingOutput.current.delete(record.summary.session_id);
-        }
-        const bufferedState = pendingState.current.get(
-          record.summary.session_id,
-        );
-        if (bufferedState) {
-          pendingState.current.delete(record.summary.session_id);
-          if (terminal.current)
-            applyStateEvent(terminal.current, bufferedState);
-        }
+      terminal.current?.write(replay.data || (terminalStatuses.has(selectedRecord.current?.status ?? record.status) ? "(No output recorded)\r\n" : ""));
+      updateAgentPhase(replay.data);
+      const bufferedState = pendingState.current.get(id);
+      if (bufferedState) {
+        pendingState.current.delete(id);
+        if (terminal.current) applyStateEvent(terminal.current, bufferedState);
       }
       requestAnimationFrame(() => {
+        if (version !== selectionVersion.current) return;
         fitAddon.current?.fit();
         terminal.current?.focus();
-        if (sessionId.current && terminal.current) {
-          void invoke("resize_session", {
-            sessionId: sessionId.current,
-            cols: terminal.current.cols,
-            rows: terminal.current.rows,
-          }).catch(() => undefined);
+        if (terminal.current && !terminalStatuses.has(selectedRecord.current?.status ?? record.status)) {
+          void invoke("resize_session", { sessionId:id, cols:terminal.current.cols, rows:terminal.current.rows })
+            .catch((reason: unknown) => setError(String(reason)));
         }
       });
     } catch (reason: unknown) {
+      if (version !== selectionVersion.current) return;
+      sessionId.current = null;
+      setSessionStatus("unavailable");
       setError(reason instanceof Error ? reason.message : String(reason));
     }
   }
 
   function rerunSelectedSession() {
     if (!session) return;
-    void startSession({ cwd: session.cwd, command: session.command ?? "" });
+    void startSession({ cwd: session.cwd, command: session.command ?? "", launch:session.launch });
   }
 
   const isRunning = sessionStatus === "running" || sessionStatus === "starting";
@@ -513,25 +520,25 @@ function App() {
   );
   const normalizedQuery = historyQuery.trim().toLowerCase();
   const titleFor = (summary: SessionSummary) =>
-    sessionTitles[summary.session_id] || summary.command || "Interactive shell";
+    sessionTitles[summary.session_id] || summary.launch?.prompt || summary.command || (summary.launch ? `${summary.launch.adapter} · ${summary.launch.mode}` : "Interactive shell");
   const visibleProjects = projectGroups
     .map((project) => ({
       ...project,
       sessions: project.sessions.filter(
         (record) =>
-          !normalizedQuery ||
+          matchesStatus(record.status, statusFilter) && (!normalizedQuery ||
           `${project.name} ${project.path} ${titleFor(record.summary)} ${record.summary.session_id}`
             .toLowerCase()
-            .includes(normalizedQuery),
+            .includes(normalizedQuery)),
       ),
     }))
     .filter(
       (project) =>
-        !normalizedQuery ||
+        (statusFilter === "all" && !normalizedQuery) ||
         project.sessions.length > 0 ||
-        `${project.name} ${project.path}`
+        (statusFilter === "all" && !!normalizedQuery && `${project.name} ${project.path}`
           .toLowerCase()
-          .includes(normalizedQuery),
+          .includes(normalizedQuery)),
     );
 
   function newSession(path = activeProject || session?.cwd || "") {
@@ -550,12 +557,14 @@ function App() {
     projectDialog.current?.showModal();
   }
 
-  function saveProject() {
+  async function saveProject() {
     const path = projectPath.trim();
     if (!path.startsWith("/") && !/^[A-Za-z]:[\\\\/]/.test(path)) {
       setProjectError("Enter an absolute directory path.");
       return;
     }
+    try { await invoke("validate_project_directory", {path}); }
+    catch (reason) { setProjectError(String(reason)); return; }
     const name = newProjectName.trim() || projectName(path);
     setProjects((previous) => [
       ...previous.filter(
@@ -614,6 +623,10 @@ function App() {
             </button>
           )}
         </div>
+        <select aria-label="Filter sessions by status" value={statusFilter} onChange={event => setStatusFilter(event.target.value)}>
+          <option value="all">All sessions</option><option value="active">Active</option>
+          <option value="attention">Needs attention</option><option value="succeeded">Completed</option><option value="stopped">Stopped</option>
+        </select>
         <div className="section-label">
           <span>Projects</span>
           <button
@@ -787,6 +800,8 @@ function App() {
             >
               <RotateCcw />
             </button>
+            <button className="icon-button" aria-label="Rename session" title="Rename session" disabled={!session}
+              onClick={() => { if (session) { setRenameTitle(titleFor(session)); setRenameError(null); renameDialog.current?.showModal(); } }}><Pencil /></button>
             <button
               className="icon-button stop-button"
               title="Stop session"
@@ -883,6 +898,18 @@ function App() {
           <span>{session ? "Terminal" : (health?.platform ?? "Local")}</span>
         </footer>
       </main>
+      <dialog ref={renameDialog} className="app-dialog" aria-labelledby="rename-title">
+        <form onSubmit={event => {
+          event.preventDefault(); if (!session) return;
+          try { const title = validateSessionTitle(renameTitle); setSessionTitles(previous => ({...previous, [session.session_id]: title})); renameDialog.current?.close(); }
+          catch (reason) { setRenameError(String(reason)); }
+        }}>
+          <header className="dialog-header"><h2 id="rename-title">Rename session</h2></header>
+          <div className="dialog-fields"><label><span>Session name</span><input autoFocus value={renameTitle} onChange={event => setRenameTitle(event.target.value)} maxLength={200} /></label>
+          {renameError && <p className="dialog-error" role="alert">{renameError}</p>}</div>
+          <footer className="dialog-actions"><button className="secondary-button" type="button" onClick={() => renameDialog.current?.close()}>Cancel</button><button className="primary-button" type="submit">Save</button></footer>
+        </form>
+      </dialog>
       <dialog
         ref={launchDialog}
         className="app-dialog"
@@ -942,6 +969,15 @@ function App() {
                 ))}
               </select>
             </label>
+            {selectedAdapter !== "shell" && (
+              <label>
+                <span>Run mode</span>
+                <select value={launchMode} onChange={(event) => setLaunchMode(event.target.value as "task" | "interactive")}>
+                  <option value="task">Single task · reports completion</option>
+                  <option value="interactive">Interactive terminal</option>
+                </select>
+              </label>
+            )}
             {selectedAdapter !== "shell" && (
               <label>
                 <span>Prompt</span>
@@ -1005,7 +1041,7 @@ function App() {
         <form
           onSubmit={(event) => {
             event.preventDefault();
-            saveProject();
+            void saveProject();
           }}
         >
           <header className="dialog-header">

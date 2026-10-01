@@ -4885,6 +4885,7 @@ name = "yam-desktop"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "notify-rust",
  "portable-pty",
  "serde",
  "serde_json",

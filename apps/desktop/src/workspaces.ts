@@ -52,3 +52,15 @@ export function isProjects(value: unknown): value is Project[] {
     )
   );
 }
+
+export function validateSessionTitle(value: string): string {
+  const title = value.trim();
+  if (!title || [...title].length > 200) throw new Error("Use a session name of 1–200 characters.");
+  return title;
+}
+export function matchesStatus(status: string, filter: string): boolean {
+  if (filter === "all") return true;
+  if (filter === "active") return status === "starting" || status === "running";
+  if (filter === "attention") return status === "needs_attention" || status === "failed";
+  return status === filter;
+}

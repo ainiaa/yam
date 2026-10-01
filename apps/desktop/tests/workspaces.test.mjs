@@ -60,3 +60,14 @@ test("invalid or inaccessible stored preferences fall back without breaking star
     globalThis.localStorage = previous;
   }
 });
+
+test('session titles trim whitespace and reject empty or oversized names', async () => {
+ const { validateSessionTitle, matchesStatus } = await import('../src/workspaces.ts');
+ assert.equal(validateSessionTitle('  My task  '), 'My task');
+ assert.throws(() => validateSessionTitle('  '));
+ assert.throws(() => validateSessionTitle('x'.repeat(201)));
+ assert.equal(matchesStatus('running', 'active'), true);
+ assert.equal(matchesStatus('failed', 'active'), false);
+ assert.equal(matchesStatus('needs_attention', 'attention'), true);
+ assert.equal(matchesStatus('succeeded', 'all'), true);
+});
