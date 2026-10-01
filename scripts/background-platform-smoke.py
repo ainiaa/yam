@@ -10,14 +10,14 @@ def app_data(identifier):
  return pathlib.Path(os.environ.get('XDG_DATA_HOME',str(pathlib.Path.home()/'.local/share')))/identifier
 
 def main():
- parser=argparse.ArgumentParser();parser.add_argument('--executable',type=pathlib.Path,required=True);parser.add_argument('--identifier',required=True);args=parser.parse_args()
+ parser=argparse.ArgumentParser();parser.add_argument('--executable',type=pathlib.Path,required=True);parser.add_argument('--identifier',required=True);parser.add_argument('--desktop',action='store_true');args=parser.parse_args()
  assert args.identifier.startswith('com.yam.') and 'validation' in args.identifier
  executable=args.executable.resolve();assert executable.is_file()
  if platform.system()=='Darwin':
   info=plistlib.loads((executable.parent.parent/'Info.plist').read_bytes());assert info['CFBundleIdentifier']==args.identifier
  else:assert os.environ.get('GITHUB_ACTIONS')=='true','Non-macOS validation requires the CI-built isolated package'
  root=app_data(args.identifier);assert not root.exists() or not any(root.iterdir()),'Refusing a pre-existing validation data namespace'
- connection=root/'background/connection.json';owner=None;descriptor=None;client=None;request_id=0
+ connection=root/'background/connection.json';owner=None;desktop=None;descriptor=None;client=None;request_id=0
  def call(command,arguments=None):
   nonlocal request_id
   request_id+=1;return smoke.rpc(descriptor,client,request_id,command,arguments)
@@ -36,6 +36,15 @@ def main():
  def marker(path):
   try:return path.read_text(encoding='utf-8')
   except FileNotFoundError:return ''
+ def close_desktop():
+  nonlocal desktop
+  if desktop is None:return
+  if desktop.poll() is None:
+   desktop.terminate()
+   try:desktop.wait(timeout=10)
+   except subprocess.TimeoutExpired:desktop.kill();desktop.wait(timeout=5)
+  if sys.exc_info()[0] is not None:print('Validation desktop stderr: '+desktop.stderr.read(4096).decode('utf-8',errors='replace'),file=sys.stderr)
+  desktop.stderr.close();desktop=None
  temporary=tempfile.TemporaryDirectory(prefix='yam-platform-fixture-')
  try:
   folder=pathlib.Path(temporary.name);fixture=folder/'fixture.py'
@@ -54,6 +63,18 @@ def main():
   client=secrets.token_hex(32);request_id=0 # A genuinely disconnected client is replaced; no desktop process remains.
   assert call('background_status')['active_sessions']==1;assert call('background_status')['pid']==first_pid
   assert sum(r['summary']['session_id']==session for r in call('list_sessions'))==1
+  if args.desktop:
+   for _ in range(2):
+    desktop=subprocess.Popen([str(executable)],stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
+    smoke.wait_until(lambda:call('background_status')['desktop_connected'],30)
+    assert desktop.poll() is None and call('background_status')['pid']==first_pid
+    assert call('background_status')['active_sessions']==1
+    before=marker(target);time.sleep(.2);assert marker(target)!=before
+    close_desktop()
+    smoke.wait_until(lambda:not call('background_status')['desktop_connected'],15)
+    assert owner.poll() is None
+    before=marker(target);time.sleep(.2);assert marker(target)!=before
+   assert sum(r['summary']['session_id']==session for r in call('list_sessions'))==1
   call('stop_session',{'session_id':session})
   smoke.wait_until(lambda:call('background_status')['active_sessions']==0,15)
   saved=call('read_terminal_frame',{'session_id':session});assert saved and saved['status']=='stopped'
@@ -71,8 +92,9 @@ def main():
   assert record['status']=='needs_attention','An interrupted task was silently rerun or marked complete'
   assert marker(crash_target)==last_marker
   create('stop-all');call('shutdown');owner.wait(timeout=10);owner.stderr.close();owner=None
-  print(json.dumps({'platform':platform.system(),'background_disconnect':True,'frozen_scene_after_owner_restart':True,'owner_crash_stops_workload':True,'no_automatic_rerun':True,'explicit_stop_all':True,'notification_delivery':'paused for validation'}))
+  print(json.dumps({'platform':platform.system(),'background_disconnect':True,'desktop_exit_reopen':args.desktop,'desktop_exit_method':'terminate fixture process' if args.desktop else None,'frozen_scene_after_owner_restart':True,'owner_crash_stops_workload':True,'no_automatic_rerun':True,'explicit_stop_all':True,'notification_delivery':'paused for validation'}))
  finally:
+  close_desktop()
   if owner is not None:
    if owner.poll() is None:
     try:

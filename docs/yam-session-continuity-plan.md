@@ -230,3 +230,5 @@ P8 跨平台原生后台生命周期验收已接入 CI，使用独立 com.yam.pl
 P8 打包缓存复核：缓存 SHA256 原先使用 read_bytes 整体分配，下载预算未约束已存在归档。新增缺失/正确/错误摘要/边界超限和禁止 read_bytes 回归先失败，再改为最多 1 MiB 分块并执行相同 200 MiB 上限；超限明确失败且保留缓存，不静默忽略。23 Python 检查通过，含真实 SEA UTF-8 打包与 Unicode probe。
 
 P8 新原生 CI 红灯（run 36932864744）：macOS 生命周期通过；Linux 等待连接文件 20 秒超时，清理路径又因 descriptor=None 遮蔽原错；Windows ping 成功后 background_status 连接中断。已修复验收脚本的未初始化清理并保留独立后台 stderr。复核零窗口 owner 的共用退出入口发现普通 ExitRequested 会启动 shutdown；先补正常/GUI/停止/程序显式退出边界回归，再使零窗口 owner 拒绝隐式退出，仅允许显式停止或闲置截止。此为已确认入口缺陷修复；是否解释 Windows 原生红灯须以后续 CI 证据确认，Linux 根因继续定位，未宣布闭环。
+
+P8 原生生命周期脚本增加 --desktop，并接入全部 CI 平台：对实际桌面进程执行两次启动/退出，在窗口存活和退出后分别验证同一后台 PID、唯一会话、工作负载心跳继续；随后仍验证最终场景保存/owner 崩溃/无自动重跑/显式停止。Mac 新独立 YAM Lifecycle Validation 包（当前业务源码 4f67f55）完整通过，通知全程暂停，无 CLI 信任或新系统权限。这项 exit_method 为 terminate fixture process，仍不替代 Cmd+Q、实时键盘/鼠标/缩放或通知中心点击验收。

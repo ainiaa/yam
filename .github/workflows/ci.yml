@@ -57,10 +57,10 @@ jobs:
         run: pnpm tauri build --debug --bundles ${{ matrix.bundle }} --config src-tauri/target/ci-validation.json
       - name: Validate actual background process lifecycle
         if: runner.os != 'Linux'
-        run: python3 ../../scripts/background-platform-smoke.py --executable "${{ matrix.smoke_executable }}" --identifier com.yam.platform-validation
+        run: python3 ../../scripts/background-platform-smoke.py --desktop --executable "${{ matrix.smoke_executable }}" --identifier com.yam.platform-validation
       - name: Validate Linux background process lifecycle in a virtual display
         if: runner.os == 'Linux'
-        run: xvfb-run -a python3 ../../scripts/background-platform-smoke.py --executable "${{ matrix.smoke_executable }}" --identifier com.yam.platform-validation
+        run: xvfb-run -a python3 ../../scripts/background-platform-smoke.py --desktop --executable "${{ matrix.smoke_executable }}" --identifier com.yam.platform-validation
       - name: Sign and archive macOS test package
         if: runner.os == 'macOS'
         run: |
