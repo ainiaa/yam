@@ -103,7 +103,7 @@ R6开始前补充范围：apps/desktop/src/session-stream.ts。工具边界检�
 
 Rust覆盖率探测实证：rustc1.98.1使用LLVM22.1.8；已安装Apple LLVM15.0.0。独立instrument-coverage探针编译与执行成功，但llvm-profdata merge失败：raw profile format version10、工具expected8；rustup未安装匹配llvm-tools组件，cargo-llvm-cov与Homebrew LLVM也不可用。不安装额外工具来伪造门禁通过，Rust覆盖率保持未覆盖。
 
-代码026102e的CI36813191803三平台success，证明Windows新增SetGroup/SetTag SDK调用编译、Clippy及测试通过。572928d的CI36814180042三平台success，新增覆盖率闸门、app/deb/nsis打包与测试产物上传全部通过。最新复审修复等待下一次CI。
+代码026102e的CI36813191803三平台success，证明Windows新增SetGroup/SetTag SDK调用编译、Clippy及测试通过。572928d的CI36814180042三平台success，新增覆盖率闸门、app/deb/nsis打包与测试产物上传全部通过。最终修复9affe4a的CI36815933487三平台success，测试、Clippy和app/deb/nsis产物上传均通过。
 
 
 ### 最终复审修复
@@ -117,3 +117,10 @@ Converge外部CLI复审未覆盖：Codex CLI缺少@openai/codex-darwin-arm64；C
 最终本地验证：前端24/24、Rust49/49、生产构建、fmt与Clippy -D warnings通过。独立原生复审再次运行通知12项及旧回执Rust回归，确认既有发现已关闭、未发现新的明确规格或质量缺陷。
 
 最终CI首次Linux检查暴露glib0.18没有Error::code方法（E0599）；保留既有原生DBus回归，改为读取借用GError的原生code，不升级依赖，再运行三平台CI。
+
+
+### 本轮闭环结论
+
+源码修复与已具备环境的验证完成；最终代码提交9affe4a05d8537935515e21cf18edcf0f1f5fd54，三平台[CI36815933487](https://github.com/ainiaa/yam/actions/runs/36815933487)全部success。Linux专属GLib错误分类测试已在真实Linux CI执行通过；macOS、Linux、Windows测试包已上传。
+
+整体仍为部分闭环：R3遗留通知样本标识未取得；R4正式证书及安装/移动验收未覆盖；R5 Windows/Linux交互桌面未连接；R6 Rust覆盖率工具版本不兼容。外部Converge CLI复审门禁未覆盖，独立原生复审通过仅作补充。对应可复用验收步骤与证据在notification-acceptance.md。没有合并或发布应用，也没有恢复临时辅助功能授权。

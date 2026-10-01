@@ -47,3 +47,6 @@ Rust覆盖率工具不兼容：rustc LLVM22生成profraw格式10，已安装Appl
 ## CI测试包证据
 
 [CI 36814180042](https://github.com/ainiaa/yam/actions/runs/36814180042)在572928d上三平台成功，包含覆盖率闸门、Rust测试/Clippy、app/deb/nsis打包和7天保留测试产物。此证据证明可构建与测试，不替代上表真实桌面、正式签名及遗留样本验收。
+
+
+最终代码9affe4a的[CI36815933487](https://github.com/ainiaa/yam/actions/runs/36815933487)三平台全部success，包含最新并发回执修复和Linux原生DBus错误回归。macOS app、Linux deb及Windows nsis测试产物均已保存；这是本轮最终源码CI证据。没有执行正式发布。
