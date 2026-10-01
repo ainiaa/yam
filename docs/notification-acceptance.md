@@ -67,3 +67,5 @@ Rust覆盖率工具不兼容：rustc LLVM22生成profraw格式10，已安装Appl
 - 跨构建旧通知 550AF452-4FB6-4C2A-96CC-1D4B8CB5E7FB 点击后未启动应用。usernoted 明确报告无法找到与旧 source UUID FE3CA26B-4B20-46E3-8662-BFC5973BACA0 匹配的应用。现有 ad-hoc 重建包无法证明正式升级后旧通知身份稳定性；仍需 Developer ID 签名升级验收。
 
 以上为实际通知卡片点击，不以堆叠展开、URL 手动打开或 accepted 回执替代。Windows/Linux 真桌面、安装位置迁移及正式签名升级仍未验证。
+
+当前业务提交 3c181db 的 [CI 36860989797](https://github.com/ainiaa/yam/actions/runs/36860989797) 三平台全部 success，包含本轮全部源码和签名流程测试。CLI 临时信任与 ChatGPT 辅助功能已恢复基线；不把该 CI 作为真实 Windows/Linux 桌面激活证据。

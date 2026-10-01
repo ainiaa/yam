@@ -129,4 +129,10 @@ Codex 0.159.3 实测只支持本次 6 项 Hook；移除了不支持的 PostToolU
 
 通知运行中点击和同构建退出后唤醒通过；跨构建旧 ad-hoc 通知身份匹配失败，详情见 notification-acceptance.md。验收发现冷启动 GUI 仅有 /usr/bin:/bin 时 CLI 缺失，先补失败测试，再统一发现/版本查询/实际启动的子进程 PATH，保留原目录优先级并补常见用户安装目录。最终隔离包以该最小 PATH 实际启动后 Codex/Claude 均可选，Claude 真实 Helper 已连接。
 
-96 项 Rust 单元测试、57 项前端测试与 6 项签名流程回归通过；TypeScript/Vite、隔离 .app 构建、Clippy、格式与最终编译 Helper 冒烟通过。测试统计不等于正式 Converge 覆盖或真实跨平台桌面验收。6 个新增 Codex Hook 信任已撤销，15 个原有状态与基线完全一致；隔离 Claude 目录的新增信任已撤销。主应用辅助功能恢复等待 macOS 触控 ID 认证。
+96 项 Rust 单元测试、57 项前端测试与 6 项签名流程回归通过；TypeScript/Vite、隔离 .app 构建、Clippy、格式与最终编译 Helper 冒烟通过。测试统计不等于正式 Converge 覆盖或真实跨平台桌面验收。6 个新增 Codex Hook 信任已撤销，15 个原有状态与基线完全一致；隔离 Claude 目录的新增信任已撤销。主应用 ChatGPT 辅助功能经 macOS 认证后已确认恢复 off；原有 Codex Computer Use 权限保持 on。
+
+验收后模式偏好恢复为 task、暂停通知 off；最终 pgrep -x yam-desktop 无结果。正式 native preflight 在最终业务提交再次执行，仍为 coverage uncovered（no executable coverage command is configured），没有改低门槛或伪造 Review v3 回执。
+
+最终业务提交 3c181db43fc2c9903c36a4e0aa768c2105856ab4 已推送。对应 [Desktop checks 36860989797](https://github.com/ainiaa/yam/actions/runs/36860989797) headSha 完全一致，macOS、Ubuntu 22.04、Windows 全部 success；覆盖前端覆盖率、TypeScript/Vite、Rust 格式/Clippy/test --locked、平台 app/deb/nsis 打包与测试产物保存，macOS 另执行 6 个签名流程 mock 测试。没有合并、发布或真实公证上传。
+
+当前事项保持部分完成：Claude 正常双轮/真实权限流需修复现有 Provider 配置后验收，Codex 原生审批完成前恢复的中间态未采样，正式签名升级旧通知与跨平台真桌面未验收，正式 Converge coverage/Review v3 仍 uncovered。已实现的状态机与流程不以这些缺口虚报全面闭环。
