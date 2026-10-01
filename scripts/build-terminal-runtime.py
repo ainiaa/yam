@@ -3,6 +3,17 @@
 import argparse,hashlib,json,os,pathlib,platform,subprocess,tarfile,urllib.request,zipfile
 VERSION='26.10.0'
 
+def archive_verified(archive,digest,limit=200*1024*1024):
+    hasher=hashlib.sha256();length=0
+    try:stream=archive.open('rb')
+    except FileNotFoundError:return False
+    with stream:
+        while data:=stream.read(min(1024*1024,limit-length+1)):
+            length+=len(data)
+            if length>limit:raise ValueError('Cached runtime archive exceeds size budget')
+            hasher.update(data)
+    return hasher.hexdigest()==digest
+
 def platform_name(system,machine):
     systems={'Darwin':'darwin','Linux':'linux','Windows':'win'};architectures={'arm64':'arm64','aarch64':'arm64','AMD64':'x64','x86_64':'x64','x64':'x64'}
     if system not in systems or machine not in architectures:raise ValueError('Unsupported terminal runtime platform')
@@ -31,7 +42,7 @@ def main():
     name='node-v'+VERSION+'-'+native+suffix
     digest=json.loads(pathlib.Path(__file__).with_name('node-runtime-checksums.json').read_text(encoding='utf-8'))[name]
     archive=root/name
-    if not archive.exists() or hashlib.sha256(archive.read_bytes()).hexdigest()!=digest:
+    if not archive_verified(archive,digest):
         def chunks():
             with urllib.request.urlopen('https://nodejs.org/dist/v'+VERSION+'/'+name,timeout=30) as response:
                 if not response.geturl().startswith('https://nodejs.org/'):raise ValueError('Unexpected runtime download origin')

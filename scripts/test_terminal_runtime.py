@@ -4,6 +4,15 @@ from unittest import mock
 path=pathlib.Path(__file__).with_name('build-terminal-runtime.py')
 spec=importlib.util.spec_from_file_location('terminal_runtime',path);runtime=importlib.util.module_from_spec(spec);spec.loader.exec_module(runtime)
 class RuntimeTests(unittest.TestCase):
+ def test_cached_archive_verification_is_bounded_and_preserves_invalid_files(self):
+  with tempfile.TemporaryDirectory() as directory:
+   archive=pathlib.Path(directory)/'node.zip';content=b'valid cached archive';archive.write_bytes(content)
+   with mock.patch.object(pathlib.Path,'read_bytes',side_effect=AssertionError('Unbounded cache read')):
+    self.assertTrue(runtime.archive_verified(archive,hashlib.sha256(content).hexdigest(),limit=len(content)))
+    self.assertFalse(runtime.archive_verified(archive,'0'*64,limit=len(content)))
+    with self.assertRaisesRegex(ValueError,'budget'):runtime.archive_verified(archive,'0'*64,limit=len(content)-1)
+    self.assertFalse(runtime.archive_verified(archive.with_name('missing'),'0'*64))
+   self.assertEqual(archive.read_bytes(),content)
  def test_supported_native_targets_and_unknown_platform_fail_closed(self):
   self.assertEqual(runtime.platform_name('Darwin','arm64'),'darwin-arm64')
   self.assertEqual(runtime.platform_name('Windows','AMD64'),'win-x64')
