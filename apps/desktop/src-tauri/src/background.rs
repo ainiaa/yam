@@ -1052,6 +1052,14 @@ pub(super) fn notify_lifecycle(app: &tauri::AppHandle, session: &str, status: &s
 fn idle_due(now: u64, last_request: u64, active: usize) -> bool {
     active == 0 && now.saturating_sub(last_request) >= 60_000
 }
+fn configure_owner_app(config: &mut tauri::utils::config::AppConfig) {
+    config.windows.clear();
+    // The GUI owns GTK/D-Bus activation. Sharing its name makes the owner a remote GUI instance.
+    #[cfg(target_os = "linux")]
+    {
+        config.enable_gtk_app_id = false;
+    }
+}
 pub(super) fn run() -> Result<(), String> {
     use tauri::{Listener, Manager};
     #[cfg(target_os = "macos")]
@@ -1059,7 +1067,7 @@ pub(super) fn run() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let _activity = ProcessActivity::begin();
     let mut context = super::app_context();
-    context.config_mut().app.windows.clear();
+    configure_owner_app(&mut context.config_mut().app);
     let owner: Arc<std::sync::Mutex<Option<Server>>> = Arc::new(std::sync::Mutex::new(None));
     let setup_owner = owner.clone();
     tauri::Builder::default()
@@ -1068,6 +1076,7 @@ pub(super) fn run() -> Result<(), String> {
             ..Default::default()
         })
         .setup(move |app| {
+            eprintln!("[YAM] Initializing background owner");
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             for name in [
@@ -1322,6 +1331,18 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_windowless_owner_does_not_claim_the_linux_desktop_activation_name() {
+        let mut config = tauri::utils::config::AppConfig {
+            enable_gtk_app_id: true,
+            windows: vec![tauri::utils::config::WindowConfig::default()],
+            ..Default::default()
+        };
+        assert!(!config.windows.is_empty());
+        super::configure_owner_app(&mut config);
+        assert!(config.windows.is_empty());
+        assert_eq!(config.enable_gtk_app_id, !cfg!(target_os = "linux"));
+    }
     use super::*;
     #[test]
     fn viewport_command_cannot_accept_input_bytes_or_an_unbounded_target() {

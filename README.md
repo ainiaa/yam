@@ -14,7 +14,7 @@ The current session slice also persists output and history locally, recovers int
 
 Requirements: Node.js 24+, pnpm 10, Python 3.11+, and the Rust stable toolchain. The macOS desktop application requires macOS 13.5 or later.
 
-The build downloads and verifies the pinned official Node 26.10.0 terminal runtime and bundles it with the application. End users do not need to install Node. Background ownership and cold terminal restoration are still being integrated; see the [continuity plan and execution evidence](docs/yam-session-continuity-plan.md).
+The build downloads and verifies the pinned official Node 26.10.0 terminal runtime and bundles it with the application. End users do not need to install Node. Background ownership and supported terminal restoration are implemented; native acceptance gaps are tracked in the [continuity plan and execution evidence](docs/yam-session-continuity-plan.md).
 
 ```bash
 cd apps/desktop
@@ -43,7 +43,7 @@ Codex CLI 0.159.3 interactive sessions can report separate response-completion a
 
 The inbox keeps each round unread until its entry is opened; OS acceptance is a separate delivery result. Keyboard shortcuts (Cmd on macOS / Ctrl elsewhere + Shift) default to `]` for attention, `[` for the previous session, `K` for search and `M` for notification pause; configure them in the sidebar. Enter in search opens the first match. The selected run mode is remembered without changing the initial single-task default.
 
-For a stopped default Codex interactive session with a trusted native conversation ID, **Continue conversation** starts a new process using native resume. YAM verifies the original directory, provider and conversation through the installed CLI first, clears the old prompt and refuses duplicate resumes. Opening history, clicking a notification or starting YAM does not restart a task. Other adapters and custom launch arguments are not advertised as resume support.
+For a stopped default Codex or Claude interactive session with a validated native conversation ID, **Continue conversation** starts a new process using that exact native resume ID, clears the old prompt and refuses duplicate resumes. Codex checks the original directory, provider and conversation through the installed CLI; Claude checks the local main-conversation metadata and original directory before passing `--resume`. Opening history, clicking a notification or starting YAM does not restart a task. Other adapters and custom launch arguments are not advertised as resume support.
 
 macOS native validation and local automated checks are recorded in [execution evidence](docs/yam-next-stage-execution.md). Windows/Linux desktop notifications, old-notification activation and actual Developer ID signing remain separate acceptance gaps; the signing and notarization flow has executable checks; CI packaging alone does not verify them.
 

@@ -232,3 +232,5 @@ P8 打包缓存复核：缓存 SHA256 原先使用 read_bytes 整体分配，下
 P8 新原生 CI 红灯（run 36932864744）：macOS 生命周期通过；Linux 等待连接文件 20 秒超时，清理路径又因 descriptor=None 遮蔽原错；Windows ping 成功后 background_status 连接中断。已修复验收脚本的未初始化清理并保留独立后台 stderr。复核零窗口 owner 的共用退出入口发现普通 ExitRequested 会启动 shutdown；先补正常/GUI/停止/程序显式退出边界回归，再使零窗口 owner 拒绝隐式退出，仅允许显式停止或闲置截止。此为已确认入口缺陷修复；是否解释 Windows 原生红灯须以后续 CI 证据确认，Linux 根因继续定位，未宣布闭环。
 
 P8 原生生命周期脚本增加 --desktop，并接入全部 CI 平台：对实际桌面进程执行两次启动/退出，在窗口存活和退出后分别验证同一后台 PID、唯一会话、工作负载心跳继续；随后仍验证最终场景保存/owner 崩溃/无自动重跑/显式停止。Mac 新独立 YAM Lifecycle Validation 包（当前业务源码 4f67f55）完整通过，通知全程暂停，无 CLI 信任或新系统权限。这项 exit_method 为 terminate fixture process，仍不替代 Cmd+Q、实时键盘/鼠标/缩放或通知中心点击验收。
+
+P8 平台复核继续：4f67f55 的 Windows/Linux 原生仍红灯；不能声称仅 ExitRequested(None) 解释了 Windows。后台退出授权改以 manager.shutting_down 判断，事件的数字退出码本身不等于 stop-all 授权；新增数值码边界曾红灯。保留后台启动/退出请求诊断，后续原生证据确认实际路径。Linux 本地 Tao 源码和 GIO 原生注册契约说明启用 GTK app ID 会通过 D-Bus 把第二实例作为 remote；零窗口 owner 现在只退出该 GTK 桌面激活注册路径，保留配置 identifier、数据目录和通知元数据，GUI 继续启用 GTK ID。配置回归先编译红灯；修正显式窗口夹具后待最终检查。原生 CI 尚未闭环。GIO 来源：https://gnome.pages.gitlab.gnome.org/gtk/gio/method.Application.register.html 。README 同步已实现 Claude 原生恢复的准确边界。
