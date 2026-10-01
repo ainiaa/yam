@@ -136,3 +136,20 @@ Codex 0.159.3 实测只支持本次 6 项 Hook；移除了不支持的 PostToolU
 最终业务提交 3c181db43fc2c9903c36a4e0aa768c2105856ab4 已推送。对应 [Desktop checks 36860989797](https://github.com/ainiaa/yam/actions/runs/36860989797) headSha 完全一致，macOS、Ubuntu 22.04、Windows 全部 success；覆盖前端覆盖率、TypeScript/Vite、Rust 格式/Clippy/test --locked、平台 app/deb/nsis 打包与测试产物保存，macOS 另执行 6 个签名流程 mock 测试。没有合并、发布或真实公证上传。
 
 当前事项保持部分完成：Claude 正常双轮/真实权限流需修复现有 Provider 配置后验收，Codex 原生审批完成前恢复的中间态未采样，正式签名升级旧通知与跨平台真桌面未验收，正式 Converge coverage/Review v3 仍 uncovered。已实现的状态机与流程不以这些缺口虚报全面闭环。
+
+
+## 2026-10-01 — Claude Provider 恢复后的双轮关联修复
+
+用户要求重新检查 Claude。2.1.286 的真实 -p 请求正常返回 YAM_CLAUDE_RECOVERY_OK，exit=0、is_error=false、terminal_reason=completed，之前的 base_url 配置阻塞已解除。旧 YAM 构建的持续会话 s-1a0f7769ded-0 第一轮回复成功，第二轮因 Unknown agent turn 降级；这属于 YAM 的真实关联缺陷，不能以单次模型回复宣称通知正常。
+
+元数据探针 446cd50d-099d-4a12-bcbc-5ab13ffa6944 捕获 UserPromptSubmit/Stop 第一轮同为 e1f47105-2cca-4207-9042-36178f148441；第二轮 UserPromptSubmit 仍为该 ID，而第二轮 Stop 为 5057512f-8411-4c34-b101-d4a89b6537a7。修复仅对 Helper 标记为 Claude 的事件：重复提交 ID 表示工作活动，后续已连接主会话的原生事件建立真实新轮次；继续拒绝非主会话、非法来源和 Codex 未知轮次。回归先失败后通过，没有生成轮次计数器或读取延迟 transcript。
+
+97 项 Rust 测试、Clippy、TypeScript/Vite 与隔离 app 构建通过；新源码编译 Helper 冒烟通过，旧包对新增来源断言先失败。真实探针进程已退出；未新增 CLI 信任或辅助功能权限，用户原有 YAM 目录信任保持。修复提交 b9d4b65 已推送，真实最终双轮与对应 CI 证据在后续补充。
+
+终端非阻断警告已通过 CLI transcript 的 hook command 区分：SessionStart 的 JSON 格式错误来自现有 claude-mem 启动 Hook，UserPromptSubmit 的缺失 graphify-out/graph.json 来自现有 query-graphify.sh；第一轮 Stop 的 claude-mem summarize 花费 110256ms，YAM Helper 为 35ms。没有修改这些全局/插件 Hook，也没有把其耗时当作 YAM Helper 耗时。
+
+最终隔离构建真实双轮通过：s-1a0f7849b5b-0、原生主会话 1f17ed3a-5ff2-4fb6-8bd0-0e8a781554c4，回复 YAM_CLAUDE_FIXED_ONE/TWO。第一轮 prompt_id 75832eb1-b4b0-4c77-98f2-2ab0d2ce9e8e、ResponseReady revision=3/suppressed；第二次提交仍复用该 ID，但状态正常恢复 working revision=4；第二轮原生 Stop ID 1ac50e0a-ee8c-4ab2-8e8e-a37d9edc27d7 获得独立 ResponseReady revision=5/accepted，两个回执均未读、integration=connected，持续 CLI 未退出。后台 OS accepted 不替代横幅可见或点击验收。正常双轮 Provider 阻塞至此解除，Claude 真实权限流仍未验收。
+
+本次无新信任/辅助功能授权，探针和 YAM 会话已停止，隔离包默认模式恢复 task、暂停通知 off。旧失败验收记录保留以追溯根因，未覆盖旧证据或宣称版本升级兼容门禁已改造。
+
+修复业务提交 b9d4b65cc1351cd4957262ffee8336387007f0b7 的 [Desktop checks 36864578925](https://github.com/ainiaa/yam/actions/runs/36864578925) headSha 完全一致，macOS/Linux/Windows 全部 success，包含当前源码测试、Clippy、覆盖率和平台打包。最终 pgrep -x yam-desktop 无结果；97 项 Rust 单元测试与编译 Helper 冒烟通过。无合并或发布。
