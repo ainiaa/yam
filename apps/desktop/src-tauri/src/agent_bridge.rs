@@ -169,6 +169,7 @@ fn normalize(value: &serde_json::Value, notify: bool) -> Result<AgentEvent, Stri
         kind: kind.into(),
         agent_session_id,
         turn_id,
+        source: None,
         permission_key: if ["PermissionRequest", "ToolProgress"].contains(&kind) {
             permission_key(value)
         } else {
@@ -219,6 +220,7 @@ fn normalize_claude(value: &serde_json::Value) -> Result<AgentEvent, String> {
         }),
         false,
     )?;
+    event.source = Some("claude".into());
     if ["PermissionRequest", "ToolProgress"].contains(&event.kind.as_str()) {
         event.permission_key = permission_key(value);
     }
@@ -1260,6 +1262,7 @@ mod tests {
                         agent_session_id: "main".into(),
                         turn_id: turn.map(str::to_string),
                         permission_key: None,
+                        source: None,
                     },
                 )
                 .unwrap();
@@ -1335,6 +1338,7 @@ mod tests {
                 agent_session_id: "main".into(),
                 turn_id: None,
                 permission_key: None,
+                source: None,
             },
         )
         .unwrap();
@@ -1376,6 +1380,7 @@ mod tests {
                 agent_session_id: "main".into(),
                 turn_id: None,
                 permission_key: None,
+                source: None,
             },
         })
         .unwrap();
@@ -1408,6 +1413,7 @@ mod tests {
             agent_session_id: "main".into(),
             turn_id: None,
             permission_key: None,
+            source: None,
         };
         assert!(submit(bridge.address, &credential().unwrap(), event()).is_err());
         submit(bridge.address, &token, event()).unwrap();
@@ -1564,6 +1570,7 @@ mod tests {
         let prompt = serde_json::json!({"hook_event_name":"UserPromptSubmit","session_id":"claude-main","prompt_id":"prompt-one","prompt":"private"});
         let e = normalize_claude(&prompt).unwrap();
         assert_eq!(e.kind, "UserPromptSubmit");
+        assert_eq!(serde_json::to_value(&e).unwrap()["source"], "claude");
         assert_eq!(e.turn_id.as_deref(), Some("prompt-one"));
         let failure = normalize_claude(&serde_json::json!({"hook_event_name":"StopFailure","session_id":"claude-main","prompt_id":"prompt-one","error":"private"})).unwrap();
         assert_eq!(failure.kind, "TurnFailed");

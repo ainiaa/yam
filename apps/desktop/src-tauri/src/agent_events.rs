@@ -50,6 +50,8 @@ pub struct AgentEvent {
     pub turn_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 impl AgentState {
     pub fn apply(&mut self, event: &AgentEvent) -> Result<Option<String>, String> {
@@ -65,6 +67,13 @@ impl AgentState {
                 && value
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        }
+        if event
+            .source
+            .as_deref()
+            .is_some_and(|source| source != "claude")
+        {
+            return Err("Unsupported agent event source".into());
         }
         if !valid(&self.generation)
             || !valid(&event.agent_session_id)
@@ -112,6 +121,16 @@ impl AgentState {
         self.integration = "connected".into();
         if event.kind == "UserPromptSubmit" {
             if self.turns.iter().any(|seen| seen == turn) {
+                // Claude 2.1.286 can submit the previous prompt_id. This hook
+                // confirms activity, while later native hooks establish the new ID.
+                if event.source.as_deref() == Some("claude") && self.phase != "working" {
+                    self.phase = "working".into();
+                    self.permission_keys.clear();
+                    self.revision = self
+                        .revision
+                        .checked_add(1)
+                        .ok_or("Agent revision exhausted")?;
+                }
                 return Ok(None);
             }
             if self.turns.len() >= 1024 {
@@ -123,7 +142,24 @@ impl AgentState {
             self.phase = "working".into();
         } else {
             if !self.turns.iter().any(|known| known == turn) {
-                return Err("Unknown agent turn".into());
+                if event.source.as_deref() != Some("claude")
+                    || ![
+                        "PermissionRequest",
+                        "ToolProgress",
+                        "ResponseReady",
+                        "TurnFailed",
+                    ]
+                    .contains(&event.kind.as_str())
+                {
+                    return Err("Unknown agent turn".into());
+                }
+                if self.turns.len() >= 1024 {
+                    return Err("Agent turn capacity reached; continue in a new YAM session".into());
+                }
+                self.turns.push(turn.into());
+                self.turn_id = Some(turn.into());
+                self.permission_keys.clear();
+                self.phase = "working".into();
             }
             if ["Stop", "TurnComplete", "ResponseReady"].contains(&event.kind.as_str())
                 && ["TurnFailed", "Interrupt"].iter().any(|kind| {
@@ -743,6 +779,7 @@ mod tests {
             kind: kind.into(),
             agent_session_id: "main-thread".into(),
             turn_id: turn.map(str::to_string),
+            source: None,
             permission_key: ["PermissionRequest", "ToolProgress"]
                 .contains(&kind)
                 .then(|| "test-tool".into()),
@@ -1013,6 +1050,42 @@ mod tests {
         let mut old = serde_json::to_value(&s).unwrap();
         old.as_object_mut().unwrap().remove("permission_keys");
         assert!(serde_json::from_value::<AgentState>(old).is_ok());
+    }
+    #[test]
+    fn claude_repeated_submit_id_uses_later_native_turn_without_guessing() {
+        let native = |kind: &str, turn: &str| {
+            serde_json::from_value::<AgentEvent>(serde_json::json!({"kind":kind,"agent_session_id":"main-thread","turn_id":turn,"source":"claude"})).unwrap()
+        };
+        let mut s = state();
+        s.apply(&native("UserPromptSubmit", "one")).unwrap();
+        s.apply(&native("ResponseReady", "one")).unwrap();
+        s.apply(&native("UserPromptSubmit", "one")).unwrap();
+        assert_eq!(s.phase, "working");
+        assert_eq!(s.turns, vec!["one"]);
+        s.apply(&native("ResponseReady", "two")).unwrap();
+        assert_eq!(s.turns, vec!["one", "two"]);
+        assert_eq!(s.turn_id.as_deref(), Some("two"));
+        assert_eq!(s.inbox.len(), 2);
+        assert_ne!(s.inbox[0].id, s.inbox[1].id);
+        let completed = s.clone();
+        s.apply(&native("ResponseReady", "two")).unwrap();
+        assert_eq!(s, completed);
+        let mut other = native("ResponseReady", "child-turn");
+        other.agent_session_id = "child".into();
+        s.apply(&other).unwrap();
+        assert_eq!(s, completed);
+        assert!(s
+            .apply(&event("ResponseReady", Some("codex-unknown")))
+            .is_err());
+        let invalid = serde_json::from_value::<AgentEvent>(serde_json::json!({"kind":"ResponseReady","agent_session_id":"main-thread","turn_id":"three","source":"unrecognized"})).unwrap();
+        assert!(s.apply(&invalid).is_err());
+        assert_eq!(s, completed);
+        s.apply(&native("UserPromptSubmit", "two")).unwrap();
+        s.apply(&native("PermissionRequest", "three")).unwrap();
+        assert_eq!(s.turn_id.as_deref(), Some("three"));
+        assert_eq!(s.phase, "needs_permission");
+        s.apply(&native("TurnFailed", "three")).unwrap();
+        assert_eq!(s.phase, "failed");
     }
     #[test]
     fn reply_readiness_is_attention_not_final_completion_and_can_resume_work() {

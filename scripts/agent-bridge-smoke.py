@@ -69,7 +69,13 @@ with tempfile.TemporaryDirectory(prefix="yam-helper-") as directory:
         worker.join(timeout=3)
         assert not worker.is_alive()
         assert [value["event"]["kind"] for value in received] == ["SessionStart", "TurnComplete", "SessionStart", "TurnComplete", "TurnComplete", "SessionStart", "UserPromptSubmit", "TurnFailed", "PermissionRequest", "ToolProgress"]
-        assert all(set(value["event"]) == {"kind", "agent_session_id", "turn_id"} for value in received)
+        for index, value in enumerate(received):
+            event = value["event"]
+            expected = {"kind", "agent_session_id", "turn_id"}
+            if 5 <= index <= 7:
+                expected.add("source")
+                assert event["source"] == "claude"
+            assert set(event) == expected
     # The original callback still runs when YAM's bridge is unavailable.
     forwarded.unlink(missing_ok=True)
     result = subprocess.run([str(binary), "--yam-agent-notify", raw], env=env,

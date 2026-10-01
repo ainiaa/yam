@@ -44,3 +44,6 @@ Claude 2.1.286 新探针已确认原生 `prompt_id`；以前探针只收集 turn
 同名同输入的并行权限请求无法由原生 Hook 的字段可靠区分；工具指纹不是调用 UUID，该场景不声明精确关联已验收。
 
 冷唤醒实测还发现系统精简 PATH 漏掉 npm 用户安装目录；现已让 CLI 发现、版本/配置探针、实际 Agent 进程共用补全 PATH，保留原 PATH 顺序，仅追加 Unix 常见安装目录（~/.local/bin、~/.npm-global/bin，macOS Homebrew）。自定义前缀仍需要配置 PATH 或显式 Custom command；不执行用户 shell 启动脚本，不修改系统环境。
+
+
+2026-10-01 后续真实验收更正：Provider 已恢复正常回复。Claude 2.1.286 持续/排队输入中 UserPromptSubmit 可能复用上一轮 prompt_id，Stop 才携带新轮次 ID；不能把前者当作每轮可靠的新 ID。编译 Helper 对 Claude 事件标记 source=claude，提交 Hook 确认活动；同一已连接原生主会话的后续权限/工具/回复就绪/失败事件用其实际 prompt_id 建立轮次。没有读延迟 transcript、生成计数器或放宽 Codex 的未知轮次规则。真实探针只保存事件名、session_id、prompt_id 和字段名，不保存用户输入或凭证。
