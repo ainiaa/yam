@@ -245,3 +245,11 @@ test('previous session records successful navigation only and does not overwrite
  await h.open(record('c'));assert.equal(h.refs.previousSession.current,'a');assert.equal(h.refs.sessionId.current,'b');
  await h.open(record('a'));assert.equal(h.refs.previousSession.current,'b');
 });
+
+test('rerun titles use the actual agent and prompt instead of the open dialog selection',async()=>{
+ for(const [launch,expected] of [[{adapter:'claude',mode:'interactive',prompt:null},'Claude Code'],[{adapter:'codex',mode:'task',prompt:'Original task'},'Original task'],[null,'Interactive shell']]){
+  let titles={};const args={starting:false,creatingSession:{current:false},terminalViews:{current:{canOpen:true}},adapters:[{id:'shell',label:'System shell'},{id:'claude',label:'Claude Code'},{id:'codex',label:'OpenAI Codex'}],selectedAdapter:'shell',command:'',cwd:'/repo',prompt:'Unsubmitted draft',adapterArgs:'',launchMode:'interactive',setStarting(){},setError(){},setActiveProject(){},setCollapsedProjects(){},setSessionTitles(update){titles=update({})},projectKey:path=>path,launchDialog:{current:null},refreshHistory(){},openHistory:async()=>{},terminal:{current:null},invoke:async()=>({session_id:'new',cwd:'/repo',status:'running',command:null,launch})};
+  const start=new Function(...Object.keys(args),startJs+';return startSession')(...Object.values(args));
+  await start({cwd:'/repo',command:'',launch});assert.equal(titles.new,expected);
+ }
+});

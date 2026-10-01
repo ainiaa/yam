@@ -5,8 +5,8 @@
 
 | 批次 | 当前结论 | 未覆盖边界 |
 |---|---|---|
-| B0 | Codex 0.159.3 能力探测通过；Claude 降级 | Claude 正常回答/可靠轮次未验证 |
-| B1 | macOS 原生持续对话、双轮后台 accepted、真实中断与收件箱通过 | 系统通知点击、权限事件和完整异常矩阵未覆盖 |
+| B0 | Codex 实际 Hook 能力探测；Claude 2.1.286 原生双轮通过 | 更新版本的真实事件语义仍需安装后验收 |
+| B1 | macOS 双轮、通知点击/同构建唤醒、Claude 审批→工具进展→回复、真实中断与收件箱通过 | Codex 工具进展本轮实测待临时信任；完整跨平台异常矩阵未覆盖 |
 | B2 | 导航、可配置快捷键、模式记忆已实现，回归及原生主要操作通过 | 完整跨平台 UI 未覆盖；模式记忆已通过原生重启复测 |
 | B3 | 已实现并有本机终端/压力证据 | cmux 对照、WebKit 全进程内存未测 |
 | B4 | 主动原生 resume 已实现；真实上下文续答通过 | 身份保留/重复拒绝已复测；其他 CLI/provider/平台未覆盖 |
@@ -153,3 +153,23 @@ Codex 0.159.3 实测只支持本次 6 项 Hook；移除了不支持的 PostToolU
 本次无新信任/辅助功能授权，探针和 YAM 会话已停止，隔离包默认模式恢复 task、暂停通知 off。旧失败验收记录保留以追溯根因，未覆盖旧证据或宣称版本升级兼容门禁已改造。
 
 修复业务提交 b9d4b65cc1351cd4957262ffee8336387007f0b7 的 [Desktop checks 36864578925](https://github.com/ainiaa/yam/actions/runs/36864578925) headSha 完全一致，macOS/Linux/Windows 全部 success，包含当前源码测试、Clippy、覆盖率和平台打包。最终 pgrep -x yam-desktop 无结果；97 项 Rust 单元测试与编译 Helper 冒烟通过。无合并或发布。
+
+## 2026-10-01 — CLI 升级兼容、参数与 Claude 权限闭环
+
+本轮范围：修复版本号锁定、安全参数误降级及权限状态验收；Windows/Linux 系统通知按用户要求暂缓。基线 7939602。
+
+Codex 改为在隔离 app-server 进程注入相同六类会话 Hook，经只读 hooks/list 确认目标 cwd 下六类 sessionFlags Hook 均启用且配置无错误；不执行 Hook、不新增信任、不发模型请求。原生 0.159.3 已实际返回六类 Hook。resume 使用真实 config/read 与 thread/read，不再靠固定版本号判断。Claude 没有同等 Hook 能力 RPC，采用已测 2.1.286 为最低 exec-form 基线，允许稳定 2.x 更新；未知主版本/预发布/畸形输出保持降级，SessionStart 才能确认连接。允许升级不等于所有未来版本事件语义已验收。
+
+参数扫描仅放行已核实的交互选项：模型、思考强度、既有权限模式等；保留原参数传递，不改审批/沙箱策略。配置覆盖、目录/会话切换、子命令、缺少值及未知参数仍明确降级。三项新增回归先出现编译红灯，再实现；Rust 100 测试、前端 57 测试与模块覆盖阈值、Clippy、签名流程 6 测试、原生隔离包与编译 Helper 冒烟通过。Converge preflight 实际仍为 coverage uncovered，未安装工具/重建索引/放宽门槛。
+
+真实 Claude 会话 s-1a0f7a023f5-0 携带 --model fable --effort low，集成 connected；实际执行 15 秒无文件副作用的 Python Bash 命令，产出 YAM_CLAUDE_PERMISSION_OK 并形成单条 response_ready 回执。现有全局 Bash(*) 自动许可导致没有 PermissionRequest，不能冒充审批验收。后续使用仅本次测试进程的 settings source 和空 allow 列表触发原生请求；全局配置不修改。
+
+实际复现了 Claude 双重审批提醒：原生 PermissionRequest 带工具身份，Notification(permission_prompt) 重复同一提示但不带工具身份，导致第二条回执及无法被 PostToolUse 清除的 unknown 权限。先修改订阅/归一化回归观察断言失败，再移除重复 Notification 订阅，仅保留原生 PermissionRequest；没有新增时间窗口、猜测合并或吞掉真正不同的请求。
+
+最终原生隔离权限验收：s-1a0f7b3a83e-0，Claude 主会话 ced11d1b-0821-4630-9f8b-cc04a7b59e7d，原生 prompt_id 8f4a5a57-9edf-41fe-916a-ea4833e5b2b1。真实 Bash /usr/bin/printf YAM_PERMISSION_FIXED_OK，仅选择一次 Yes，未保存许可规则。HistoryStore 顺序 working/revision 2 → needs_permission/3（仅一条、一个工具 key）→ matching PostToolUse 后 working/4（keys 清空）→ response_ready/5（仅一条）。两个独立未读回执分别是审批与回复，不是两个审批。最终输出 YAM_PERMISSION_FIXED_DONE；连接始终 connected，CLI 仍 running。临时脱敏证据 /tmp/yam-claude-fixed-permission-evidence.jsonl，已执行状态顺序与计数断言。
+
+测试为真实 CLI → 编译 Helper → 原生 YAM Bridge/HistoryStore；为触发审批，仅本次进程使用 project settings source、空 allow 和 default 模式，同时保留本机 provider/模型。正常默认全局 Bash(*) 启动的模型/effort 参数另已原生验收；不能把隔离测试说成默认全局配置会请求审批。全局 settings 文件 SHA256 未变、项目既有 trust 未变；临时外部导入 warning bookkeeping 精确恢复。没有新增辅助功能权限；临时 wrapper 已删除、验收 CLI 与应用退出、运行模式恢复 task。Codex hooks.state 与原 15 项基线完全一致。
+
+原生验收另外发现再次运行 Claude 被命名为 Interactive shell，且任务 prompt 丢失于默认标题；实际 startSession 协调器测试先失败，再改为依据后端返回的 launch/adapter/prompt 命名。58 个前端回归与覆盖门槛通过，原生再次运行的标题为 Claude Code。最终 Rust 100 回归、Clippy、原生 build、编译 Helper 冒烟通过。
+
+剩余状态：Windows/Linux 通知按本轮用户要求暂缓；Codex PermissionRequest → matching ToolProgress 的本轮原生测试待六个 Hook 的临时信任答复。Converge coverage/Trace/Review v3 仍未覆盖：本机 guard 不识别项目 Node coverage 阈值，Rust LLVM coverage 工具链缺失；未改全局 Suite、安装工具或重建用户索引。已有 Developer ID 证书为 0，正式签名/公证实物与跨构建旧通知/安装迁移验收仍是外部条件；既有流程及检查已实现。全局 claude-mem/graphify 报错不属于 YAM Helper，未修改外部插件。

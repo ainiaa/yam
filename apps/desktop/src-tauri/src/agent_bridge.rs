@@ -205,9 +205,6 @@ fn normalize_claude(value: &serde_json::Value) -> Result<AgentEvent, String> {
         {
             "ResponseReady"
         }
-        Some("Notification") if value["notification_type"] == "permission_prompt" => {
-            "PermissionRequest"
-        }
         _ => return Err("Unsupported Claude hook event".into()),
     };
     // Claude prompt_id is the native per-prompt UUID. Never invent a counter or
@@ -239,12 +236,10 @@ fn claude_args(exe: &str) -> Result<Vec<String>, String> {
         "PostToolUseFailure",
         "StopFailure",
         "Stop",
-        "Notification",
     ] {
-        let mut group = serde_json::json!({"hooks":[{"type":"command","command":exe,"args":["--yam-claude-hook"],"timeout":2}]});
-        if kind == "Notification" {
-            group["matcher"] = serde_json::json!("permission_prompt");
-        }
+        // PermissionRequest carries tool identity; Notification(permission_prompt)
+        // repeats the same request without that identity and cannot be cleared safely.
+        let group = serde_json::json!({"hooks":[{"type":"command","command":exe,"args":["--yam-claude-hook"],"timeout":2}]});
         hooks.insert(kind.into(), serde_json::json!([group]));
     }
     Ok(vec![
@@ -782,16 +777,127 @@ fn injected_args(exe: &str) -> Result<Vec<String>, String> {
     ));
     Ok(args)
 }
-fn version_supported(
-    program: &std::ffi::OsStr,
-    prefix: &[std::ffi::OsString],
+fn validate_hook_capabilities(
+    response: &serde_json::Value,
+    cwd: &std::path::Path,
 ) -> Result<(), String> {
-    measured_version(program, prefix, "codex-cli 0.159.3")
+    let entry = response["result"]["data"]
+        .as_array()
+        .and_then(|entries| {
+            entries
+                .iter()
+                .find(|entry| entry["cwd"].as_str() == cwd.to_str())
+        })
+        .ok_or("Agent did not report hook capabilities for this directory")?;
+    if !entry["errors"].as_array().is_some_and(Vec::is_empty) {
+        return Err("Agent hook configuration is invalid".into());
+    }
+    let hooks = entry["hooks"]
+        .as_array()
+        .ok_or("Missing agent hook capabilities")?;
+    for event in [
+        "sessionStart",
+        "userPromptSubmit",
+        "stop",
+        "interrupt",
+        "permissionRequest",
+        "postToolUse",
+    ] {
+        if !hooks.iter().any(|hook| {
+            hook["eventName"].as_str() == Some(event)
+                && hook["source"].as_str() == Some("sessionFlags")
+                && hook["enabled"] == true
+        }) {
+            return Err("Agent does not support all required YAM session hooks".into());
+        }
+    }
+    Ok(())
+}
+fn compatible_claude_version(output: &str) -> bool {
+    let Some(version) = output.strip_suffix(" (Claude Code)") else {
+        return false;
+    };
+    let parts: Vec<_> = version.split('.').collect();
+    if parts.len() != 3
+        || parts
+            .iter()
+            .any(|part| part.is_empty() || !part.bytes().all(|c| c.is_ascii_digit()))
+    {
+        return false;
+    }
+    let numbers: Option<Vec<u64>> = parts.iter().map(|part| part.parse().ok()).collect();
+    // ponytail: Claude exposes no hook-capability RPC; accept stable 2.x updates
+    // from the measured exec-form baseline, and confirm connection via SessionStart.
+    numbers.is_some_and(|v| v[0] == 2 && (v[1], v[2]) >= (1, 286))
+}
+fn validate_interactive_args(adapter: &str, args: &[String]) -> Result<(), String> {
+    let (values, flags): (&[&str], &[&str]) = if adapter == "claude" {
+        (
+            &[
+                "--model",
+                "--effort",
+                "--permission-mode",
+                "--append-system-prompt",
+                "--system-prompt",
+                "--name",
+            ],
+            &["--verbose"],
+        )
+    } else {
+        (
+            &[
+                "--model",
+                "-m",
+                "--sandbox",
+                "-s",
+                "--ask-for-approval",
+                "-a",
+                "--image",
+                "-i",
+                "--add-dir",
+                "--local-provider",
+            ],
+            &[
+                "--search",
+                "--no-alt-screen",
+                "--oss",
+                "--approve-for-me",
+                "--strict-config",
+                "--no-daemon",
+            ],
+        )
+    };
+    let error = || {
+        "Custom CLI configuration requires manual hook integration; existing CLI behavior is preserved".to_string()
+    };
+    let mut i = 0;
+    while i < args.len() {
+        let argument = &args[i];
+        if flags.contains(&argument.as_str()) {
+            i += 1;
+            continue;
+        }
+        if let Some((name, value)) = argument.split_once('=') {
+            if !values.contains(&name) || value.is_empty() {
+                return Err(error());
+            }
+            i += 1;
+        } else {
+            if !values.contains(&argument.as_str())
+                || args
+                    .get(i + 1)
+                    .is_none_or(|value| value.is_empty() || value.starts_with('-'))
+            {
+                return Err(error());
+            }
+            i += 2;
+        }
+    }
+    Ok(())
 }
 fn measured_version(
     program: &std::ffi::OsStr,
     prefix: &[std::ffi::OsString],
-    expected: &str,
 ) -> Result<(), String> {
     let mut command = std::process::Command::new(program);
     command
@@ -840,7 +946,9 @@ fn measured_version(
                 {
                     break Err("Cannot read agent version".into());
                 }
-                break if bytes.len() <= 4096 && String::from_utf8_lossy(&bytes).trim() == expected {
+                break if bytes.len() <= 4096
+                    && compatible_claude_version(String::from_utf8_lossy(&bytes).trim())
+                {
                     Ok(())
                 } else {
                     Err("This CLI version has not passed YAM hook compatibility checks".into())
@@ -908,7 +1016,6 @@ pub(super) fn validate_resume(
     };
     let command = super::agent_command(executable, &launch)?;
     let argv = command.get_argv();
-    version_supported(&argv[0], &argv[1..])?;
     let config = agent_query(
         &argv[0],
         &argv[1..],
@@ -942,16 +1049,15 @@ pub(super) fn prepare(
     cwd: &std::path::Path,
 ) -> Result<Prepared, String> {
     if launch.adapter == "claude" && launch.mode == "interactive" {
-        if !launch.extra_args.trim().is_empty() {
-            return Err("Custom Claude CLI options require manual hook integration".into());
-        }
+        validate_interactive_args("claude", &super::parse_agent_args(&launch.extra_args)?)?;
         let plain = super::AgentLaunch {
             prompt: None,
+            extra_args: String::new(),
             ..launch.clone()
         };
         let command = super::agent_command(executable, &plain)?;
         let argv = command.get_argv();
-        measured_version(&argv[0], &argv[1..], "2.1.286 (Claude Code)")?;
+        measured_version(&argv[0], &argv[1..])?;
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         return Ok(Prepared {
             token: credential()?,
@@ -964,32 +1070,7 @@ pub(super) fn prepare(
         return Err("Reliable interactive hooks are currently validated for Codex only".into());
     }
     let extra = super::parse_agent_args(&launch.extra_args)?;
-    if extra.iter().any(|a| {
-        [
-            "-c",
-            "--config",
-            "-p",
-            "--profile",
-            "--enable",
-            "--disable",
-            "--cd",
-            "--remote",
-            "--worktree",
-            "--",
-        ]
-        .contains(&a.as_str())
-            || a.starts_with("-c")
-            || a.starts_with("-p")
-            || a.starts_with("-C")
-            || a.starts_with("--cd=")
-            || a.starts_with("--remote=")
-            || a.starts_with("--config=")
-            || a.starts_with("--profile=")
-            || a.starts_with("--enable=")
-            || a.starts_with("--disable=")
-    }) {
-        return Err("Custom CLI configuration requires manual hook integration; existing CLI behavior is preserved".into());
-    }
+    validate_interactive_args("codex", &extra)?;
     let plain = super::AgentLaunch {
         adapter: "codex".into(),
         mode: "interactive".into(),
@@ -998,17 +1079,27 @@ pub(super) fn prepare(
     };
     let command = super::agent_command(executable, &plain)?;
     let argv = command.get_argv();
-    version_supported(&argv[0], &argv[1..])?;
     let original = effective_notify(&argv[0], &argv[1..], cwd)?;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let exe = exe.to_str().ok_or("Helper executable path is not UTF-8")?;
     if original.first().is_some_and(|program| program == exe) {
         return Err("Recursive notify callback rejected".into());
     }
+    let args = injected_args(exe)?;
+    let mut probe = argv[1..].to_vec();
+    probe.extend(args.iter().map(std::ffi::OsString::from));
+    let capabilities = agent_query(
+        &argv[0],
+        &probe,
+        cwd,
+        "hooks/list",
+        serde_json::json!({"cwds":[cwd.to_string_lossy()]}),
+    )?;
+    validate_hook_capabilities(&capabilities, cwd)?;
     Ok(Prepared {
         token: credential()?,
         generation: credential()?,
-        args: injected_args(exe)?,
+        args,
         original,
     })
 }
@@ -1576,12 +1667,14 @@ mod tests {
         assert_eq!(failure.kind, "TurnFailed");
         assert!(normalize_claude(&serde_json::json!({"hook_event_name":"StopFailure","session_id":"claude-main","turn_id":"guessed"})).is_err());
         assert!(normalize_claude(&serde_json::json!({"hook_event_name":"SubagentStop","session_id":"child","prompt_id":"prompt-one"})).is_err());
-        assert_eq!(normalize_claude(&serde_json::json!({"hook_event_name":"Notification","notification_type":"permission_prompt","session_id":"claude-main","prompt_id":"prompt-one"})).unwrap().kind,"PermissionRequest");
+        assert!(normalize_claude(&serde_json::json!({"hook_event_name":"Notification","notification_type":"permission_prompt","session_id":"claude-main","prompt_id":"prompt-one"})).is_err());
         assert!(normalize_claude(&serde_json::json!({"hook_event_name":"Notification","notification_type":"idle_prompt","session_id":"claude-main","prompt_id":"prompt-one"})).is_err());
         let args = claude_args("/application path/YAM").unwrap();
         assert_eq!(args[0], "--settings");
         let settings: serde_json::Value = serde_json::from_str(&args[1]).unwrap();
         assert_eq!(settings.as_object().unwrap().len(), 1);
+        assert!(settings["hooks"]["Notification"].is_null());
+        assert_eq!(settings["hooks"].as_object().unwrap().len(), 7);
         let hook = &settings["hooks"]["PermissionRequest"][0]["hooks"][0];
         assert_eq!(hook["command"], "/application path/YAM");
         assert_eq!(hook["args"], serde_json::json!(["--yam-claude-hook"]));
@@ -1645,32 +1738,147 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn compatible_claude_updates_are_not_locked_to_one_patch() {
+        for version in [
+            "2.1.286 (Claude Code)",
+            "2.1.287 (Claude Code)",
+            "2.2.0 (Claude Code)",
+        ] {
+            assert!(compatible_claude_version(version), "{version}");
+        }
+        for version in [
+            "2.1.285 (Claude Code)",
+            "3.0.0 (Claude Code)",
+            "2.1.287-beta (Claude Code)",
+            "2.1.287",
+            "codex-cli 2.1.287",
+            "2.1.287.1 (Claude Code)",
+        ] {
+            assert!(!compatible_claude_version(version), "{version}");
+        }
+    }
+    #[test]
+    fn safe_interactive_arguments_preserve_hooks_but_conflicts_degrade() {
+        for (adapter, args) in [
+            (
+                "claude",
+                vec!["--model", "fable", "--effort=high", "--verbose"],
+            ),
+            (
+                "claude",
+                vec![
+                    "--permission-mode",
+                    "default",
+                    "--append-system-prompt",
+                    "Keep replies short",
+                ],
+            ),
+            (
+                "codex",
+                vec!["--model", "model", "--sandbox=read-only", "--no-alt-screen"],
+            ),
+            (
+                "codex",
+                vec![
+                    "--oss",
+                    "--local-provider",
+                    "ollama",
+                    "--image",
+                    "diagram.png",
+                    "--add-dir",
+                    "/tmp",
+                    "--no-daemon",
+                ],
+            ),
+        ] {
+            assert!(validate_interactive_args(
+                adapter,
+                &args.iter().map(|s| s.to_string()).collect::<Vec<_>>()
+            )
+            .is_ok());
+        }
+        for (adapter, arg) in [
+            ("claude", "--settings=private.json"),
+            ("claude", "--bare"),
+            ("claude", "--resume=old"),
+            ("claude", "--safe-mode"),
+            ("claude", "--model"),
+            ("claude", "--model="),
+            ("codex", "--worktree=/tmp"),
+            ("codex", "--remote=remote"),
+            ("codex", "-cnotify=[]"),
+            ("codex", "exec"),
+            ("codex", "--"),
+        ] {
+            assert!(
+                validate_interactive_args(adapter, &[arg.to_string()]).is_err(),
+                "{adapter} {arg}"
+            );
+        }
+    }
+    #[test]
+    fn codex_hook_probe_requires_all_injected_events_and_no_config_errors() {
+        let hooks = [
+            "sessionStart",
+            "userPromptSubmit",
+            "stop",
+            "interrupt",
+            "permissionRequest",
+            "postToolUse",
+        ]
+        .map(|event| serde_json::json!({"eventName":event,"source":"sessionFlags","enabled":true}));
+        let response =
+            serde_json::json!({"result":{"data":[{"cwd":"/tmp","errors":[],"hooks":hooks}]}});
+        assert!(validate_hook_capabilities(&response, std::path::Path::new("/tmp")).is_ok());
+        let mut bad = response.clone();
+        bad["result"]["data"][0]["hooks"]
+            .as_array_mut()
+            .unwrap()
+            .pop();
+        assert!(validate_hook_capabilities(&bad, std::path::Path::new("/tmp")).is_err());
+        bad = response.clone();
+        bad["result"]["data"][0]["hooks"][0]["source"] = serde_json::json!("user");
+        assert!(validate_hook_capabilities(&bad, std::path::Path::new("/tmp")).is_err());
+        bad = response.clone();
+        bad["result"]["data"][0]["hooks"][0]["enabled"] = serde_json::json!(false);
+        assert!(validate_hook_capabilities(&bad, std::path::Path::new("/tmp")).is_err());
+        bad = response.clone();
+        bad["result"]["data"][0]["errors"] = serde_json::json!([{"message":"unsupported hook"}]);
+        assert!(validate_hook_capabilities(&bad, std::path::Path::new("/tmp")).is_err());
+        assert!(validate_hook_capabilities(&response, std::path::Path::new("/elsewhere")).is_err());
+        assert!(validate_hook_capabilities(
+            &serde_json::json!({"result":{}}),
+            std::path::Path::new("/tmp")
+        )
+        .is_err());
+    }
     #[cfg(unix)]
     #[test]
-    fn version_gate_accepts_only_measured_cli_and_times_out_without_hanging() {
-        assert!(version_supported(
+    fn claude_version_query_accepts_updates_and_times_out_without_hanging() {
+        assert!(measured_version(
             std::ffi::OsStr::new("/bin/sh"),
-            &["-c".into(), "printf 'codex-cli 0.159.3\\n'".into()]
+            &["-c".into(), "printf '2.1.286 (Claude Code)\\n'".into()]
         )
         .is_ok());
-        assert!(version_supported(
+        assert!(measured_version(
             std::ffi::OsStr::new("/bin/sh"),
-            &["-c".into(), "printf 'codex-cli 0.999.0\\n'".into()]
+            &["-c".into(), "printf '3.0.0 (Claude Code)\\n'".into()]
         )
         .is_err());
         let start = std::time::Instant::now();
-        assert!(version_supported(
+        assert!(measured_version(
             std::ffi::OsStr::new("/bin/sh"),
             &["-c".into(), "sleep 10".into()]
         )
         .is_err());
         assert!(start.elapsed() < Duration::from_secs(4));
         let start = std::time::Instant::now();
-        assert!(version_supported(
+        assert!(measured_version(
             std::ffi::OsStr::new("/bin/sh"),
             &[
                 "-c".into(),
-                "sleep 1 & printf 'codex-cli 0.159.3\\n'".into()
+                "sleep 1 & printf '2.1.286 (Claude Code)\\n'".into()
             ]
         )
         .is_ok());

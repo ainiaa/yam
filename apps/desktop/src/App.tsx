@@ -501,11 +501,9 @@ function App() {
       setSessionTitles((previous) => ({
         ...previous,
         [next.session_id]:
-          overrides?.resumeFrom ? `Continue ${next.launch?.adapter ?? "conversation"}` : !overrides && selectedAdapter !== "shell" && prompt.trim()
-            ? prompt.trim()
-            : customCommand ||
-              (overrides ? "Interactive shell" : adapter?.label) ||
-              "Interactive shell",
+          overrides?.resumeFrom ? `Continue ${next.launch?.adapter ?? "conversation"}` : next.launch?.prompt?.trim() ||
+            customCommand || adapters.find((item) => item.id === next.launch?.adapter)?.label ||
+            (!overrides ? adapter?.label : null) || "Interactive shell",
       }));
       launchDialog.current?.close();
       await openHistory({summary:next, status:next.status, exit_code:null, reason:null, started_at:Date.now()/1000, ended_at:null},true);

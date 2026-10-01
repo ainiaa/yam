@@ -5,8 +5,10 @@
 |---|---|---|
 | Codex 0.159.3 | SessionStart、UserPromptSubmit、Stop 携带可靠主 session/turn ID；连续双轮成功；Stop 续跑保持同一 turn，两次 Stop，仅最终回复触发 notify | 用主 SessionStart/Prompt 身份过滤 notify；Stop 本身不发送确定完成横幅 |
 | Codex notify | 标题生成线程也触发 agent-turn-complete；线程身份与主会话不同 | 禁止“第一次 notify 就绑定主会话”的实现 |
-| Claude Code 2.1.286 | 会话参数 --settings 的 SessionStart/Prompt Hook 执行，无 turn ID；本机正常回应未获得 | 保持普通交互终端；不宣称可靠每轮完成/resume 已验证 |
+| Claude Code 2.1.286 | 原生 prompt_id；已验证正常双轮、API 失败与真实工具执行 | 使用会话限定 Helper；Stop 提醒回复就绪，不宣称整个任务完成；升级策略见下文 |
 | 通用 CLI | 已有 PTY/退出状态/空闲提醒 | 无可信交互轮次完成证据 |
+
+## 初始探针历史（后续实测已更新 Claude 结论）
 
 探针没有使用绕过信任参数。用户明确批准后，在 Codex Hook 审核界面逐项只信任 4 个临时 capture.py 定义，未信任两个已有未审核 Hook。Claude 仅临时信任 YAM 目录。结束后删除 4 个新增 Codex session-flags trust 条目，并恢复 Claude 项目的 hasTrustDialogAccepted；CLI 自己的界面/运行 bookkeeping 更新被保留，不能声称整个全局配置逐字不变。没有改 Hook 定义、审批或沙箱策略。
 
@@ -47,3 +49,11 @@ Claude 2.1.286 新探针已确认原生 `prompt_id`；以前探针只收集 turn
 
 
 2026-10-01 后续真实验收更正：Provider 已恢复正常回复。Claude 2.1.286 持续/排队输入中 UserPromptSubmit 可能复用上一轮 prompt_id，Stop 才携带新轮次 ID；不能把前者当作每轮可靠的新 ID。编译 Helper 对 Claude 事件标记 source=claude，提交 Hook 确认活动；同一已连接原生主会话的后续权限/工具/回复就绪/失败事件用其实际 prompt_id 建立轮次。没有读延迟 transcript、生成计数器或放宽 Codex 的未知轮次规则。真实探针只保存事件名、session_id、prompt_id 和字段名，不保存用户输入或凭证。
+
+## 升级兼容与 Claude 权限验收（2026-10-01）
+
+Codex 通过只读 hooks/list 验证六类 sessionFlags Hook 已启用且配置有效，不再将支持锁定为 0.159.3。Claude 允许从已测 2.1.286 起的稳定 2.x，未知主版本/预发布仍降级，只有实际 SessionStart 才确认连接；允许升级并不等于未来版本已实测。安全 model/effort 参数保持集成，冲突配置与未知参数仍明确降级。
+
+Claude 原生审批已复现并修复重复 Notification(permission_prompt)：该事件重复 PermissionRequest 且没有工具身份，会留下不可匹配清除的 unknown。当前只订阅七类原生事件，使用 PermissionRequest/匹配 PostToolUse 追踪审批。最终真实会话 s-1a0f7b3a83e-0 仅一次 Yes：needs_permission rev3 → working rev4，权限 key 清空；最终单条 response_ready rev5。进程仍运行、两条未读分别为审批/回复，集成 connected。默认全局 Bash(*) 会自动许可，因此本次审批在仅进程 settings source/default 模式中测试；没有改全局权限或 Hook。外部导入 warning 记录已恢复，临时 wrapper 已删除。详细身份与边界见 yam-next-stage-execution.md。
+
+官方事件语义：[Claude Hooks](https://code.claude.com/docs/en/hooks)、[Codex app-server](https://learn.chatgpt.com/docs/app-server)。
