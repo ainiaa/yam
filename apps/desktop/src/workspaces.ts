@@ -64,3 +64,10 @@ export function matchesStatus(status: string, filter: string): boolean {
   if (filter === "attention") return status === "needs_attention" || status === "failed";
   return status === filter;
 }
+
+export async function selectProjectDirectory(pick: () => Promise<string | null>, validate: (path: string) => Promise<unknown>) {
+  const path = await pick();
+  if (path === null) return null;
+  await validate(path);
+  return path;
+}

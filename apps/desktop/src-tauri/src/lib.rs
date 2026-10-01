@@ -9,6 +9,14 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_deep_link::DeepLinkExt;
+
+#[cfg(any(target_os = "linux", test))]
+mod linux_notifications;
+#[cfg(target_os = "macos")]
+mod mac_notifications;
+#[cfg(any(windows, test))]
+mod windows_notifications;
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
 const MAX_SESSION_LOG_BYTES: u64 = 8 * 1024 * 1024;
@@ -474,6 +482,7 @@ pub struct SessionManager {
     sessions: Arc<Mutex<HashMap<String, Arc<Session>>>>,
     shutting_down: AtomicBool,
     shutdown_complete: AtomicBool,
+    notification_selection: Mutex<Option<String>>,
     history: Mutex<Option<Arc<HistoryStore>>>,
 }
 
@@ -483,6 +492,7 @@ impl Default for SessionManager {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             shutting_down: AtomicBool::new(false),
             shutdown_complete: AtomicBool::new(false),
+            notification_selection: Mutex::new(None),
             history: Mutex::new(None),
         }
     }
@@ -716,6 +726,17 @@ impl HistoryStore {
 }
 
 impl SessionManager {
+    fn acknowledge_selection(&self, session_id: &str) -> Result<(), String> {
+        let mut pending = self
+            .notification_selection
+            .lock()
+            .map_err(|_| "Notification selection lock poisoned".to_string())?;
+        if pending.as_deref() == Some(session_id) {
+            *pending = None;
+        }
+        Ok(())
+    }
+
     fn history(&self, app: &AppHandle) -> Result<Arc<HistoryStore>, String> {
         let mut history = self
             .history
@@ -746,6 +767,76 @@ impl HealthReport {
             status: "ready".to_string(),
         }
     }
+}
+
+fn session_id_from_link(link: &str) -> Option<String> {
+    let url = tauri::Url::parse(link).ok()?;
+    if url.scheme() != "yam"
+        || url.host_str() != Some("session")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    let id = url.path().strip_prefix('/')?;
+    if id.len() < 3
+        || id.len() > 128
+        || !id.starts_with("s-")
+        || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    {
+        return None;
+    }
+    Some(id.to_string())
+}
+
+pub(crate) fn route_notification_session(app: &AppHandle, session_id: &str) -> Result<(), String> {
+    let manager = app.state::<SessionManager>();
+    if !manager
+        .history(app)?
+        .list()?
+        .iter()
+        .any(|record| record.summary.session_id == session_id)
+    {
+        return Err("Notification refers to an unknown session".into());
+    }
+    *manager
+        .notification_selection
+        .lock()
+        .map_err(|_| "Notification selection lock poisoned".to_string())? = Some(session_id.into());
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+    app.emit("session-notification-click", session_id)
+        .map_err(|error| error.to_string())
+}
+
+pub(crate) fn route_notification_link(app: &AppHandle, link: &str) -> Result<(), String> {
+    let id = session_id_from_link(link).ok_or_else(|| "Invalid session link".to_string())?;
+    route_notification_session(app, &id)
+}
+
+#[tauri::command]
+fn pending_notification_selection(
+    manager: State<'_, SessionManager>,
+) -> Result<Option<String>, String> {
+    manager
+        .notification_selection
+        .lock()
+        .map(|id| id.clone())
+        .map_err(|_| "Notification selection lock poisoned".into())
+}
+
+#[tauri::command]
+fn acknowledge_notification_selection(
+    manager: State<'_, SessionManager>,
+    session_id: String,
+) -> Result<(), String> {
+    manager.acknowledge_selection(&session_id)
 }
 
 fn next_session_id() -> String {
@@ -1669,16 +1760,6 @@ async fn notify_session(
     session_id: String,
     title: String,
 ) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        static IDENTITY: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
-        IDENTITY
-            .get_or_init(|| {
-                notify_rust::set_application(&app.config().identifier)
-                    .map_err(|error| format!("Notification identity setup failed: {error}"))
-            })
-            .clone()?;
-    }
     if title.chars().count() > 200 {
         return Err("Notification title is too long".into());
     }
@@ -1692,44 +1773,17 @@ async fn notify_session(
         .reason
         .unwrap_or_else(|| format!("Session {}", record.status));
     tauri::async_runtime::spawn_blocking(move || {
-        let handle = notify_rust::Notification::new()
-            .summary(&title)
-            .body(&body)
-            .action("default", "Open session")
-            .timeout(10000)
-            .show()
-            .map_err(|error| format!("Notification delivery failed: {error}"))?;
-        let wait = move || {
-            handle
-                .wait_for_response(move |response: &notify_rust::NotificationResponse| {
-                    if matches!(
-                        response,
-                        notify_rust::NotificationResponse::Default
-                            | notify_rust::NotificationResponse::Action(_)
-                    ) {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.unminimize();
-                            let _ = window.set_focus();
-                        }
-                        let _ = app.emit("session-notification-click", &session_id);
-                    }
-                })
-                .map_err(|error| format!("Notification response failed: {error}"))
-        };
-        // macOS show() only constructs a handle; waiting performs delivery.
         #[cfg(target_os = "macos")]
         {
-            wait()
+            mac_notifications::send(app, session_id, title, body)
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(windows)]
         {
-            thread::spawn(move || {
-                if let Err(error) = wait() {
-                    eprintln!("{error}");
-                }
-            });
-            Ok(())
+            windows_notifications::send(app, session_id, title, body)
+        }
+        #[cfg(target_os = "linux")]
+        {
+            linux_notifications::send(app, session_id, title, body)
         }
     })
     .await
@@ -1820,6 +1874,33 @@ fn read_session_snapshot(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
+        .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(
+            tauri::plugin::Builder::<tauri::Wry, ()>::new("native-notifications")
+                .setup(|app, _| {
+                    #[cfg(target_os = "macos")]
+                    if let Err(error) = mac_notifications::init(app) {
+                        eprintln!("[YAM] {error}");
+                    }
+                    #[cfg(target_os = "linux")]
+                    if let Err(error) = linux_notifications::init(app) {
+                        eprintln!("[YAM] {error}");
+                    }
+                    #[cfg(windows)]
+                    if let Err(error) = app.deep_link().register_all() {
+                        eprintln!("[YAM] Protocol registration failed: {error}");
+                    }
+                    Ok(())
+                })
+                .build(),
+        )
         .menu(|app| {
             let menu = tauri::menu::Menu::default(app)?;
             #[cfg(target_os = "macos")]
@@ -1845,6 +1926,21 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            if let Some(urls) = app.deep_link().get_current()? {
+                for url in urls {
+                    if let Err(error) = route_notification_link(app.handle(), url.as_str()) {
+                        eprintln!("[YAM] {error}");
+                    }
+                }
+            }
+            let handle = app.handle().clone();
+            app.deep_link().on_open_url(move |event| {
+                for url in event.urls() {
+                    if let Err(error) = route_notification_link(&handle, url.as_str()) {
+                        eprintln!("[YAM] {error}");
+                    }
+                }
+            });
             if let Some(window) = app.get_webview_window("main") {
                 if let Some(monitor) = window.current_monitor()? {
                     let area = monitor.work_area();
@@ -1864,7 +1960,6 @@ pub fn run() {
         })
         .manage(SessionManager::default())
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             health_check,
             validate_project_directory,
@@ -1876,6 +1971,8 @@ pub fn run() {
             list_sessions,
             notify_session,
             acknowledge_notification,
+            pending_notification_selection,
+            acknowledge_notification_selection,
             read_session_log,
             read_session_snapshot
         ])
@@ -1921,14 +2018,38 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::io::Read;
 
     use portable_pty::{native_pty_system, PtySize};
 
     use super::{
         agent_adapters, append_log, is_terminal, next_session_id, shell_command, HealthReport,
-        HistoryStore, SessionSummary,
+        HistoryStore, SessionManager, SessionSummary,
     };
+
+    #[test]
+    fn notification_selection_survives_startup_and_stale_acknowledgement() {
+        let manager = SessionManager::default();
+        *manager.notification_selection.lock().unwrap() = Some("s-first".into());
+        assert_eq!(
+            manager.notification_selection.lock().unwrap().as_deref(),
+            Some("s-first")
+        );
+        manager.acknowledge_selection("s-other").unwrap();
+        assert_eq!(
+            manager.notification_selection.lock().unwrap().as_deref(),
+            Some("s-first")
+        );
+        *manager.notification_selection.lock().unwrap() = Some("s-newer".into());
+        manager.acknowledge_selection("s-first").unwrap();
+        assert_eq!(
+            manager.notification_selection.lock().unwrap().as_deref(),
+            Some("s-newer")
+        );
+        manager.acknowledge_selection("s-newer").unwrap();
+        assert_eq!(*manager.notification_selection.lock().unwrap(), None);
+    }
 
     #[test]
     fn health_report_identifies_yam_and_ready_state() {
@@ -2464,6 +2585,27 @@ mod tests {
     }
 
     #[test]
+    fn session_links_accept_only_named_local_sessions() {
+        assert_eq!(
+            super::session_id_from_link("yam://session/s-abc-1"),
+            Some("s-abc-1".into())
+        );
+        for link in [
+            "https://session/s-abc-1",
+            "yam://other/s-abc-1",
+            "yam://session/../etc",
+            "yam://session/s-abc-1?command=rm",
+            "yam://session/s-abc-1#fragment",
+            "yam://user@session/s-abc-1",
+            "yam://session/s-abc-1/other",
+            "yam://session/%2fetc",
+            "yam://session/",
+        ] {
+            assert_eq!(super::session_id_from_link(link), None, "{link}");
+        }
+    }
+
+    #[test]
     fn notification_receipt_survives_reopen_and_unknown_receipt_is_rejected() {
         let (root, summary) = test_history();
         let store = HistoryStore::open(root.clone()).unwrap();
@@ -2522,6 +2664,7 @@ mod tests {
             .slave
             .spawn_command(shell_command(Some("printf 'yam-m1\\n'")))
             .expect("spawn command");
+        drop(pair.slave);
         let mut reader = pair.master.try_clone_reader().expect("clone reader");
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes).expect("read PTY output");

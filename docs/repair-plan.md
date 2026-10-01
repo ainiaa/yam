@@ -90,7 +90,7 @@
 
 ## 约束与证据边界
 
-- 新依赖需用户批准，目录dialog插件等待答复。
+- 新依赖需用户批准；用户已批准必要dialog/deep-link/single-instance和平台SDK依赖及推送分支运行CI。
 - 不改变已有CLI权限、模型或安全设置；结构化任务模式保留CLI自身权限策略。
 - 交互模式的文本提示仅辅助展示，不据此宣布任务完成。
 - 本机验证macOS；Windows/Linux只能通过CI矩阵证明，未运行前不得称实机验证完成。
@@ -123,7 +123,7 @@ Windows补充：原生Job Object绑定会话进程，停止和自然退出终止
 
 最终检查：Rust33 passed；前端12 passed；Clippy -D warnings通过；前端构建和macOS调试app打包通过；cargo fmt与git diff --check通过。Vite有xterm主包超过500KiB提示，未引入额外拆分机制。三平台CI已配置，未推送/运行远端CI。
 
-尚未闭环项：目录选择插件待既有授权问题答复；Windows/Linux运行验证、操作系统通知点击实测及应用关闭后旧通知唤醒路由未完成；CodeGraph/coverage工具闸门未配置。上述项不计为已验证完成。
+首轮结束时缺口（由下方续修记录更新）：目录选择插件待既有授权问题答复；Windows/Linux运行验证、操作系统通知点击实测及应用关闭后旧通知唤醒路由未完成；CodeGraph/coverage工具闸门未配置。上述项不计为已验证完成。
 
 ## 已知缺陷闭环表
 
@@ -139,4 +139,17 @@ Windows补充：原生Job Object绑定会话进程，停止和自然退出终止
 | 旧Working提示覆盖新Waiting | 比较最新提示位置，任务模式优先协议事件；Working→Waiting回归通过 |
 | 发送失败提前计入已通知 | 成功后计入回执、失败保留重试、并发去重、终态pending持久化；队列与回执测试通过，OS点击仍待实测 |
 
-所有新增依赖中只有notify-rust直接声明已获批准，opener为已有依赖minor版本对齐。目录dialog依赖尚未加入。代码留在codex/reliability-closure工作区，未提交、未推送、未发布。
+首轮记录：当时只有notify-rust直接声明已获批准，opener为已有依赖minor版本对齐。目录dialog依赖尚未加入。代码留在codex/reliability-closure工作区，未提交、未推送、未发布。
+
+
+## 授权后续修记录（2026-10-01，进行中）
+
+用户已批准必要依赖及提交推送修复分支。首轮修复已提交2a145ba并推送；真实CI [36806784559](https://github.com/ainiaa/yam/actions/runs/36806784559) macOS通过，Windows暴露Unix测试import未按平台限定，Linux32/33测试通过但PTY fixture保留slave使read_to_end永远等EOF。旧run已取消，已修复两项并等待新head验证。
+
+已接入官方directory dialog；选择后复用后端目录校验，取消不修改目录。picker正常/取消/错误回归通过，前端13项测试和构建通过。
+
+已替换旧通知发送链路：macOS UNUserNotificationCenter持久请求+保留delegate；Windows原生protocol toast+当前用户快捷方式身份+yam协议注册；Linux兼容portal/GNOME持久action+当前用户desktop/D-Bus service启动注册。SDK与插件依赖均在授权范围内。移除不用的旧notification插件及notify-rust直接声明，避免两套权限状态冲突。
+
+冷启动通知代理在Tauri Builder.build插件初始化阶段注册，早于事件循环开始；点击目标先保存在后端，前端注册监听后再读取，成功打开后确认，旧确认不覆盖新点击。URL仅接受yam://session/s-...并核实历史记录存在，不执行URL内容。解析与暂存回执正常/边界/异常测试已补。
+
+Linux不支持退出后激活的generic freedesktop通知服务明确返回错误，保留重试。Windows/Linux CI验证编译、测试和进程清理，不等价于交互桌面通知点击实测。原生通知发送与历史回执持久化仍不是原子事务，崩溃窗口可重复。

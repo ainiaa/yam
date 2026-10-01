@@ -1,10 +1,7 @@
 import { useEffect, useRef, useState } from "react";
+import { open as openDirectoryDialog } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import {
-  isPermissionGranted,
-  requestPermission,
-} from "@tauri-apps/plugin-notification";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import {
@@ -29,6 +26,7 @@ import {
   groupProjects,
   matchesStatus,
   validateSessionTitle,
+  selectProjectDirectory,
   isProjects,
   projectKey,
   projectName,
@@ -113,7 +111,6 @@ function App() {
   const agentOutputWindow = useRef("");
   const notifications = useRef(new NotificationQueue());
   const retryNotifications = useRef(new Map<string, SessionStateEvent>());
-  const notificationSetup = useRef(false);
   const launchDialog = useRef<HTMLDialogElement>(null);
   const renameDialog = useRef<HTMLDialogElement>(null);
   const [renameTitle, setRenameTitle] = useState("");
@@ -199,7 +196,6 @@ function App() {
     retryNotifications.current.set(key, event);
     try {
       const delivered = await notifications.current.deliver(key, async () => {
-        if (!(await isPermissionGranted())) return;
         const record = (await invoke<SessionRecord[]>("list_sessions")).find(item => item.summary.session_id === event.session_id);
         const taskName = titlesRef.current[event.session_id] || record?.summary.launch?.adapter || "Session";
         const title = `${projectName(record?.summary.cwd ?? "")} · ${taskName} · ${statusLabels[event.status] ?? "Needs attention"}`.slice(0, 200);
@@ -225,15 +221,7 @@ function App() {
     }
   }
 
-  useEffect(() => {
-    if (notificationSetup.current) return;
-    notificationSetup.current = true;
-    void isPermissionGranted()
-      .then((allowed) => {
-        if (!allowed) void requestPermission();
-      })
-      .catch(() => undefined);
-  }, []);
+
 
   useEffect(() => {
     invoke<HealthReport>("health_check")
@@ -324,11 +312,30 @@ function App() {
     ] as const) void listen<{ session_id: string; data: string }>(name, event => callback(event.payload)).then(unlisten => {
       if (active) extraListeners.push(unlisten); else unlisten();
     });
-    void listen<string>("session-notification-click", async event => {
-      const records = await invoke<SessionRecord[]>("list_sessions");
-      const record = records.find(item => item.summary.session_id === event.payload);
-      if (record) await openHistory(record);
-    }).then(unlisten => { if (active) extraListeners.push(unlisten); else unlisten(); });
+    async function selectNotificationSession(id: string) {
+      try {
+        const records = await invoke<SessionRecord[]>("list_sessions");
+        if (!active) return;
+        const pending = await invoke<string | null>("pending_notification_selection");
+        if (!active || pending !== id) return;
+        const record = records.find(item => item.summary.session_id === id);
+        if (!record) throw new Error("Notification refers to an unknown session");
+        launchDialog.current?.close();
+        projectDialog.current?.close();
+        renameDialog.current?.close();
+        await openHistory(record);
+        if (active && sessionId.current === id && outputCursor.current !== null) {
+          await invoke("acknowledge_notification_selection", { sessionId: id });
+        }
+      } catch (reason) { if (active) setError(String(reason)); }
+    }
+    void listen<string>("session-notification-click", event => { void selectNotificationSession(event.payload); })
+      .then(async unlisten => {
+        if (!active) { unlisten(); return; }
+        extraListeners.push(unlisten);
+        const pending = await invoke<string | null>("pending_notification_selection");
+        if (pending && active) await selectNotificationSession(pending);
+      }).catch(reason => { if (active) setError(String(reason)); });
     let unlistenOutput: UnlistenFn | undefined;
     let unlistenState: UnlistenFn | undefined;
     let active = true;
@@ -555,6 +562,17 @@ function App() {
     setProjectPath("");
     setNewProjectName("");
     projectDialog.current?.showModal();
+  }
+
+  async function chooseDirectory(target: "launch" | "project") {
+    try {
+      const path = await selectProjectDirectory(async () => {
+        const chosen = await openDirectoryDialog({directory: true, multiple: false, title: "Choose project directory"});
+        if (Array.isArray(chosen)) throw new Error("Expected one directory");
+        return chosen;
+      }, path => invoke("validate_project_directory", {path}));
+      if (path !== null) { if (target === "launch") setCwd(path); else { setProjectPath(path); setProjectError(null); } }
+    } catch (reason) { if (target === "launch") setError(String(reason)); else setProjectError(String(reason)); }
   }
 
   async function saveProject() {
@@ -943,6 +961,7 @@ function App() {
           <div className="dialog-fields">
             <label>
               <span>Project directory</span>
+              <button className="secondary-button" type="button" onClick={() => void chooseDirectory("launch")}>Browse directory</button>
               <input
                 autoFocus
                 value={cwd}
@@ -1059,6 +1078,7 @@ function App() {
           <div className="dialog-fields">
             <label>
               <span>Directory</span>
+              <button className="secondary-button" type="button" onClick={() => void chooseDirectory("project")}>Browse directory</button>
               <input
                 required
                 autoFocus

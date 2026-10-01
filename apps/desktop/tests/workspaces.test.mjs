@@ -71,3 +71,14 @@ test('session titles trim whitespace and reject empty or oversized names', async
  assert.equal(matchesStatus('needs_attention', 'attention'), true);
  assert.equal(matchesStatus('succeeded', 'all'), true);
 });
+
+test('directory selection validates chosen paths and preserves cancellation', async () => {
+ const { selectProjectDirectory } = await import('../src/workspaces.ts');
+ const checks = [];
+ assert.equal(await selectProjectDirectory(async () => null, async p => checks.push(p)), null);
+ assert.deepEqual(checks, []);
+ assert.equal(await selectProjectDirectory(async () => '/valid/path', async p => checks.push(p)), '/valid/path');
+ assert.deepEqual(checks, ['/valid/path']);
+ await assert.rejects(selectProjectDirectory(async () => '/missing', async () => { throw Error('missing'); }));
+ await assert.rejects(selectProjectDirectory(async () => { throw Error('picker failed'); }, async () => {}));
+});
