@@ -58,6 +58,10 @@ fn read_connection(stream: &mut TcpStream, stopping: &AtomicBool) -> Result<Wire
                 if bytes.len() as u64 > MAX_WIRE_BYTES {
                     return Err("Agent event too large".into());
                 }
+                // Explicit framing avoids relying on runtimes' differing TCP half-close behavior.
+                if bytes.ends_with(b"\n") {
+                    return read_wire(bytes.as_slice());
+                }
             }
             Err(e)
                 if matches!(
@@ -247,7 +251,7 @@ fn claude_args(exe: &str) -> Result<Vec<String>, String> {
         serde_json::json!({"hooks":hooks}).to_string(),
     ])
 }
-fn credential() -> Result<String, String> {
+pub(super) fn credential() -> Result<String, String> {
     let mut bytes = [0u8; 32];
     #[cfg(unix)]
     std::fs::File::open("/dev/urandom")
@@ -380,9 +384,15 @@ impl Bridge {
                         epoch = retry.load(Ordering::Acquire);
                         queue.retry();
                     }
-                    let foreground = app
-                        .get_webview_window("main")
-                        .is_some_and(|w| w.is_focused().unwrap_or(false));
+                    let manager = app.state::<super::SessionManager>();
+                    let foreground = if manager.background_owner {
+                        manager.desktop_focus.lock().is_ok_and(|focus| {
+                            focus.1 && focus.0.elapsed() < Duration::from_secs(3)
+                        })
+                    } else {
+                        app.get_webview_window("main")
+                            .is_some_and(|w| w.is_focused().unwrap_or(false))
+                    };
                     let result = queue.tick(
                         &history,
                         started.elapsed().as_millis().min(u64::MAX as u128) as u64,
@@ -830,8 +840,65 @@ fn compatible_claude_version(output: &str) -> bool {
     // from the measured exec-form baseline, and confirm connection via SessionStart.
     numbers.is_some_and(|v| v[0] == 2 && (v[1], v[2]) >= (1, 286))
 }
-fn validate_interactive_args(adapter: &str, args: &[String]) -> Result<(), String> {
-    let (values, flags): (&[&str], &[&str]) = if adapter == "claude" {
+fn compatible_opencode_version(output: &str) -> bool {
+    let parts: Vec<_> = output.split('.').collect();
+    if parts.len() != 3
+        || parts
+            .iter()
+            .any(|p| p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return false;
+    }
+    let values: Option<Vec<u64>> = parts.iter().map(|p| p.parse().ok()).collect();
+    // ponytail: OpenCode has no plugin capability query; confirm native message/event binding at launch.
+    values.is_some_and(|v| v[0] == 1 && (v[1], v[2]) >= (18, 34))
+}
+fn opencode_config(original: Option<&str>, plugin: &str) -> Result<String, String> {
+    let mut value: serde_json::Value =
+        serde_json::from_str(original.filter(|s| !s.is_empty()).unwrap_or("{}"))
+            .map_err(|_| "Existing OpenCode inline configuration cannot be safely merged")?;
+    let object = value
+        .as_object_mut()
+        .ok_or("OpenCode inline configuration must be an object")?;
+    let plugins = object
+        .entry("plugin")
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+        .ok_or("Existing OpenCode plugin list is invalid")?;
+    plugins.push(serde_json::json!(plugin));
+    serde_json::to_string(&value).map_err(|e| e.to_string())
+}
+fn opencode_plugin(assets: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let directory = assets.join("helpers");
+    std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    include_bytes!("opencode-plugin.mjs").hash(&mut hash);
+    let path = directory.join(format!("opencode-{:016x}.mjs", hash.finish()));
+    let source = include_bytes!("opencode-plugin.mjs");
+    if !path.try_exists().map_err(|e| e.to_string())? {
+        if let Err(error) = super::session_logs::write_export(&path, source) {
+            if !path.try_exists().map_err(|e| e.to_string())? {
+                return Err(format!("Cannot store YAM plugin: {error}"));
+            }
+        }
+    }
+    let mut bytes = vec![];
+    std::fs::File::open(&path)
+        .map_err(|e| e.to_string())?
+        .take(source.len() as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes != source {
+        return Err("Existing YAM OpenCode plugin differs; integration was not injected".into());
+    }
+    Ok(path)
+}
+
+pub(super) fn validate_interactive_args(adapter: &str, args: &[String]) -> Result<(), String> {
+    let (values, flags): (&[&str], &[&str]) = if adapter == "opencode" {
+        (&["--model", "-m", "--agent"], &[])
+    } else if adapter == "claude" {
         (
             &[
                 "--model",
@@ -899,6 +966,13 @@ fn measured_version(
     program: &std::ffi::OsStr,
     prefix: &[std::ffi::OsString],
 ) -> Result<(), String> {
+    measured_version_checked(program, prefix, compatible_claude_version)
+}
+fn measured_version_checked(
+    program: &std::ffi::OsStr,
+    prefix: &[std::ffi::OsString],
+    compatible: fn(&str) -> bool,
+) -> Result<(), String> {
     let mut command = std::process::Command::new(program);
     command
         .args(prefix)
@@ -946,9 +1020,7 @@ fn measured_version(
                 {
                     break Err("Cannot read agent version".into());
                 }
-                break if bytes.len() <= 4096
-                    && compatible_claude_version(String::from_utf8_lossy(&bytes).trim())
-                {
+                break if bytes.len() <= 4096 && compatible(String::from_utf8_lossy(&bytes).trim()) {
                     Ok(())
                 } else {
                     Err("This CLI version has not passed YAM hook compatibility checks".into())
@@ -1042,12 +1114,43 @@ pub(super) struct Prepared {
     pub(super) generation: String,
     args: Vec<String>,
     original: Vec<String>,
+    opencode: Option<String>,
 }
 pub(super) fn prepare(
     executable: &std::path::Path,
     launch: &super::AgentLaunch,
     cwd: &std::path::Path,
+    assets: &std::path::Path,
 ) -> Result<Prepared, String> {
+    if launch.adapter == "opencode" && launch.mode == "interactive" {
+        validate_interactive_args("opencode", &super::parse_agent_args(&launch.extra_args)?)?;
+        let plain = super::AgentLaunch {
+            prompt: None,
+            extra_args: String::new(),
+            ..launch.clone()
+        };
+        let command = super::agent_command(executable, &plain)?;
+        let argv = command.get_argv();
+        measured_version_checked(&argv[0], &argv[1..], compatible_opencode_version)?;
+        let path = opencode_plugin(assets)?;
+        let url = tauri::Url::from_file_path(&path).map_err(|_| "Invalid YAM plugin path")?;
+        let original = std::env::var("OPENCODE_CONFIG_CONTENT")
+            .map_err(|_| "OpenCode configuration is not UTF-8")
+            .or_else(|e| {
+                if std::env::var_os("OPENCODE_CONFIG_CONTENT").is_none() {
+                    Ok(String::new())
+                } else {
+                    Err(e)
+                }
+            })?;
+        return Ok(Prepared {
+            token: credential()?,
+            generation: credential()?,
+            args: vec![],
+            original: vec![],
+            opencode: Some(opencode_config(Some(&original), url.as_str())?),
+        });
+    }
     if launch.adapter == "claude" && launch.mode == "interactive" {
         validate_interactive_args("claude", &super::parse_agent_args(&launch.extra_args)?)?;
         let plain = super::AgentLaunch {
@@ -1064,6 +1167,7 @@ pub(super) fn prepare(
             generation: credential()?,
             args: claude_args(exe.to_str().ok_or("Helper executable path is not UTF-8")?)?,
             original: vec![],
+            opencode: None,
         });
     }
     if launch.adapter != "codex" || launch.mode != "interactive" {
@@ -1101,6 +1205,7 @@ pub(super) fn prepare(
         generation: credential()?,
         args,
         original,
+        opencode: None,
     })
 }
 impl Prepared {
@@ -1109,6 +1214,9 @@ impl Prepared {
         builder: &mut portable_pty::CommandBuilder,
         address: SocketAddr,
     ) -> Result<(), String> {
+        if let Some(config) = &self.opencode {
+            builder.env("OPENCODE_CONFIG_CONTENT", config);
+        }
         let index = builder
             .get_argv()
             .iter()
@@ -1132,6 +1240,69 @@ mod tests {
     fn valid_wire() -> Vec<u8> {
         br#"{"version":1,"token":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","event":{"kind":"SessionStart","agent_session_id":"main","turn_id":null}}"#.to_vec()
     }
+    #[test]
+    fn framed_events_are_acknowledged_without_waiting_for_a_half_close() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let result = read_connection(&mut stream, &AtomicBool::new(false));
+            assert!(
+                result.is_ok(),
+                "a newline frame must not wait for socket EOF"
+            );
+            stream.write_all(b"ack").unwrap();
+        });
+        let mut client = TcpStream::connect(address).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        client.write_all(&valid_wire()).unwrap();
+        client.write_all(b"\n").unwrap();
+        let mut reply = vec![];
+        client.read_to_end(&mut reply).unwrap();
+        worker.join().unwrap();
+        assert_eq!(reply, b"ack");
+    }
+
+    #[test]
+    fn opencode_config_append_preserves_every_existing_field_and_validates_plugins() {
+        let original = serde_json::json!({"model":"existing","permission":{"bash":"ask"},"plugin":["existing",["module",{"option":true}]]});
+        let next: serde_json::Value = serde_json::from_str(
+            &opencode_config(Some(&original.to_string()), "file:///YAM%20plugin.mjs").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(next["model"], original["model"]);
+        assert_eq!(next["permission"], original["permission"]);
+        assert_eq!(next["plugin"][0], original["plugin"][0]);
+        assert_eq!(next["plugin"][1], original["plugin"][1]);
+        assert_eq!(next["plugin"][2], "file:///YAM%20plugin.mjs");
+        for invalid in ["not JSON", "[]", "{\"plugin\":false}"] {
+            assert!(opencode_config(Some(invalid), "file:///x").is_err());
+        }
+        for version in ["1.18.34", "1.18.35", "1.19.0"] {
+            assert!(compatible_opencode_version(version));
+        }
+        for version in ["1.18.33", "2.0.0", "1.18.34-beta", "nonsense"] {
+            assert!(!compatible_opencode_version(version));
+        }
+        assert!(validate_interactive_args(
+            "opencode",
+            &["--model".into(), "provider/model".into()]
+        )
+        .is_ok());
+        for flag in [
+            "--session",
+            "--continue",
+            "--port",
+            "--hostname",
+            "--auto",
+            "--pure",
+        ] {
+            assert!(validate_interactive_args("opencode", &[flag.into()]).is_err());
+        }
+    }
+
     #[test]
     fn resume_metadata_rejects_missing_moved_or_different_provider_threads() {
         let root = std::env::temp_dir();
@@ -1297,6 +1468,7 @@ mod tests {
             generation: credential().unwrap(),
             args: vec!["-c".into(), "notify=[]".into()],
             original: vec!["existing".into(), "literal ' 中文".into()],
+            opencode: None,
         };
         let mut command = portable_pty::CommandBuilder::new("codex");
         command.args(["--model", "model", "--", "literal $(touch ignored) 中文"]);
@@ -1728,6 +1900,7 @@ mod tests {
             let error = prepare(
                 std::path::Path::new("/no/such/cli"),
                 &launch,
+                std::path::Path::new("/tmp"),
                 std::path::Path::new("/tmp"),
             )
             .err()

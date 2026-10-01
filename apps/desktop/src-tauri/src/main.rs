@@ -5,5 +5,8 @@ fn main() {
     if yam_desktop_lib::agent_helper_entry() {
         return;
     }
+    if yam_desktop_lib::background_entry() {
+        return;
+    }
     yam_desktop_lib::run()
 }

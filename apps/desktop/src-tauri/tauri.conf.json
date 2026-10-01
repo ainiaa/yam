@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.yam.desktop",
   "build": {
-    "beforeDevCommand": "pnpm dev",
+    "beforeDevCommand": "pnpm build:terminal && pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm build",
+    "beforeBuildCommand": "pnpm build && pnpm build:terminal",
     "frontendDist": "../dist"
   },
   "app": {
@@ -36,8 +36,12 @@
       "icons/icon.ico"
     ],
     "macOS": {
-      "minimumSystemVersion": "10.14"
-    }
+      "minimumSystemVersion": "13.5"
+    },
+    "resources": [
+      "target/terminal-runtime/yam-terminal",
+      "target/terminal-runtime/THIRD-PARTY-NOTICES.txt"
+    ]
   },
   "plugins": {
     "deep-link": {

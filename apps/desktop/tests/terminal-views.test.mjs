@@ -37,17 +37,18 @@ test('invalid limits and failed creation cannot consume capacity',()=>{
 
 import ts from 'typescript';
 import {readFileSync} from 'node:fs';
+import {applyTerminalFrame,validateTerminalFrame} from '../src/terminal-frame.ts';
 const source=ts.createSourceFile('App.tsx',readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
-let code;
-function find(node){if(ts.isFunctionDeclaration(node)&&node.name?.text==='openHistory')code=node.getText(source);ts.forEachChild(node,find)}
+let code,renderCode;
+function find(node){if(ts.isFunctionDeclaration(node)&&node.name?.text==='openHistory')code=node.getText(source);if(ts.isFunctionDeclaration(node)&&node.name?.text==='renderFrame')renderCode=node.getText(source);ts.forEachChild(node,find)}
 find(source);
-const js=ts.transpileModule(code,{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText;
-function harness(invoke, delayWrite=false){
- const refs={previousSession:{current:null},creatingSession:{current:false},selectionVersion:{current:0},sessionId:{current:null},selectedRecord:{current:null},outputCursor:{current:null},terminal:{current:null},fitAddon:{current:null},agentOutputWindow:{current:''},pendingOutput:{current:{drain:()=>[]}},pendingState:{current:new Map()},terminalViews:{current:new TerminalViews(2)}};
+const js=ts.transpileModule(renderCode+'\n'+code,{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText;
+function harness(invoke, delayWrite=false, fullFrame=()=>Promise.resolve(null)){
+ const refs={previousSession:{current:null},creatingSession:{current:false},selectionVersion:{current:0},sessionId:{current:null},selectedRecord:{current:null},outputCursor:{current:null},terminal:{current:null},fitAddon:{current:null},agentOutputWindow:{current:''},pendingOutput:{current:{drain:()=>[],delete(){}}},pendingState:{current:new Map()},terminalViews:{current:new TerminalViews(2)}};
  let resets=0,focus=0;const frames=[],writes=[];
- const make=()=>{const element={style:{},inert:true};return {instance:{reset(){resets++},write(_s,done){if(delayWrite)writes.push(done);else done?.()},focus(){if(!element.inert)focus++},cols:100,rows:30},fit:{fit(){}},element,cursor:null,ready:false,dispose(){}}};
+ const make=()=>{const element={style:{},inert:true};return {instance:{_core:{_inputHandler:{_activeBuffer:{x:0}}},resize(cols,rows){this.cols=cols;this.rows=rows;},scrollToLine(){},reset(){resets++},write(_s,done){if(delayWrite)writes.push(done);else done?.()},focus(){if(!element.inert)focus++},cols:100,rows:30},fit:{fit(){}},element,cursor:null,ready:false,dispose(){}}};
  refs.terminal.current=make().instance;refs.fitAddon.current=make().fit;
- const args={...refs,invoke,createTerminalView:make,setSession(){},setActiveProject(){},setSessionStatus(){},setTerminalNotice(){},setAgentPhase(){},updateAgentPhase(){},setError(){},document:{activeElement:{}},terminalStatuses:new Set(['succeeded','failed','stopped']),replayOutput:(s)=>({data:s.data,nextOffset:s.end_offset}),requestAnimationFrame:fn=>frames.push(fn),applyStateEvent(){}};
+ const args={...refs,invoke:(command,args)=>command==='read_terminal_frame'?fullFrame(args):invoke(command,args),applyTerminalFrame,validateTerminalFrame,createTerminalView:make,setSession(){},setActiveProject(){},setSessionStatus(){},setTerminalNotice(){},setAgentPhase(){},updateAgentPhase(){},setError(){},document:{activeElement:{}},terminalStatuses:new Set(['succeeded','failed','stopped']),replayOutput:(s)=>({data:s.data,nextOffset:s.end_offset}),requestAnimationFrame:fn=>frames.push(fn),applyStateEvent(){}};
  const open=new Function(...Object.keys(args),js+';return openHistory')(...Object.values(args));
  return {open,refs,frames,writes,document:args.document,get resets(){return resets},get focus(){return focus}};
 }
@@ -65,9 +66,9 @@ test('actual selection coordinator warm-switches without replay/reset and preser
 });
 test('slow snapshot from old selection cannot write into the newly selected terminal',async()=>{
  let release;
- const h=harness(async(_command,args)=>args.sessionId==='a'?new Promise(r=>release=r):({data:'B',offset:0,end_offset:1}));
+ const h=harness(async()=>({data:'B',offset:0,end_offset:1}),false,args=>args.sessionId==='a'?new Promise(r=>release=r):Promise.resolve(null));
  const first=h.open(record('a'));await h.open(record('b'));const b=h.refs.terminal.current;
- release({data:'A',offset:0,end_offset:1});await first;
+ release(null);await first;
  assert.equal(h.refs.terminal.current,b);assert.equal(h.refs.sessionId.current,'b');assert.equal(h.resets,1);
  for(const frame of h.frames)frame();assert.equal(h.focus,1);
 });
@@ -138,7 +139,7 @@ test('newer buffered lifecycle wins over an old running snapshot and releases ca
  let release;const h=harness(async()=>new Promise(resolve=>release=resolve));h.refs.terminalViews.current=new TerminalViews(1);
  const loading=h.open(record('a'));const view=h.refs.terminalViews.current.get('a');
  h.refs.pendingState.current.set('a',{session_id:'a',status:'stopped'});view.live=false;h.refs.terminalViews.current.setRunning('a',false);
- release({data:'A',offset:0,end_offset:1,status:'running'});await loading;
+ await new Promise(setImmediate);release({data:'A',offset:0,end_offset:1,status:'running'});await loading;
  assert.equal(view.live,false);assert.equal(h.refs.terminalViews.current.canOpen,true);
 });
 test('warm selection cannot revive a stopped view from stale history',async()=>{
@@ -252,4 +253,19 @@ test('rerun titles use the actual agent and prompt instead of the open dialog se
   const start=new Function(...Object.keys(args),startJs+';return startSession')(...Object.values(args));
   await start({cwd:'/repo',command:'',launch});assert.equal(titles.new,expected);
  }
+});
+
+const full=id=>({projection:{version:1,instance:'a'.repeat(64),session:id,terminal_version:'6.0.0',serialize_version:'0.14.0',revision:4,data:'FULL',cols:20,rows:8,cursorX:20,viewport:0,buffer:'normal'},end_offset:42,status:'running'});
+test('actual coordinator restores a full scene without reading a log or answering its old protocol',async()=>{
+ const h=harness(async command=>{if(command==='read_session_snapshot')throw Error('log replay is forbidden for a full scene');return null;},false,async args=>full(args.sessionId));
+ await h.open(record('a'));const view=h.refs.terminalViews.current.get('a');
+ assert.equal(view.projection,true);assert.equal(view.instance.cols,20);assert.equal(view.instance.rows,8);assert.equal(view.instance._core._inputHandler._activeBuffer.x,20);assert.equal(view.cursor,42);assert.equal(view.notice,null);
+ await h.open(record('a'));assert.equal(h.resets,1);
+});
+test('a late running projection cannot revive a newer stopped lifecycle',async()=>{
+ let release;const h=harness(async()=>null,false,()=>new Promise(resolve=>release=resolve));
+ const loading=h.open(record('a'));const view=h.refs.terminalViews.current.get('a');
+ view.lifecycleRevision=1;view.status='stopped';view.live=false;
+ release(full('a'));await loading;
+ assert.equal(view.live,false);assert.equal(view.status,'stopped');
 });

@@ -23,6 +23,7 @@ import {
   Pencil,
   Bell,
   BellOff,
+  LogOut,
 } from "lucide-react";
 import {
   groupProjects,
@@ -37,6 +38,9 @@ import {
 } from "./workspaces";
 import { OutputBuffer, consumeOutput, replayOutput, type OutputChunk, type LogSnapshot } from "./session-stream";
 import { TerminalViews } from "./terminal-views";
+import {applyTerminalFrame,validateTerminalFrame,type TerminalFrame} from "./terminal-frame";
+import { SessionLogSearch } from "./SessionLogSearch";
+import { SessionLogExport } from "./SessionLogExport";
 import {agentLabel,unreadCount,nextAttention,defaultShortcuts,isShortcuts,shortcutAction,isLaunchMode,type Shortcuts,type AgentState,type AgentReceipt} from "./agent-events";
 import { NotificationQueue, inferAgentPhase, discardAttentionRetries, terminalStatuses } from "./notifications";
 import "@xterm/xterm/css/xterm.css";
@@ -86,7 +90,7 @@ type SessionStateEvent = {
   reason: string | null;
 };
 
-type TerminalView = { instance: Terminal; fit: FitAddon; element: HTMLDivElement; cursor: number | null; ready: boolean; replayVersion:number; firstAttachment:boolean; parsing:Promise<void>|null; finishReplay:(()=>void)|null; live: boolean; status:string|null; notice: string | null; dispose(): void };
+type TerminalView = { instance: Terminal; fit: FitAddon; element: HTMLDivElement; cursor: number | null; ready: boolean; replayVersion:number; firstAttachment:boolean; parsing:Promise<void>|null; finishReplay:(()=>void)|null; live: boolean; status:string|null; notice: string | null; projection:boolean; frameRevision:number; frameInstance:string|null; dirty:boolean; updating:boolean; selecting:boolean; lifecycleRevision:number; projecting:boolean; viewportRevision:number; dispose(): void };
 
 type AgentPhase = "idle" | "working" | "waiting";
 
@@ -142,6 +146,8 @@ function App() {
   const [starting, setStarting] = useState(false);
   const [history, setHistory] = useState<SessionRecord[]>([]);
   const [historyQuery, setHistoryQuery] = useState("");
+  const [logSearchOpen,setLogSearchOpen]=useState(false);
+  const [logExportOpen,setLogExportOpen]=useState(false);
   const [inboxOpen,setInboxOpen]=useState(false);
   const [shortcuts,setShortcuts]=useState<Shortcuts>(()=>readPreference("yam.shortcuts",defaultShortcuts,isShortcuts));
   const [notificationsPaused,setNotificationsPaused]=useState(()=>readPreference("yam.notificationsPaused",false,(value):value is boolean=>typeof value==="boolean"));
@@ -181,6 +187,10 @@ function App() {
     try {localStorage.setItem("yam.launchMode",JSON.stringify(launchMode));localStorage.setItem("yam.shortcuts",JSON.stringify(shortcuts));}
     catch(reason){setError(`Failed to save session preferences: ${String(reason)}`);}
   },[launchMode,shortcuts]);
+
+  useEffect(()=>{
+    if(session?.session_id) {try{localStorage.setItem("yam.lastSession",JSON.stringify(session.session_id));}catch(reason){setError(`Failed to save last session: ${String(reason)}`);}}
+  },[session?.session_id]);
 
   useEffect(()=>{
     try {localStorage.setItem("yam.notificationsPaused",JSON.stringify(notificationsPaused));}
@@ -321,13 +331,23 @@ function App() {
       try { instance.loadAddon(fit); instance.open(element); }
       catch (reason) { instance.dispose(); element.remove(); throw reason; }
       const view: TerminalView = {
-        instance, fit, element, cursor: null, ready:false, replayVersion:0, firstAttachment:false, parsing:null, finishReplay:null, live:false, status:null, notice:null,
-        dispose() { view.finishReplay?.(); onData.dispose(); instance.dispose(); element.remove(); },
+        instance, fit, element, cursor: null, ready:false, replayVersion:0, firstAttachment:false, parsing:null, finishReplay:null, live:false, status:null, notice:null, projection:false, frameRevision:-1, frameInstance:null,dirty:true,updating:false,selecting:false,lifecycleRevision:0,projecting:false,viewportRevision:0,
+        dispose() { view.finishReplay?.(); onData.dispose(); onScroll.dispose(); instance.dispose(); element.remove(); },
       };
       const onData = instance.onData(data => {
-        if (view.cursor !== null && (view.ready || view.firstAttachment) && view.live)
+        if (view.live && (view.projection || (view.cursor !== null && (view.ready || view.firstAttachment))))
           void invoke("write_session", { sessionId:id, data }).catch(reason => setError(String(reason)));
       });
+      const onScroll=instance.onScroll(line=>{
+        if(view.projection && view.live && !view.projecting){
+          view.viewportRevision++;
+          void invoke("set_terminal_viewport",{sessionId:id,line}).then(()=>{view.dirty=true;}).catch(reason=>setError(String(reason)));
+        }
+      });
+      element.addEventListener("pointerdown",()=>{view.selecting=view.instance.modes.mouseTrackingMode === "none";});
+      const finishSelection=()=>{view.selecting=false;};
+      window.addEventListener("pointerup",finishSelection);
+      const originalDispose=view.dispose;view.dispose=()=>{window.removeEventListener("pointerup",finishSelection);originalDispose();};
       element.style.visibility = "hidden";
       element.inert = true;
       return view;
@@ -337,13 +357,24 @@ function App() {
         view.fit.fit();
         // Hidden views keep the same measurable layout as the visible view.
         if (view.instance.cols > 0 && view.instance.rows > 0 && view.cursor !== null)
-          void invoke("resize_session", { sessionId:view.element.dataset.sessionId, cols:view.instance.cols, rows:view.instance.rows }).catch(() => undefined);
+          void invoke("resize_session", { sessionId:view.element.dataset.sessionId, cols:view.instance.cols, rows:view.instance.rows }).then(()=>{view.dirty=true;}).catch(() => undefined);
       }
     };
     window.addEventListener("resize", resize);
     const observer = new ResizeObserver(resize);
     observer.observe(terminalHost.current);
 
+    const frameTimer=window.setInterval(()=>{
+      const id=sessionId.current,view=id?terminalViews.current.get(id):undefined;
+      if(!id || !view?.projection || !view.dirty || view.updating || view.selecting || view.instance.hasSelection() || document.hidden) return;
+      view.updating=true;view.dirty=false;
+      const lifecycleRevision=view.lifecycleRevision,viewportRevision=view.viewportRevision;
+      void invoke<TerminalFrame|null>("read_terminal_frame",{sessionId:id}).then(async frame=>{
+        if(!active || !frame || sessionId.current!==id) return;
+        if(view.viewportRevision!==viewportRevision){view.dirty=true;return;}
+        await renderFrame(view,id,frame,lifecycleRevision);
+      }).catch(reason=>{if(active) setError(String(reason));}).finally(()=>{view.updating=false;});
+    },100);
     const extraListeners: UnlistenFn[] = [];
     const retryTimer = window.setInterval(() => {
       for (const event of retryNotifications.current.values()) void notifySession(event);
@@ -361,6 +392,17 @@ function App() {
     ] as const) void listen<{ session_id: string; data: string }>(name, event => callback(event.payload)).then(unlisten => {
       if (active) extraListeners.push(unlisten); else unlisten();
     });
+    void listen("background-gap", () => {
+      for (const view of terminalViews.current.all) {
+        view.cursor = null; view.ready = false; view.firstAttachment = false;
+      }
+      outputCursor.current = null;
+      pendingOutput.current.clear();
+      for (const view of terminalViews.current.all) view.dirty=true;
+      setError("Background event buffer exceeded its limit. Reloading the latest terminal state.");
+      void refreshHistory();
+      if (selectedRecord.current) void openHistory(selectedRecord.current);
+    }).then(unlisten => { if (active) extraListeners.push(unlisten); else unlisten(); });
     async function selectNotificationSession(id: string) {
       try {
         const records = await invoke<SessionRecord[]>("list_sessions");
@@ -384,6 +426,10 @@ function App() {
         extraListeners.push(unlisten);
         const pending = await invoke<string | null>("pending_notification_selection");
         if (pending && active) await selectNotificationSession(pending);
+        else if(active && !sessionId.current){
+          const last=readPreference<string|null>("yam.lastSession",null,(value):value is string|null=>typeof value==="string" && /^s-[a-zA-Z0-9-]{1,126}$/.test(value));
+          if(last){const records=await invoke<SessionRecord[]>("list_sessions");const record=records.find(r=>r.summary.session_id===last);if(record && active && !sessionId.current) await openHistory(record);}
+        }
       }).catch(reason => { if (active) setError(String(reason)); });
     let unlistenOutput: UnlistenFn | undefined;
     let unlistenState: UnlistenFn | undefined;
@@ -391,6 +437,7 @@ function App() {
     void listen<SessionOutput>("session-output", (event) => {
       if (!active) return;
       const view = terminalViews.current.get(event.payload.session_id);
+      if(view?.projection){view.dirty=true;if(event.payload.session_id===sessionId.current) updateAgentPhase(event.payload.data);return;}
       if (view && view.cursor !== null) {
         try {
           const next = consumeOutput(view.cursor, event.payload);
@@ -420,7 +467,7 @@ function App() {
       const live = ["starting", "running"].includes(event.payload.status);
       terminalViews.current.setRunning(event.payload.session_id, live);
       const view = terminalViews.current.get(event.payload.session_id);
-      if (view) { view.live = live; view.status = event.payload.status; }
+      if (view) { view.live = live; view.status = event.payload.status; view.dirty=true; view.lifecycleRevision++; }
       void notifySession(event.payload);
       void refreshHistory();
       if (terminalStatuses.has(event.payload.status) && event.payload.session_id !== sessionId.current)
@@ -439,6 +486,7 @@ function App() {
     return () => {
       active = false;
       window.clearInterval(retryTimer);
+      window.clearInterval(frameTimer);
       extraListeners.forEach(unlisten => unlisten());
       createView.current = null;
       window.removeEventListener("resize", resize);
@@ -458,7 +506,7 @@ function App() {
     if (selectedRecord.current?.summary.session_id === event.session_id) {
       selectedRecord.current = { ...selectedRecord.current, status:event.status, exit_code:event.exit_code, reason:event.reason };
     }
-    if (event.status !== "starting" && event.status !== "running") {
+    if (!terminalViews.current.get(event.session_id)?.projection && event.status !== "starting" && event.status !== "running") {
       instance.writeln(
         `\r\n[${statusLabels[event.status] ?? event.status}] ${event.reason ?? ""}`,
       );
@@ -534,6 +582,25 @@ function App() {
     return view;
   }
 
+  async function renderFrame(view:TerminalView,id:string,frame:TerminalFrame,lifecycleRevision:number) {
+    validateTerminalFrame(frame,id);
+    if(view.frameInstance && view.live && frame.projection.instance!==view.frameInstance) throw Error("The terminal owner changed; the previous live state is unavailable.");
+    while(view.parsing) await view.parsing;
+    if(view.frameInstance===frame.projection.instance && frame.projection.revision<view.frameRevision) return;
+    view.projection=true;
+    if(frame.projection.revision!==view.frameRevision || view.frameInstance!==frame.projection.instance || !view.ready) {
+      view.projecting=true;
+      const parsing=view.parsing=applyTerminalFrame(view.instance,frame,id);
+      try{await parsing;}finally{view.projecting=false;if(view.parsing===parsing)view.parsing=null;}
+      view.frameRevision=frame.projection.revision;view.frameInstance=frame.projection.instance;
+    }
+    view.cursor=frame.end_offset;view.ready=true;view.firstAttachment=false;
+    if(view.lifecycleRevision===lifecycleRevision){view.status=frame.status;view.live=["starting","running"].includes(frame.status);}
+    view.element.inert=sessionId.current!==id;
+    view.notice=view.live?null:"Saved terminal scene. The process has ended; input is disabled.";
+    terminalViews.current.setRunning(id,view.live);
+    if(sessionId.current===id){outputCursor.current=view.cursor;setSessionStatus(view.status??frame.status);setTerminalNotice(view.notice);}
+  }
   async function openHistory(record: SessionRecord, firstAttachment=false) {
     const focusOrigin = document.activeElement;
     const id = record.summary.session_id;
@@ -567,6 +634,11 @@ function App() {
     setAgentPhase("idle");
     agentOutputWindow.current = "";
     try {
+      view.lifecycleRevision??=0;
+      const lifecycleRevision=view.lifecycleRevision;
+      const frame=await invoke<TerminalFrame|null>("read_terminal_frame",{sessionId:id});
+      if(version!==selectionVersion.current) return;
+      if(frame){view.dirty=false;await renderFrame(view,id,frame,lifecycleRevision);pendingOutput.current.delete(id);}
       let replay: ReturnType<typeof replayOutput> | null = null;
       if (view.cursor === null) {
         const replayVersion = view.replayVersion = (view.replayVersion ?? 0) + 1;
@@ -629,7 +701,7 @@ function App() {
         if (document.activeElement === focusOrigin || (focusOrigin?.isConnected === false && document.activeElement === document.body)) terminal.current?.focus();
         if (terminal.current && !terminalStatuses.has(selectedRecord.current?.status ?? record.status)) {
           void invoke("resize_session", { sessionId:id, cols:terminal.current.cols, rows:terminal.current.rows })
-            .catch((reason: unknown) => setError(String(reason)));
+            .then(()=>{view.dirty=true;}).catch((reason: unknown) => setError(String(reason)));
         }
       });
     } catch (reason: unknown) {
@@ -754,6 +826,8 @@ function App() {
 
   return (
     <div className={`app-shell ${sidebarOpen ? "" : "sidebar-collapsed"}`}>
+      {logSearchOpen&&<SessionLogSearch sessions={history.map(record=>({id:record.summary.session_id,title:titleFor(record.summary),cwd:record.summary.cwd}))} selected={session?.session_id??null} onClose={()=>setLogSearchOpen(false)} onSelect={async id=>{const record=history.find(record=>record.summary.session_id===id);if(record)await openHistory(record);else throw Error("Session no longer available");}}/>}
+      {logExportOpen&&session&&<SessionLogExport sessionId={session.session_id} title={titleFor(session)} onClose={()=>setLogExportOpen(false)}/>}
       <aside
         className="sidebar"
         aria-label="Projects and sessions"
@@ -973,8 +1047,12 @@ function App() {
             )}
           </div>
           <div className="toolbar">
+            <button type="button" className="icon-button" title="Stop all tasks and quit YAM" aria-label="Stop all tasks and quit YAM" onClick={()=>void invoke("stop_all_and_quit").catch(reason=>setError(String(reason)))}><LogOut/></button>
+            <button className="icon-button" aria-label="Export session log" title="Export session log" disabled={!session} onClick={()=>setLogExportOpen(true)}><Copy/></button>
+            <button className="icon-button" aria-label="Search session logs" title="Search session logs" onClick={()=>setLogSearchOpen(true)}><Search/></button>
             {session?.launch?.mode==="interactive" && <span className="round-status" role="status" title="Last confirmed CLI event; missing hooks can leave this status stale.">{agentLabel(currentAgent,sessionStatus)}</span>}
             <button type="button" className="icon-button" aria-pressed={notificationsPaused} aria-label={notificationsPaused?"Resume notifications":"Pause notifications"} title={notificationsPaused?"Resume notifications":"Pause notifications"} onClick={()=>setNotificationsPaused(value=>!value)}>{notificationsPaused?<BellOff/>:<Bell/>}</button>
+            {isRunning && session && <button type="button" title="Take terminal input control from another connected window" onClick={()=>void invoke("take_terminal_control",{sessionId:session.session_id}).then(()=>{setError(null);terminal.current?.focus();}).catch(reason=>setError(String(reason)))}>Take control</button>}
             {history.some(record=>record.agent?.inbox.some(entry=>entry.delivery==="failed")) && <button type="button" className="icon-button" aria-label="Retry round notifications" title="Retry round notifications" onClick={()=>void invoke("retry_agent_notifications").catch(reason=>setError(String(reason)))}><RotateCcw/></button>}
             {session && (
               <span
@@ -1002,7 +1080,7 @@ function App() {
             >
               <RotateCcw />
             </button>
-            {session?.launch?.mode==='interactive' && <button type="button" className="icon-button" aria-label="Continue conversation" title="Continue original Codex conversation (new process)" disabled={isRunning||starting||session.launch.adapter!=='codex'||!currentAgent?.agent_session_id} onClick={resumeSelectedSession}><Play/></button>}
+            {session?.launch?.mode==='interactive' && <button type="button" className="icon-button" aria-label="Continue conversation" title="Continue original Agent conversation (new process)" disabled={isRunning||starting||!['codex','claude'].includes(session.launch.adapter)||!currentAgent?.agent_session_id} onClick={resumeSelectedSession}><Play/></button>}
             <button className="icon-button" aria-label="Rename session" title="Rename session" disabled={!session}
               onClick={() => { if (session) { setRenameTitle(titleFor(session)); setRenameError(null); renameDialog.current?.showModal(); } }}><Pencil /></button>
             <button
@@ -1190,7 +1268,7 @@ function App() {
                   <option value="task">Run one task · reports completion</option>
                   <option value="interactive">Continuous conversation</option>
                 </select>
-                <small>{launchMode==='task'?"Reports when the command exits; each launch starts a new task.":selectedAdapter==='codex'?"Round reminders require supported CLI hooks and trust. If unavailable, only exit / idle reminders are supported.":selectedAdapter==='claude'?"Supported Claude hooks report reply readiness, permission requests and API failures. A ready reply may still be followed by hook continuation.":"Round integration is unavailable for this adapter; only exit / idle reminders are supported."}</small>
+                <small>{launchMode==='task'?"Reports when the command exits; each launch starts a new task.":selectedAdapter==='codex'?"Round reminders require supported CLI hooks and trust. If unavailable, only exit / idle reminders are supported.":selectedAdapter==='claude'?"Supported Claude hooks report reply readiness, permission requests and API failures. A ready reply may still be followed by hook continuation.":selectedAdapter==='opencode'?"Native message and session events report main conversation replies, permission requests and errors. Startup idle and subagent replies do not complete your round.":"Round integration is unavailable for this adapter; only exit / idle reminders are supported."}</small>
               </label>
             )}
             {selectedAdapter !== "shell" && (

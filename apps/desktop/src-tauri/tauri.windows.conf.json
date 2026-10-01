@@ -1,0 +1,8 @@
+{
+  "bundle": {
+    "resources": [
+      "target/terminal-runtime/yam-terminal.exe",
+      "target/terminal-runtime/THIRD-PARTY-NOTICES.txt"
+    ]
+  }
+}

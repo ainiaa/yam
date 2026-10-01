@@ -1,7 +1,27 @@
 mod agent_bridge;
 mod agent_events;
+mod background;
+mod claude_resume;
+mod session_logs;
+mod terminal_runtime;
 pub fn agent_helper_entry() -> bool {
     agent_bridge::helper_entry()
+}
+pub fn background_entry() -> bool {
+    if std::env::args().nth(1).as_deref() != Some("--yam-background") {
+        return false;
+    }
+    if std::env::args().count() != 2 {
+        eprintln!("[YAM] Invalid background startup arguments");
+        return true;
+    }
+    if let Err(error) = background::run() {
+        eprintln!("[YAM] {error}");
+    }
+    true
+}
+fn app_context() -> tauri::Context<tauri::Wry> {
+    tauri::generate_context!()
 }
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
@@ -15,6 +35,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_deep_link::DeepLinkExt;
+use tauri_plugin_dialog::DialogExt;
 
 #[cfg(any(target_os = "linux", test))]
 mod linux_notifications;
@@ -26,6 +47,8 @@ mod windows_notifications;
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
 const MAX_SESSION_LOG_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_SESSION_HISTORY_BYTES: u64 = 32 * 1024 * 1024;
+static LOG_SEARCH_GENERATION: AtomicU64 = AtomicU64::new(0);
+static LOG_SEARCH_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct HealthReport {
@@ -90,7 +113,7 @@ fn parse_agent_args(input: &str) -> Result<Vec<String>, String> {
 }
 
 fn agent_command(executable: &Path, launch: &AgentLaunch) -> Result<CommandBuilder, String> {
-    if !matches!(launch.adapter.as_str(), "codex" | "claude")
+    if !matches!(launch.adapter.as_str(), "codex" | "claude" | "opencode")
         || !matches!(launch.mode.as_str(), "task" | "interactive")
     {
         return Err("Unknown agent or launch mode".into());
@@ -116,8 +139,10 @@ fn agent_command(executable: &Path, launch: &AgentLaunch) -> Result<CommandBuild
             .ok_or_else(|| "Invalid CLI wrapper path".to_string())?;
         let script = directory.join(if launch.adapter == "codex" {
             "node_modules/@openai/codex/bin/codex.js"
-        } else {
+        } else if launch.adapter == "claude" {
             "node_modules/@anthropic-ai/claude-code/cli.js"
+        } else {
+            "node_modules/opencode-ai/bin/opencode"
         });
         if !script.is_file() {
             return Err("This batch wrapper cannot be launched safely. Select a native CLI executable or use Custom command.".into());
@@ -135,13 +160,21 @@ fn agent_command(executable: &Path, launch: &AgentLaunch) -> Result<CommandBuild
     if launch.mode == "task" {
         if launch.adapter == "codex" {
             builder.args(["exec", "--json"]);
-        } else {
+        } else if launch.adapter == "claude" {
             builder.args(["--print", "--output-format", "stream-json", "--verbose"]);
+        } else {
+            builder.args(["run", "--format", "json"]);
         }
     }
     builder.args(parse_agent_args(&launch.extra_args)?);
     if let Some(prompt) = prompt {
-        builder.arg("--");
+        builder.arg(
+            if launch.adapter == "opencode" && launch.mode == "interactive" {
+                "--prompt"
+            } else {
+                "--"
+            },
+        );
         builder.arg(prompt);
     }
     Ok(builder)
@@ -174,14 +207,16 @@ fn resume_source(
         .launch
         .ok_or("This history has no supported Agent conversation")?;
     if record.summary.command.is_some()
-        || launch.adapter != "codex"
+        || !matches!(launch.adapter.as_str(), "codex" | "claude")
         || launch.mode != "interactive"
-        || !launch.extra_args.trim().is_empty()
+        || (launch.adapter == "codex" && !launch.extra_args.trim().is_empty())
     {
         return Err(
-            "Native resume is currently supported for default Codex interactive sessions only"
-                .into(),
+            "Native resume supports default Codex and validated Claude interactive sessions".into(),
         );
+    }
+    if launch.adapter == "claude" {
+        agent_bridge::validate_interactive_args("claude", &parse_agent_args(&launch.extra_args)?)?;
     }
     let id = record
         .agent
@@ -201,15 +236,20 @@ fn resume_command(
     id: &str,
 ) -> Result<CommandBuilder, String> {
     if !valid_resume_id(id)
-        || launch.adapter != "codex"
+        || !matches!(launch.adapter.as_str(), "codex" | "claude")
         || launch.mode != "interactive"
-        || !launch.extra_args.trim().is_empty()
+        || (launch.adapter == "codex" && !launch.extra_args.trim().is_empty())
         || launch.prompt.is_some()
     {
         return Err("Invalid native resume request".into());
     }
     let mut command = agent_command(executable, launch)?;
-    command.args(["resume", id]);
+    if launch.adapter == "claude" {
+        agent_bridge::validate_interactive_args("claude", &parse_agent_args(&launch.extra_args)?)?;
+        command.args(["--resume", id]);
+    } else {
+        command.args(["resume", id]);
+    }
     Ok(command)
 }
 
@@ -372,7 +412,7 @@ struct SessionOutput {
     end_offset: u64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct LogSnapshot {
     data: String,
     offset: u64,
@@ -576,6 +616,7 @@ struct Session {
     #[cfg(windows)]
     job: Option<WindowsJob>,
     log: Mutex<SessionLog>,
+    terminal: Option<TerminalAttachment>,
     output_done: (Mutex<bool>, Condvar),
     cancel_output: AtomicBool,
     protocol: Mutex<AgentProtocol>,
@@ -587,6 +628,205 @@ struct Session {
     status: Mutex<String>,
 }
 
+macro_rules! proxy {
+    ($manager:expr, $command:literal, $args:expr) => {
+        let client = {
+            $manager
+                .background_client
+                .lock()
+                .map_err(|_| "Background client lock poisoned")?
+                .clone()
+        };
+        if let Some(client) = client {
+            return serde_json::from_value(client.call($command, $args)?)
+                .map_err(|_| "Invalid background command result".into());
+        }
+    };
+}
+
+struct TerminalAttachment {
+    runtime: Arc<terminal_runtime::Runtime>,
+    session: String,
+    reported: AtomicBool,
+}
+impl Drop for TerminalAttachment {
+    fn drop(&mut self) {
+        let _ = self
+            .runtime
+            .call("close", &self.session, serde_json::json!({}));
+    }
+}
+#[derive(Serialize, Deserialize)]
+struct TerminalFrame {
+    projection: serde_json::Value,
+    end_offset: u64,
+    status: String,
+}
+fn active_frame(session: &Session) -> Result<TerminalFrame, String> {
+    let terminal = session
+        .terminal
+        .as_ref()
+        .ok_or("No persistent terminal parser owns this session")?;
+    let status = session
+        .status
+        .lock()
+        .map_err(|_| "Session status lock poisoned")?;
+    let log = session
+        .log
+        .lock()
+        .map_err(|_| "Session log lock poisoned")?;
+    let projection = terminal.runtime.call(
+        "snapshot",
+        &session.summary.session_id,
+        serde_json::json!({}),
+    )?;
+    Ok(TerminalFrame {
+        projection,
+        end_offset: log.end_offset,
+        status: status.clone(),
+    })
+}
+#[tauri::command]
+fn set_terminal_viewport(
+    manager: State<'_, SessionManager>,
+    session_id: String,
+    line: u32,
+) -> Result<(), String> {
+    proxy!(
+        manager,
+        "set_terminal_viewport",
+        serde_json::json!({"session_id":session_id,"line":line})
+    );
+    let session = manager
+        .sessions
+        .lock()
+        .map_err(|_| "Session manager lock poisoned")?
+        .get(&session_id)
+        .cloned()
+        .ok_or("Unknown live terminal")?;
+    let _log = session
+        .log
+        .lock()
+        .map_err(|_| "Session log lock poisoned")?;
+    session
+        .terminal
+        .as_ref()
+        .ok_or("Terminal parser unavailable")?
+        .runtime
+        .call("viewport", &session_id, serde_json::json!({"line":line}))?;
+    Ok(())
+}
+fn save_final_frame(session: &Session) -> Result<(), String> {
+    if session.terminal.is_none() {
+        return Ok(());
+    }
+    if !*session
+        .output_done
+        .0
+        .lock()
+        .map_err(|_| "Output completion lock poisoned")?
+    {
+        return Err("Terminal output did not drain; a complete final scene is unavailable".into());
+    }
+    let frame = active_frame(session)?;
+    let bytes = serde_json::to_vec(&frame).map_err(|_| "Cannot encode final terminal frame")?;
+    let path = session
+        .history
+        .root
+        .join(format!("{}.frame.json", session.summary.session_id));
+    let temporary = session.history.root.join(format!(
+        "{}.{}.frame.tmp",
+        session.summary.session_id,
+        next_session_id()
+    ));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let result = (|| -> std::io::Result<()> {
+        let mut file = options.open(&temporary)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        fs::rename(&temporary, &path)?;
+        #[cfg(unix)]
+        File::open(&session.history.root)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result.map_err(|e| format!("Cannot save final terminal frame: {e}"))
+}
+fn saved_frame_bytes(path: &Path) -> Result<Option<Vec<u8>>, String> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("Cannot inspect final terminal frame".into()),
+        Ok(_) => {}
+    }
+    let file = background::private_file(path, false)?;
+    if file
+        .metadata()
+        .map_err(|_| "Cannot inspect final terminal frame")?
+        .len()
+        > 64 * 1024 * 1024
+    {
+        return Err("Final terminal frame exceeds size budget".into());
+    }
+    let mut bytes = Vec::new();
+    file.take(64 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "Cannot read final terminal frame")?;
+    if bytes.len() > 64 * 1024 * 1024 {
+        return Err("Final terminal frame exceeds size budget".into());
+    }
+    Ok(Some(bytes))
+}
+
+#[tauri::command]
+fn read_terminal_frame(
+    app: AppHandle,
+    manager: State<'_, SessionManager>,
+    session_id: String,
+) -> Result<Option<TerminalFrame>, String> {
+    proxy!(
+        manager,
+        "read_terminal_frame",
+        serde_json::json!({"session_id":session_id})
+    );
+    let active = manager
+        .sessions
+        .lock()
+        .map_err(|_| "Session manager lock poisoned")?
+        .get(&session_id)
+        .cloned();
+    if let Some(session) = active {
+        return active_frame(&session).map(Some);
+    }
+    let history = manager.history(&app)?;
+    let record = history
+        .list()?
+        .into_iter()
+        .find(|r| r.summary.session_id == session_id)
+        .ok_or("Unknown terminal session")?;
+    let path = history.root.join(format!("{session_id}.frame.json"));
+    let Some(bytes) = saved_frame_bytes(&path)? else {
+        return Ok(None);
+    };
+    let frame: TerminalFrame =
+        serde_json::from_slice(&bytes).map_err(|_| "Invalid final terminal frame")?;
+    terminal_runtime::validate_snapshot(&frame.projection, &session_id, None)?;
+    if !is_terminal(&record.status)
+        || frame.status != record.status
+        || frame.end_offset != record.output_end_offset
+    {
+        return Err("Final terminal frame does not match recorded lifecycle".into());
+    }
+    Ok(Some(frame))
+}
+
 pub struct SessionManager {
     resume_claims: Arc<Mutex<std::collections::HashSet<String>>>,
     sessions: Arc<Mutex<HashMap<String, Arc<Session>>>>,
@@ -595,6 +835,17 @@ pub struct SessionManager {
     notification_selection: Mutex<Option<String>>,
     history: Mutex<Option<Arc<HistoryStore>>>,
     agent_bridge: Mutex<Option<agent_bridge::Bridge>>,
+    background_owner: bool,
+    background_client: Mutex<Option<Arc<background::Client>>>,
+    relay: Mutex<background::Relay>,
+    input_leases: Mutex<background::InputLeases>,
+    started: Instant,
+    desktop_focus: Mutex<(Instant, bool)>,
+    desktop_connected: AtomicBool,
+    desktop_foreground: AtomicBool,
+    last_request: AtomicU64,
+    terminal_runtime: Mutex<Option<Arc<terminal_runtime::Runtime>>>,
+    history_owner: Mutex<Option<background::OwnerLock>>,
 }
 
 impl Default for SessionManager {
@@ -607,11 +858,35 @@ impl Default for SessionManager {
             notification_selection: Mutex::new(None),
             history: Mutex::new(None),
             agent_bridge: Mutex::new(None),
+            background_owner: false,
+            background_client: Mutex::new(None),
+            relay: Mutex::new(background::Relay::default()),
+            input_leases: Mutex::new(background::InputLeases::default()),
+            started: Instant::now(),
+            desktop_focus: Mutex::new((Instant::now(), false)),
+            desktop_connected: AtomicBool::new(false),
+            desktop_foreground: AtomicBool::new(false),
+            last_request: AtomicU64::new(0),
+            terminal_runtime: Mutex::new(None),
+            history_owner: Mutex::new(None),
         }
     }
 }
 
 impl SessionManager {
+    fn acquire_history_owner(&self, root: &Path) -> Result<(), String> {
+        if self.background_owner {
+            return Ok(());
+        }
+        let mut owner = self
+            .history_owner
+            .lock()
+            .map_err(|_| "History owner lock poisoned")?;
+        if owner.is_none() {
+            *owner = Some(background::OwnerLock::acquire(root)?);
+        }
+        Ok(())
+    }
     fn shutdown(&self) -> Result<(), String> {
         let sessions: Vec<_> = self
             .sessions
@@ -648,6 +923,14 @@ impl SessionManager {
             bridge.stop_until(deadline)?;
         }
         runtime.take();
+        if let Some(parser) = self
+            .terminal_runtime
+            .lock()
+            .map_err(|_| "Terminal runtime lock poisoned")?
+            .take()
+        {
+            parser.stop();
+        }
         self.shutdown_complete.store(true, Ordering::Release);
         Ok(())
     }
@@ -908,6 +1191,14 @@ impl SessionManager {
     }
 
     fn history(&self, app: &AppHandle) -> Result<Arc<HistoryStore>, String> {
+        if self
+            .background_client
+            .lock()
+            .map_err(|_| "Background client lock poisoned")?
+            .is_some()
+        {
+            return Err("Desktop cannot open owner history directly".into());
+        }
         let mut history = self
             .history
             .lock()
@@ -918,8 +1209,9 @@ impl SessionManager {
         let root = app
             .path()
             .app_data_dir()
-            .map_err(|error| format!("Failed to resolve app data directory: {error}"))?
-            .join("sessions");
+            .map_err(|error| format!("Failed to resolve app data directory: {error}"))?;
+        self.acquire_history_owner(&root.join("background"))?;
+        let root = root.join("sessions");
         let store = Arc::new(HistoryStore::open(root)?);
         store.recover_running()?;
         *history = Some(Arc::clone(&store));
@@ -1024,9 +1316,7 @@ fn session_id_from_link(link: &str) -> Option<String> {
 
 pub(crate) fn route_notification_session(app: &AppHandle, session_id: &str) -> Result<(), String> {
     let manager = app.state::<SessionManager>();
-    if !manager
-        .history(app)?
-        .list()?
+    if !list_sessions(app.clone(), app.state::<SessionManager>())?
         .iter()
         .any(|record| record.summary.session_id == session_id)
     {
@@ -1036,6 +1326,15 @@ pub(crate) fn route_notification_session(app: &AppHandle, session_id: &str) -> R
         .notification_selection
         .lock()
         .map_err(|_| "Notification selection lock poisoned".to_string())? = Some(session_id.into());
+    if manager.background_owner {
+        std::process::Command::new(std::env::current_exe().map_err(|e| e.to_string())?)
+            .arg(format!("yam://session/{session_id}"))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| format!("Cannot reopen desktop: {e}"))?;
+    }
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.unminimize();
@@ -1273,6 +1572,7 @@ fn agent_adapters() -> Vec<AgentAdapter> {
         ("shell", "System shell", None),
         ("codex", "OpenAI Codex", Some("codex")),
         ("claude", "Claude Code", Some("claude")),
+        ("opencode", "OpenCode", Some("opencode")),
     ]
     .into_iter()
     .map(|(id, label, executable)| {
@@ -1531,6 +1831,7 @@ fn emit_state(
         reason,
     };
     let _ = app.emit("session-state", event);
+    background::notify_lifecycle(app, &session.summary.session_id, status);
     true
 }
 
@@ -1554,6 +1855,22 @@ fn publish_output(app: &AppHandle, session: &Session, data: String) {
     let Ok(mut log) = session.log.lock() else {
         return;
     };
+    if let Some(terminal) = session.terminal.as_ref() {
+        if let Err(error) = terminal
+            .runtime
+            .output(&session.summary.session_id, data.as_bytes())
+        {
+            if !terminal.reported.swap(true, Ordering::AcqRel) {
+                let _ = app.emit(
+                    "session-error",
+                    SessionMessage {
+                        session_id: session.summary.session_id.clone(),
+                        data: error,
+                    },
+                );
+            }
+        }
+    }
     let offset = log.end_offset;
     log.end_offset += data.len() as u64;
     if let Err(error) = append_log(&mut log.file, data.as_bytes(), MAX_SESSION_LOG_BYTES) {
@@ -1580,6 +1897,9 @@ fn publish_output(app: &AppHandle, session: &Session, data: String) {
 }
 
 fn finish_session(sessions: &Mutex<HashMap<String, Arc<Session>>>, session: &Session) {
+    if let Err(error) = save_final_frame(session) {
+        eprintln!("[YAM] {error}");
+    }
     if let Ok(mut active) = sessions.lock() {
         active.remove(&session.summary.session_id);
     }
@@ -1660,6 +1980,13 @@ fn spawn_session_threads(
                     publish_output(&output_app, &output_session, decoder.push(&buffer[..size]));
                 }
                 Err(error) => {
+                    #[cfg(unix)]
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) {
+                        continue;
+                    }
                     #[cfg(unix)]
                     if error.raw_os_error() == Some(libc::EIO) {
                         break;
@@ -1813,6 +2140,11 @@ fn create_session(
     launch: Option<AgentLaunch>,
     resume_from: Option<String>,
 ) -> Result<SessionSummary, String> {
+    proxy!(
+        manager,
+        "create_session",
+        serde_json::json!({"cwd":cwd,"command":command,"launch":launch,"resume_from":resume_from})
+    );
     if manager.shutting_down.load(Ordering::Acquire) {
         return Err("Application is closing".into());
     }
@@ -1852,11 +2184,21 @@ fn create_session(
             )
         })?;
         if let Some(id) = resume_id.as_deref() {
-            agent_bridge::validate_resume(
-                &executable,
-                Path::new(cwd.as_deref().ok_or("Resume directory is missing")?),
-                id,
-            )?;
+            let directory = Path::new(cwd.as_deref().ok_or("Resume directory is missing")?);
+            if launch.adapter == "claude" {
+                let config = std::env::var_os("CLAUDE_CONFIG_DIR")
+                    .filter(|v| !v.is_empty())
+                    .map(PathBuf::from)
+                    .unwrap_or(
+                        app.path()
+                            .home_dir()
+                            .map_err(|e| e.to_string())?
+                            .join(".claude"),
+                    );
+                claude_resume::validate(&config, directory, id)?;
+            } else {
+                agent_bridge::validate_resume(&executable, directory, id)?;
+            }
             resume_command(&executable, launch, id)?
         } else {
             agent_command(&executable, launch)?
@@ -1880,7 +2222,14 @@ fn create_session(
         .map(|launch| {
             find_executable(&launch.adapter)
                 .ok_or_else(|| "Agent executable unavailable".to_string())
-                .and_then(|exe| agent_bridge::prepare(&exe, launch, Path::new(&working_directory)))
+                .and_then(|exe| {
+                    agent_bridge::prepare(
+                        &exe,
+                        launch,
+                        Path::new(&working_directory),
+                        &history.root,
+                    )
+                })
         });
 
     let summary = SessionSummary {
@@ -1897,6 +2246,8 @@ fn create_session(
         .append(true)
         .open(&log_path)
         .map_err(|error| format!("Failed to open session log: {error}"))?;
+    #[cfg(unix)]
+    configure_terminal_input(pair.master.as_ref())?;
     let reader = pair
         .master
         .try_clone_reader()
@@ -1913,6 +2264,24 @@ fn create_session(
     if manager.shutting_down.load(Ordering::Acquire) {
         return Err("Application is closing".into());
     }
+    let terminal = manager
+        .terminal_runtime
+        .lock()
+        .map_err(|_| "Terminal runtime lock poisoned")?
+        .clone()
+        .map(|runtime| {
+            runtime.call(
+                "create",
+                &summary.session_id,
+                serde_json::json!({"cols":100,"rows":24}),
+            )?;
+            Ok::<_, String>(TerminalAttachment {
+                runtime,
+                session: summary.session_id.clone(),
+                reported: AtomicBool::new(false),
+            })
+        })
+        .transpose()?;
     history.start(&summary)?;
     if let Some(integration) = integration {
         match integration {
@@ -1987,6 +2356,7 @@ fn create_session(
         child: Mutex::new(child),
         #[cfg(windows)]
         job,
+        terminal,
         log: Mutex::new(SessionLog {
             file: log,
             end_offset: 0,
@@ -2035,12 +2405,100 @@ fn create_session(
     })
 }
 
+#[cfg(unix)]
+fn configure_terminal_input(master: &dyn portable_pty::MasterPty) -> Result<(), String> {
+    let fd = master
+        .as_raw_fd()
+        .ok_or("PTY input does not support bounded native writes")?;
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err("Cannot configure bounded terminal input".into());
+    }
+    Ok(())
+}
+
+fn input_lock<'a, T>(
+    mutex: &'a Mutex<T>,
+    deadline: Instant,
+    cancelled: &AtomicBool,
+) -> Result<std::sync::MutexGuard<'a, T>, String> {
+    loop {
+        if cancelled.load(Ordering::Acquire) {
+            return Err("Terminal input cancelled; no bytes were accepted".into());
+        }
+        if Instant::now() >= deadline {
+            return Err("Terminal input lock is busy; no bytes were accepted".into());
+        }
+        match mutex.try_lock() {
+            Ok(guard) => return Ok(guard),
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Err("Terminal input lock poisoned".into())
+            }
+            Err(std::sync::TryLockError::WouldBlock) => thread::sleep(Duration::from_millis(1)),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn write_input_until(
+    writer: &mut dyn Write,
+    fd: i32,
+    bytes: &[u8],
+    deadline: Instant,
+    cancelled: &AtomicBool,
+) -> Result<(), String> {
+    let mut written = 0;
+    let failure = |reason: &str, written: usize| {
+        format!("Terminal input {reason} after {written}/{} bytes; do not resend partially accepted input",bytes.len())
+    };
+    while written < bytes.len() {
+        if cancelled.load(Ordering::Acquire) {
+            return Err(failure("cancelled", written));
+        }
+        if Instant::now() >= deadline {
+            return Err(failure("deadline reached", written));
+        }
+        match writer.write(&bytes[written..]) {
+            Ok(0) => return Err(failure("writer closed", written)),
+            Ok(size) => written += size,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                let mut descriptor = libc::pollfd {
+                    fd,
+                    events: libc::POLLOUT,
+                    revents: 0,
+                };
+                let ready = unsafe {
+                    libc::poll(
+                        &mut descriptor,
+                        1,
+                        remaining.as_millis().clamp(1, 100) as i32,
+                    )
+                };
+                if ready < 0
+                    && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
+                {
+                    return Err(failure("readiness failed", written));
+                }
+            }
+            Err(error) => return Err(failure(&error.to_string(), written)),
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn write_session(
     manager: State<'_, SessionManager>,
     session_id: String,
     data: String,
 ) -> Result<(), String> {
+    proxy!(
+        manager,
+        "write_session",
+        serde_json::json!({"session_id":session_id,"data":data})
+    );
     let session = manager
         .sessions
         .lock()
@@ -2048,10 +2506,22 @@ fn write_session(
         .get(&session_id)
         .cloned()
         .ok_or_else(|| format!("Unknown session: {session_id}"))?;
-    session
-        .writer
-        .lock()
-        .map_err(|_| "Session writer lock poisoned".to_string())?
+    let deadline = Instant::now() + Duration::from_secs(3);
+    #[cfg(unix)]
+    let fd = input_lock(&session.master, deadline, &session.stop_requested)?
+        .as_raw_fd()
+        .ok_or("PTY input does not support bounded native writes")?;
+    let mut writer = input_lock(&session.writer, deadline, &session.stop_requested)?;
+    #[cfg(unix)]
+    write_input_until(
+        writer.as_mut(),
+        fd,
+        data.as_bytes(),
+        deadline,
+        &session.stop_requested,
+    )?;
+    #[cfg(windows)]
+    writer
         .write_all(data.as_bytes())
         .map_err(|error| format!("Failed to write to session: {error}"))?;
     if let Ok(mut activity) = session.last_activity.lock() {
@@ -2067,6 +2537,11 @@ fn resize_session(
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
+    proxy!(
+        manager,
+        "resize_session",
+        serde_json::json!({"session_id":session_id,"cols":cols,"rows":rows})
+    );
     if cols == 0 || rows == 0 {
         return Err("Terminal dimensions must be greater than zero".to_string());
     }
@@ -2077,6 +2552,23 @@ fn resize_session(
         .get(&session_id)
         .cloned()
         .ok_or_else(|| format!("Unknown session: {session_id}"))?;
+    let _log = session
+        .log
+        .lock()
+        .map_err(|_| "Session log lock poisoned")?;
+    let previous = if let Some(terminal) = &session.terminal {
+        let previous = terminal
+            .runtime
+            .call("snapshot", &session_id, serde_json::json!({}))?;
+        terminal.runtime.call(
+            "resize",
+            &session_id,
+            serde_json::json!({"cols":cols,"rows":rows}),
+        )?;
+        Some(previous)
+    } else {
+        None
+    };
     let result = session
         .master
         .lock()
@@ -2088,11 +2580,25 @@ fn resize_session(
             pixel_height: 0,
         })
         .map_err(|error| format!("Failed to resize session: {error}"));
+    if result.is_err() {
+        if let (Some(terminal), Some(previous)) = (&session.terminal, previous) {
+            terminal.runtime.call(
+                "resize",
+                &session_id,
+                serde_json::json!({"cols":previous["cols"],"rows":previous["rows"]}),
+            )?;
+        }
+    }
     result
 }
 
 #[tauri::command]
 fn stop_session(manager: State<'_, SessionManager>, session_id: String) -> Result<(), String> {
+    proxy!(
+        manager,
+        "stop_session",
+        serde_json::json!({"session_id":session_id})
+    );
     let session = manager
         .sessions
         .lock()
@@ -2110,6 +2616,11 @@ fn acknowledge_notification(
     session_id: String,
     expected_status: String,
 ) -> Result<(), String> {
+    proxy!(
+        manager,
+        "acknowledge_notification",
+        serde_json::json!({"session_id":session_id,"expected_status":expected_status})
+    );
     manager
         .history(&app)?
         .acknowledge_notification(&session_id, &expected_status)
@@ -2123,6 +2634,11 @@ async fn notify_session(
     title: String,
     expected_status: String,
 ) -> Result<(), String> {
+    proxy!(
+        manager,
+        "notify_session",
+        serde_json::json!({"session_id":session_id,"title":title,"expected_status":expected_status})
+    );
     if title.chars().count() > 200 {
         return Err("Notification title is too long".into());
     }
@@ -2172,6 +2688,11 @@ fn set_agent_notification_context(
     selected: Option<String>,
     paused: bool,
 ) -> Result<(), String> {
+    proxy!(
+        manager,
+        "set_agent_notification_context",
+        serde_json::json!({"selected":selected,"paused":paused})
+    );
     let history = manager.history(&app)?;
     let records = history.list()?;
     if selected
@@ -2194,6 +2715,7 @@ fn set_agent_notification_context(
 }
 #[tauri::command]
 fn retry_agent_notifications(manager: State<'_, SessionManager>) -> Result<(), String> {
+    proxy!(manager, "retry_agent_notifications", serde_json::json!({}));
     let runtime = manager
         .agent_bridge
         .lock()
@@ -2213,6 +2735,11 @@ fn read_agent_receipt(
     receipt: String,
     revision: u64,
 ) -> Result<(), String> {
+    proxy!(
+        manager,
+        "read_agent_receipt",
+        serde_json::json!({"session_id":session_id,"receipt":receipt,"revision":revision})
+    );
     manager
         .history(&app)?
         .read_agent_receipt(&session_id, &receipt, revision)
@@ -2223,7 +2750,181 @@ fn list_sessions(
     app: AppHandle,
     manager: State<'_, SessionManager>,
 ) -> Result<Vec<SessionRecord>, String> {
+    proxy!(manager, "list_sessions", serde_json::json!({}));
     manager.history(&app)?.list()
+}
+
+fn recorded_log(
+    history: &HistoryStore,
+    sessions: &Mutex<HashMap<String, Arc<Session>>>,
+    record: &SessionRecord,
+) -> Result<session_logs::LogData, String> {
+    let session_id = &record.summary.session_id;
+    if session_id_from_link(&format!("yam://session/{session_id}")).is_none() {
+        return Err("Invalid log session identity".into());
+    }
+    let active = sessions
+        .lock()
+        .map_err(|_| "Session manager lock poisoned")?
+        .get(session_id)
+        .cloned();
+    let log = active
+        .as_ref()
+        .map(|s| s.log.lock().map_err(|_| "Session log lock poisoned"))
+        .transpose()?;
+    if let Some(error) = log.as_ref().and_then(|log| log.error.as_ref()) {
+        return Err(error.clone());
+    }
+    let mut bytes = Vec::new();
+    File::open(history.log_path(session_id))
+        .and_then(|file| file.take(MAX_SESSION_LOG_BYTES + 1).read_to_end(&mut bytes))
+        .map_err(|error| format!("Cannot read retained log: {error}"))?;
+    if bytes.len() as u64 > MAX_SESSION_LOG_BYTES {
+        return Err("Log exceeds its 8 MiB budget".into());
+    }
+    let end = log
+        .as_ref()
+        .map(|log| log.end_offset)
+        .unwrap_or(record.output_end_offset)
+        .max(bytes.len() as u64);
+    let offset = end - bytes.len() as u64;
+    let data = String::from_utf8(bytes).map_err(|_| "Log encoding is invalid")?;
+    Ok(session_logs::LogData { data, offset })
+}
+
+#[tauri::command]
+async fn search_session_logs(
+    app: AppHandle,
+    manager: State<'_, SessionManager>,
+    session_id: Option<String>,
+    request: session_logs::SearchRequest,
+) -> Result<session_logs::SearchPage, String> {
+    proxy!(
+        manager,
+        "search_session_logs",
+        serde_json::json!({"session_id":session_id,"request":request})
+    );
+    let generation = LOG_SEARCH_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+    let history = manager.history(&app)?;
+    let records = history.list()?;
+    if session_id
+        .as_ref()
+        .is_some_and(|id| !records.iter().any(|r| &r.summary.session_id == id))
+    {
+        return Err("Unknown log session".into());
+    }
+    let records = records
+        .into_iter()
+        .filter(|r| {
+            session_id
+                .as_ref()
+                .is_none_or(|id| &r.summary.session_id == id)
+        })
+        .collect::<Vec<_>>();
+    let sources = records
+        .iter()
+        .map(|r| session_logs::LogSource {
+            session_id: r.summary.session_id.clone(),
+            cwd: r.summary.cwd.clone(),
+        })
+        .collect::<Vec<_>>();
+    let by_id = records
+        .into_iter()
+        .map(|r| (r.summary.session_id.clone(), r))
+        .collect::<HashMap<_, _>>();
+    let sessions = manager.sessions.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = LOG_SEARCH_LOCK.lock().map_err(|_| "Search lock poisoned")?;
+        session_logs::search(
+            &sources,
+            |id| {
+                recorded_log(
+                    &history,
+                    &sessions,
+                    by_id.get(id).ok_or("Unknown log session")?,
+                )
+            },
+            &request,
+            || LOG_SEARCH_GENERATION.load(Ordering::Acquire) != generation,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn export_session_log(
+    app: AppHandle,
+    _manager: State<'_, SessionManager>,
+    session_id: String,
+    title: String,
+    raw: bool,
+) -> Result<Option<String>, String> {
+    if title.chars().count() > 200 || title.contains('\0') {
+        return Err("Invalid export title".into());
+    }
+    let records = list_sessions(app.clone(), app.state::<SessionManager>())?;
+    let record = records
+        .into_iter()
+        .find(|r| r.summary.session_id == session_id)
+        .ok_or("Unknown log session")?;
+    let snapshot = read_session_snapshot(
+        app.clone(),
+        app.state::<SessionManager>(),
+        session_id.clone(),
+    )?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let metadata = serde_json::to_string_pretty(&serde_json::json!({"session_id":session_id,"title":title,
+            "cwd":record.summary.cwd,"status":record.status,"started_at":record.started_at,"ended_at":record.ended_at,
+            "retained_output_offset":snapshot.offset,"format":if raw {"raw terminal output"}else{"plain text"}})).map_err(|e|e.to_string())?;
+        let log = session_logs::LogData {data:snapshot.data, offset:snapshot.offset};
+        let content = session_logs::export_text(&format!("YAM recorded session output\n{metadata}\n\n"),&log,raw);
+        let Some(path)=app.dialog().file().set_file_name(format!("yam-{session_id}.txt")).add_filter("Text",&["txt"]).blocking_save_file() else {return Ok(None);};
+        let path=path.into_path().map_err(|e|e.to_string())?;
+        session_logs::write_export(&path,content.as_bytes())?;
+        Ok(Some(path.to_string_lossy().into_owned()))
+    }).await.map_err(|error|error.to_string())?
+}
+
+#[tauri::command]
+async fn read_log_excerpt(
+    app: AppHandle,
+    manager: State<'_, SessionManager>,
+    session_id: String,
+    offset: u64,
+    column: usize,
+) -> Result<String, String> {
+    proxy!(
+        manager,
+        "read_log_excerpt",
+        serde_json::json!({"session_id":session_id,"offset":offset,"column":column})
+    );
+    let history = manager.history(&app)?;
+    let sessions = manager.sessions.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let record = history
+            .list()?
+            .into_iter()
+            .find(|r| r.summary.session_id == session_id)
+            .ok_or("Unknown log session")?;
+        let log = recorded_log(&history, &sessions, &record)?;
+        session_logs::excerpt(&log, offset, column)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn cancel_log_search(manager: State<'_, SessionManager>) -> Result<(), String> {
+    proxy!(manager, "cancel_log_search", serde_json::json!({}));
+    LOG_SEARCH_GENERATION.fetch_add(1, Ordering::AcqRel);
+    // Wait for the cancelled read to leave the shared scan boundary before accepting a new UI query.
+    tauri::async_runtime::spawn_blocking(|| {
+        let _guard = LOG_SEARCH_LOCK.lock().map_err(|_| "Search lock poisoned")?;
+        Ok(())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -2232,6 +2933,11 @@ fn read_session_log(
     manager: State<'_, SessionManager>,
     session_id: String,
 ) -> Result<String, String> {
+    proxy!(
+        manager,
+        "read_session_log",
+        serde_json::json!({"session_id":session_id})
+    );
     let history = manager.history(&app)?;
     if !history
         .list()?
@@ -2251,6 +2957,11 @@ fn read_session_snapshot(
     manager: State<'_, SessionManager>,
     session_id: String,
 ) -> Result<LogSnapshot, String> {
+    proxy!(
+        manager,
+        "read_session_snapshot",
+        serde_json::json!({"session_id":session_id})
+    );
     let active = manager
         .sessions
         .lock()
@@ -2299,8 +3010,50 @@ fn read_session_snapshot(
     }
 }
 
+#[tauri::command]
+fn take_terminal_control(
+    manager: State<'_, SessionManager>,
+    session_id: String,
+) -> Result<(), String> {
+    proxy!(
+        manager,
+        "take_terminal_control",
+        serde_json::json!({"session_id":session_id})
+    );
+    Err("Input control requires the background owner".into())
+}
+
+fn record_desktop_focus(manager: &SessionManager, label: &str, focused: bool) {
+    if label == "main" {
+        manager.desktop_foreground.store(focused, Ordering::Release);
+    }
+}
+
+fn stop_background_and_quit(app: AppHandle) -> Result<(), String> {
+    let client = app
+        .state::<SessionManager>()
+        .background_client
+        .lock()
+        .map_err(|_| "Background client lock poisoned")?
+        .clone()
+        .ok_or("Background is unavailable")?;
+    client.call("shutdown", serde_json::json!({}))?;
+    app.exit(0);
+    Ok(())
+}
+#[tauri::command]
+async fn stop_all_and_quit(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || stop_background_and_quit(app))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "macos")]
+    background::ignore_platform_window_restoration();
+    #[cfg(target_os = "macos")]
+    let _activity = background::ProcessActivity::begin();
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             // The deep-link plugin may not be initialized when a second process arrives.
@@ -2348,6 +3101,13 @@ pub fn run() {
                 }
                 application.append(&tauri::menu::MenuItem::with_id(
                     app,
+                    "yam-stop-quit",
+                    "Stop all tasks and quit",
+                    true,
+                    None::<&str>,
+                )?)?;
+                application.append(&tauri::menu::MenuItem::with_id(
+                    app,
                     "yam-quit",
                     "Quit YAM",
                     true,
@@ -2357,11 +3117,38 @@ pub fn run() {
             Ok(menu)
         })
         .on_menu_event(|app, event| {
+            if event.id().as_ref() == "yam-stop-quit" {
+                let app = app.clone();
+                thread::spawn(move || {
+                    if let Err(error) = stop_background_and_quit(app.clone()) {
+                        let _ = app.emit(
+                            "session-error",
+                            SessionMessage {
+                                session_id: String::new(),
+                                data: error,
+                            },
+                        );
+                    }
+                });
+            }
             if event.id().as_ref() == "yam-quit" {
                 app.exit(0);
             }
         })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Focused(focused) = event {
+                record_desktop_focus(&window.state::<SessionManager>(), window.label(), *focused);
+            }
+        })
         .setup(|app| {
+            if let Some(window) = app.get_webview_window("main") {
+                record_desktop_focus(
+                    &app.state::<SessionManager>(),
+                    "main",
+                    window.is_focused().unwrap_or(false),
+                );
+            }
+            background::attach(app.handle())?;
             let handle = app.handle().clone();
             app.deep_link().on_open_url(move |event| {
                 for url in event.urls() {
@@ -2370,6 +3157,11 @@ pub fn run() {
                     }
                 }
             });
+            for argument in std::env::args().skip(1) {
+                if session_id_from_link(&argument).is_some() {
+                    route_notification_link(app.handle(), &argument)?;
+                }
+            }
             if let Some(urls) = app.deep_link().get_current()? {
                 for url in urls {
                     if let Err(error) = route_notification_link(app.handle(), url.as_str()) {
@@ -2413,51 +3205,92 @@ pub fn run() {
             pending_notification_selection,
             acknowledge_notification_selection,
             read_session_log,
-            read_session_snapshot
+            search_session_logs,
+            cancel_log_search,
+            read_log_excerpt,
+            export_session_log,
+            read_session_snapshot,
+            read_terminal_frame,
+            stop_all_and_quit,
+            take_terminal_control,
+            set_terminal_viewport
         ])
-        .build(tauri::generate_context!())
+        .build(app_context())
         .expect("error while building YAM")
-        .run(|app, event| {
-            if matches!(event, tauri::RunEvent::Exit) {
-                let manager = app.state::<SessionManager>();
-                if !manager.shutdown_complete.load(Ordering::Acquire) {
-                    manager.shutting_down.store(true, Ordering::Release);
-                    if let Err(error) = manager.shutdown() {
-                        eprintln!("[YAM] Final exit cleanup failed: {error}");
-                    }
-                }
+        .run(handle_owner_exit);
+}
+fn handle_owner_exit(app: &AppHandle, event: tauri::RunEvent) {
+    let manager = app.state::<SessionManager>();
+    if manager
+        .background_client
+        .lock()
+        .is_ok_and(|client| client.is_some())
+    {
+        if matches!(
+            event,
+            tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. }
+        ) {
+            manager.shutting_down.store(true, Ordering::Release);
+        }
+        return;
+    }
+    if matches!(event, tauri::RunEvent::Exit) {
+        let manager = app.state::<SessionManager>();
+        if !manager.shutdown_complete.load(Ordering::Acquire) {
+            manager.shutting_down.store(true, Ordering::Release);
+            if let Err(error) = manager.shutdown() {
+                eprintln!("[YAM] Final exit cleanup failed: {error}");
             }
-            if let tauri::RunEvent::ExitRequested { api, .. } = event {
-                let manager = app.state::<SessionManager>();
-                if manager.shutdown_complete.load(Ordering::Acquire) {
-                    return;
+        }
+    }
+    if let tauri::RunEvent::ExitRequested { api, .. } = event {
+        let manager = app.state::<SessionManager>();
+        if manager.shutdown_complete.load(Ordering::Acquire) {
+            return;
+        }
+        api.prevent_exit();
+        if !manager.shutting_down.swap(true, Ordering::AcqRel) {
+            let app = app.clone();
+            thread::spawn(move || match app.state::<SessionManager>().shutdown() {
+                Ok(()) => app.exit(0),
+                Err(error) => {
+                    app.state::<SessionManager>()
+                        .shutting_down
+                        .store(false, Ordering::Release);
+                    let _ = app.emit(
+                        "session-error",
+                        SessionMessage {
+                            session_id: String::new(),
+                            data: error,
+                        },
+                    );
                 }
-                api.prevent_exit();
-                if !manager.shutting_down.swap(true, Ordering::AcqRel) {
-                    let app = app.clone();
-                    thread::spawn(move || match app.state::<SessionManager>().shutdown() {
-                        Ok(()) => app.exit(0),
-                        Err(error) => {
-                            app.state::<SessionManager>()
-                                .shutting_down
-                                .store(false, Ordering::Release);
-                            let _ = app.emit(
-                                "session-error",
-                                SessionMessage {
-                                    session_id: String::new(),
-                                    data: error,
-                                },
-                            );
-                        }
-                    });
-                }
-            }
-        });
+            });
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::MAX_SESSION_HISTORY_BYTES;
+    #[test]
+    fn desktop_history_cannot_write_while_another_process_owns_background_history() {
+        let root =
+            std::env::temp_dir().join(format!("yam-history-owner-{}", super::next_session_id()));
+        let desktop = super::SessionManager::default();
+        desktop.acquire_history_owner(&root).unwrap();
+        desktop.acquire_history_owner(&root).unwrap();
+        let second = super::SessionManager::default();
+        assert!(second.acquire_history_owner(&root).is_err());
+        assert!(super::background::OwnerLock::acquire(&root).is_err());
+        drop(desktop);
+        let background = super::background::OwnerLock::acquire(&root).unwrap();
+        assert!(second.acquire_history_owner(&root).is_err());
+        drop(background);
+        second.acquire_history_owner(&root).unwrap();
+        drop(second);
+        std::fs::remove_dir_all(root).unwrap();
+    }
     use std::fs;
     #[cfg(unix)]
     use std::io::Read;
@@ -2469,6 +3302,180 @@ mod tests {
         HistoryStore, SessionManager, SessionSummary,
     };
 
+    #[cfg(unix)]
+    #[test]
+    fn native_raw_pty_input_is_nonblocking_and_cannot_hang_when_child_does_not_read() {
+        let pair = portable_pty::native_pty_system()
+            .openpty(portable_pty::PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        super::configure_terminal_input(pair.master.as_ref()).unwrap();
+        let fd = pair.master.as_raw_fd().unwrap();
+        let mut settings: libc::termios = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::tcgetattr(fd, &mut settings) }, 0);
+        unsafe { libc::cfmakeraw(&mut settings) };
+        assert_eq!(unsafe { libc::tcsetattr(fd, libc::TCSANOW, &settings) }, 0);
+        let mut writer = pair.master.take_writer().unwrap();
+        let started = std::time::Instant::now();
+        assert!(super::write_input_until(
+            writer.as_mut(),
+            fd,
+            &vec![b'x'; 2 * 1024 * 1024],
+            started + std::time::Duration::from_millis(40),
+            &std::sync::atomic::AtomicBool::new(false)
+        )
+        .unwrap_err()
+        .contains("deadline"));
+        assert!(started.elapsed() < std::time::Duration::from_millis(300));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn saved_terminal_frames_reject_links_public_files_and_oversized_content() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let root = std::env::temp_dir().join(super::next_session_id());
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("saved.frame.json");
+        assert!(super::saved_frame_bytes(&path).unwrap().is_none());
+        std::fs::write(&path, b"frame").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(super::saved_frame_bytes(&path).unwrap().unwrap(), b"frame");
+        let link = root.join("link");
+        symlink(&path, &link).unwrap();
+        assert!(super::saved_frame_bytes(&link).is_err());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(super::saved_frame_bytes(&path).is_err());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(64 * 1024 * 1024 + 1)
+            .unwrap();
+        assert!(super::saved_frame_bytes(&path)
+            .unwrap_err()
+            .contains("budget"));
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            super::saved_frame_bytes(&link).is_err(),
+            "a broken link is an error, not a legacy session"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn terminal_input_lock_is_bounded_and_cancelled_without_accepting_bytes() {
+        let lock = std::sync::Mutex::new(7);
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        assert_eq!(
+            *super::input_lock(
+                &lock,
+                std::time::Instant::now() + std::time::Duration::from_secs(1),
+                &cancelled
+            )
+            .unwrap(),
+            7
+        );
+        let _held = lock.lock().unwrap();
+        let started = std::time::Instant::now();
+        assert!(super::input_lock(
+            &lock,
+            started + std::time::Duration::from_millis(20),
+            &cancelled
+        )
+        .unwrap_err()
+        .contains("no bytes"));
+        assert!(started.elapsed() < std::time::Duration::from_millis(250));
+        cancelled.store(true, super::Ordering::Release);
+        assert!(super::input_lock(
+            &lock,
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+            &cancelled
+        )
+        .unwrap_err()
+        .contains("cancelled"));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn blocked_terminal_input_times_out_with_a_partial_byte_receipt() {
+        use std::os::{fd::AsRawFd, unix::net::UnixStream};
+        let (mut writer, mut reader) = UnixStream::pair().unwrap();
+        writer.set_nonblocking(true).unwrap();
+        let fd = writer.as_raw_fd();
+        let bytes = vec![b'x'; 2 * 1024 * 1024];
+        let started = std::time::Instant::now();
+        let result = super::write_input_until(
+            &mut writer,
+            fd,
+            &bytes,
+            started + std::time::Duration::from_millis(40),
+            &std::sync::atomic::AtomicBool::new(false),
+        );
+        assert!(started.elapsed() < std::time::Duration::from_millis(300));
+        let error = result.unwrap_err();
+        assert!(error.contains("deadline"));
+        assert!(error.contains("bytes"));
+        assert!(error.contains("not resend"));
+        reader.set_nonblocking(true).unwrap();
+        let mut received = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut reader, &mut received);
+        assert!(!received.is_empty());
+        assert!(received.len() < bytes.len());
+        assert!(received.iter().all(|byte| *byte == b'x'));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn terminal_input_preserves_unicode_and_checks_cancellation_before_writing() {
+        use std::os::{fd::AsRawFd, unix::net::UnixStream};
+        let (mut writer, mut reader) = UnixStream::pair().unwrap();
+        writer.set_nonblocking(true).unwrap();
+        let fd = writer.as_raw_fd();
+        let bytes = "hello 中文 😀\n".as_bytes();
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        super::write_input_until(
+            &mut writer,
+            fd,
+            bytes,
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+            &cancelled,
+        )
+        .unwrap();
+        let mut received = vec![0; bytes.len()];
+        std::io::Read::read_exact(&mut reader, &mut received).unwrap();
+        assert_eq!(received, bytes);
+        cancelled.store(true, super::Ordering::Release);
+        assert!(super::write_input_until(
+            &mut writer,
+            fd,
+            b"never",
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+            &cancelled
+        )
+        .unwrap_err()
+        .contains("cancelled"));
+        reader.set_nonblocking(true).unwrap();
+        assert_eq!(
+            std::io::Read::read(&mut reader, &mut [0])
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        super::write_input_until(&mut writer, fd, b"", std::time::Instant::now(), &cancelled)
+            .unwrap();
+    }
+    #[test]
+    fn only_main_window_focus_changes_desktop_heartbeat_context() {
+        let manager = SessionManager::default();
+        super::record_desktop_focus(&manager, "main", true);
+        assert!(manager.desktop_foreground.load(super::Ordering::Acquire));
+        super::record_desktop_focus(&manager, "export-dialog", false);
+        assert!(manager.desktop_foreground.load(super::Ordering::Acquire));
+        super::record_desktop_focus(&manager, "main", false);
+        assert!(!manager.desktop_foreground.load(super::Ordering::Acquire));
+    }
     #[test]
     fn notification_selection_survives_startup_and_stale_acknowledgement() {
         let manager = SessionManager::default();
@@ -2529,7 +3536,7 @@ mod tests {
     #[test]
     fn built_in_adapters_include_shell_and_agent_entries() {
         let adapters = agent_adapters();
-        assert_eq!(adapters.len(), 3);
+        assert_eq!(adapters.len(), 4);
         assert_eq!(adapters[0].id, "shell");
         assert!(adapters[0].available);
         assert!(adapters.iter().any(|adapter| adapter.id == "codex"));
@@ -2644,6 +3651,7 @@ mod tests {
             #[cfg(windows)]
             job: Some(super::WindowsJob::attach(child.as_raw_handle().unwrap()).unwrap()),
             child: std::sync::Mutex::new(child),
+            terminal: None,
             log: std::sync::Mutex::new(super::SessionLog {
                 file: log,
                 end_offset: 0,
@@ -3039,8 +4047,19 @@ mod tests {
             assert!(super::resume_command(std::path::Path::new("codex"), &launch, bad).is_err());
         }
         store.records.lock().unwrap()[0].agent.agent_session_id = Some(native_id.into());
+        {
+            let mut records = store.records.lock().unwrap();
+            let launch = records[0].summary.launch.as_mut().unwrap();
+            launch.adapter = "claude".into();
+            launch.extra_args = "--model fable".into();
+        }
+        let (_, claude, id) = super::resume_source(&store, &summary.session_id).unwrap();
+        assert_eq!(claude.adapter, "claude");
+        assert_eq!(claude.extra_args, "--model fable");
+        assert_eq!(claude.prompt, None);
+        assert_eq!(id, native_id);
         for (adapter, mode, args) in [
-            ("claude", "interactive", ""),
+            ("unknown", "interactive", ""),
             ("codex", "task", ""),
             ("codex", "interactive", "--model custom"),
         ] {
@@ -3058,6 +4077,83 @@ mod tests {
         drop(records);
         assert!(super::resume_source(&store, &summary.session_id).is_err());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn opencode_uses_native_prompt_options_without_shell_interpretation() {
+        let mut launch = super::AgentLaunch {
+            adapter: "opencode".into(),
+            mode: "interactive".into(),
+            extra_args: "--model opencode/space-bunny-free".into(),
+            prompt: Some("literal $(ignored) 中文".into()),
+        };
+        let cmd = super::agent_command(std::path::Path::new("opencode"), &launch).unwrap();
+        let args: Vec<_> = cmd
+            .get_argv()
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            &args[1..],
+            &[
+                "--model",
+                "opencode/space-bunny-free",
+                "--prompt",
+                "literal $(ignored) 中文"
+            ]
+        );
+        launch.mode = "task".into();
+        let cmd = super::agent_command(std::path::Path::new("opencode"), &launch).unwrap();
+        let args: Vec<_> = cmd
+            .get_argv()
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            &args[1..],
+            &[
+                "run",
+                "--format",
+                "json",
+                "--model",
+                "opencode/space-bunny-free",
+                "--",
+                "literal $(ignored) 中文"
+            ]
+        );
+    }
+
+    #[test]
+    fn claude_resume_preserves_safe_options_and_never_replays_the_prompt() {
+        let id = "446cd50d-099d-4a12-bcbc-5ab13ffa6944";
+        let mut launch = super::AgentLaunch {
+            adapter: "claude".into(),
+            mode: "interactive".into(),
+            extra_args: "--model fable --effort high".into(),
+            prompt: None,
+        };
+        let cmd = super::resume_command(std::path::Path::new("claude"), &launch, id).unwrap();
+        let args: Vec<_> = cmd
+            .get_argv()
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            &args[1..],
+            &["--model", "fable", "--effort", "high", "--resume", id]
+        );
+        for args in [
+            "--resume another",
+            "--settings arbitrary",
+            "--continue",
+            "--session-id arbitrary",
+        ] {
+            launch.extra_args = args.into();
+            assert!(super::resume_command(std::path::Path::new("claude"), &launch, id).is_err());
+        }
+        launch.extra_args = String::new();
+        launch.prompt = Some("never replay".into());
+        assert!(super::resume_command(std::path::Path::new("claude"), &launch, id).is_err());
     }
 
     #[test]

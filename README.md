@@ -12,7 +12,9 @@ The current session slice also persists output and history locally, recovers int
 
 ## Development
 
-Requirements: Node.js 24+, pnpm 10, and the Rust stable toolchain.
+Requirements: Node.js 24+, pnpm 10, Python 3.11+, and the Rust stable toolchain. The macOS desktop application requires macOS 13.5 or later.
+
+The build downloads and verifies the pinned official Node 26.10.0 terminal runtime and bundles it with the application. End users do not need to install Node. Background ownership and cold terminal restoration are still being integrated; see the [continuity plan and execution evidence](docs/yam-session-continuity-plan.md).
 
 ```bash
 cd apps/desktop
@@ -31,7 +33,7 @@ pnpm tauri build --debug
 
 ## Reliability verification
 
-See [repair plan and evidence](docs/repair-plan.md). History saves are atomic with a recoverable backup; storage errors are visible. Active sessions are stopped explicitly on exit. Agent prompts are passed as literal arguments. Notifications retain pending receipts for retry, suppress the selected foreground session, and open the associated session through persisted native notification activation, including app restart. macOS uses UserNotifications; Windows uses protocol toasts; Linux requires GNOME or a notification portal supporting host-app registration (xdg-desktop-portal 1.20+). Unsupported Linux notification backends return an error and preserve retry state. A crash between OS delivery and receipt persistence can cause a duplicate notification; OS notification display remains subject to system settings.
+See [repair plan and evidence](docs/repair-plan.md). History saves are atomic with a recoverable backup; storage errors are visible. Closing the desktop keeps active tasks in an independent background process. Use **Stop all tasks and quit** to stop them explicitly; reconnecting does not relaunch a task. An idle background with no connected desktop and no active tasks exits after 60 seconds. Agent prompts are passed as literal arguments. Notifications retain pending receipts for retry, suppress the selected foreground session, and open the associated session through persisted native notification activation, including app restart. macOS uses UserNotifications; Windows uses protocol toasts; Linux requires GNOME or a notification portal supporting host-app registration (xdg-desktop-portal 1.20+). Unsupported Linux notification backends return an error and preserve retry state. A crash between OS delivery and receipt persistence can cause a duplicate notification; OS notification display remains subject to system settings.
 
 CI runs frontend tests/build and Rust fmt/clippy/tests on macOS, Linux and Windows. The native directory picker validates selected folders and preserves cancellation. Native notification acceptance and click behavior remain subject to OS permissions and desktop capabilities; see the repair plan for actual platform evidence.
 
@@ -44,3 +46,10 @@ The inbox keeps each round unread until its entry is opened; OS acceptance is a 
 For a stopped default Codex interactive session with a trusted native conversation ID, **Continue conversation** starts a new process using native resume. YAM verifies the original directory, provider and conversation through the installed CLI first, clears the old prompt and refuses duplicate resumes. Opening history, clicking a notification or starting YAM does not restart a task. Other adapters and custom launch arguments are not advertised as resume support.
 
 macOS native validation and local automated checks are recorded in [execution evidence](docs/yam-next-stage-execution.md). Windows/Linux desktop notifications, old-notification activation and actual Developer ID signing remain separate acceptance gaps; the signing and notarization flow has executable checks; CI packaging alone does not verify them.
+
+
+The continuity implementation and measured limits are tracked in [the execution plan](docs/yam-session-continuity-plan.md). Supported terminal/TUI state stays in the background parser while the desktop is closed; ended sessions retain a read-only final scene. Older records without a saved scene offer log replay instead. A failed background or parser is reported explicitly rather than silently restarting an Agent. **Take control** explicitly transfers terminal input from another connected client.
+
+Session log search supports the current session or all recorded sessions, bounded result pages, excerpts and case matching. Export offers plain text or raw terminal output with session metadata, uses a native destination dialog, and refuses to overwrite an existing file.
+
+OpenCode 1.18.34 was measured with session-only integration, native prompt/parent IDs and separate completion, permission, interruption and failure events. One YAM process binds to one verified OpenCode root; switching roots with `/new` marks integration unavailable, so start another YAM session for a new root. Native callback and delivery queues each retain at most 128 events; overflow reports unavailable rather than guessing completion. Native session lookup has a one-second deadline and aborts its SDK request. Latest macOS background exit/reconnect and frozen-scene checks pass; native keyboard/mouse/resize, the new architecture's WebKit-inclusive memory comparison and cross-platform packaging acceptance remain pending.

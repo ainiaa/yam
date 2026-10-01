@@ -71,7 +71,7 @@ impl AgentState {
         if event
             .source
             .as_deref()
-            .is_some_and(|source| source != "claude")
+            .is_some_and(|source| !matches!(source, "claude" | "opencode"))
         {
             return Err("Unsupported agent event source".into());
         }
@@ -92,6 +92,7 @@ impl AgentState {
             "ToolProgress",
             "TurnFailed",
             "ResponseReady",
+            "IntegrationUnavailable",
         ]
         .contains(&event.kind.as_str())
         {
@@ -118,6 +119,22 @@ impl AgentState {
             return Ok(None);
         }
         let turn = event.turn_id.as_deref().ok_or("Missing agent turn ID")?;
+        if event.kind == "IntegrationUnavailable" {
+            if event.source.as_deref() != Some("opencode") {
+                return Err("Unsupported integration status source".into());
+            }
+            if self.turn_id.as_deref() != Some(turn) {
+                return Ok(None);
+            }
+            self.integration = "unavailable".into();
+            self.phase = "unknown".into();
+            self.permission_keys.clear();
+            self.revision = self
+                .revision
+                .checked_add(1)
+                .ok_or("Agent revision exhausted")?;
+            return Ok(None);
+        }
         self.integration = "connected".into();
         if event.kind == "UserPromptSubmit" {
             if self.turns.iter().any(|seen| seen == turn) {
@@ -635,6 +652,27 @@ fn permanent_delivery_error(error: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn opencode_native_source_retains_strict_turn_identity() {
+        let mut state = AgentState {
+            generation: "generation".into(),
+            integration: "connecting".into(),
+            ..Default::default()
+        };
+        let mut start = event("SessionStart", None);
+        start.source = Some("opencode".into());
+        state.apply(&start).unwrap();
+        let mut prompt = event("UserPromptSubmit", Some("one"));
+        prompt.source = Some("opencode".into());
+        state.apply(&prompt).unwrap();
+        let mut complete = event("TurnComplete", Some("one"));
+        complete.source = Some("opencode".into());
+        assert!(state.apply(&complete).unwrap().is_some());
+        assert!(state.apply(&complete).unwrap().is_none());
+        complete.turn_id = Some("unknown".into());
+        assert!(state.apply(&complete).is_err());
+    }
+
     #[test]
     fn a_validated_resume_keeps_identity_without_claiming_hook_connection() {
         let mut state = state();
@@ -1187,6 +1225,25 @@ mod tests {
         assert!(store.agent_failure("a", "expired", "stale error").is_err());
         assert_eq!(store.list().unwrap()[0].agent.phase, "working");
         std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn opencode_overflow_is_unavailable_without_erasing_receipts_or_poisoning_a_newer_turn() {
+        let mut s = state();
+        s.apply(&event("UserPromptSubmit", Some("one"))).unwrap();
+        s.apply(&event("TurnComplete", Some("one"))).unwrap();
+        s.apply(&event("UserPromptSubmit", Some("two"))).unwrap();
+        let mut degraded = event("IntegrationUnavailable", Some("one"));
+        degraded.source = Some("opencode".into());
+        s.apply(&degraded).unwrap();
+        assert_eq!(s.phase, "working");
+        degraded.turn_id = Some("two".into());
+        s.apply(&degraded).unwrap();
+        assert_eq!(s.phase, "unknown");
+        assert_eq!(s.integration, "unavailable");
+        assert_eq!(s.inbox.len(), 1);
+        assert!(!s.inbox[0].read);
+        degraded.source = Some("claude".into());
+        assert!(s.apply(&degraded).is_err());
     }
     #[test]
     fn title_thread_and_stop_signal_do_not_send_completion() {
