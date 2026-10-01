@@ -3,7 +3,7 @@ fn activation_metadata(app_id: &str, executable: &str) -> Result<(String, String
         || !app_id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
-        || !std::path::Path::new(executable).is_absolute()
+        || !executable.starts_with('/')
         || executable.contains(['\0', '\n', '\r'])
     {
         return Err("Invalid Linux activation identity or executable".into());

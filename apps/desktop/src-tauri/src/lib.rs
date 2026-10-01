@@ -2287,8 +2287,23 @@ mod tests {
             .spawn()
             .unwrap();
         let job = super::WindowsJob::attach(child.as_raw_handle()).unwrap();
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "fixture must be running before Job closes"
+        );
         drop(job);
-        assert!(!child.wait().unwrap().success());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            if child.try_wait().unwrap().is_some() {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("Closing the last Job handle did not terminate the owned process");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     #[test]
