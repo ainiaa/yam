@@ -1,0 +1,62 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import {
+  groupProjects,
+  isProjects,
+  projectName,
+  readPreference,
+} from "../src/workspaces.ts";
+
+test("existing sessions group by full directory, preserving distinct projects with the same name", () => {
+  const sessions = [
+    { summary: { cwd: "/work/api/" }, id: "one" },
+    { summary: { cwd: "/work/api" }, id: "two" },
+    { summary: { cwd: "/other/api" }, id: "three" },
+  ];
+  const projects = groupProjects(
+    [
+      { path: "/work/api", name: "Backend" },
+      { path: "/work/ui", name: "Frontend" },
+    ],
+    sessions,
+  );
+  assert.equal(projects.length, 3);
+  assert.equal(projects[0].name, "Backend");
+  assert.deepEqual(
+    projects[0].sessions.map((session) => session.id),
+    ["one", "two"],
+  );
+  assert.deepEqual(projects[1].sessions, []);
+  assert.equal(projects[2].name, "api");
+  assert.equal(projects[2].sessions[0].id, "three");
+});
+
+test("directory labels support POSIX roots and Windows paths", () => {
+  assert.equal(projectName("/"), "/");
+  assert.equal(projectName("/work/app/"), "app");
+  assert.equal(projectName("C:\\work\\app\\"), "app");
+});
+
+test("invalid or inaccessible stored preferences fall back without breaking startup", () => {
+  const previous = globalThis.localStorage;
+  try {
+    for (const stored of ["{", "null", '[{"path":3,"name":"x"}]']) {
+      globalThis.localStorage = { getItem: () => stored };
+      assert.deepEqual(readPreference("projects", [], isProjects), []);
+    }
+    globalThis.localStorage = {
+      getItem: () => {
+        throw new Error("unavailable");
+      },
+    };
+    assert.deepEqual(readPreference("projects", [], isProjects), []);
+    globalThis.localStorage = {
+      getItem: () => '[{"path":"/work/app","name":"App"}]',
+    };
+    assert.deepEqual(readPreference("projects", [], isProjects), [
+      { path: "/work/app", name: "App" },
+    ]);
+  } finally {
+    globalThis.localStorage = previous;
+  }
+});

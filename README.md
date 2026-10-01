@@ -8,7 +8,7 @@ A reliable, cross-platform workspace for AI coding agents such as Codex and Clau
 
 YAM is in active development. The current M0 slice boots a Tauri desktop shell, verifies the Rust runtime through IPC, and is ready for the first session-management feature.
 
-See the [product and implementation plan](docs/PLAN.md) for the roadmap and acceptance criteria.
+The current session slice also persists output and history locally, recovers interrupted sessions as `needs_attention`, and supervises idle sessions. See the [product and implementation plan](docs/PLAN.md) and [M2 stability design](docs/M2-stability-design.md) for the roadmap and acceptance criteria.
 
 ## Development
 

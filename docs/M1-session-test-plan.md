@@ -27,6 +27,6 @@ Rust 单元测试、TypeScript 检查、前端生产构建和 Tauri debug 构建
 
 ## 本轮结果
 
-- Rust 测试：6 passed，包含真实 PTY shell 输出夹具。
+- Rust 测试：11 passed，包含真实 PTY 输出、非零退出、停止和工作目录校验夹具。
 - TypeScript 检查和 Vite 生产构建：通过。
 - Tauri macOS debug `.app` / `.dmg`：构建通过。
