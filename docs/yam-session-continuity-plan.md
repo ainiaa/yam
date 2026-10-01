@@ -218,3 +218,7 @@ Windows CI 进一步暴露打包脚本使用默认 cp1252 解码 xterm UTF-8 Jav
 53e140f 的 macOS CI 已通过、Linux 已进入包上传；Windows SEA UTF-8 打包通过后暴露测试 cfg(unix) 误附到 viewport 测试，而 fork/pipe 继承锁测试未限定 Unix。将 cfg 移到实际 Unix-only 测试，保留 viewport 的跨平台覆盖，修复真实 Windows 编译红灯，不跳过平台业务检查。
 
 Windows 输入已先增加原生匿名管道堵塞/Unicode/取消回归，再实现当前写线程的 CancelSynchronousIo 截止与 stop 取消；使用本进程当前线程 handle，不终止线程/任务，不添加依赖。取消与 WriteFile 入口竞争时重试，无法确认取消时记录错误；错误保留已确认前缀并说明最后一次写入可能部分接受，禁止整段自动重发。该 API 标记取消后并不保证所有类型 I/O 都立即完成，因此只在 Windows CI 原生管道回归通过后才能收口此子项。本机 macOS 无法执行这项 Windows 测试，当前仍 uncovered；Microsoft 原生契约：https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-cancelsynchronousio 。
+
+45c599b 的三平台 CI 已全部成功（run 36927857344）：macOS app、Linux deb、Windows NSIS 调试包均产出；Windows 130 Rust 测试通过，原生 synchronous_windows_pipe_input_can_be_cancelled_without_waiting_for_the_reader 明确通过，验证同步管道在读端 300ms 后才排空时能先按 40ms 截止取消。该结论关闭原生同步输入子项，不能推广成 Windows 全桌面/通知点击或后台进程重开已实际验收。
+
+继续复核发现事件轮询一次暂时错误会永久停止。新增先红后绿回归，将只读 poll_events 限制为最多 3 次重连，始终沿用同一认证实例/客户端/游标，不重新发现连接文件或启动任何后台；成功恢复后发 background-gap 重新同步。真实认证服务回归证明瞬时错误后恢复、持续错误只尝试 3 次、替代后台不能被旧连接接受。增加 Windows 两个服务 child 的 CREATE_NO_WINDOW 共享启动选项，原生 test 子进程通过 GetConsoleWindow 和唯一成功标记核对实际行为，尚待本轮 Windows CI 执行。本机当前 155 Rust、77 Node、19 Python 检查通过，Clippy -D warnings 通过。

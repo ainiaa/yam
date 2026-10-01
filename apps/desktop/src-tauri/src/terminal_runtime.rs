@@ -8,6 +8,18 @@ use std::sync::{
     mpsc, Arc, Mutex,
 };
 use std::time::Duration;
+pub(super) fn service_command(executable: &Path) -> Command {
+    let command = Command::new(executable);
+    #[cfg(windows)]
+    let command = {
+        use std::os::windows::process::CommandExt;
+        let mut command = command;
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW: the two service children have no console UI.
+        command
+    };
+    command
+}
+
 fn base64(bytes: &[u8]) -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut result = String::with_capacity(bytes.len().div_ceil(3) * 4);
@@ -81,7 +93,7 @@ impl Runtime {
         input: impl Fn(String, String) -> Result<(), String> + Send + 'static,
     ) -> Result<Self, String> {
         let instance = super::agent_bridge::credential()?;
-        let mut child = Command::new(executable)
+        let mut child = service_command(executable)
             .env_remove("NODE_OPTIONS")
             .env_remove("NODE_PATH")
             .env_remove("NODE_SEA_OPTIONS")
@@ -274,6 +286,40 @@ impl Drop for Runtime {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn service_children_do_not_allocate_a_console_window() {
+        let output = super::service_command(&std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "terminal_runtime::tests::service_console_probe",
+                "--ignored",
+                "--nocapture",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("YAM_NO_CONSOLE_OK"));
+    }
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "Invoked by the service process creation test in an isolated child"]
+    fn service_console_probe() {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetConsoleWindow() -> std::os::windows::io::RawHandle;
+        }
+        assert!(
+            unsafe { GetConsoleWindow() }.is_null(),
+            "service child allocated a console"
+        );
+        println!("YAM_NO_CONSOLE_OK");
+    }
+
     use super::*;
     #[test]
     fn saved_frames_validate_identity_versions_dimensions_and_pending_wrap_cursor() {

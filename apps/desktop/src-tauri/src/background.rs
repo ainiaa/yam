@@ -911,7 +911,7 @@ pub(super) fn attach(app: &tauri::AppHandle) -> Result<(), String> {
         .join("background");
     let client = Arc::new(connect_or_start(&root, || {
         let executable = std::env::current_exe().map_err(|e| e.to_string())?;
-        std::process::Command::new(executable)
+        super::terminal_runtime::service_command(&executable)
             .arg("--yam-background")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -932,17 +932,31 @@ pub(super) fn attach(app: &tauri::AppHandle) -> Result<(), String> {
             .shutting_down
             .load(Ordering::Acquire)
         {
-            match client.call("poll_events", serde_json::json!({"cursor":cursor,"foreground":app.state::<super::SessionManager>().desktop_foreground.load(Ordering::Acquire)}))
-                .and_then(|v|serde_json::from_value::<RelayPage>(v).map_err(|_|"Invalid background event page".into())) {
-                Ok(page) => {
-                    if page.gap { let _ = app.emit("background-gap", ()); }
+            match poll_events_with_reconnect(
+                &client,
+                cursor,
+                app.state::<super::SessionManager>()
+                    .desktop_foreground
+                    .load(Ordering::Acquire),
+            ) {
+                Ok((page, reconnected)) => {
+                    if page.gap || reconnected {
+                        let _ = app.emit("background-gap", ());
+                    }
                     cursor = page.cursor;
                     for event in page.events {
-                        if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload) { let _ = app.emit(&event.name, payload); }
+                        if let Ok(payload) =
+                            serde_json::from_str::<serde_json::Value>(&event.payload)
+                        {
+                            let _ = app.emit(&event.name, payload);
+                        }
                     }
                 }
                 Err(error) => {
-                    let _ = app.emit("session-error", serde_json::json!({"session_id":"","data":error}));
+                    let _ = app.emit(
+                        "session-error",
+                        serde_json::json!({"session_id":"","data":error}),
+                    );
                     break; // Never silently restart an owner or rerun its tasks after a crash.
                 }
             }
@@ -950,6 +964,35 @@ pub(super) fn attach(app: &tauri::AppHandle) -> Result<(), String> {
         }
     });
     Ok(())
+}
+
+fn poll_events_with_reconnect(
+    client: &Client,
+    cursor: u64,
+    foreground: bool,
+) -> Result<(RelayPage, bool), String> {
+    const ATTEMPTS: u64 = 3;
+    let mut last_error = String::new();
+    for attempt in 0..ATTEMPTS {
+        let result = client
+            .call(
+                "poll_events",
+                serde_json::json!({"cursor":cursor,"foreground":foreground}),
+            )
+            .and_then(|value| {
+                serde_json::from_value::<RelayPage>(value)
+                    .map_err(|_| "Invalid background event page".into())
+            });
+        match result {
+            Ok(page) => return Ok((page, attempt > 0)),
+            Err(error) => last_error = error,
+        }
+        if attempt + 1 < ATTEMPTS {
+            thread::sleep(Duration::from_millis(250 * (attempt + 1)));
+        }
+    }
+    // Client retains its authenticated descriptor. Recovery never discovers or starts another owner.
+    Err(last_error)
 }
 
 fn lifecycle_due(foreground: bool, selected: Option<&str>, session: &str, paused: bool) -> bool {
@@ -1601,6 +1644,84 @@ mod tests {
         drop(stream);
         writer.join().unwrap();
     }
+    #[test]
+    fn event_reconnect_does_not_discover_or_start_a_replacement_owner() {
+        let root = std::env::temp_dir().join(format!(
+            "yam-relay-owner-{}",
+            super::super::next_session_id()
+        ));
+        let original = Server::start(&root, |_| Ok(serde_json::Value::Null)).unwrap();
+        let client = Client::new(Descriptor::read(&root).unwrap()).unwrap();
+        drop(original);
+        let seen = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let calls = seen.clone();
+        let replacement = Server::start(&root, move |_| {
+            calls.fetch_add(1, Ordering::AcqRel);
+            Ok(serde_json::json!({"cursor":8,"gap":false,"events":[]}))
+        })
+        .unwrap();
+        assert!(poll_events_with_reconnect(&client, 7, false).is_err());
+        assert_eq!(
+            seen.load(Ordering::Acquire),
+            0,
+            "stale desktop must not accept a new owner"
+        );
+        drop(replacement);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn event_poll_recovers_a_transient_failure_with_the_same_identity_and_cursor() {
+        let root = std::env::temp_dir().join(format!(
+            "yam-relay-retry-{}",
+            super::super::next_session_id()
+        ));
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let requests = seen.clone();
+        let server = Server::start(&root, move |request| {
+            assert_eq!(request.command, "poll_events");
+            assert_eq!(
+                request.args,
+                serde_json::json!({"cursor":7,"foreground":false})
+            );
+            let mut seen = requests.lock().unwrap();
+            seen.push((request.client, request.id));
+            if seen.len() == 1 {
+                Err("Transient test failure".into())
+            } else {
+                Ok(serde_json::json!({"cursor":8,"gap":false,"events":[]}))
+            }
+        })
+        .unwrap();
+        let client = Client::new(Descriptor::read(&root).unwrap()).unwrap();
+        let (page, reconnected) = poll_events_with_reconnect(&client, 7, false).unwrap();
+        assert_eq!(page.cursor, 8);
+        assert!(reconnected);
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0].0, seen[1].0);
+        assert_ne!(seen[0].1, seen[1].1);
+        drop(seen);
+        drop(server);
+        std::fs::remove_dir_all(root).unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "yam-relay-failure-{}",
+            super::super::next_session_id()
+        ));
+        let count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let attempts = count.clone();
+        let server = Server::start(&root, move |_| {
+            attempts.fetch_add(1, Ordering::AcqRel);
+            Err("Unavailable".into())
+        })
+        .unwrap();
+        let client = Client::new(Descriptor::read(&root).unwrap()).unwrap();
+        assert!(poll_events_with_reconnect(&client, 7, false).is_err());
+        assert_eq!(count.load(Ordering::Acquire), 3);
+        drop(server);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn full_worker_pool_waits_without_resetting_authenticated_clients() {
         let root =
