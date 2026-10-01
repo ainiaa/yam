@@ -35,3 +35,20 @@ test("large Unicode chunks retain a valid bounded tail", () => {
   assert.equal(tail.data,"测试");
   assert.equal(tail.offset,6);
 });
+
+test("output offsets and cache limits reject invalid numeric boundaries", () => {
+ for (const cursor of [-1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])
+  assert.throws(() => consumeOutput(cursor, chunk(0, "abc")), /offset/i);
+ for (const bad of [chunk(-1, "abc"), {...chunk(0,"abc"), end_offset:2}, {...chunk(0,"abc"), offset:NaN}])
+  assert.throws(() => consumeOutput(0,bad), /offset/i);
+ for (const value of [0,-1,0.5,NaN,Infinity,Number.MAX_SAFE_INTEGER + 1]) {
+  assert.throws(() => new OutputBuffer(value,1));
+  assert.throws(() => new OutputBuffer(1,value));
+ }
+ const buffer = new OutputBuffer();
+ assert.equal(buffer.byteLength("missing"),0);
+ buffer.push(chunk(0,"abc"));
+ buffer.clear();
+ assert.equal(buffer.size,0);
+ assert.deepEqual(buffer.drain("s-test"),[]);
+});

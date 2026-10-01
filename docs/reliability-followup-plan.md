@@ -86,3 +86,21 @@
 Windows补充稳定Group/Tag，相同会话重试替换同一身份；Tag使用固定FNV-1a 64-bit映射，不使用跨版本未承诺稳定的DefaultHasher，不用于安全校验。Tag保持16个字符以兼容原始Windows限制（[Microsoft Tag文档](https://learn.microsoft.com/en-us/uwp/api/windows.ui.notifications.toastnotification.tag)）。64-bit摘要存在理论碰撞边界，不承诺无限会话数学唯一性。新增稳定值、同/异会话、最长ID及非法ID回归。
 
 新增磁盘故障测试：终态pending写入后阻塞临时文件，模拟系统已接收但回执失败；内存与重新打开的历史均保留pending，移除故障后确认并再次重开为false。本地Rust47/47通过，Clippy -D warnings通过。macOS请求identifier与Linuxnotification id沿用session ID，稳定身份不会保证横幅恰好一次。
+
+### R3 部分完成，遗留样本未覆盖
+
+旧notify-rust链路及其NSUserNotification UUID/进程内回调已核实；当前持久协议路由修复不变。独立临时SDK探针返回空列表，不足以取得实际遗留通知标识；已在notification-acceptance.md保留证据边界。没有用标题猜测路由，也没有重新扩大辅助功能权限。
+
+### R4/R5 已补打包与验收清单，环境验收未覆盖
+
+本地重新打包YAM.app成功，Info.plist核实com.yam.desktop、yam协议及最低系统10.14。CI新增app/deb/nsis打包与7天保留的测试产物；macOS测试包使用ad-hoc身份并以ditto压缩保留执行权限，不作为Developer ID或公证产物。跨平台真实桌面、正式签名安装/升级及移动位置仍待环境验证；逐项步骤已写入notification-acceptance.md。
+
+R6开始前补充范围：apps/desktop/src/session-stream.ts。工具边界检查发现缓存上限未拒绝NaN/Infinity，可能使上限比较失效；将先写非法数值回归，复现后补齐正整数校验。新增范围仍属于本轮核心工具测试与边界修复。
+
+### R6 本地完成，Rust覆盖率未覆盖
+
+新增输出游标、chunk offset、缓存上限的非法数值及清空边界测试；先观察非法游标红灯，再最小修复安全非负整数游标与正整数缓存上限。补齐精确状态筛选回归。前端18/18通过，三个已执行工具模块行覆盖率100%、分支99.11%、函数100%；不是React页面或原生SDK覆盖率。新增test:coverage命令及CI闸门：行95%、分支90%、函数95%。生产构建通过。
+
+Rust覆盖率探测实证：rustc1.98.1使用LLVM22.1.8；已安装Apple LLVM15.0.0。独立instrument-coverage探针编译与执行成功，但llvm-profdata merge失败：raw profile format version10、工具expected8；rustup未安装匹配llvm-tools组件，cargo-llvm-cov与Homebrew LLVM也不可用。不安装额外工具来伪造门禁通过，Rust覆盖率保持未覆盖。
+
+代码026102e的CI36813191803三平台success，证明Windows新增SetGroup/SetTag SDK调用编译、Clippy及测试通过。新打包/覆盖率配置尚待后续提交CI。

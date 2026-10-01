@@ -386,7 +386,8 @@
         "apps/desktop/tests/workspaces.test.mjs",
         "apps/desktop/src-tauri/src/lib.rs",
         ".github/workflows/ci.yml",
-        "docs/notification-acceptance.md"
+        "docs/notification-acceptance.md",
+        "apps/desktop/src/session-stream.ts"
       ],
       "depends_on": [
         "R1",

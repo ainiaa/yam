@@ -10,7 +10,8 @@ const decoder = new TextDecoder();
 
 export function consumeOutput(cursor: number, chunk: LogSnapshot) {
   const bytes = encoder.encode(chunk.data);
-  if (!Number.isSafeInteger(chunk.offset) || chunk.offset < 0 ||
+  if (!Number.isSafeInteger(cursor) || cursor < 0 ||
+      !Number.isSafeInteger(chunk.offset) || chunk.offset < 0 ||
       !Number.isSafeInteger(chunk.end_offset) || chunk.end_offset - chunk.offset !== bytes.length)
     throw new Error("Invalid terminal output offsets");
   if (chunk.end_offset <= cursor) return { data: "", nextOffset: cursor };
@@ -35,7 +36,7 @@ export class OutputBuffer {
   private maxBytes: number;
   private maxSessions: number;
   constructor(maxBytes = 256 * 1024, maxSessions = 32) {
-    if (maxBytes < 1 || maxSessions < 1) throw new Error("Output cache limits must be positive");
+    if (!Number.isSafeInteger(maxBytes) || !Number.isSafeInteger(maxSessions) || maxBytes < 1 || maxSessions < 1) throw new Error("Output cache limits must be positive");
     this.maxBytes = maxBytes;
     this.maxSessions = maxSessions;
   }

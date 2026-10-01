@@ -82,3 +82,12 @@ test('directory selection validates chosen paths and preserves cancellation', as
  await assert.rejects(selectProjectDirectory(async () => '/missing', async () => { throw Error('missing'); }));
  await assert.rejects(selectProjectDirectory(async () => { throw Error('picker failed'); }, async () => {}));
 });
+
+test("status filters match exact terminal states and both attention states", async () => {
+ const {matchesStatus} = await import('../src/workspaces.ts');
+ assert.equal(matchesStatus('starting','active'),true);
+ assert.equal(matchesStatus('failed','attention'),true);
+ assert.equal(matchesStatus('running','attention'),false);
+ assert.equal(matchesStatus('succeeded','succeeded'),true);
+ assert.equal(matchesStatus('stopped','succeeded'),false);
+});

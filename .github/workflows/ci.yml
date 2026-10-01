@@ -6,7 +6,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-22.04, windows-latest]
+        include:
+          - os: macos-latest
+            bundle: app
+            bundle_dir: macos/YAM-macos.zip
+          - os: ubuntu-22.04
+            bundle: deb
+            bundle_dir: deb
+          - os: windows-latest
+            bundle: nsis
+            bundle_dir: nsis
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -28,8 +37,22 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf
       - run: pnpm install --frozen-lockfile
-      - run: pnpm test
+      - run: pnpm test:coverage
       - run: pnpm build
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+      - name: Package desktop application
+        run: pnpm tauri build --debug --bundles ${{ matrix.bundle }}
+      - name: Sign and archive macOS test package
+        if: runner.os == 'macOS'
+        run: |
+          codesign --force --deep --sign - --identifier com.yam.desktop src-tauri/target/debug/bundle/macos/YAM.app
+          ditto -c -k --sequesterRsrc --keepParent src-tauri/target/debug/bundle/macos/YAM.app src-tauri/target/debug/bundle/macos/YAM-macos.zip
+      - name: Save desktop test package
+        uses: actions/upload-artifact@v4
+        with:
+          name: yam-test-package-${{ matrix.os }}
+          path: apps/desktop/src-tauri/target/debug/bundle/${{ matrix.bundle_dir }}
+          if-no-files-found: error
+          retention-days: 7
