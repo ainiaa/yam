@@ -3292,8 +3292,22 @@ pub fn run() {
         .expect("error while building YAM")
         .run(handle_owner_exit);
 }
+fn keep_background_event_loop(owner: bool, stopping: bool, code: Option<i32>) -> bool {
+    owner && !stopping && code.is_none()
+}
 fn handle_owner_exit(app: &AppHandle, event: tauri::RunEvent) {
     let manager = app.state::<SessionManager>();
+    if let tauri::RunEvent::ExitRequested { code, api, .. } = &event {
+        if keep_background_event_loop(
+            manager.background_owner,
+            manager.shutting_down.load(Ordering::Acquire),
+            *code,
+        ) {
+            // The zero-window owner must stay alive until shutdown or its idle deadline.
+            api.prevent_exit();
+            return;
+        }
+    }
     if manager
         .background_client
         .lock()
@@ -3346,6 +3360,13 @@ fn handle_owner_exit(app: &AppHandle, event: tauri::RunEvent) {
 #[cfg(test)]
 mod tests {
     use super::MAX_SESSION_HISTORY_BYTES;
+    #[test]
+    fn a_background_owner_keeps_its_event_loop_without_a_desktop_window() {
+        assert!(super::keep_background_event_loop(true, false, None));
+        assert!(!super::keep_background_event_loop(false, false, None));
+        assert!(!super::keep_background_event_loop(true, true, None));
+        assert!(!super::keep_background_event_loop(true, false, Some(0)));
+    }
     #[test]
     fn desktop_history_cannot_write_while_another_process_owns_background_history() {
         let root =

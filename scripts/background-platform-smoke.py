@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Author: Jeff.Liu. Validate the actual isolated background process on all desktop platforms."""
-import argparse,importlib.util,json,os,pathlib,platform,plistlib,secrets,shlex,subprocess,tempfile,time
+import argparse,importlib.util,json,os,pathlib,platform,plistlib,secrets,shlex,subprocess,sys,tempfile,time
 spec=importlib.util.spec_from_file_location('background_smoke',pathlib.Path(__file__).with_name('background-smoke.py'))
 smoke=importlib.util.module_from_spec(spec);spec.loader.exec_module(smoke)
 
@@ -75,8 +75,11 @@ def main():
  finally:
   if owner is not None:
    if owner.poll() is None:
-    try:call('shutdown');owner.wait(timeout=5)
+    try:
+     if descriptor is None:raise OSError('Background did not publish its connection')
+     call('shutdown');owner.wait(timeout=5)
     except (OSError,AssertionError,subprocess.TimeoutExpired):owner.kill();owner.wait(timeout=5)
+   if sys.exc_info()[0] is not None:print('Validation background stderr: '+owner.stderr.read(4096).decode('utf-8',errors='replace'),file=sys.stderr)
    owner.stderr.close()
   temporary.cleanup()
 

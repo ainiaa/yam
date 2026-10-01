@@ -228,3 +228,5 @@ Windows 输入已先增加原生匿名管道堵塞/Unicode/取消回归，再实
 P8 跨平台原生后台生命周期验收已接入 CI，使用独立 com.yam.platform-validation 包身份和合成 PTY，不开启通知或 CLI 信任。共享认证 RPC 补 3 个回归，覆盖分片 UTF-8、响应版本/实例/客户端/请求 ID 错配、超限和业务错误，22 Python 测试通过。本机实际独立 macOS 包通过客户端断开、后台重启后最终场景严格等价、owner 崩溃停止合成任务、needs_attention 且不自动重跑、显式停止所有任务；这不是原生 GUI Cmd+Q/鼠标验收。6666b61 三平台 CI 已全部成功（run 36929764928）；新生命周期脚本的 Windows/Linux 结果尚待下一次 CI，不能沿用上一轮构建成功冒充这项证据。
 
 P8 打包缓存复核：缓存 SHA256 原先使用 read_bytes 整体分配，下载预算未约束已存在归档。新增缺失/正确/错误摘要/边界超限和禁止 read_bytes 回归先失败，再改为最多 1 MiB 分块并执行相同 200 MiB 上限；超限明确失败且保留缓存，不静默忽略。23 Python 检查通过，含真实 SEA UTF-8 打包与 Unicode probe。
+
+P8 新原生 CI 红灯（run 36932864744）：macOS 生命周期通过；Linux 等待连接文件 20 秒超时，清理路径又因 descriptor=None 遮蔽原错；Windows ping 成功后 background_status 连接中断。已修复验收脚本的未初始化清理并保留独立后台 stderr。复核零窗口 owner 的共用退出入口发现普通 ExitRequested 会启动 shutdown；先补正常/GUI/停止/程序显式退出边界回归，再使零窗口 owner 拒绝隐式退出，仅允许显式停止或闲置截止。此为已确认入口缺陷修复；是否解释 Windows 原生红灯须以后续 CI 证据确认，Linux 根因继续定位，未宣布闭环。
