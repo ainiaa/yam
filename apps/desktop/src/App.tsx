@@ -120,6 +120,7 @@ function App() {
   const selectionVersion = useRef(0);
   const [health, setHealth] = useState<HealthReport | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notificationError, setNotificationError] = useState<string | null>(null);
   const [cwd, setCwd] = useState("");
   const [command, setCommand] = useState("");
   const [prompt, setPrompt] = useState("");
@@ -187,10 +188,11 @@ function App() {
   async function notifySession(event: SessionStateEvent) {
     if (!terminalStatuses.has(event.status) && event.status !== "idle_attention") return;
     const key = `${event.session_id}:${event.status}`;
+    if (!notifications.current.canRetry(key)) return;
     if (document.hasFocus() && sessionId.current === event.session_id) {
       notifications.current.suppress(key);
-      try { await invoke("acknowledge_notification", {sessionId: event.session_id}); retryNotifications.current.delete(key); }
-      catch (reason) { retryNotifications.current.set(key, event); setError(String(reason)); }
+      try { await invoke("acknowledge_notification", {sessionId: event.session_id}); retryNotifications.current.delete(key); notifications.current.clearFailure(key); if (!retryNotifications.current.size) setNotificationError(null); }
+      catch (reason) { retryNotifications.current.set(key, event); setNotificationError(notifications.current.recordFailure(key, reason)); }
       return;
     }
     retryNotifications.current.set(key, event);
@@ -204,8 +206,10 @@ function App() {
       if (delivered) {
         await invoke("acknowledge_notification", {sessionId: event.session_id});
         retryNotifications.current.delete(key);
+        notifications.current.clearFailure(key);
+        if (!retryNotifications.current.size) setNotificationError(null);
       }
-    } catch (reason) { setError(String(reason)); }
+    } catch (reason) { setNotificationError(notifications.current.recordFailure(key, reason)); }
   }
 
   function updateAgentPhase(data: string) {
@@ -898,6 +902,15 @@ function App() {
             </div>
           )}
         </section>
+        {notificationError && (
+          <div className="error-banner" role="alert">
+            <span>{notificationError}</span>
+            <button onClick={() => {
+              notifications.current.resetRetries();
+              for (const event of retryNotifications.current.values()) void notifySession(event);
+            }}>Retry notifications</button>
+          </div>
+        )}
         {error && !launchDialog.current?.open && (
           <div className="error-banner" role="alert">
             <span>{error}</span>

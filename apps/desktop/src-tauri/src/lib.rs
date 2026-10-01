@@ -2629,6 +2629,31 @@ mod tests {
     }
 
     #[test]
+    fn failed_notification_receipt_preserves_pending_after_crash_and_can_recover() {
+        let (root, summary) = test_history();
+        let store = HistoryStore::open(root.clone()).unwrap();
+        store.start(&summary).unwrap();
+        store
+            .update(&summary.session_id, "succeeded", Some(0), None, None)
+            .unwrap();
+        // Simulate the disk failing after the OS accepted the notification.
+        std::fs::create_dir(root.join("sessions.json.tmp")).unwrap();
+        assert!(store.acknowledge_notification(&summary.session_id).is_err());
+        assert!(store.list().unwrap()[0].notification_pending);
+        drop(store);
+        let reopened = HistoryStore::open(root.clone()).unwrap();
+        assert!(reopened.list().unwrap()[0].notification_pending);
+        assert_eq!(reopened.list().unwrap()[0].status, "succeeded");
+        std::fs::remove_dir(root.join("sessions.json.tmp")).unwrap();
+        reopened
+            .acknowledge_notification(&summary.session_id)
+            .unwrap();
+        drop(reopened);
+        assert!(!HistoryStore::open(root.clone()).unwrap().list().unwrap()[0].notification_pending);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn notification_receipt_survives_reopen_and_unknown_receipt_is_rejected() {
         let (root, summary) = test_history();
         let store = HistoryStore::open(root.clone()).unwrap();

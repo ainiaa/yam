@@ -1,0 +1,483 @@
+{
+  "schema_version": 6,
+  "plan_id": "yam-followup-20261001",
+  "requirement_fingerprint": "a2adefce1b5313ffe8d82f4d7d4abc45c4efb776a03712c02d7955d0175dbb11",
+  "planner": {
+    "name": "project-plan-v1",
+    "source_path": "/Users/liuwenyuan/www/tools/yam/docs/repair-plan.md",
+    "source_fingerprint": "10b4a8f921185406535f1d18ad8fee2de5f398cfca7196daeff33ea2f308519e"
+  },
+  "context": "long",
+  "baseline": {
+    "commit": "b8176a289fceabbd46da4d406dc4afb89b910df4",
+    "source": {
+      "schema_version": 2,
+      "baseline_commit": "b8176a289fceabbd46da4d406dc4afb89b910df4",
+      "commit_id": "b8176a289fceabbd46da4d406dc4afb89b910df4",
+      "tree_hash": "7738c8245d9d3ca1776dd8e1fb47425c067030c9",
+      "diff_fingerprint": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "changed_paths": [],
+      "changed_entries": [],
+      "source_fingerprint": "59982dc24eaf7ed8946bf151a5efc95bf371c793f0f7fbfa5ca7382ad9a11b5f"
+    }
+  },
+  "checkpoint": "same_session",
+  "tasks": [
+    {
+      "task_id": "R1",
+      "task_kind": "vertical_slice",
+      "outcomes": [
+        "通知失败可操作且不会无限频繁重试"
+      ],
+      "goal": "通知失败可操作且不会无限频繁重试",
+      "owned_paths": [
+        "apps/desktop/src/notifications.ts",
+        "apps/desktop/src/App.tsx",
+        "apps/desktop/tests/notifications.test.mjs"
+      ],
+      "depends_on": [],
+      "steps": [
+        "复现冻结验收的失败或探测真实验收环境",
+        "添加对应可执行回归测试",
+        "运行回归观察失败",
+        "实现最小根因修复",
+        "运行冻结验证命令",
+        "复核受影响调用链并记录证据"
+      ],
+      "acceptance": [
+        "权限关闭与桌面不支持分别提示解决动作，自动重试暂停，手动重试可恢复",
+        "暂时错误按15秒到5分钟退避；重复状态事件不能绕过退避",
+        "发送成功而回执失败时仅重试回执，不重复发送"
+      ],
+      "verification": [
+        "pnpm --dir apps/desktop test",
+        "pnpm --dir apps/desktop build"
+      ],
+      "execution": "current",
+      "status": "pending",
+      "provider_run": {
+        "scope": "task",
+        "recursive_planning": false
+      },
+      "provider_binding": {
+        "binding": {
+          "controller": "converge",
+          "stage_providers": {},
+          "workflow_provider": {
+            "contract": {
+              "closure": [],
+              "entrypoint": "references/execution-protocol.md",
+              "preserve_external_behavior": false
+            },
+            "contract_fingerprint": "2fb1c069b1686ca2b67c505882e2ae27a404663386e5e72df4b2f65a6ec62822",
+            "id": "native-v1",
+            "manifest": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/providers/native-v1.json",
+            "manifest_fingerprint": "da79b6af45fa1e1a94b5ce9b4b0cf84d5f43a798e57f5e1c50b510f6b7e954ee",
+            "role": "workflow",
+            "source_root": "/Users/liuwenyuan/www/tools/skills-convergent-delivery",
+            "sources": [
+              {
+                "fingerprint": "a43c016ea5daecbf5e74ea93840c1e489fe7ce85f926bb651fdbf36064028770",
+                "kind": "entrypoint",
+                "path": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/references/execution-protocol.md",
+                "relative_path": "references/execution-protocol.md"
+              }
+            ],
+            "task_kind": "fix",
+            "version": "1"
+          }
+        },
+        "binding_fingerprint": "d7734d703897a4a4994052d9c8dee17dd9d48e75c4dbd5a65dd4565e320113b5",
+        "reason": "native engine was selected",
+        "selection": "explicit",
+        "task_kind": "fix"
+      }
+    },
+    {
+      "task_id": "R2",
+      "task_kind": "vertical_slice",
+      "outcomes": [
+        "崩溃后重试使用稳定通知身份"
+      ],
+      "goal": "崩溃后重试使用稳定通知身份",
+      "owned_paths": [
+        "apps/desktop/src-tauri/src/windows_notifications.rs",
+        "apps/desktop/src-tauri/src/mac_notifications.rs",
+        "apps/desktop/src-tauri/src/linux_notifications.rs",
+        "apps/desktop/src-tauri/src/lib.rs"
+      ],
+      "depends_on": [
+        "R1"
+      ],
+      "steps": [
+        "复现冻结验收的失败或探测真实验收环境",
+        "添加对应可执行回归测试",
+        "运行回归观察失败",
+        "实现最小根因修复",
+        "运行冻结验证命令",
+        "复核受影响调用链并记录证据"
+      ],
+      "acceptance": [
+        "系统发送成功但回执尚未写入时，重启保留pending并可重试",
+        "macOS identifier、Linux notification id和Windows group/tag对同一会话保持稳定",
+        "不同会话身份不冲突，非法标识拒绝；不承诺恰好一次横幅"
+      ],
+      "verification": [
+        "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked"
+      ],
+      "execution": "current",
+      "status": "pending",
+      "provider_run": {
+        "scope": "task",
+        "recursive_planning": false
+      },
+      "provider_binding": {
+        "binding": {
+          "controller": "converge",
+          "stage_providers": {},
+          "workflow_provider": {
+            "contract": {
+              "closure": [],
+              "entrypoint": "references/execution-protocol.md",
+              "preserve_external_behavior": false
+            },
+            "contract_fingerprint": "2fb1c069b1686ca2b67c505882e2ae27a404663386e5e72df4b2f65a6ec62822",
+            "id": "native-v1",
+            "manifest": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/providers/native-v1.json",
+            "manifest_fingerprint": "da79b6af45fa1e1a94b5ce9b4b0cf84d5f43a798e57f5e1c50b510f6b7e954ee",
+            "role": "workflow",
+            "source_root": "/Users/liuwenyuan/www/tools/skills-convergent-delivery",
+            "sources": [
+              {
+                "fingerprint": "a43c016ea5daecbf5e74ea93840c1e489fe7ce85f926bb651fdbf36064028770",
+                "kind": "entrypoint",
+                "path": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/references/execution-protocol.md",
+                "relative_path": "references/execution-protocol.md"
+              }
+            ],
+            "task_kind": "fix",
+            "version": "1"
+          }
+        },
+        "binding_fingerprint": "d7734d703897a4a4994052d9c8dee17dd9d48e75c4dbd5a65dd4565e320113b5",
+        "reason": "native engine was selected",
+        "selection": "explicit",
+        "task_kind": "fix"
+      }
+    },
+    {
+      "task_id": "R3",
+      "task_kind": "vertical_slice",
+      "outcomes": [
+        "遗留通知未跳转有可核查归因"
+      ],
+      "goal": "遗留通知未跳转有可核查归因",
+      "owned_paths": [
+        "apps/desktop/src-tauri/src/mac_notifications.rs",
+        "docs/notification-acceptance.md"
+      ],
+      "depends_on": [],
+      "steps": [
+        "复现冻结验收的失败或探测真实验收环境",
+        "添加对应可执行回归测试",
+        "运行回归观察失败",
+        "实现最小根因修复",
+        "运行冻结验证命令",
+        "复核受影响调用链并记录证据"
+      ],
+      "acceptance": [
+        "读取遗留YAM通知请求标识，核对当前路由及历史会话",
+        "有目标会话的当前通知运行中/冷启动均准确路由",
+        "无法识别目标的历史实验通知不得按标题猜测会话，记录样本与限制"
+      ],
+      "verification": [
+        "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked"
+      ],
+      "execution": "current",
+      "status": "pending",
+      "provider_run": {
+        "scope": "task",
+        "recursive_planning": false
+      },
+      "provider_binding": {
+        "binding": {
+          "controller": "converge",
+          "stage_providers": {},
+          "workflow_provider": {
+            "contract": {
+              "closure": [],
+              "entrypoint": "references/execution-protocol.md",
+              "preserve_external_behavior": false
+            },
+            "contract_fingerprint": "2fb1c069b1686ca2b67c505882e2ae27a404663386e5e72df4b2f65a6ec62822",
+            "id": "native-v1",
+            "manifest": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/providers/native-v1.json",
+            "manifest_fingerprint": "da79b6af45fa1e1a94b5ce9b4b0cf84d5f43a798e57f5e1c50b510f6b7e954ee",
+            "role": "workflow",
+            "source_root": "/Users/liuwenyuan/www/tools/skills-convergent-delivery",
+            "sources": [
+              {
+                "fingerprint": "a43c016ea5daecbf5e74ea93840c1e489fe7ce85f926bb651fdbf36064028770",
+                "kind": "entrypoint",
+                "path": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/references/execution-protocol.md",
+                "relative_path": "references/execution-protocol.md"
+              }
+            ],
+            "task_kind": "fix",
+            "version": "1"
+          }
+        },
+        "binding_fingerprint": "d7734d703897a4a4994052d9c8dee17dd9d48e75c4dbd5a65dd4565e320113b5",
+        "reason": "native engine was selected",
+        "selection": "explicit",
+        "task_kind": "fix"
+      }
+    },
+    {
+      "task_id": "R4",
+      "task_kind": "vertical_slice",
+      "outcomes": [
+        "安装与移动后的身份注册可验证"
+      ],
+      "goal": "安装与移动后的身份注册可验证",
+      "owned_paths": [
+        "apps/desktop/src-tauri/src/windows_notifications.rs",
+        "apps/desktop/src-tauri/src/linux_notifications.rs",
+        "apps/desktop/src-tauri/tauri.conf.json",
+        "docs/notification-acceptance.md",
+        ".github/workflows/ci.yml"
+      ],
+      "depends_on": [],
+      "steps": [
+        "复现冻结验收的失败或探测真实验收环境",
+        "添加对应可执行回归测试",
+        "运行回归观察失败",
+        "实现最小根因修复",
+        "运行冻结验证命令",
+        "复核受影响调用链并记录证据"
+      ],
+      "acceptance": [
+        "现有SDK和协议注册沿用com.yam.desktop",
+        "检查本地签名身份及三平台打包能力，包内协议配置完整",
+        "正式签名安装/升级/移动后点击只能凭实测勾选；没有证书则保持未验收"
+      ],
+      "verification": [
+        "pnpm --dir apps/desktop tauri build --debug --bundles app"
+      ],
+      "execution": "current",
+      "status": "pending",
+      "provider_run": {
+        "scope": "task",
+        "recursive_planning": false
+      },
+      "provider_binding": {
+        "binding": {
+          "controller": "converge",
+          "stage_providers": {},
+          "workflow_provider": {
+            "contract": {
+              "closure": [],
+              "entrypoint": "references/execution-protocol.md",
+              "preserve_external_behavior": false
+            },
+            "contract_fingerprint": "2fb1c069b1686ca2b67c505882e2ae27a404663386e5e72df4b2f65a6ec62822",
+            "id": "native-v1",
+            "manifest": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/providers/native-v1.json",
+            "manifest_fingerprint": "da79b6af45fa1e1a94b5ce9b4b0cf84d5f43a798e57f5e1c50b510f6b7e954ee",
+            "role": "workflow",
+            "source_root": "/Users/liuwenyuan/www/tools/skills-convergent-delivery",
+            "sources": [
+              {
+                "fingerprint": "a43c016ea5daecbf5e74ea93840c1e489fe7ce85f926bb651fdbf36064028770",
+                "kind": "entrypoint",
+                "path": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/references/execution-protocol.md",
+                "relative_path": "references/execution-protocol.md"
+              }
+            ],
+            "task_kind": "fix",
+            "version": "1"
+          }
+        },
+        "binding_fingerprint": "d7734d703897a4a4994052d9c8dee17dd9d48e75c4dbd5a65dd4565e320113b5",
+        "reason": "native engine was selected",
+        "selection": "explicit",
+        "task_kind": "fix"
+      }
+    },
+    {
+      "task_id": "R5",
+      "task_kind": "vertical_slice",
+      "outcomes": [
+        "跨平台桌面验收有独立证据"
+      ],
+      "goal": "跨平台桌面验收有独立证据",
+      "owned_paths": [
+        ".github/workflows/ci.yml",
+        "docs/notification-acceptance.md"
+      ],
+      "depends_on": [],
+      "steps": [
+        "复现冻结验收的失败或探测真实验收环境",
+        "添加对应可执行回归测试",
+        "运行回归观察失败",
+        "实现最小根因修复",
+        "运行冻结验证命令",
+        "复核受影响调用链并记录证据"
+      ],
+      "acceptance": [
+        "Windows/Linux通知点击、退出后唤醒、目录取消/选择和退出进程清理逐项记录",
+        "可用桌面执行实测，无桌面不把编译单测当点击验收",
+        "三平台CI持续运行测试、构建、fmt、clippy"
+      ],
+      "verification": [
+        "pnpm --dir apps/desktop test"
+      ],
+      "execution": "current",
+      "status": "pending",
+      "provider_run": {
+        "scope": "task",
+        "recursive_planning": false
+      },
+      "provider_binding": {
+        "binding": {
+          "controller": "converge",
+          "stage_providers": {},
+          "workflow_provider": {
+            "contract": {
+              "closure": [],
+              "entrypoint": "references/execution-protocol.md",
+              "preserve_external_behavior": false
+            },
+            "contract_fingerprint": "2fb1c069b1686ca2b67c505882e2ae27a404663386e5e72df4b2f65a6ec62822",
+            "id": "native-v1",
+            "manifest": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/providers/native-v1.json",
+            "manifest_fingerprint": "da79b6af45fa1e1a94b5ce9b4b0cf84d5f43a798e57f5e1c50b510f6b7e954ee",
+            "role": "workflow",
+            "source_root": "/Users/liuwenyuan/www/tools/skills-convergent-delivery",
+            "sources": [
+              {
+                "fingerprint": "a43c016ea5daecbf5e74ea93840c1e489fe7ce85f926bb651fdbf36064028770",
+                "kind": "entrypoint",
+                "path": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/references/execution-protocol.md",
+                "relative_path": "references/execution-protocol.md"
+              }
+            ],
+            "task_kind": "fix",
+            "version": "1"
+          }
+        },
+        "binding_fingerprint": "d7734d703897a4a4994052d9c8dee17dd9d48e75c4dbd5a65dd4565e320113b5",
+        "reason": "native engine was selected",
+        "selection": "explicit",
+        "task_kind": "fix"
+      }
+    },
+    {
+      "task_id": "R6",
+      "task_kind": "vertical_slice",
+      "outcomes": [
+        "核心测试覆盖缺口可量化"
+      ],
+      "goal": "核心测试覆盖缺口可量化",
+      "owned_paths": [
+        "apps/desktop/package.json",
+        "apps/desktop/tests/notifications.test.mjs",
+        "apps/desktop/tests/session-stream.test.mjs",
+        "apps/desktop/tests/workspaces.test.mjs",
+        "apps/desktop/src-tauri/src/lib.rs",
+        ".github/workflows/ci.yml",
+        "docs/notification-acceptance.md"
+      ],
+      "depends_on": [
+        "R1",
+        "R2"
+      ],
+      "steps": [
+        "复现冻结验收的失败或探测真实验收环境",
+        "添加对应可执行回归测试",
+        "运行回归观察失败",
+        "实现最小根因修复",
+        "运行冻结验证命令",
+        "复核受影响调用链并记录证据"
+      ],
+      "acceptance": [
+        "使用已有Node覆盖率工具统计实际执行模块",
+        "探测Rust覆盖率工具兼容性，能运行则统计核心模块，否则记录具体限制",
+        "只为实际分支缺口补测试，正常/边界/异常有断言"
+      ],
+      "verification": [
+        "pnpm --dir apps/desktop test",
+        "pnpm --dir apps/desktop build",
+        "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked"
+      ],
+      "execution": "current",
+      "status": "pending",
+      "provider_run": {
+        "scope": "task",
+        "recursive_planning": false
+      },
+      "provider_binding": {
+        "binding": {
+          "controller": "converge",
+          "stage_providers": {},
+          "workflow_provider": {
+            "contract": {
+              "closure": [],
+              "entrypoint": "references/execution-protocol.md",
+              "preserve_external_behavior": false
+            },
+            "contract_fingerprint": "2fb1c069b1686ca2b67c505882e2ae27a404663386e5e72df4b2f65a6ec62822",
+            "id": "native-v1",
+            "manifest": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/providers/native-v1.json",
+            "manifest_fingerprint": "da79b6af45fa1e1a94b5ce9b4b0cf84d5f43a798e57f5e1c50b510f6b7e954ee",
+            "role": "workflow",
+            "source_root": "/Users/liuwenyuan/www/tools/skills-convergent-delivery",
+            "sources": [
+              {
+                "fingerprint": "a43c016ea5daecbf5e74ea93840c1e489fe7ce85f926bb651fdbf36064028770",
+                "kind": "entrypoint",
+                "path": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/references/execution-protocol.md",
+                "relative_path": "references/execution-protocol.md"
+              }
+            ],
+            "task_kind": "fix",
+            "version": "1"
+          }
+        },
+        "binding_fingerprint": "d7734d703897a4a4994052d9c8dee17dd9d48e75c4dbd5a65dd4565e320113b5",
+        "reason": "native engine was selected",
+        "selection": "explicit",
+        "task_kind": "fix"
+      }
+    }
+  ],
+  "final_acceptance": [
+    "新通知失败、自动重试和手动恢复行为均有正常边界异常回归",
+    "崩溃恢复沿用稳定会话身份且不损坏历史pending",
+    "遗留通知、正式签名安装和Windows/Linux桌面各项有明确证据或未覆盖原因",
+    "生产构建及三平台持续验证通过，未验收项目不冒充完成"
+  ],
+  "decisions": [
+    {
+      "id": "D1",
+      "status": "resolved",
+      "question": "是否增加依赖或替换架构",
+      "resolution": "沿用现有平台SDK、JSON存储和Node测试工具，不增加产品依赖",
+      "source": "user"
+    },
+    {
+      "id": "D2",
+      "status": "resolved",
+      "question": "平台缺失与证书缺失如何处理",
+      "resolution": "先探测可用环境并执行可运行验证，缺失项目保留未验收，不发布、不合并、不申请新权限",
+      "source": "reversible-default"
+    },
+    {
+      "id": "D3",
+      "status": "resolved",
+      "question": "是否承诺恰好一次系统通知",
+      "resolution": "同会话使用稳定OS标识减少重复，崩溃后仍可能重新弹出横幅；不丢失pending",
+      "source": "code"
+    }
+  ]
+}

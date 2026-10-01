@@ -12,16 +12,17 @@ pub fn send(
         .register_all()
         .map_err(|error| format!("Register notification protocol: {error}"))?;
     let xml = toast_xml(&session_id, &title, &body)?;
+    let tag = toast_tag(&session_id)?;
     let app_id = app.config().identifier.clone();
     // A fresh thread guarantees a compatible WinRT apartment without changing
     // the caller's apartment (Tauri's UI thread may already use STA).
-    std::thread::spawn(move || show_toast(&app_id, &xml))
+    std::thread::spawn(move || show_toast(&app_id, &xml, &tag))
         .join()
         .map_err(|_| "Windows notification worker panicked".to_string())?
 }
 
 #[cfg(windows)]
-fn show_toast(app_id: &str, xml: &str) -> Result<(), String> {
+fn show_toast(app_id: &str, xml: &str, tag: &str) -> Result<(), String> {
     use windows::{
         core::HSTRING,
         Data::Xml::Dom::XmlDocument,
@@ -46,6 +47,12 @@ fn show_toast(app_id: &str, xml: &str) -> Result<(), String> {
         .map_err(|error| format!("Load Windows notification content: {error}"))?;
     let notification = ToastNotification::CreateToastNotification(&document)
         .map_err(|error| format!("Create Windows notification: {error}"))?;
+    notification
+        .SetGroup(&HSTRING::from("yam-sessions"))
+        .map_err(|error| format!("Set Windows notification group: {error}"))?;
+    notification
+        .SetTag(&HSTRING::from(tag))
+        .map_err(|error| format!("Set Windows notification tag: {error}"))?;
     let notifier = ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(app_id))
         .map_err(|error| format!("Create Windows notifier: {error}"))?;
     let setting = notifier
@@ -141,6 +148,22 @@ fn register_shortcut(app_id: &str) -> Result<(), String> {
     result.map_err(|error| format!("Register YAM notification shortcut: {error}"))
 }
 
+fn toast_tag(session_id: &str) -> Result<String, String> {
+    if crate::session_id_from_link(&format!("yam://session/{session_id}")).as_deref()
+        != Some(session_id)
+    {
+        return Err("Invalid notification session ID".into());
+    }
+    // Keep the algorithm fixed across restarts/upgrades and fit the original
+    // Windows 16-character limit. This identity is not used for security.
+    let hash = session_id
+        .bytes()
+        .fold(0xcbf29ce484222325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+        });
+    Ok(format!("{hash:016x}"))
+}
+
 fn toast_xml(session_id: &str, title: &str, body: &str) -> Result<String, String> {
     if !session_id.starts_with("s-")
         || session_id.len() <= 2
@@ -182,6 +205,21 @@ fn escape_xml(text: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notification_tag_is_stable_bounded_and_session_specific() {
+        let tag = toast_tag("s-abcdef-0").unwrap();
+        assert_eq!(tag, "a0c7db03b9470457");
+        assert_eq!(tag, toast_tag("s-abcdef-0").unwrap());
+        assert_ne!(tag, toast_tag("s-abcdef-1").unwrap());
+        assert_eq!(
+            toast_tag(&format!("s-{}", "a".repeat(126))).unwrap().len(),
+            16
+        );
+        for id in ["", "s-", "../secret", "s-1?query", "s-中文"] {
+            assert!(toast_tag(id).is_err());
+        }
+    }
 
     #[test]
     fn notification_uses_protocol_activation_without_process_callback() {
