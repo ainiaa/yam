@@ -10,7 +10,7 @@
 | B2 | 导航、可配置快捷键、模式记忆已实现，回归及原生主要操作通过 | 完整跨平台 UI 未覆盖；模式记忆已通过原生重启复测 |
 | B3 | 已实现并有本机终端/压力证据 | cmux 对照、WebKit 全进程内存未测 |
 | B4 | 主动原生 resume 已实现；真实上下文续答通过 | 身份保留/重复拒绝已复测；其他 CLI/provider/平台未覆盖 |
-| B5 | 当前源码本地检查进行中 | 当前分支 CI、三平台真实通知点击/唤醒、正式签名待验收 |
+| B5 | 本地检查及提交 77180ef 的三平台 CI、打包通过 | 三平台真实通知点击/唤醒、正式签名、正式工具回执待验收 |
 
 冻结 JSON 中的 pending 为原计划快照；本节与后续实测记录是执行进度，不改写冻结验收。Converge native preflight 实际返回 coverage uncovered（未识别项目现有 Node coverage 配置），没有正式 Trace/Review v3 完成回执；不能据此宣称整个 Converge 计划完成。
 
@@ -103,3 +103,9 @@ B4 只接受 YAM 历史 source ID，由后端取可信主会话 UUID；不允许
 本地最终验证仍需绑定下述最后检查与原生包复测；平台/签名/正式工具缺口保留。
 
 最终隔离包 s-1a0f70eb564-0 复测：主动恢复原 ID 后，从原历史再次点击续聊被明确拒绝（already being resumed），未产生第二个运行会话。停止后 agent_session_id 仍为 01a0f6ec-5463-78c3-a404-5a7ad3b933fe、integration=connecting，继续按钮可用；未信任 Hook 不伪称连接成功。模式设置 Continuous conversation 跨包重启保留，测试后恢复原 task；暂停偏好恢复 off。最终 Helper 二进制冒烟通过。87 个 Rust 测试、57 个前端测试通过，模块覆盖行 100%、分支 99.01%、函数 100%（仍不覆盖 App.tsx 整体渲染）；实际 App 协调器单独回归。Vite/TypeScript 与隔离 .app 构建通过；最后 Clippy、格式与 diff 检查见本轮命令回执。无新增依赖或审批/沙箱变更。
+
+## 2026-10-01 — 当前提交三平台 CI 通过
+
+修复已提交并推送到 codex/reliability-closure，业务提交 77180ef253c814280b4293cabc9f4ef7c002cabe。[Desktop checks 36851285080](https://github.com/ainiaa/yam/actions/runs/36851285080) 的 headSha 与该提交一致，最终 conclusion=success。macOS、Ubuntu 22.04、Windows 均通过前端测试/覆盖阈值、构建、Rust 格式、Clippy、cargo test --locked 和桌面打包，测试产物已上传；不引用旧分支 CI 替代本轮证据。
+
+该 CI 不操作真实桌面通知中心，不证明通知点击/退出后唤醒或 Developer ID 签名/公证。macOS CUA 仍只能读取通知中心天气小组件，Control Center 入口超时；Windows/Linux 没有可操作的真实桌面。Claude 正常回应与权限事件、正式 Converge 工具回执及 cmux 对照仍未覆盖，整个冻结验收不能标为完成。所有本次测试 CLI 与隔离包已退出，4 个新增 Hook 信任已撤销，原有 15 项状态一致；隔离包通知权限保留本次授权的开启状态。
