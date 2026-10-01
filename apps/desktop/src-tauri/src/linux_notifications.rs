@@ -224,12 +224,13 @@ fn delivery_error(portal: &str, gnome: &str, unavailable: bool) -> String {
 
 #[cfg(target_os = "linux")]
 fn backend_unavailable(error: &glib::Error) -> bool {
-    use glib::translate::IntoGlib;
-    // GDBus's stable domain/code identifies missing capabilities without matching
-    // localized error text. The quark function only obtains the registered domain.
+    use glib::translate::{IntoGlib, ToGlibPtr};
+    // GDBus's stable domain/code avoids localized error text. glib 0.18 has no
+    // code accessor; the borrowed GError stays valid for this read.
+    let raw: *const glib::ffi::GError = error.to_glib_none().0;
     error.domain().into_glib() == unsafe { gio::ffi::g_dbus_error_quark() }
         && matches!(
-            error.code(),
+            unsafe { (*raw).code },
             gio::ffi::G_DBUS_ERROR_SERVICE_UNKNOWN
                 | gio::ffi::G_DBUS_ERROR_NAME_HAS_NO_OWNER
                 | gio::ffi::G_DBUS_ERROR_NOT_SUPPORTED

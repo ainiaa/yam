@@ -10,9 +10,9 @@
 
 范围：`apps/desktop/src/notifications.ts`、`apps/desktop/src/App.tsx`、`apps/desktop/tests/notifications.test.mjs`
 
-- [ ] 权限关闭与桌面不支持分别提示解决动作，自动重试暂停，手动重试可恢复
-- [ ] 暂时错误按15秒到5分钟退避；重复状态事件不能绕过退避
-- [ ] 发送成功而回执失败时仅重试回执，不重复发送
+- [x] 权限关闭与桌面不支持分别提示解决动作，自动重试暂停，手动重试可恢复
+- [x] 暂时错误按15秒到5分钟退避；重复状态事件不能绕过退避
+- [x] 发送成功而回执失败时仅重试回执，不重复发送
 
 验证：`pnpm --dir apps/desktop test`；`pnpm --dir apps/desktop build`
 
@@ -20,9 +20,9 @@
 
 范围：`apps/desktop/src-tauri/src/windows_notifications.rs`、`apps/desktop/src-tauri/src/mac_notifications.rs`、`apps/desktop/src-tauri/src/linux_notifications.rs`、`apps/desktop/src-tauri/src/lib.rs`
 
-- [ ] 系统发送成功但回执尚未写入时，重启保留pending并可重试
-- [ ] macOS identifier、Linux notification id和Windows group/tag对同一会话保持稳定
-- [ ] 不同会话身份不冲突，非法标识拒绝；不承诺恰好一次横幅
+- [x] 系统发送成功但回执尚未写入时，重启保留pending并可重试
+- [x] macOS identifier、Linux notification id和Windows group/tag对同一会话保持稳定
+- [x] 不同会话身份不冲突，非法标识拒绝；不承诺恰好一次横幅
 
 验证：`cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked`
 
@@ -31,8 +31,8 @@
 范围：`apps/desktop/src-tauri/src/mac_notifications.rs`、`docs/notification-acceptance.md`
 
 - [ ] 读取遗留YAM通知请求标识，核对当前路由及历史会话
-- [ ] 有目标会话的当前通知运行中/冷启动均准确路由
-- [ ] 无法识别目标的历史实验通知不得按标题猜测会话，记录样本与限制
+- [x] 有目标会话的当前通知运行中/冷启动均准确路由
+- [x] 无法识别目标的历史实验通知不得按标题猜测会话，记录样本与限制
 
 验证：`cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked`
 
@@ -40,9 +40,9 @@
 
 范围：`apps/desktop/src-tauri/src/windows_notifications.rs`、`apps/desktop/src-tauri/src/linux_notifications.rs`、`apps/desktop/src-tauri/tauri.conf.json`、`docs/notification-acceptance.md`、`.github/workflows/ci.yml`
 
-- [ ] 现有SDK和协议注册沿用com.yam.desktop
-- [ ] 检查本地签名身份及三平台打包能力，包内协议配置完整
-- [ ] 正式签名安装/升级/移动后点击只能凭实测勾选；没有证书则保持未验收
+- [x] 现有SDK和协议注册沿用com.yam.desktop
+- [x] 检查本地签名身份及三平台打包能力，包内协议配置完整
+- [x] 正式签名安装/升级/移动后点击只能凭实测勾选；没有证书则保持未验收
 
 验证：`pnpm --dir apps/desktop tauri build --debug --bundles app`
 
@@ -51,8 +51,8 @@
 范围：`.github/workflows/ci.yml`、`docs/notification-acceptance.md`
 
 - [ ] Windows/Linux通知点击、退出后唤醒、目录取消/选择和退出进程清理逐项记录
-- [ ] 可用桌面执行实测，无桌面不把编译单测当点击验收
-- [ ] 三平台CI持续运行测试、构建、fmt、clippy
+- [x] 可用桌面执行实测，无桌面不把编译单测当点击验收
+- [x] 三平台CI持续运行测试、构建、fmt、clippy
 
 验证：`pnpm --dir apps/desktop test`
 
@@ -60,9 +60,9 @@
 
 范围：`apps/desktop/package.json`、`apps/desktop/tests/notifications.test.mjs`、`apps/desktop/tests/session-stream.test.mjs`、`apps/desktop/tests/workspaces.test.mjs`、`apps/desktop/src-tauri/src/lib.rs`、`.github/workflows/ci.yml`、`docs/notification-acceptance.md`
 
-- [ ] 使用已有Node覆盖率工具统计实际执行模块
-- [ ] 探测Rust覆盖率工具兼容性，能运行则统计核心模块，否则记录具体限制
-- [ ] 只为实际分支缺口补测试，正常/边界/异常有断言
+- [x] 使用已有Node覆盖率工具统计实际执行模块
+- [x] 探测Rust覆盖率工具兼容性，能运行则统计核心模块，否则记录具体限制
+- [x] 只为实际分支缺口补测试，正常/边界/异常有断言
 
 验证：`pnpm --dir apps/desktop test`；`pnpm --dir apps/desktop build`；`cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked`
 
@@ -115,3 +115,5 @@ Rust覆盖率探测实证：rustc1.98.1使用LLVM22.1.8；已安装Apple LLVM15.
 Converge外部CLI复审未覆盖：Codex CLI缺少@openai/codex-darwin-arm64；Claude CLI provider缺少base_url（HTTP400）。未安装或改写用户CLI/provider。补充独立原生审查agent复核，不将其冒称正式Converge外部审查门禁。
 
 最终本地验证：前端24/24、Rust49/49、生产构建、fmt与Clippy -D warnings通过。独立原生复审再次运行通知12项及旧回执Rust回归，确认既有发现已关闭、未发现新的明确规格或质量缺陷。
+
+最终CI首次Linux检查暴露glib0.18没有Error::code方法（E0599）；保留既有原生DBus回归，改为读取借用GError的原生code，不升级依赖，再运行三平台CI。
