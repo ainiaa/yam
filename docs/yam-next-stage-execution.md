@@ -173,3 +173,5 @@ Codex 改为在隔离 app-server 进程注入相同六类会话 Hook，经只读
 原生验收另外发现再次运行 Claude 被命名为 Interactive shell，且任务 prompt 丢失于默认标题；实际 startSession 协调器测试先失败，再改为依据后端返回的 launch/adapter/prompt 命名。58 个前端回归与覆盖门槛通过，原生再次运行的标题为 Claude Code。最终 Rust 100 回归、Clippy、原生 build、编译 Helper 冒烟通过。
 
 剩余状态：Windows/Linux 通知按本轮用户要求暂缓；Codex PermissionRequest → matching ToolProgress 的本轮原生测试待六个 Hook 的临时信任答复。Converge coverage/Trace/Review v3 仍未覆盖：本机 guard 不识别项目 Node coverage 阈值，Rust LLVM coverage 工具链缺失；未改全局 Suite、安装工具或重建用户索引。已有 Developer ID 证书为 0，正式签名/公证实物与跨构建旧通知/安装迁移验收仍是外部条件；既有流程及检查已实现。全局 claude-mem/graphify 报错不属于 YAM Helper，未修改外部插件。
+
+最终业务提交：2c2ff7b57ed7ecdedb5b2929f5f265835eecea7d，已推送 codex/reliability-closure。精确业务 SHA 的 GitHub CI 36871796571 三平台均 success（Windows NSIS、Ubuntu deb、macOS app/archive），包含 Node 覆盖阈值、build、fmt、Clippy、Rust 回归、macOS 签名流程 mock 与打包。回执：https://github.com/ainiaa/yam/actions/runs/36871796571。这不等于 Windows/Linux 实际通知验收或 Developer ID 签名；运行模式、临时 wrapper、项目 import warning 与全局信任已恢复/清理。文档收口提交使用 skip ci，不将旧业务 SHA 的 CI 冒充新业务变更通过。
