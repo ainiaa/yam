@@ -316,6 +316,10 @@ fn read_frame_with_budget(
     limit: usize,
     budget: Duration,
 ) -> Result<Vec<u8>, String> {
+    // Winsock accepts inherit the nonblocking listener mode; timeout-based framing requires blocking I/O.
+    stream
+        .set_nonblocking(false)
+        .map_err(|_| "Cannot configure background frame mode")?;
     let deadline = std::time::Instant::now() + budget;
     let mut read = |mut bytes: &mut [u8]| -> Result<(), String> {
         while !bytes.is_empty() {
@@ -1331,6 +1335,31 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn inherited_nonblocking_connections_wait_for_fragmented_request_bytes() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = std::thread::spawn(move || {
+            use std::io::Write;
+            let mut stream = std::net::TcpStream::connect(address).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(40));
+            for chunk in [
+                &4u32.to_be_bytes()[..2],
+                &4u32.to_be_bytes()[2..],
+                b"te",
+                b"st",
+            ] {
+                stream.write_all(chunk).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        });
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.set_nonblocking(true).unwrap(); // Winsock accepts inherit the listening socket's mode.
+        let frame =
+            super::read_frame_with_budget(&mut stream, 1024, std::time::Duration::from_secs(1));
+        peer.join().unwrap();
+        assert_eq!(frame.unwrap(), b"test");
+    }
     #[test]
     fn the_windowless_owner_does_not_claim_the_linux_desktop_activation_name() {
         let mut config = tauri::utils::config::AppConfig {
