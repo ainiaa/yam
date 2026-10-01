@@ -1874,7 +1874,15 @@ fn read_session_snapshot(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            // The deep-link plugin may not be initialized when a second process arrives.
+            for argument in args.iter().skip(1) {
+                if session_id_from_link(argument).is_some() {
+                    if let Err(error) = route_notification_link(app, argument) {
+                        eprintln!("[YAM] {error}");
+                    }
+                }
+            }
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
                 let _ = window.set_focus();
@@ -1926,13 +1934,6 @@ pub fn run() {
             }
         })
         .setup(|app| {
-            if let Some(urls) = app.deep_link().get_current()? {
-                for url in urls {
-                    if let Err(error) = route_notification_link(app.handle(), url.as_str()) {
-                        eprintln!("[YAM] {error}");
-                    }
-                }
-            }
             let handle = app.handle().clone();
             app.deep_link().on_open_url(move |event| {
                 for url in event.urls() {
@@ -1941,6 +1942,13 @@ pub fn run() {
                     }
                 }
             });
+            if let Some(urls) = app.deep_link().get_current()? {
+                for url in urls {
+                    if let Err(error) = route_notification_link(app.handle(), url.as_str()) {
+                        eprintln!("[YAM] {error}");
+                    }
+                }
+            }
             if let Some(window) = app.get_webview_window("main") {
                 if let Some(monitor) = window.current_monitor()? {
                     let area = monitor.work_area();
