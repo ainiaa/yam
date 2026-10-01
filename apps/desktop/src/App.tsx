@@ -34,7 +34,7 @@ import {
   type Project,
 } from "./workspaces";
 import { OutputBuffer, consumeOutput, replayOutput, type OutputChunk, type LogSnapshot } from "./session-stream";
-import { NotificationQueue, inferAgentPhase } from "./notifications";
+import { NotificationQueue, inferAgentPhase, discardAttentionRetries, terminalStatuses } from "./notifications";
 import "@xterm/xterm/css/xterm.css";
 import "./App.css";
 
@@ -91,13 +91,6 @@ const statusLabels: Record<string, string> = {
   stopped: "Stopped",
   needs_attention: "Needs attention",
 };
-
-const terminalStatuses = new Set([
-  "succeeded",
-  "failed",
-  "stopped",
-  "needs_attention",
-]);
 
 function App() {
   const terminalHost = useRef<HTMLDivElement>(null);
@@ -187,29 +180,44 @@ function App() {
 
   async function notifySession(event: SessionStateEvent) {
     if (!terminalStatuses.has(event.status) && event.status !== "idle_attention") return;
+    if (terminalStatuses.has(event.status)) {
+      for (const oldKey of discardAttentionRetries(retryNotifications.current, event.session_id))
+        notifications.current.clearFailure(oldKey);
+    }
     const key = `${event.session_id}:${event.status}`;
     if (!notifications.current.canRetry(key)) return;
     if (document.hasFocus() && sessionId.current === event.session_id) {
       notifications.current.suppress(key);
-      try { await invoke("acknowledge_notification", {sessionId: event.session_id}); retryNotifications.current.delete(key); notifications.current.clearFailure(key); if (!retryNotifications.current.size) setNotificationError(null); }
+      try { await invoke("acknowledge_notification", {sessionId: event.session_id, expectedStatus: event.status}); retryNotifications.current.delete(key); notifications.current.clearFailure(key); if (!retryNotifications.current.size) setNotificationError(null); }
       catch (reason) { retryNotifications.current.set(key, event); setNotificationError(notifications.current.recordFailure(key, reason)); }
       return;
     }
     retryNotifications.current.set(key, event);
     try {
-      const delivered = await notifications.current.deliver(key, async () => {
-        const record = (await invoke<SessionRecord[]>("list_sessions")).find(item => item.summary.session_id === event.session_id);
+      const record = (await invoke<SessionRecord[]>("list_sessions")).find(item => item.summary.session_id === event.session_id);
+      if (!notifications.current.canRetry(key)) return;
+      const superseded = event.status === "idle_attention" && record && terminalStatuses.has(record.status);
+      const delivered = superseded || await notifications.current.deliver(key, async () => {
         const taskName = titlesRef.current[event.session_id] || record?.summary.launch?.adapter || "Session";
         const title = `${projectName(record?.summary.cwd ?? "")} · ${taskName} · ${statusLabels[event.status] ?? "Needs attention"}`.slice(0, 200);
         await invoke("notify_session", { sessionId: event.session_id, title });
-      });
+      }, event.session_id);
       if (delivered) {
-        await invoke("acknowledge_notification", {sessionId: event.session_id});
+        // Completion can arrive while the OS is sending the older attention request.
+        // Do not consume the newer terminal receipt with that older request.
+        const latest = event.status === "idle_attention" && !superseded
+          ? (await invoke<SessionRecord[]>("list_sessions")).find(item => item.summary.session_id === event.session_id)
+          : record;
+        if (!(event.status === "idle_attention" && latest && terminalStatuses.has(latest.status)))
+          await invoke("acknowledge_notification", {sessionId: event.session_id, expectedStatus: event.status});
         retryNotifications.current.delete(key);
         notifications.current.clearFailure(key);
         if (!retryNotifications.current.size) setNotificationError(null);
       }
-    } catch (reason) { setNotificationError(notifications.current.recordFailure(key, reason)); }
+    } catch (reason) {
+      if (retryNotifications.current.has(key))
+        setNotificationError(notifications.current.recordFailure(key, reason));
+    }
   }
 
   function updateAgentPhase(data: string) {

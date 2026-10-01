@@ -166,10 +166,16 @@ pub fn send(
         "org.gtk.Notifications",
         "AddNotification",
         &(app_id, &session_id, &notification).to_variant(),
-    ).map(|_| ()).map_err(|gnome| format!(
-        "This desktop cannot provide notifications that reopen YAM after exit. A notification portal with host-app Registry (xdg-desktop-portal 1.20+) or GNOME is required. Portal: {}; GNOME: {gnome}",
-        portal.unwrap_err(),
-    ))
+    )
+    .map(|_| ())
+    .map_err(|gnome| {
+        let portal = portal.unwrap_err();
+        delivery_error(
+            &portal.to_string(),
+            &gnome.to_string(),
+            backend_unavailable(&portal) && backend_unavailable(&gnome),
+        )
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -194,24 +200,83 @@ fn call(
     interface: &str,
     method: &str,
     parameters: &glib::Variant,
-) -> Result<glib::Variant, String> {
-    connection
-        .call_sync(
-            Some(destination),
-            path,
-            interface,
-            method,
-            Some(parameters),
-            Some(glib::VariantTy::UNIT),
-            gio::DBusCallFlags::NONE,
-            5000,
-            None::<&gio::Cancellable>,
+) -> Result<glib::Variant, glib::Error> {
+    connection.call_sync(
+        Some(destination),
+        path,
+        interface,
+        method,
+        Some(parameters),
+        Some(glib::VariantTy::UNIT),
+        gio::DBusCallFlags::NONE,
+        5000,
+        None::<&gio::Cancellable>,
+    )
+}
+
+fn delivery_error(portal: &str, gnome: &str, unavailable: bool) -> String {
+    if unavailable {
+        format!("This desktop cannot provide notifications that reopen YAM after exit. A notification portal with host-app Registry (xdg-desktop-portal 1.20+) or GNOME is required. Portal: {portal}; GNOME: {gnome}")
+    } else {
+        format!("Linux notification delivery failed. Portal: {portal}; GNOME: {gnome}")
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn backend_unavailable(error: &glib::Error) -> bool {
+    use glib::translate::IntoGlib;
+    // GDBus's stable domain/code identifies missing capabilities without matching
+    // localized error text. The quark function only obtains the registered domain.
+    error.domain().into_glib() == unsafe { gio::ffi::g_dbus_error_quark() }
+        && matches!(
+            error.code(),
+            gio::ffi::G_DBUS_ERROR_SERVICE_UNKNOWN
+                | gio::ffi::G_DBUS_ERROR_NAME_HAS_NO_OWNER
+                | gio::ffi::G_DBUS_ERROR_NOT_SUPPORTED
+                | gio::ffi::G_DBUS_ERROR_UNKNOWN_METHOD
+                | gio::ffi::G_DBUS_ERROR_UNKNOWN_INTERFACE
+                | gio::ffi::G_DBUS_ERROR_UNKNOWN_OBJECT
         )
-        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn delivery_errors_only_pause_for_confirmed_backend_absence() {
+        let missing = "ServiceUnknown";
+        assert!(super::delivery_error(missing, missing, true).starts_with("This desktop cannot"));
+        for error in ["Timeout was reached", "NoReply", "Permission denied"] {
+            let message = super::delivery_error(error, missing, false);
+            assert!(message.starts_with("Linux notification delivery failed"));
+            assert!(message.contains(error));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn native_dbus_errors_distinguish_missing_services_from_transient_failures() {
+        use gio::glib::translate::from_glib_full;
+        for (name, unavailable) in [
+            ("org.freedesktop.DBus.Error.ServiceUnknown", true),
+            ("org.freedesktop.DBus.Error.UnknownMethod", true),
+            ("org.freedesktop.DBus.Error.NoReply", false),
+            ("org.freedesktop.DBus.Error.Timeout", false),
+            ("org.freedesktop.DBus.Error.AccessDenied", false),
+        ] {
+            let name = std::ffi::CString::new(name).unwrap();
+            let message = std::ffi::CString::new("test").unwrap();
+            let error: gio::glib::Error = unsafe {
+                from_glib_full(gio::ffi::g_dbus_error_new_for_dbus_error(
+                    name.as_ptr(),
+                    message.as_ptr(),
+                ))
+            };
+            assert_eq!(super::backend_unavailable(&error), unavailable);
+        }
+        let timeout = gio::glib::Error::new(gio::IOErrorEnum::TimedOut, "timeout");
+        assert!(!super::backend_unavailable(&timeout));
+    }
+
     #[test]
     fn send_requires_successful_activation_registration() {
         let missing = std::sync::OnceLock::new();

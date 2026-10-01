@@ -79,9 +79,9 @@
 
 ### R1 已完成
 
-新增3项正常/边界/异常回归，先观察缺失notificationFailure导出红灯，再实现分类、暂停、15秒至5分钟退避及手动重试。前端16/16测试和生产构建通过。回执保存失败后手动重试保留已发送去重记录。独立通知错误提示不覆盖其他业务错误。
+新增3项正常/边界/异常回归，先观察缺失notificationFailure导出红灯，再实现分类、暂停、15秒至5分钟退避及手动重试。前端初次16/16测试和生产构建通过；复审补充真实App协调函数回归后24/24通过。回执保存失败后手动重试保留已发送去重记录。独立通知错误提示不覆盖其他业务错误。
 
-### R2 已完成源码与本地回归，Windows SDK调用待CI
+### R2 已完成源码、回归与三平台CI
 
 Windows补充稳定Group/Tag，相同会话重试替换同一身份；Tag使用固定FNV-1a 64-bit映射，不使用跨版本未承诺稳定的DefaultHasher，不用于安全校验。Tag保持16个字符以兼容原始Windows限制（[Microsoft Tag文档](https://learn.microsoft.com/en-us/uwp/api/windows.ui.notifications.toastnotification.tag)）。64-bit摘要存在理论碰撞边界，不承诺无限会话数学唯一性。新增稳定值、同/异会话、最长ID及非法ID回归。
 
@@ -99,8 +99,19 @@ R6开始前补充范围：apps/desktop/src/session-stream.ts。工具边界检�
 
 ### R6 本地完成，Rust覆盖率未覆盖
 
-新增输出游标、chunk offset、缓存上限的非法数值及清空边界测试；先观察非法游标红灯，再最小修复安全非负整数游标与正整数缓存上限。补齐精确状态筛选回归。前端18/18通过，三个已执行工具模块行覆盖率100%、分支99.11%、函数100%；不是React页面或原生SDK覆盖率。新增test:coverage命令及CI闸门：行95%、分支90%、函数95%。生产构建通过。
+新增输出游标、chunk offset、缓存上限的非法数值及清空边界测试；先观察非法游标红灯，再最小修复安全非负整数游标与正整数缓存上限。补齐精确状态筛选回归。前端最终24/24通过，三个已执行工具模块行覆盖率100%、分支99.17%、函数100%；不是React页面或原生SDK覆盖率。新增test:coverage命令及CI闸门：行95%、分支90%、函数95%。生产构建通过。
 
 Rust覆盖率探测实证：rustc1.98.1使用LLVM22.1.8；已安装Apple LLVM15.0.0。独立instrument-coverage探针编译与执行成功，但llvm-profdata merge失败：raw profile format version10、工具expected8；rustup未安装匹配llvm-tools组件，cargo-llvm-cov与Homebrew LLVM也不可用。不安装额外工具来伪造门禁通过，Rust覆盖率保持未覆盖。
 
-代码026102e的CI36813191803三平台success，证明Windows新增SetGroup/SetTag SDK调用编译、Clippy及测试通过。新打包/覆盖率配置尚待后续提交CI。
+代码026102e的CI36813191803三平台success，证明Windows新增SetGroup/SetTag SDK调用编译、Clippy及测试通过。572928d的CI36814180042三平台success，新增覆盖率闸门、app/deb/nsis打包与测试产物上传全部通过。最新复审修复等待下一次CI。
+
+
+### 最终复审修复
+
+独立只读复审发现并闭环修复：Linux的portal/GNOME暂时超时不能被误判为永久不支持；macOS未安装包及Windows/Linux权限错误有可操作提示。使用GLib原生DBus错误域/码区分缺失服务和暂时故障，Linux专属测试交由CI执行。
+
+实际提取App的notifySession函数并mock IPC，验证重复旧attention、同会话不同状态发送竞争、发送成功回执失败、延迟history绕过退避。先观察断言失败，再增加会话发送gate、旧attention重试清理及await后重查退避。后端历史锁内校验required expected_status，防止查询后终态改变时旧ACK清掉新pending；磁盘回归验证旧状态回执保留pending、正确状态可确认。
+
+Converge外部CLI复审未覆盖：Codex CLI缺少@openai/codex-darwin-arm64；Claude CLI provider缺少base_url（HTTP400）。未安装或改写用户CLI/provider。补充独立原生审查agent复核，不将其冒称正式Converge外部审查门禁。
+
+最终本地验证：前端24/24、Rust49/49、生产构建、fmt与Clippy -D warnings通过。独立原生复审再次运行通知12项及旧回执Rust回归，确认既有发现已关闭、未发现新的明确规格或质量缺陷。

@@ -668,7 +668,11 @@ impl HistoryStore {
         Ok(())
     }
 
-    fn acknowledge_notification(&self, session_id: &str) -> Result<(), String> {
+    fn acknowledge_notification(
+        &self,
+        session_id: &str,
+        expected_status: &str,
+    ) -> Result<(), String> {
         let mut records = self
             .records
             .lock()
@@ -678,6 +682,10 @@ impl HistoryStore {
             .iter_mut()
             .find(|record| record.summary.session_id == session_id)
             .ok_or_else(|| "Unknown notification session".to_string())?;
+        // Validate under the history lock: an old receipt must not consume a new state.
+        if record.status != expected_status {
+            return Ok(());
+        }
         record.notification_pending = false;
         self.save_locked(&updated)?;
         *records = updated;
@@ -1749,8 +1757,11 @@ fn acknowledge_notification(
     app: AppHandle,
     manager: State<'_, SessionManager>,
     session_id: String,
+    expected_status: String,
 ) -> Result<(), String> {
-    manager.history(&app)?.acknowledge_notification(&session_id)
+    manager
+        .history(&app)?
+        .acknowledge_notification(&session_id, &expected_status)
 }
 
 #[tauri::command]
@@ -2638,7 +2649,9 @@ mod tests {
             .unwrap();
         // Simulate the disk failing after the OS accepted the notification.
         std::fs::create_dir(root.join("sessions.json.tmp")).unwrap();
-        assert!(store.acknowledge_notification(&summary.session_id).is_err());
+        assert!(store
+            .acknowledge_notification(&summary.session_id, "succeeded")
+            .is_err());
         assert!(store.list().unwrap()[0].notification_pending);
         drop(store);
         let reopened = HistoryStore::open(root.clone()).unwrap();
@@ -2646,10 +2659,34 @@ mod tests {
         assert_eq!(reopened.list().unwrap()[0].status, "succeeded");
         std::fs::remove_dir(root.join("sessions.json.tmp")).unwrap();
         reopened
-            .acknowledge_notification(&summary.session_id)
+            .acknowledge_notification(&summary.session_id, "succeeded")
             .unwrap();
         drop(reopened);
         assert!(!HistoryStore::open(root.clone()).unwrap().list().unwrap()[0].notification_pending);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stale_notification_receipt_preserves_new_terminal_pending() {
+        let (root, summary) = test_history();
+        let store = HistoryStore::open(root.clone()).unwrap();
+        store.start(&summary).unwrap();
+        store
+            .update(&summary.session_id, "succeeded", Some(0), None, None)
+            .unwrap();
+        store
+            .acknowledge_notification(&summary.session_id, "idle_attention")
+            .unwrap();
+        assert!(store.list().unwrap()[0].notification_pending);
+        assert!(HistoryStore::open(root.clone()).unwrap().list().unwrap()[0].notification_pending);
+        store
+            .acknowledge_notification(&summary.session_id, "running")
+            .unwrap();
+        assert!(store.list().unwrap()[0].notification_pending);
+        store
+            .acknowledge_notification(&summary.session_id, "succeeded")
+            .unwrap();
+        assert!(!store.list().unwrap()[0].notification_pending);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -2662,8 +2699,12 @@ mod tests {
             .update(&summary.session_id, "succeeded", Some(0), None, None)
             .unwrap();
         assert!(HistoryStore::open(root.clone()).unwrap().list().unwrap()[0].notification_pending);
-        assert!(store.acknowledge_notification("missing").is_err());
-        store.acknowledge_notification(&summary.session_id).unwrap();
+        assert!(store
+            .acknowledge_notification("missing", "succeeded")
+            .is_err());
+        store
+            .acknowledge_notification(&summary.session_id, "succeeded")
+            .unwrap();
         assert!(!HistoryStore::open(root.clone()).unwrap().list().unwrap()[0].notification_pending);
         std::fs::remove_dir_all(root).unwrap();
     }

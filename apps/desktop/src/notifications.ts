@@ -15,12 +15,12 @@ export class NotificationQueue {
   clearFailure(id: string) { this.failures.delete(id); }
   resetRetries() { this.failures.clear(); }
   suppress(id: string) { this.completed.add(id); }
-  async deliver(id: string, send: () => Promise<void>) {
+  async deliver(id: string, send: () => Promise<void>, scope = id) {
     if (this.completed.has(id)) return true;
-    if (this.inFlight.has(id)) return false;
-    this.inFlight.add(id);
+    if (this.inFlight.has(scope)) return false;
+    this.inFlight.add(scope);
     try { await send(); this.completed.add(id); return true; }
-    finally { this.inFlight.delete(id); }
+    finally { this.inFlight.delete(scope); }
   }
 }
 export function inferAgentPhase(data: string): "idle" | "working" | "waiting" {
@@ -35,6 +35,12 @@ export function notificationFailure(reason: unknown): { kind: "permission" | "un
   if (/notification permission was denied|notifications are disabled/i.test(detail)) {
     return { kind: "permission", message: "Notifications are disabled. Enable YAM notifications in your system settings, then retry." };
   }
+  if (/access (?:is )?denied|permission denied|0x80070005|org\.freedesktop\.(?:DBus\.Error\.(?:AccessDenied|AuthFailed)|portal\.Error\.NotAllowed)/i.test(detail)) {
+    return { kind: "permission", message: `YAM cannot access notification services: ${detail}. Check application installation and system permissions, then retry.` };
+  }
+  if (/macOS notifications require the installed YAM\.app bundle/i.test(detail)) {
+    return { kind: "unsupported", message: "Run the installed YAM.app bundle to send macOS notifications, then retry." };
+  }
   if (/This desktop cannot provide notifications that reopen YAM after exit/i.test(detail)) {
     return { kind: "unsupported", message: "This desktop cannot reopen YAM from notifications. Use GNOME or a notification portal with host-app Registry support, then retry." };
   }
@@ -42,4 +48,17 @@ export function notificationFailure(reason: unknown): { kind: "permission" | "un
     return { kind: "invalid", message: `Notification could not be sent: ${detail}. Automatic retries are paused.` };
   }
   return { kind: "transient", message: `Notification delivery or receipt failed: ${detail}. Automatic retry will back off up to five minutes; you can also retry now.` };
+}
+
+export const terminalStatuses = new Set(["succeeded", "failed", "stopped", "needs_attention"]);
+
+export function discardAttentionRetries<T extends { session_id: string; status: string }>(pending: Map<string, T>, sessionId: string) {
+  const removed: string[] = [];
+  for (const [key, event] of pending) {
+    if (event.session_id === sessionId && event.status === "idle_attention") {
+      pending.delete(key);
+      removed.push(key);
+    }
+  }
+  return removed;
 }

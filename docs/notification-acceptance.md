@@ -39,6 +39,11 @@ security find-identity -v -p codesigning返回0 valid identities，本机无法�
 
 ## 覆盖率证据
 
-本地Node原生覆盖率：18项测试；notifications.ts与session-stream.ts行/分支/函数均100%，workspaces.ts行/函数100%、分支97.22%，合计行100%、分支99.11%、函数100%。统计仅包含实际执行的三个工具模块，未包含App.tsx和平台SDK，不声称仓库整体100%。
+本地Node原生覆盖率：24项测试；notifications.ts与session-stream.ts行/分支/函数均100%，workspaces.ts行/函数100%、分支97.22%，合计行100%、分支99.17%、函数100%。统计仅包含实际执行的三个工具模块，未包含App.tsx和平台SDK，不声称仓库整体100%。
 
 Rust覆盖率工具不兼容：rustc LLVM22生成profraw格式10，已安装Apple LLVM15的llvm-profdata只接受格式8，merge实测失败。缺少匹配llvm-tools组件，当前没有可信Rust覆盖率数字。
+
+
+## CI测试包证据
+
+[CI 36814180042](https://github.com/ainiaa/yam/actions/runs/36814180042)在572928d上三平台成功，包含覆盖率闸门、Rust测试/Clippy、app/deb/nsis打包和7天保留测试产物。此证据证明可构建与测试，不替代上表真实桌面、正式签名及遗留样本验收。
