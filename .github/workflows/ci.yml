@@ -45,7 +45,7 @@ jobs:
       - run: pnpm build:terminal
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-      - run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --locked -- --test-threads=2
       - name: Verify lifecycle validation protocol
         run: python3 -m unittest discover -s ../../scripts -p test_background_smoke.py
       - name: Verify macOS release workflow without signing or uploading

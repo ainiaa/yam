@@ -238,3 +238,7 @@ P8 平台复核继续：4f67f55 的 Windows/Linux 原生仍红灯；不能声称
 P8 Windows 传输根因补证：server 的 listener 为非阻塞，Winsock 接受的 stream 会继承该模式，而 read_frame_with_budget 按阻塞超时读取；报文首部/正文稍晚会立即 WouldBlock 并无回执断开。真实 TCP 将已接受 stream 设为继承状态、分片延迟发送的回归在本机先失败（Background frame unavailable or timed out），共享读帧入口显式切换 blocking 后等待绝对截止，不修改认证/预算/重试。该机制与原生 10053 相符，最终是否消除平台烟测红灯仍以下一次 CI 为准。Microsoft 原生契约：https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-accept 。
 
 140e4a7 原生 Windows 已通过 ping/status/auth 及 create_session，先前 10053 不再出现，说明传输修复有客观推进；新红灯转为合成 Python 任务心跳未出现，owner 保持运行，清理时报输出未排空。补仅针对自建夹具的终端尾部/状态诊断，不先猜测修改自定义命令或 ConPTY。Linux 仍未进入 setup（缺少 Initializing 日志），下一轮 CI 使用独立 dbus-run-session 虚拟桌面并从实际 deb 解包布局运行，同时在构建事件循环前记录阶段；不禁用辅助功能，不跳过检查，未宣称原因已确认。macOS 最新源码生命周期 CI 成功。
+
+P8 30 分钟新架构内存测量完成，344 完整样本/1800.07 秒，全程 16 合成负载；停止后 13 样本、GUI 退出后 6 样本均完整且负载为 0。总 footprint 中位数 337.98 MiB，5–10 分钟均值 340.12、末 5 分钟 340.81；停止后末次 347.79，退出 GUI 空后台 182.51。没有立即回到冷启动水平。详细组件、构建源码 6666b61、终端尺寸/锁屏/编译干扰及原始记录 SHA256 见 yam-memory-continuity.md；不宣称固定收益或 cmux 对照，快速切换/活跃 16 任务退出 GUI 的成本和最后源码长测仍未覆盖。测试后台与合成任务均已关闭。
+
+82f8a30 原生 Windows 给出确定的两项根因：终端显示反斜杠引号的 Python 路径不被 cmd 识别；子进程退出但 ConPTY HPCON 仍被 session master 持有，输出管道不结束。补真实 Windows shell 引号/中文路径/重定向和 ConPTY 最终输出关闭两项回归；shell 文本改在 cmd 内通过会话限定环境变量展开，避开 portable-pty 的 C argv 引号；退出分支在 reader 仍工作时释放 ConPTY master，后续缩放对关闭状态执行原有回滚。原生平台尚待下一轮证明这两项，不以 Mac 测试代替。Linux 本轮 cargo test 因线程创建 Resource temporarily unavailable 而未到生命周期；CI 将测试并行度固定为 2，保留每项测试内部并发与所有检查，不添加重试/跳过。

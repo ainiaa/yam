@@ -610,7 +610,7 @@ impl Drop for ResumeClaim {
 struct Session {
     _resume_claim: Option<ResumeClaim>,
     summary: SessionSummary,
-    master: Mutex<Box<dyn MasterPty + Send>>,
+    master: Mutex<Option<Box<dyn MasterPty + Send>>>,
     writer: Mutex<Box<dyn Write + Send>>,
     child: Mutex<Box<dyn Child + Send + Sync>>,
     #[cfg(windows)]
@@ -1445,7 +1445,9 @@ fn shell_command(command: Option<&str>) -> CommandBuilder {
         builder.arg("/D");
         if let Some(command) = command {
             builder.arg("/C");
-            builder.arg(command);
+            // portable-pty uses C argv quoting, while cmd parses shell quoting. Expand the literal shell text inside cmd.
+            builder.arg("%YAM_CUSTOM_COMMAND%");
+            builder.env("YAM_CUSTOM_COMMAND", command);
         }
         builder
     }
@@ -1941,6 +1943,16 @@ fn wait_output_ready(fd: i32, cancelled: &AtomicBool) -> std::io::Result<bool> {
     }
 }
 
+#[cfg(windows)]
+fn close_exited_console(session: &Session) {
+    // ClosePseudoConsole sends its final output before closing the pipe; the reader is still running.
+    let master = session
+        .master
+        .lock()
+        .ok()
+        .and_then(|mut master| master.take());
+    drop(master);
+}
 fn spawn_session_threads(
     app: &AppHandle,
     sessions: Arc<Mutex<HashMap<String, Arc<Session>>>>,
@@ -1958,7 +1970,7 @@ fn spawn_session_threads(
             .master
             .lock()
             .ok()
-            .and_then(|master| master.as_raw_fd());
+            .and_then(|master| master.as_ref().and_then(|master| master.as_raw_fd()));
         loop {
             #[cfg(unix)]
             if let Some(fd) = fd {
@@ -2036,6 +2048,8 @@ fn spawn_session_threads(
             match result {
                 Ok(Some(exit)) => {
                     let cleanup = cleanup_session_descendants(&session);
+                    #[cfg(windows)]
+                    close_exited_console(&session);
                     let (lock, done) = &session.output_done;
                     let drained = lock
                         .lock()
@@ -2351,7 +2365,7 @@ fn create_session(
     let session = Arc::new(Session {
         _resume_claim: resume_claim,
         summary: summary.clone(),
-        master: Mutex::new(pair.master),
+        master: Mutex::new(Some(pair.master)),
         writer: Mutex::new(writer),
         child: Mutex::new(child),
         #[cfg(windows)]
@@ -2579,6 +2593,8 @@ fn write_session(
     let deadline = Instant::now() + Duration::from_secs(3);
     #[cfg(unix)]
     let fd = input_lock(&session.master, deadline, &session.stop_requested)?
+        .as_ref()
+        .ok_or("PTY is closed")?
         .as_raw_fd()
         .ok_or("PTY input does not support bounded native writes")?;
     let mut writer = input_lock(&session.writer, deadline, &session.stop_requested)?;
@@ -2645,14 +2661,19 @@ fn resize_session(
     let result = session
         .master
         .lock()
-        .map_err(|_| "PTY master lock poisoned".to_string())?
-        .resize(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|error| format!("Failed to resize session: {error}"));
+        .map_err(|_| "PTY master lock poisoned".to_string())
+        .and_then(|master| {
+            master
+                .as_ref()
+                .ok_or_else(|| "PTY is closed".to_string())?
+                .resize(PtySize {
+                    rows,
+                    cols,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .map_err(|error| format!("Failed to resize session: {error}"))
+        });
     if result.is_err() {
         if let (Some(terminal), Some(previous)) = (&session.terminal, previous) {
             terminal.runtime.call(
@@ -3364,6 +3385,63 @@ fn handle_owner_exit(app: &AppHandle, event: tauri::RunEvent) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn custom_cmd_quotes_and_unicode_paths_reach_the_native_shell_unchanged() {
+        let root =
+            std::env::temp_dir().join(format!("yam quoted 中文 {}", super::next_session_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let output = root.join("quoted result.txt");
+        let shell =
+            std::env::var("ComSpec").unwrap_or_else(|_| "C:\\Windows\\System32\\cmd.exe".into());
+        let command = format!(
+            "\"{shell}\" /D /C echo YAM_QUOTED_COMMAND>\"{}\"",
+            output.display()
+        );
+        let builder = super::shell_command(Some(&command));
+        let mut child = std::process::Command::new(&builder.get_argv()[0]);
+        child.args(&builder.get_argv()[1..]);
+        if let Some(value) = builder.get_env("YAM_CUSTOM_COMMAND") {
+            child.env("YAM_CUSTOM_COMMAND", value);
+        }
+        assert!(child.status().unwrap().success());
+        assert!(std::fs::read_to_string(&output)
+            .unwrap()
+            .contains("YAM_QUOTED_COMMAND"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[cfg(windows)]
+    #[test]
+    fn an_exited_conpty_closes_output_before_the_final_scene_deadline() {
+        use std::io::{Read, Write};
+        let (session, mut reader, history) = test_session("echo YAM_CONPTY_DRAIN");
+        let (done, receive) = std::sync::mpsc::channel();
+        let output = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let result = reader.read_to_end(&mut bytes);
+            let _ = done.send((result, bytes));
+        });
+        session
+            .writer
+            .lock()
+            .unwrap()
+            .write_all(b"\x1b[1;1R")
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while session.child.lock().unwrap().try_wait().unwrap().is_none() {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        super::close_exited_console(&session);
+        let (result, bytes) = receive
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        result.unwrap();
+        assert!(String::from_utf8_lossy(&bytes).contains("YAM_CONPTY_DRAIN"));
+        output.join().unwrap();
+        drop(session);
+        std::fs::remove_dir_all(&history).unwrap();
+    }
     use super::MAX_SESSION_HISTORY_BYTES;
     #[test]
     fn a_background_owner_keeps_its_event_loop_without_a_desktop_window() {
@@ -3808,7 +3886,7 @@ mod tests {
         let session = std::sync::Arc::new(super::Session {
             _resume_claim: None,
             summary,
-            master: std::sync::Mutex::new(pair.master),
+            master: std::sync::Mutex::new(Some(pair.master)),
             writer: std::sync::Mutex::new(writer),
             #[cfg(windows)]
             job: Some(super::WindowsJob::attach(child.as_raw_handle().unwrap()).unwrap()),
