@@ -86,7 +86,14 @@ fn previous_notify(response: &serde_json::Value) -> Result<Vec<String>, String> 
     if let Some(hooks) = config.get("hooks").filter(|v| !v.is_null()) {
         let hooks = hooks.as_object().ok_or("Invalid existing agent hooks")?;
         // CLI overrides replace config.toml arrays, unlike independent hook files.
-        for kind in ["SessionStart", "UserPromptSubmit", "Stop", "Interrupt"] {
+        for kind in [
+            "SessionStart",
+            "UserPromptSubmit",
+            "Stop",
+            "Interrupt",
+            "PermissionRequest",
+            "PostToolUse",
+        ] {
             if let Some(groups) = hooks.get(kind) {
                 let groups = groups.as_array().ok_or("Invalid existing agent hooks")?;
                 if !groups.is_empty() {
@@ -121,6 +128,10 @@ fn normalize(value: &serde_json::Value, notify: bool) -> Result<AgentEvent, Stri
             .and_then(|v| v.as_str())
             .ok_or("Missing hook event")?
     };
+    let kind = match kind {
+        "PostToolUse" | "PostToolUseFailure" => "ToolProgress",
+        other => other,
+    };
     if ![
         "SessionStart",
         "UserPromptSubmit",
@@ -128,6 +139,9 @@ fn normalize(value: &serde_json::Value, notify: bool) -> Result<AgentEvent, Stri
         "Interrupt",
         "PermissionRequest",
         "TurnComplete",
+        "ToolProgress",
+        "TurnFailed",
+        "ResponseReady",
     ]
     .contains(&kind)
     {
@@ -155,7 +169,86 @@ fn normalize(value: &serde_json::Value, notify: bool) -> Result<AgentEvent, Stri
         kind: kind.into(),
         agent_session_id,
         turn_id,
+        permission_key: if ["PermissionRequest", "ToolProgress"].contains(&kind) {
+            permission_key(value)
+        } else {
+            None
+        },
     })
+}
+fn permission_key(value: &serde_json::Value) -> Option<String> {
+    let name = value["tool_name"].as_str()?;
+    if !value["tool_input"].is_object() {
+        return None;
+    }
+    // ponytail: identical concurrent tool inputs share a key; use native call IDs
+    // when the CLI supplies them. Correlation only, not a security identity. Keep commands and arguments
+    // out of persisted receipts and diagnostics.
+    let input = serde_json::to_vec(&serde_json::json!([name, value["tool_input"]])).ok()?;
+    let hash = input.iter().fold(0xcbf29ce484222325_u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+    });
+    Some(format!("tool-{hash:016x}"))
+}
+fn normalize_claude(value: &serde_json::Value) -> Result<AgentEvent, String> {
+    let kind = match value["hook_event_name"].as_str() {
+        Some("SessionStart") => "SessionStart",
+        Some("UserPromptSubmit") => "UserPromptSubmit",
+        Some("PermissionRequest") => "PermissionRequest",
+        Some("PostToolUse" | "PostToolUseFailure") => "ToolProgress",
+        Some("StopFailure") => "TurnFailed",
+        Some("Stop")
+            if value["last_assistant_message"]
+                .as_str()
+                .is_some_and(|message| !message.trim().is_empty()) =>
+        {
+            "ResponseReady"
+        }
+        Some("Notification") if value["notification_type"] == "permission_prompt" => {
+            "PermissionRequest"
+        }
+        _ => return Err("Unsupported Claude hook event".into()),
+    };
+    // Claude prompt_id is the native per-prompt UUID. Never invent a counter or
+    // read a potentially delayed transcript to correlate a turn.
+    let mut event = normalize(
+        &serde_json::json!({
+            "hook_event_name":kind,
+            "session_id":value["session_id"],
+            "turn_id":value["prompt_id"],
+        }),
+        false,
+    )?;
+    if ["PermissionRequest", "ToolProgress"].contains(&event.kind.as_str()) {
+        event.permission_key = permission_key(value);
+    }
+    Ok(event)
+}
+fn claude_args(exe: &str) -> Result<Vec<String>, String> {
+    if exe.is_empty() || exe.contains(['\0', '\n', '\r']) {
+        return Err("Invalid helper executable path".into());
+    }
+    let mut hooks = serde_json::Map::new();
+    for kind in [
+        "SessionStart",
+        "UserPromptSubmit",
+        "PermissionRequest",
+        "PostToolUse",
+        "PostToolUseFailure",
+        "StopFailure",
+        "Stop",
+        "Notification",
+    ] {
+        let mut group = serde_json::json!({"hooks":[{"type":"command","command":exe,"args":["--yam-claude-hook"],"timeout":2}]});
+        if kind == "Notification" {
+            group["matcher"] = serde_json::json!("permission_prompt");
+        }
+        hooks.insert(kind.into(), serde_json::json!([group]));
+    }
+    Ok(vec![
+        "--settings".into(),
+        serde_json::json!({"hooks":hooks}).to_string(),
+    ])
 }
 fn credential() -> Result<String, String> {
     let mut bytes = [0u8; 32];
@@ -307,6 +400,8 @@ impl Bridge {
                                 "response_finished" => "Response finished",
                                 "needs_permission" => "Permission required",
                                 "interrupted" => "Round interrupted",
+                                "failed" => "Round failed",
+                                "needs_attention" => "Response ready; hooks may continue",
                                 _ => "Agent attention",
                             };
                             history.native_delivery(
@@ -470,6 +565,7 @@ pub(crate) fn helper_entry() -> bool {
     let notify = match mode.as_deref() {
         Some("--yam-agent-hook") => false,
         Some("--yam-agent-notify") => true,
+        Some("--yam-claude-hook") => false,
         _ => return false,
     };
     let raw = (|| {
@@ -508,7 +604,11 @@ pub(crate) fn helper_entry() -> bool {
         let own = (|| {
             let value: serde_json::Value =
                 serde_json::from_str(&raw).map_err(|_| "Invalid native agent payload")?;
-            let event = normalize(&value, notify)?;
+            let event = if mode.as_deref() == Some("--yam-claude-hook") {
+                normalize_claude(&value)?
+            } else {
+                normalize(&value, notify)?
+            };
             let address = local_address(
                 &std::env::var("YAM_AGENT_ADDRESS").map_err(|_| "Missing agent address")?,
             )?;
@@ -550,6 +650,7 @@ fn agent_query(
     command
         .args(prefix)
         .args(["app-server", "--listen", "stdio://"])
+        .env("PATH", super::agent_path())
         .current_dir(cwd)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -658,7 +759,14 @@ fn injected_args(exe: &str) -> Result<Vec<String>, String> {
         format!("\"{exe}\" --yam-agent-hook")
     };
     let mut args = vec![];
-    for kind in ["SessionStart", "UserPromptSubmit", "Stop", "Interrupt"] {
+    for kind in [
+        "SessionStart",
+        "UserPromptSubmit",
+        "Stop",
+        "Interrupt",
+        "PermissionRequest",
+        "PostToolUse",
+    ] {
         args.push("-c".into());
         args.push(format!(
             "hooks.{kind}=[{{hooks=[{{type=\"command\",command={},timeout=2}}]}}]",
@@ -676,10 +784,18 @@ fn version_supported(
     program: &std::ffi::OsStr,
     prefix: &[std::ffi::OsString],
 ) -> Result<(), String> {
+    measured_version(program, prefix, "codex-cli 0.159.3")
+}
+fn measured_version(
+    program: &std::ffi::OsStr,
+    prefix: &[std::ffi::OsString],
+    expected: &str,
+) -> Result<(), String> {
     let mut command = std::process::Command::new(program);
     command
         .args(prefix)
         .arg("--version")
+        .env("PATH", super::agent_path())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
@@ -722,9 +838,7 @@ fn version_supported(
                 {
                     break Err("Cannot read agent version".into());
                 }
-                break if bytes.len() <= 4096
-                    && String::from_utf8_lossy(&bytes).trim() == "codex-cli 0.159.3"
-                {
+                break if bytes.len() <= 4096 && String::from_utf8_lossy(&bytes).trim() == expected {
                     Ok(())
                 } else {
                     Err("This CLI version has not passed YAM hook compatibility checks".into())
@@ -825,6 +939,25 @@ pub(super) fn prepare(
     launch: &super::AgentLaunch,
     cwd: &std::path::Path,
 ) -> Result<Prepared, String> {
+    if launch.adapter == "claude" && launch.mode == "interactive" {
+        if !launch.extra_args.trim().is_empty() {
+            return Err("Custom Claude CLI options require manual hook integration".into());
+        }
+        let plain = super::AgentLaunch {
+            prompt: None,
+            ..launch.clone()
+        };
+        let command = super::agent_command(executable, &plain)?;
+        let argv = command.get_argv();
+        measured_version(&argv[0], &argv[1..], "2.1.286 (Claude Code)")?;
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        return Ok(Prepared {
+            token: credential()?,
+            generation: credential()?,
+            args: claude_args(exe.to_str().ok_or("Helper executable path is not UTF-8")?)?,
+            original: vec![],
+        });
+    }
     if launch.adapter != "codex" || launch.mode != "interactive" {
         return Err("Reliable interactive hooks are currently validated for Codex only".into());
     }
@@ -1126,6 +1259,7 @@ mod tests {
                         kind: kind.into(),
                         agent_session_id: "main".into(),
                         turn_id: turn.map(str::to_string),
+                        permission_key: None,
                     },
                 )
                 .unwrap();
@@ -1200,6 +1334,7 @@ mod tests {
                 kind: "SessionStart".into(),
                 agent_session_id: "main".into(),
                 turn_id: None,
+                permission_key: None,
             },
         )
         .unwrap();
@@ -1240,6 +1375,7 @@ mod tests {
                 kind: "SessionStart".into(),
                 agent_session_id: "main".into(),
                 turn_id: None,
+                permission_key: None,
             },
         })
         .unwrap();
@@ -1271,6 +1407,7 @@ mod tests {
             kind: "SessionStart".into(),
             agent_session_id: "main".into(),
             turn_id: None,
+            permission_key: None,
         };
         assert!(submit(bridge.address, &credential().unwrap(), event()).is_err());
         submit(bridge.address, &token, event()).unwrap();
@@ -1374,8 +1511,18 @@ mod tests {
     #[test]
     fn injected_config_contains_no_policy_override_and_quotes_the_executable() {
         let args = injected_args("/application path/YAM").unwrap();
-        assert_eq!(args.len(), 10);
-        for kind in ["SessionStart", "UserPromptSubmit", "Stop", "Interrupt"] {
+        assert_eq!(args.len(), 14);
+        assert!(!args
+            .iter()
+            .any(|arg| arg.contains("hooks.PostToolUseFailure=")));
+        for kind in [
+            "SessionStart",
+            "UserPromptSubmit",
+            "Stop",
+            "Interrupt",
+            "PermissionRequest",
+            "PostToolUse",
+        ] {
             assert!(args
                 .iter()
                 .any(|a| a.starts_with(&format!("hooks.{kind}="))));
@@ -1390,6 +1537,77 @@ mod tests {
             assert!(!arg.contains("approval"));
         }
         assert!(injected_args("").is_err());
+    }
+
+    #[test]
+    fn permission_hooks_preserve_existing_policy_and_normalize_progress() {
+        for kind in ["PermissionRequest", "PostToolUse"] {
+            let existing = serde_json::json!({"result":{"config":{"hooks":{kind:[{"hooks":[{"type":"command","command":"original-policy"}]}]}}}});
+            assert!(
+                previous_notify(&existing).is_err(),
+                "must not replace {kind}"
+            );
+            let event = normalize(&serde_json::json!({"hook_event_name":kind,"session_id":"main","turn_id":"one","tool_input":{"command":"sensitive"}}),false).unwrap();
+            assert_eq!(
+                event.kind,
+                if kind == "PermissionRequest" {
+                    kind
+                } else {
+                    "ToolProgress"
+                }
+            );
+            assert_eq!(event.turn_id.as_deref(), Some("one"));
+        }
+    }
+    #[test]
+    fn claude_uses_native_prompt_identity_and_explicit_failure_without_success_guessing() {
+        let prompt = serde_json::json!({"hook_event_name":"UserPromptSubmit","session_id":"claude-main","prompt_id":"prompt-one","prompt":"private"});
+        let e = normalize_claude(&prompt).unwrap();
+        assert_eq!(e.kind, "UserPromptSubmit");
+        assert_eq!(e.turn_id.as_deref(), Some("prompt-one"));
+        let failure = normalize_claude(&serde_json::json!({"hook_event_name":"StopFailure","session_id":"claude-main","prompt_id":"prompt-one","error":"private"})).unwrap();
+        assert_eq!(failure.kind, "TurnFailed");
+        assert!(normalize_claude(&serde_json::json!({"hook_event_name":"StopFailure","session_id":"claude-main","turn_id":"guessed"})).is_err());
+        assert!(normalize_claude(&serde_json::json!({"hook_event_name":"SubagentStop","session_id":"child","prompt_id":"prompt-one"})).is_err());
+        assert_eq!(normalize_claude(&serde_json::json!({"hook_event_name":"Notification","notification_type":"permission_prompt","session_id":"claude-main","prompt_id":"prompt-one"})).unwrap().kind,"PermissionRequest");
+        assert!(normalize_claude(&serde_json::json!({"hook_event_name":"Notification","notification_type":"idle_prompt","session_id":"claude-main","prompt_id":"prompt-one"})).is_err());
+        let args = claude_args("/application path/YAM").unwrap();
+        assert_eq!(args[0], "--settings");
+        let settings: serde_json::Value = serde_json::from_str(&args[1]).unwrap();
+        assert_eq!(settings.as_object().unwrap().len(), 1);
+        let hook = &settings["hooks"]["PermissionRequest"][0]["hooks"][0];
+        assert_eq!(hook["command"], "/application path/YAM");
+        assert_eq!(hook["args"], serde_json::json!(["--yam-claude-hook"]));
+        assert!(claude_args("").is_err());
+    }
+    #[test]
+    fn claude_stop_reports_readiness_without_claiming_final_completion() {
+        let stop = serde_json::json!({"hook_event_name":"Stop","session_id":"claude-main","prompt_id":"prompt-one","last_assistant_message":"private reply","stop_hook_active":false,"background_tasks":[{"status":"running"}]});
+        assert_eq!(normalize_claude(&stop).unwrap().kind, "ResponseReady");
+        let mut missing = stop.clone();
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("last_assistant_message");
+        assert!(normalize_claude(&missing).is_err());
+        let settings: serde_json::Value =
+            serde_json::from_str(&claude_args("/application path/YAM").unwrap()[1]).unwrap();
+        assert!(settings["hooks"]["Stop"].is_array());
+        let request = serde_json::json!({"hook_event_name":"PermissionRequest","session_id":"main","turn_id":"one","tool_name":"Bash","tool_input":{"command":"private"}});
+        let a = normalize(&request, false).unwrap();
+        let mut done = request.clone();
+        done["hook_event_name"] = serde_json::json!("PostToolUse");
+        assert_eq!(
+            a.permission_key,
+            normalize(&done, false).unwrap().permission_key
+        );
+        assert!(a.permission_key.is_some());
+        done["tool_input"]["command"] = serde_json::json!("another");
+        assert_ne!(
+            a.permission_key,
+            normalize(&done, false).unwrap().permission_key
+        );
+        assert!(!serde_json::to_string(&a).unwrap().contains("private"));
     }
     #[test]
     fn alternate_config_directory_and_remote_flags_degrade_before_any_cli_query() {

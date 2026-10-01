@@ -22,6 +22,8 @@ pub struct AgentState {
     pub turns: Vec<String>,
     pub seen: Vec<String>,
     pub inbox: Vec<AgentReceipt>,
+    #[serde(default)]
+    pub permission_keys: Vec<String>,
 }
 impl Default for AgentState {
     fn default() -> Self {
@@ -36,6 +38,7 @@ impl Default for AgentState {
             turns: vec![],
             seen: vec![],
             inbox: vec![],
+            permission_keys: vec![],
         }
     }
 }
@@ -45,6 +48,8 @@ pub struct AgentEvent {
     pub kind: String,
     pub agent_session_id: String,
     pub turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_key: Option<String>,
 }
 impl AgentState {
     pub fn apply(&mut self, event: &AgentEvent) -> Result<Option<String>, String> {
@@ -64,6 +69,7 @@ impl AgentState {
         if !valid(&self.generation)
             || !valid(&event.agent_session_id)
             || event.turn_id.as_deref().is_some_and(|id| !valid(id))
+            || event.permission_key.as_deref().is_some_and(|id| !valid(id))
         {
             return Err("Invalid agent event identity".into());
         }
@@ -74,6 +80,9 @@ impl AgentState {
             "TurnComplete",
             "PermissionRequest",
             "Interrupt",
+            "ToolProgress",
+            "TurnFailed",
+            "ResponseReady",
         ]
         .contains(&event.kind.as_str())
         {
@@ -110,10 +119,59 @@ impl AgentState {
             }
             self.turns.push(turn.into());
             self.turn_id = Some(turn.into());
+            self.permission_keys.clear();
             self.phase = "working".into();
         } else {
             if !self.turns.iter().any(|known| known == turn) {
                 return Err("Unknown agent turn".into());
+            }
+            if ["Stop", "TurnComplete", "ResponseReady"].contains(&event.kind.as_str())
+                && ["TurnFailed", "Interrupt"].iter().any(|kind| {
+                    self.seen
+                        .contains(&format!("{}:{}:{}", self.generation, turn, kind))
+                })
+            {
+                return Ok(None);
+            }
+            if ["PermissionRequest", "ToolProgress"].contains(&event.kind.as_str()) {
+                if self.turn_id.as_deref() != Some(turn)
+                    || ["response_finished", "interrupted", "failed"].contains(&self.phase.as_str())
+                {
+                    return Ok(None);
+                }
+                if event.kind == "ToolProgress" {
+                    if self.phase == "needs_attention" && self.permission_keys.is_empty() {
+                        self.phase = "working".into();
+                        self.revision = self
+                            .revision
+                            .checked_add(1)
+                            .ok_or("Agent revision exhausted")?;
+                        return Ok(None);
+                    }
+                    if let Some(key) = event
+                        .permission_key
+                        .as_deref()
+                        .filter(|key| self.permission_keys.iter().any(|pending| pending == key))
+                    {
+                        self.permission_keys.retain(|pending| pending != key);
+                        if self.permission_keys.is_empty() {
+                            self.phase = "working".into();
+                        }
+                        self.revision = self
+                            .revision
+                            .checked_add(1)
+                            .ok_or("Agent revision exhausted")?;
+                    }
+                    return Ok(None);
+                }
+                let key = event.permission_key.as_deref().unwrap_or("unknown");
+                if self.permission_keys.iter().any(|pending| pending == key) {
+                    return Ok(None);
+                }
+                if self.permission_keys.len() >= 32 {
+                    return Err("Pending permission capacity reached".into());
+                }
+                self.permission_keys.push(key.into());
             }
             if event.kind == "Stop" {
                 if self.turn_id.as_deref() != Some(turn) {
@@ -128,7 +186,14 @@ impl AgentState {
                 }
                 return Ok(None);
             }
-            let identity = format!("{}:{}:{}", self.generation, turn, event.kind);
+            let identity = if event.kind == "PermissionRequest" {
+                format!(
+                    "{}:{}:{}:{}",
+                    self.generation, turn, event.kind, self.revision
+                )
+            } else {
+                format!("{}:{}:{}", self.generation, turn, event.kind)
+            };
             if self.seen.contains(&identity) {
                 return Ok(None);
             }
@@ -153,10 +218,15 @@ impl AgentState {
             let phase = match event.kind.as_str() {
                 "TurnComplete" => "response_finished",
                 "PermissionRequest" => "needs_permission",
+                "TurnFailed" => "failed",
+                "ResponseReady" => "needs_attention",
                 _ => "interrupted",
             };
             if self.turn_id.as_deref() == Some(turn) {
                 self.phase = phase.into();
+                if ["response_finished", "failed", "interrupted"].contains(&phase) {
+                    self.permission_keys.clear();
+                }
             }
             self.seen.push(identity.clone());
             self.inbox.push(AgentReceipt {
@@ -673,6 +743,9 @@ mod tests {
             kind: kind.into(),
             agent_session_id: "main-thread".into(),
             turn_id: turn.map(str::to_string),
+            permission_key: ["PermissionRequest", "ToolProgress"]
+                .contains(&kind)
+                .then(|| "test-tool".into()),
         }
     }
     fn state() -> AgentState {
@@ -875,6 +948,95 @@ mod tests {
         assert_eq!(s.background, "unknown");
     }
     #[test]
+    fn permission_requests_repeat_only_after_progress_and_never_after_completion() {
+        let mut s = state();
+        s.apply(&event("UserPromptSubmit", Some("one"))).unwrap();
+        s.apply(&event("PermissionRequest", Some("one"))).unwrap();
+        assert_eq!(s.phase, "needs_permission");
+        let revision = s.revision;
+        s.apply(&event("PermissionRequest", Some("one"))).unwrap();
+        assert_eq!(s.revision, revision);
+        s.apply(&event("ToolProgress", Some("one"))).unwrap();
+        assert_eq!(s.phase, "working");
+        let progress = s.revision;
+        s.apply(&event("ToolProgress", Some("one"))).unwrap();
+        assert_eq!(s.revision, progress);
+        s.apply(&event("PermissionRequest", Some("one"))).unwrap();
+        assert_eq!(s.inbox.len(), 2);
+        assert_ne!(s.inbox[0].id, s.inbox[1].id);
+        s.apply(&event("TurnComplete", Some("one"))).unwrap();
+        let completed = s.clone();
+        s.apply(&event("PermissionRequest", Some("one"))).unwrap();
+        s.apply(&event("ToolProgress", Some("one"))).unwrap();
+        assert_eq!(s, completed);
+        assert!(s.apply(&event("ToolProgress", Some("unknown"))).is_err());
+        s.apply(&event("UserPromptSubmit", Some("two"))).unwrap();
+        let current = s.clone();
+        s.apply(&event("ToolProgress", Some("one"))).unwrap();
+        assert_eq!(s, current);
+    }
+    #[test]
+    fn api_failure_is_a_separate_unread_failure_receipt_and_never_completion() {
+        let mut s = state();
+        s.apply(&event("UserPromptSubmit", Some("one"))).unwrap();
+        s.apply(&event("TurnFailed", Some("one"))).unwrap();
+        assert_eq!(s.phase, "failed");
+        assert_eq!(s.inbox[0].kind, "failed");
+        assert!(!s.inbox[0].read);
+        let failed = s.clone();
+        s.apply(&event("TurnFailed", Some("one"))).unwrap();
+        s.apply(&event("PermissionRequest", Some("one"))).unwrap();
+        s.apply(&event("ToolProgress", Some("one"))).unwrap();
+        s.apply(&event("Stop", Some("one"))).unwrap();
+        s.apply(&event("TurnComplete", Some("one"))).unwrap();
+        assert_eq!(s, failed);
+        s.apply(&event("UserPromptSubmit", Some("two"))).unwrap();
+        assert_eq!(s.phase, "working");
+    }
+    #[test]
+    fn unrelated_parallel_tool_cannot_clear_another_permission_request() {
+        let mut s = state();
+        s.apply(&event("UserPromptSubmit", Some("one"))).unwrap();
+        let keyed = |kind: &str, key: &str| {
+            serde_json::from_value::<AgentEvent>(serde_json::json!({"kind":kind,"agent_session_id":"main-thread","turn_id":"one","permission_key":key})).unwrap()
+        };
+        s.apply(&keyed("PermissionRequest", "tool-a")).unwrap();
+        let pending = s.clone();
+        s.apply(&keyed("ToolProgress", "unrelated-tool")).unwrap();
+        assert_eq!(s, pending);
+        s.apply(&keyed("PermissionRequest", "tool-b")).unwrap();
+        assert_eq!(s.inbox.len(), 2);
+        s.apply(&keyed("ToolProgress", "tool-a")).unwrap();
+        assert_eq!(s.phase, "needs_permission");
+        s.apply(&keyed("ToolProgress", "tool-b")).unwrap();
+        assert_eq!(s.phase, "working");
+        let mut old = serde_json::to_value(&s).unwrap();
+        old.as_object_mut().unwrap().remove("permission_keys");
+        assert!(serde_json::from_value::<AgentState>(old).is_ok());
+    }
+    #[test]
+    fn reply_readiness_is_attention_not_final_completion_and_can_resume_work() {
+        let mut s = state();
+        s.apply(&event("UserPromptSubmit", Some("one"))).unwrap();
+        s.apply(&event("ResponseReady", Some("one"))).unwrap();
+        assert_eq!(s.phase, "needs_attention");
+        assert_eq!(s.inbox[0].kind, "needs_attention");
+        let revision = s.revision;
+        s.apply(&event("ResponseReady", Some("one"))).unwrap();
+        assert_eq!(s.revision, revision);
+        s.apply(&event("ToolProgress", Some("one"))).unwrap();
+        assert_eq!(s.phase, "working");
+        s.apply(&event("ResponseReady", Some("one"))).unwrap();
+        assert_eq!(
+            s.phase, "working",
+            "duplicate stop cannot reset resumed work"
+        );
+        s.apply(&event("TurnFailed", Some("one"))).unwrap();
+        let failed = s.clone();
+        s.apply(&event("ResponseReady", Some("one"))).unwrap();
+        assert_eq!(s, failed);
+    }
+    #[test]
     fn duplicates_and_late_events_cannot_affect_the_next_turn() {
         let mut s = state();
         s.apply(&event("UserPromptSubmit", Some("one"))).unwrap();
@@ -991,6 +1153,21 @@ mod tests {
         s.apply(&event("Interrupt", Some("one"))).unwrap();
         assert_eq!(s.phase, "interrupted");
         assert!(!s.inbox[0].read);
+    }
+    #[test]
+    fn interrupted_round_cannot_be_overwritten_by_late_success_or_stop() {
+        let mut s = state();
+        s.apply(&event("UserPromptSubmit", Some("one"))).unwrap();
+        s.apply(&event("Interrupt", Some("one"))).unwrap();
+        let interrupted = s.clone();
+        for kind in ["Stop", "TurnComplete", "ResponseReady"] {
+            s.apply(&event(kind, Some("one"))).unwrap();
+            assert_eq!(s, interrupted, "late {kind} must not undo interruption");
+        }
+        s.apply(&event("UserPromptSubmit", Some("two"))).unwrap();
+        s.apply(&event("TurnComplete", Some("two"))).unwrap();
+        assert_eq!(s.phase, "response_finished");
+        assert_eq!(s.inbox.len(), 2);
     }
     #[test]
     fn missing_identity_unknown_event_and_oversized_fields_are_rejected() {

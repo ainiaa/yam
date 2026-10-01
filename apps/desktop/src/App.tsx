@@ -1192,7 +1192,7 @@ function App() {
                   <option value="task">Run one task · reports completion</option>
                   <option value="interactive">Continuous conversation</option>
                 </select>
-                <small>{launchMode==='task'?"Reports when the command exits; each launch starts a new task.":selectedAdapter==='codex'?"Round reminders require supported CLI hooks and trust. If unavailable, only exit / idle reminders are supported.":"Round integration is unavailable for this adapter; only exit / idle reminders are supported."}</small>
+                <small>{launchMode==='task'?"Reports when the command exits; each launch starts a new task.":selectedAdapter==='codex'?"Round reminders require supported CLI hooks and trust. If unavailable, only exit / idle reminders are supported.":selectedAdapter==='claude'?"Supported Claude hooks report reply readiness, permission requests and API failures. A ready reply may still be followed by hook continuation.":"Round integration is unavailable for this adapter; only exit / idle reminders are supported."}</small>
               </label>
             )}
             {selectedAdapter !== "shell" && (

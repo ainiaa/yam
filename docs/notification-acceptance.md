@@ -56,3 +56,14 @@ Rust覆盖率工具不兼容：rustc LLVM22生成profraw格式10，已安装Appl
 隔离 com.yam.validation 原生包、本机 Codex 0.159.3：持续 CLI 的两次后台 response_finished 获得独立 accepted 回执，前台抑制仍未读；具体收件箱点击只读对应 revision，真实 Esc 中断独立记录。用户授权只开启隔离包通知，测试后 4 个临时 Helper 信任全部撤销。accepted 不证明横幅可见或点击完成；CUA 仍无法读取真实通知列表，点击/退出后唤醒继续未覆盖。
 
 主动 resume 的后端校验、重复占用/清理释放及原生上下文续答通过；模式记忆和主要导航快捷键通过 macOS 原生验证。详见 yam-next-stage-execution.md。Windows/Linux 真桌面、正式签名/公证、旧通知/安装路径迁移、cmux 同场景性能对照仍未验收；本轮 CI 包也只用于测试，不属于正式分发。
+
+
+## 2026-10-01 — 本次真实 macOS 激活验收
+
+隔离 com.yam.validation 本地 ad-hoc 包：
+
+- 运行中点击真实系统通知 7213108C-518F-49BD-A5DB-0ED59A5C06F4，目标 s-1a0f74bedcb-0 被选中；收件箱仍未读，导航不代替确认。
+- 同一构建退出后，先确认 yam-desktop 不存在，再点击 E52B866F-4E34-4CFC-A104-5F01B068D5D7；系统启动新进程并选中 s-1a0f755f649-0，17 条历史、0 个运行会话，未自动重放任务。该通知为退出时更新的 Stopped 通知。
+- 跨构建旧通知 550AF452-4FB6-4C2A-96CC-1D4B8CB5E7FB 点击后未启动应用。usernoted 明确报告无法找到与旧 source UUID FE3CA26B-4B20-46E3-8662-BFC5973BACA0 匹配的应用。现有 ad-hoc 重建包无法证明正式升级后旧通知身份稳定性；仍需 Developer ID 签名升级验收。
+
+以上为实际通知卡片点击，不以堆叠展开、URL 手动打开或 accepted 回执替代。Windows/Linux 真桌面、安装位置迁移及正式签名升级仍未验证。

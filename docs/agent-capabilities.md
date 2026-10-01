@@ -32,3 +32,15 @@ Codex 0.159.3 PID 69140、主线程 01a0f6c3-833c-7092-85cf-5a8e6b68b832 连续�
 仅已测 Codex 0.159.3 支持主动 resume。后端查可信历史 UUID、只读 thread/read 校验原目录/provider，清除旧 prompt；不自动恢复任务或回退新对话。真实原生续聊显示旧回复，并从旧上下文回答未含标签的问题，返回 YAM_NATIVE_THREE。未新增 Hook 信任时保持集成未连接提示，续聊与轮次通知能力分别验收。Claude、自定义 CLI 参数、缺失目录/ID/provider、未测版本不声明可续聊；失效项明确报错。
 
 具体进度与回执见 yam-next-stage-execution.md 的最新段落，早期探针段落为历史证据。
+
+## 非桌面剩余项接入（2026-10-01，待真实验收）
+
+Codex 会话 Hook 增加 PermissionRequest、PostToolUse；与原 4 个 Hook 共 6 项。真实 0.159.3 审核确认无 PostToolUseFailure，已撤回该不受支持注入；Claude 原生失败 Hook 单独保留。有效配置中任一拟注入数组已有 Hook 时降级，不能覆盖用户策略；Helper 始终输出空 JSON，不作 allow/deny 决定。权限请求按轮次及工具名称/输入指纹关联，工具完成或失败只清理对应待审批项，无关并行工具不清理；没有工具身份的 Notification 保守保留，直到新轮次或明确终态。收到 API 失败后迟到 Stop/完成不得变为成功。指纹仅用于关联，不持久化命令或工具参数，不作为权限凭据。
+
+Claude 2.1.286 新探针已确认原生 `prompt_id`；以前探针只收集 turn_id 导致漏看，不能继续据此断言没有轮次身份。已增加会话限定 --settings、exec-form Helper，支持启动、Prompt、权限请求、permission_prompt 通知、工具进展及 StopFailure。普通 CLI 参数/未知版本安全降级；未改全局 Hook 或审批策略。真实 CLI 经编译 Helper 上报了 SessionStart、UserPromptSubmit、TurnFailed，同一会话 10fc271c-89d0-4046-841a-74bd6e5a9910、同一失败轮次 3cbd7208-a5d4-47a0-9aef-a5208434ab96。此次接收器为认证测试 receiver，不冒充真实 YAM HistoryStore 或 OS 通知。
+
+正常回复仍收到现有本地服务的 HTTP 400：Claude Provider 缺少 base_url 配置。登录状态正常，没有擅改 http://127.0.0.1:15721 的服务配置、认证或切换供应商。Claude Stop 可由其他 Hook 阻止后继续，不发确定完成回执；按可撤回的保守默认，仅在 Stop 含实际回复时提示“回复就绪，可能继续”，后续工具进展恢复工作状态。上述真实失败探针不替代正常双轮和权限端到端验收。[原生 prompt_id 与 Hook 语义](https://code.claude.com/docs/en/hooks)。
+
+同名同输入的并行权限请求无法由原生 Hook 的字段可靠区分；工具指纹不是调用 UUID，该场景不声明精确关联已验收。
+
+冷唤醒实测还发现系统精简 PATH 漏掉 npm 用户安装目录；现已让 CLI 发现、版本/配置探针、实际 Agent 进程共用补全 PATH，保留原 PATH 顺序，仅追加 Unix 常见安装目录（~/.local/bin、~/.npm-global/bin，macOS Homebrew）。自定义前缀仍需要配置 PATH 或显式 Custom command；不执行用户 shell 启动脚本，不修改系统环境。

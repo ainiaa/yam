@@ -131,6 +131,7 @@ fn agent_command(executable: &Path, launch: &AgentLaunch) -> Result<CommandBuild
         builder = CommandBuilder::new(node);
         builder.arg(script);
     }
+    builder.env("PATH", agent_path());
     if launch.mode == "task" {
         if launch.adapter == "codex" {
             builder.args(["exec", "--json"]);
@@ -1163,15 +1164,51 @@ fn shell_command(command: Option<&str>) -> CommandBuilder {
     }
 }
 
+fn agent_path() -> std::ffi::OsString {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    #[cfg(unix)]
+    {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        agent_path_with_home(&path, home.as_deref())
+    }
+    #[cfg(not(unix))]
+    path
+}
+
+#[cfg(unix)]
+fn agent_path_with_home(path: &std::ffi::OsStr, home: Option<&Path>) -> std::ffi::OsString {
+    let mut directories: Vec<_> = std::env::split_paths(path).collect();
+    // ponytail: common CLI install locations only; custom prefixes still require
+    // a configured PATH or an explicit Custom command, without running shell startup scripts.
+    let mut fallback = vec![PathBuf::from("/usr/local/bin")];
+    #[cfg(target_os = "macos")]
+    fallback.push(PathBuf::from("/opt/homebrew/bin"));
+    if let Some(home) = home.filter(|home| home.is_absolute()) {
+        fallback.extend([home.join(".local/bin"), home.join(".npm-global/bin")]);
+    }
+    for directory in fallback {
+        if !directories.contains(&directory) {
+            directories.push(directory);
+        }
+    }
+    std::env::join_paths(directories).unwrap_or_else(|_| path.to_os_string())
+}
+
 fn find_executable(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    for directory in std::env::split_paths(&path) {
+    find_executable_on_path(name, &agent_path())
+}
+
+fn find_executable_on_path(name: &str, path: &std::ffi::OsStr) -> Option<PathBuf> {
+    for directory in std::env::split_paths(path) {
         let candidate = directory.join(name);
         if candidate.is_file() {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                if candidate.metadata().ok()?.permissions().mode() & 0o111 != 0 {
+                if candidate
+                    .metadata()
+                    .is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0)
+                {
                     return Some(candidate);
                 }
             }
@@ -1187,6 +1224,48 @@ fn find_executable(name: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn cold_gui_path_finds_user_cli_and_preserves_existing_precedence() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = std::env::temp_dir().join(format!("yam-cold-path-{}", next_session_id()));
+    let user_bin = root.join(".npm-global/bin");
+    std::fs::create_dir_all(&user_bin).unwrap();
+    let cli = user_bin.join("yam-cold-test-cli");
+    std::fs::write(&cli, "#!/bin/sh\nexit 0\n").unwrap();
+    let minimal = std::ffi::OsStr::new("/usr/bin:/bin");
+    let path = agent_path_with_home(minimal, Some(&root));
+    assert!(
+        find_executable_on_path("yam-cold-test-cli", &path).is_none(),
+        "non-executable file is rejected"
+    );
+    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(
+        find_executable_on_path("yam-cold-test-cli", &path),
+        Some(cli)
+    );
+    assert_eq!(
+        std::env::split_paths(&path).take(2).collect::<Vec<_>>(),
+        vec![PathBuf::from("/usr/bin"), PathBuf::from("/bin")]
+    );
+    assert!(agent_path_with_home(minimal, None)
+        .to_string_lossy()
+        .contains("/usr/local/bin"));
+    assert!(find_executable_on_path("yam-no-such-cli", &path).is_none());
+    let command = agent_command(
+        Path::new("codex"),
+        &AgentLaunch {
+            adapter: "codex".into(),
+            mode: "interactive".into(),
+            extra_args: String::new(),
+            prompt: None,
+        },
+    )
+    .unwrap();
+    assert!(command.get_env("PATH").is_some());
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 fn agent_adapters() -> Vec<AgentAdapter> {

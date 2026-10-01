@@ -26,7 +26,7 @@ with tempfile.TemporaryDirectory(prefix="yam-helper-") as directory:
         env = dict(os.environ, YAM_AGENT_ADDRESS=f"127.0.0.1:{listener.getsockname()[1]}",
                    YAM_AGENT_TOKEN=token, YAM_PREVIOUS_NOTIFY=json.dumps([sys.executable, str(callback), str(forwarded)]))
         def receive():
-            for _ in range(5):
+            for _ in range(10):
                 connection, _ = listener.accept()
                 with connection:
                     connection.settimeout(1)
@@ -58,9 +58,17 @@ with tempfile.TemporaryDirectory(prefix="yam-helper-") as directory:
             result = subprocess.run([str(binary), "--yam-agent-notify", raw], env=failed_env,
                                     text=True, capture_output=True, timeout=2)
             assert result.returncode == 0 and result.stdout == "" and "degraded" in result.stderr
+        for kind in ["SessionStart", "UserPromptSubmit", "StopFailure"]:
+            payload = {"hook_event_name":kind,"session_id":"claude-main","prompt_id":None if kind == "SessionStart" else "prompt-one","private":"never forward"}
+            result = subprocess.run([str(binary), "--yam-claude-hook"], input=json.dumps(payload), env=env,text=True,capture_output=True,timeout=2)
+            assert result.returncode == 0 and json.loads(result.stdout) == {} and not result.stderr
+        for kind in ["PermissionRequest", "PostToolUse"]:
+            payload = {"hook_event_name":kind,"session_id":"main","turn_id":"one","tool_input":{"command":"private"}}
+            result = subprocess.run([str(binary), "--yam-agent-hook"], input=json.dumps(payload), env=env,text=True,capture_output=True,timeout=2)
+            assert result.returncode == 0 and json.loads(result.stdout) == {} and not result.stderr
         worker.join(timeout=3)
         assert not worker.is_alive()
-        assert [value["event"]["kind"] for value in received] == ["SessionStart", "TurnComplete", "SessionStart", "TurnComplete", "TurnComplete"]
+        assert [value["event"]["kind"] for value in received] == ["SessionStart", "TurnComplete", "SessionStart", "TurnComplete", "TurnComplete", "SessionStart", "UserPromptSubmit", "TurnFailed", "PermissionRequest", "ToolProgress"]
         assert all(set(value["event"]) == {"kind", "agent_session_id", "turn_id"} for value in received)
     # The original callback still runs when YAM's bridge is unavailable.
     forwarded.unlink(missing_ok=True)

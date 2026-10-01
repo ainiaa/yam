@@ -3,13 +3,13 @@ export type AgentState = {phase:string;integration:string;agent_session_id:strin
 export function unreadCount(agent?:AgentState):number{return agent?.inbox.filter(entry=>!entry.read).length??0;}
 export function agentLabel(agent?:AgentState,status="running"):string{
  if(!agent||agent.integration.startsWith('unavailable'))return 'Integration unavailable';
- if(agent.integration==='connecting')return 'Awaiting trusted hook';
+ if(agent.integration==='connecting')return ['starting','running'].includes(status)?'Awaiting trusted hook':'Integration not connected';
  if(agent.phase==='working'&&!['starting','running'].includes(status))return 'Round interrupted';
- return ({idle:'Ready',working:'Working',response_finished:'Response finished',needs_permission:'Permission required',interrupted:'Round interrupted'} as Record<string,string>)[agent.phase]??'Round status unknown';
+ return ({idle:'Ready',working:'Working',response_finished:'Response finished',needs_permission:'Permission required',interrupted:'Round interrupted',failed:'Round failed',needs_attention:'Response ready · may continue'} as Record<string,string>)[agent.phase]??'Round status unknown';
 }
 export function nextAttention<T extends {summary:{session_id:string};status:string;agent?:AgentState}>(records:T[],current:string|null):T|undefined{
  const priority=(record:T)=>record.agent?.inbox.some(entry=>!entry.read&&entry.kind==='needs_permission')?0:
-  record.status==='failed'||record.status==='needs_attention'||record.agent?.inbox.some(entry=>!entry.read&&entry.kind==='interrupted')?1:2;
+  record.status==='failed'||record.status==='needs_attention'||record.agent?.inbox.some(entry=>!entry.read&&['interrupted','failed'].includes(entry.kind))?1:2;
  const pending=records.filter(record=>unreadCount(record.agent)>0||record.status==='needs_attention').sort((a,b)=>priority(a)-priority(b));
  if(!pending.length)return undefined;
  return pending[(pending.findIndex(record=>record.summary.session_id===current)+1)%pending.length];

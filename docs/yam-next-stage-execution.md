@@ -109,3 +109,24 @@ B4 只接受 YAM 历史 source ID，由后端取可信主会话 UUID；不允许
 修复已提交并推送到 codex/reliability-closure，业务提交 77180ef253c814280b4293cabc9f4ef7c002cabe。[Desktop checks 36851285080](https://github.com/ainiaa/yam/actions/runs/36851285080) 的 headSha 与该提交一致，最终 conclusion=success。macOS、Ubuntu 22.04、Windows 均通过前端测试/覆盖阈值、构建、Rust 格式、Clippy、cargo test --locked 和桌面打包，测试产物已上传；不引用旧分支 CI 替代本轮证据。
 
 该 CI 不操作真实桌面通知中心，不证明通知点击/退出后唤醒或 Developer ID 签名/公证。macOS CUA 仍只能读取通知中心天气小组件，Control Center 入口超时；Windows/Linux 没有可操作的真实桌面。Claude 正常回应与权限事件、正式 Converge 工具回执及 cmux 对照仍未覆盖，整个冻结验收不能标为完成。所有本次测试 CLI 与隔离包已退出，4 个新增 Hook 信任已撤销，原有 15 项状态一致；隔离包通知权限保留本次授权的开启状态。
+
+## 2026-10-01 — 非桌面剩余项的后续闭环
+
+用户要求排除桌面体验后继续处理其余剩余项。新有限计划 yam-nondesktop-closure-plan.json 校验 status=valid，按 N1/N2/N3 同会话顺序实施；不修改原冻结计划。当前正式证书仍为 0，用户明确改为先完成签名与公证流程及检查，不申请证书或发布。
+
+N1 新增权限事件注入、处理后恢复、并行工具身份关联及 API 失败回执；回归先失败后修复。Claude 原生 prompt_id 经真实探针确认；当前失败路径 CLI→编译后 Helper→认证测试 receiver 通过，正常模型回复被现有服务 base_url 配置错误阻断。Stop 最终完成不能由 Hook 独自证明；采用“回复就绪，可能继续”的可撤回默认，工具进展可恢复工作状态。用户已授权本次 7 项 Codex 会话 Hook/隔离 Claude 目录临时信任与主应用辅助功能，系统辅助功能开关已实测开启；未绕过认证或提前写信任记录。
+
+N2 签名、公证、staple、Gatekeeper 流程已实现 scripts/macos-release.py；6 个命令 mock 回归通过，覆盖正常顺序、缺失证书/错误包、拒绝公证、ad-hoc/缺失 hardened runtime、嵌套代码与命令失败、已有签名身份不匹配。隔离 com.yam.validation 包被实际只读 check 明确拒绝。无真实证书，未签正式包、上传公证或发布；使用方式见 macos-release.md。
+
+Converge native preflight 仍返回 coverage uncovered（未识别已有可执行 Node coverage），不降阈值、不重建图索引，不宣称正式 Review v3 完成。最终源码检查与真实通知激活证据仍需在收尾段绑定。
+
+
+### 本轮最终本机证据
+
+Codex 0.159.3 实测只支持本次 6 项 Hook；移除了不支持的 PostToolUseFailure 注入，未扩大授权范围。原生持续会话 s-1a0f74bedcb-0 两轮主线程 01a0f74c-5780-7ad2-9c62-e4c10d8125a8 分别收到独立完成回执（revision 4/7），后台第二轮 accepted。真实一次性工具审批 s-1a0f755f649-0 先收到 needs_permission revision 3，批准一次后完成 revision 5，最终 pending key 为空；没有采集到完成前 ToolProgress 中间态，因此不把原生权限关联恢复的完整时序标为已验收，相关逻辑由回归测试覆盖。
+
+真实 Claude 持续会话 s-1a0f76371e7-0 在隔离目录临时信任后，SessionStart/UserPromptSubmit/StopFailure 经正式 Helper 写入实际 HistoryStore。原生 session_id 82877ff0-4d8d-4f86-b31d-15bf239818cf、prompt_id eaca5325-48f3-4fd1-889e-9cc9ada813e2；phase=failed、revision=3、失败回执未读且前台 suppressed。本地服务仍返回 HTTP400/缺少 base_url；正常双轮和权限流不虚报通过，未修改用户全局 Provider 或认证配置。
+
+通知运行中点击和同构建退出后唤醒通过；跨构建旧 ad-hoc 通知身份匹配失败，详情见 notification-acceptance.md。验收发现冷启动 GUI 仅有 /usr/bin:/bin 时 CLI 缺失，先补失败测试，再统一发现/版本查询/实际启动的子进程 PATH，保留原目录优先级并补常见用户安装目录。最终隔离包以该最小 PATH 实际启动后 Codex/Claude 均可选，Claude 真实 Helper 已连接。
+
+96 项 Rust 单元测试、57 项前端测试与 6 项签名流程回归通过；TypeScript/Vite、隔离 .app 构建、Clippy、格式与最终编译 Helper 冒烟通过。测试统计不等于正式 Converge 覆盖或真实跨平台桌面验收。6 个新增 Codex Hook 信任已撤销，15 个原有状态与基线完全一致；隔离 Claude 目录的新增信任已撤销。主应用辅助功能恢复等待 macOS 触控 ID 认证。

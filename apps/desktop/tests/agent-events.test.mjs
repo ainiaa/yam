@@ -12,6 +12,9 @@ test('round labels never imply the whole task succeeded or a stopped process is 
  assert.equal(agentLabel(agent()),'Response finished');assert.equal(agentLabel(agent('needs_permission')),'Permission required');
  assert.equal(agentLabel(agent('working'),'stopped'),'Round interrupted');assert.equal(agentLabel(agent('unknown')),'Round status unknown');
  assert.equal(agentLabel(), 'Integration unavailable');
+ assert.equal(agentLabel(agent('failed')),'Round failed');
+ assert.equal(agentLabel(agent('needs_attention')),'Response ready · may continue');
+ assert.equal(agentLabel({...agent(),integration:'connecting'},'stopped'),'Integration not connected');
 });
 test('attention navigation wraps through separate sessions without swallowing later rounds',()=>{
  const records=['a','b','c'].map(id=>({summary:{session_id:id},status:'running',agent:agent()}));
@@ -44,6 +47,8 @@ test('attention prioritizes intervention while retaining round navigation and un
  assert.equal(nextAttention(records,'permission').summary.session_id,'interrupted');
  assert.equal(nextAttention(records,'error').summary.session_id,'done');
  records[1].agent.inbox[0].read=true; assert.equal(nextAttention(records,null).summary.session_id,'interrupted');
+ records[2].agent.inbox[0].read=true; records[3].status='running'; records[3].agent.inbox[0].kind='failed';
+ assert.equal(nextAttention(records,null).summary.session_id,'error');
 });
 test('shortcut preferences reject malformed, conflicting and extra keys',()=>{
  assert.equal(isShortcuts(defaultShortcuts),true);
