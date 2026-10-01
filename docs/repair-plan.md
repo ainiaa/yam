@@ -66,7 +66,7 @@
 - [x] 运行测试并观察失败
 - [x] 最小修复实现
 - [x] 定向测试、构建通过
-- [ ] 系统通知中心实际点击与退出后点击验收（代码和发送回执已验证，点击还待可操作通知中心）
+- [x] macOS系统通知中心实际点击与退出后点击验收（当前原生SDK通知两项通过；Windows/Linux真实桌面点击仍待对应环境）
 
 ### T6：项目和会话操作
 
@@ -157,10 +157,14 @@ Linux不支持退出后激活的generic freedesktop通知服务明确返回错�
 
 ### 最新验收结果
 
-代码提交 `da5f82a` 的 [CI 36809071640](https://github.com/ainiaa/yam/actions/runs/36809071640) 三平台全部success：macOS Rust45/45、Linux44/44、Windows35/35；三平台前端13项测试、生产构建、Rust fmt及Clippy -D warnings全部通过。Linux旧PTY EOF卡死已消失；Windows Job关闭测试改为先确认进程running、再验证3秒内退出，不依赖OS未规定的终止退出码。Linux元数据的路径校验显式按Linux路径语法，跨平台运行测试不误用Windows规则。
+提交 `5dc47d4` 的 [CI 36809821929](https://github.com/ainiaa/yam/actions/runs/36809821929) 三平台全部success：macOS Rust45/45、Linux44/44、Windows35/35；三平台前端13项测试、生产构建、Rust fmt及Clippy -D warnings全部通过。Linux旧PTY EOF卡死已消失；Windows Job关闭测试改为先确认进程running、再验证3秒内退出，不依赖OS未规定的终止退出码。Linux元数据的路径校验显式按Linux路径语法，跨平台运行测试不误用Windows规则。
 
 macOS原生新增实测：目录对话框取消不改值，选择项目根目录正确回填并保存；UNUserNotificationCenter权限关闭时明确报错且pending保留，临时启用YAM权限后系统接受请求并将历史回执持久化为false；本次验收的权限、提醒样式与通知中心快捷键开关都已恢复原设置。调试包先用ad-hoc签名绑定com.yam.desktop进行SDK验收，发布仍使用自己的正式签名身份，不在产品配置中硬编码调试签名。
 
 macOS系统协议冷启动实测通过：先Cmd+Q退出并确认进程不存在，再在Chrome输入yam://session/s-1a0f56ef9fd-2并确认系统打开YAM；进程由系统重新启动，前端准确选中对应Completed会话、日志中文emoji正确显示。测试浏览器标签页已关闭。此项证明系统启动与前端就绪前暂存路由，不替代UNUserNotificationCenter旧通知响应的直接点击验收。
 
-剩余验收边界：Windows/Linux没有本地交互桌面，CI不验证通知中心真实鼠标点击；macOS屏幕共享抑制横幅，当前CUA只返回日历/天气桌面小组件，不能展开菜单栏通知中心。已请求用户展开通知中心，之后继续活进程及退出后点击验收；这里保留T5最后一个复核项，不虚标通过。通知冷启动实现、依赖、目录选择、三平台编译和测试都已完成，不再作为待开发缺口。CodeGraph/coverage仍是未配置工具闸门，不是已运行覆盖率结果。
+macOS通知中心直接点击实测（2026-10-01）：经用户授权使用AppleScript操作实际通知列表，临时开启ChatGPT辅助功能并由用户认证。运行中先选中其他历史会话、后台完成`notification-current-live`，点击系统通知后准确选中`s-1a0f5889695-0`，显示Completed及中文emoji输出；点击前后进程均为17340，没有重复实例。退出后用另一个新任务`notification-current-cold`复核：先选中Unicode smoke，等待系统通知，Cmd+Q退出并用pgrep确认进程不存在；随后直接点击保留通知，系统启动进程20141，准确打开`s-1a0f589ca78-1`，Completed及中文emoji日志正确。整个冷启动验收没有手动启动应用。另一个较早的banner-smoke通知也已唤醒应用。验收结束后，ChatGPT辅助功能已恢复off，原有Codex Computer Use权限保留；用户当前已开启的YAM通知权限保留。
+
+样本边界：较早遗留的`notification-live-smoke`测试通知点击没有切换会话，未确认该通知的生成版本与请求标识，不能用它证明当前实现通过，也不能将上述当前SDK样本通过外推为历史实验通知兼容。当前版本新发送通知的运行中点击及发送后退出再点击均已直接验证。
+
+剩余验收边界：Windows/Linux没有本地交互桌面，CI不验证通知中心真实点击；macOS当前原生SDK通知的两项直接点击验收已完成。通知冷启动实现、依赖、目录选择、三平台编译和测试都已完成。CodeGraph/coverage仍是未配置工具闸门，不是已运行覆盖率结果。
