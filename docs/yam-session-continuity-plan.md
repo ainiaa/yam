@@ -210,3 +210,5 @@ P4 最新有限回调实现后的真实 OpenCode 扩展 13 事件已通过，原
 本轮收口检查：153 Rust、77 Node、18 Python 全部通过；Clippy --all-targets -D warnings、计划 v6 校验和 git diff --check 通过。Node coverage 仍只覆盖 src/*.ts（100% 行/99.20% 分支/100% 函数），不能冒充 Rust/React coverage 或正式 Review v3。最终原生包与三平台 CI 继续执行，尚未改写 P6/P7/P8 为全部完成。
 
 最终原生包 178.52 MiB（debug）通过 --desktop 烟测，样本 s-1a0f946dd3f-0：真实 GUI 退出/重开、后台/任务 PID 保持、输入接管、后台双轮查询、停止和整个后台重启后的保存场景等价全部通过；本次未带 --idle-check，JSON 的 connected_idle_retains_owner=false 表示未执行该子项，两次 65 秒通过证据见前文。准备将当前可审阅实现检查点提交并推送既有修复分支以执行三平台 CI，不合并或发布。
+
+三平台 CI 已由 71ab941 推送启动（run 36926048286），macOS 安装步骤暴露 @xterm/xterm lock importer specifier 仍为 ^6.0.0，而 package 已固定 6.0.0。本地 pnpm install --frozen-lockfile 同样红灯；仅将 importer specifier 同步为已批准的 6.0.0，不变更已解析版本/依赖图。离线冻结安装通过，不放宽 CI 的 frozen-lockfile 检查。
