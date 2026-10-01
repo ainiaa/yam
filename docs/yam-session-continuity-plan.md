@@ -224,3 +224,5 @@ Windows 输入已先增加原生匿名管道堵塞/Unicode/取消回归，再实
 继续复核发现事件轮询一次暂时错误会永久停止。新增先红后绿回归，将只读 poll_events 限制为最多 3 次重连，始终沿用同一认证实例/客户端/游标，不重新发现连接文件或启动任何后台；成功恢复后发 background-gap 重新同步。真实认证服务回归证明瞬时错误后恢复、持续错误只尝试 3 次、替代后台不能被旧连接接受。增加 Windows 两个服务 child 的 CREATE_NO_WINDOW 共享启动选项，原生 test 子进程通过 GetConsoleWindow 和唯一成功标记核对实际行为，尚待本轮 Windows CI 执行。本机当前 155 Rust、77 Node、19 Python 检查通过，Clippy -D warnings 通过。
 
 重连界面回归补证：实际 App.tsx background-gap 回调此前没有作废进行中的帧读取，且会把普通恢复误写为“缓冲区超限”。新增 AST 提取真实回调的回归先失败后修复：gap 时递增生命周期/视口请求版本，使恢复前的帧失效；后台带 missing_events 布尔值，仅真实缺口保留超限提示，正常有限重连不显示假错误。当前 155 Rust、78 Node、19 Python 检查通过；Node coverage 仍仅工具类范围。最新前端构建通过，最终原生包与同一源码三平台 CI 继续执行。
+
+P8 跨平台原生后台生命周期验收已接入 CI，使用独立 com.yam.platform-validation 包身份和合成 PTY，不开启通知或 CLI 信任。共享认证 RPC 补 3 个回归，覆盖分片 UTF-8、响应版本/实例/客户端/请求 ID 错配、超限和业务错误，22 Python 测试通过。本机实际独立 macOS 包通过客户端断开、后台重启后最终场景严格等价、owner 崩溃停止合成任务、needs_attention 且不自动重跑、显式停止所有任务；这不是原生 GUI Cmd+Q/鼠标验收。6666b61 三平台 CI 已全部成功（run 36929764928）；新生命周期脚本的 Windows/Linux 结果尚待下一次 CI，不能沿用上一轮构建成功冒充这项证据。

@@ -25,6 +25,39 @@ def wait_until(predicate, seconds=10):
     raise AssertionError("Background acceptance timed out")
 
 
+def rpc(descriptor,client,request_id,command,arguments=None,*,error=False):
+    wire_id=request_id
+    address, port = descriptor["address"].rsplit(":", 1)
+    assert address == "127.0.0.1"
+    wire = json.dumps({"version": 1, "token": descriptor["token"], "instance": descriptor["instance"],
+                       "client": client, "id": wire_id, "command": command, "args": arguments or {}}).encode()
+    with socket.create_connection((address, int(port)), timeout=5) as stream:
+        deadline=time.monotonic()+10
+        stream.settimeout(10)
+        stream.sendall(struct.pack("!I", len(wire)) + wire)
+
+        def read(length):
+            result = bytearray()
+            while len(result) < length:
+                remaining=deadline-time.monotonic()
+                assert remaining>0,"Background response deadline reached"
+                stream.settimeout(remaining)
+                chunk = stream.recv(length - len(result))
+                assert chunk, "Background closed connection before response"
+                result.extend(chunk)
+            return result
+
+        length = struct.unpack("!I", read(4))[0]
+        assert 0 < length <= 64 * 1024 * 1024
+        result = json.loads(read(length))
+        assert result["version"] == 1 and result["instance"] == descriptor["instance"] and result["id"] == wire_id and result["client"] == client
+        if error:
+            assert isinstance(result["result"].get("Err"),str), "Background unexpectedly accepted an invalid command"
+            return result["result"]["Err"]
+        assert "Ok" in result["result"], "Background rejected validation command"
+        return result["result"]["Ok"]
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--app", type=Path, required=True)
@@ -62,31 +95,7 @@ def main():
         if repeat_id is None:
             request_id += 1
         wire_id = request_id if repeat_id is None else repeat_id
-        address, port = descriptor["address"].rsplit(":", 1)
-        assert address == "127.0.0.1"
-        wire = json.dumps({"version": 1, "token": descriptor["token"], "instance": descriptor["instance"],
-                           "client": client, "id": wire_id, "command": command, "args": arguments or {}}).encode()
-        with socket.create_connection((address, int(port)), timeout=5) as stream:
-            stream.settimeout(10)
-            stream.sendall(struct.pack("!I", len(wire)) + wire)
-
-            def read(length):
-                result = bytearray()
-                while len(result) < length:
-                    chunk = stream.recv(length - len(result))
-                    assert chunk, "Background closed connection before response"
-                    result.extend(chunk)
-                return result
-
-            length = struct.unpack("!I", read(4))[0]
-            assert 0 < length <= 64 * 1024 * 1024
-            result = json.loads(read(length))
-            assert result["instance"] == descriptor["instance"] and result["id"] == wire_id and result["client"] == client
-            if error:
-                assert isinstance(result["result"].get("Err"),str), "Background unexpectedly accepted an invalid command"
-                return result["result"]["Err"]
-            assert "Ok" in result["result"], "Background rejected validation command"
-            return result["result"]["Ok"]
+        return rpc(descriptor,client,wire_id,command,arguments,error=error)
 
     try:
         wait_until(lambda: connection.exists() or owner.poll() is not None)

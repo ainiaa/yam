@@ -10,12 +10,15 @@ jobs:
           - os: macos-latest
             bundle: app
             bundle_dir: macos/YAM-macos.zip
+            smoke_executable: src-tauri/target/debug/bundle/macos/YAM.app/Contents/MacOS/yam-desktop
           - os: ubuntu-22.04
             bundle: deb
             bundle_dir: deb
+            smoke_executable: src-tauri/target/debug/yam-desktop
           - os: windows-latest
             bundle: nsis
             bundle_dir: nsis
+            smoke_executable: src-tauri/target/debug/yam-desktop.exe
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -35,7 +38,7 @@ jobs:
           components: rustfmt, clippy
       - name: Linux desktop prerequisites
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf xvfb
       - run: pnpm install --frozen-lockfile
       - run: pnpm test:coverage
       - run: pnpm build
@@ -43,15 +46,25 @@ jobs:
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+      - name: Verify lifecycle validation protocol
+        run: python3 -m unittest discover -s ../../scripts -p test_background_smoke.py
       - name: Verify macOS release workflow without signing or uploading
         if: runner.os == 'macOS'
         run: python3 -m unittest discover -s ../../scripts -p test_macos_release.py
+      - name: Write isolated lifecycle validation identity
+        run: python3 -c "import pathlib,json; p=pathlib.Path('src-tauri/target/ci-validation.json'); p.parent.mkdir(parents=True,exist_ok=True); p.write_text(json.dumps({'identifier':'com.yam.platform-validation'}),encoding='utf-8')"
       - name: Package desktop application
-        run: pnpm tauri build --debug --bundles ${{ matrix.bundle }}
+        run: pnpm tauri build --debug --bundles ${{ matrix.bundle }} --config src-tauri/target/ci-validation.json
+      - name: Validate actual background process lifecycle
+        if: runner.os != 'Linux'
+        run: python3 ../../scripts/background-platform-smoke.py --executable "${{ matrix.smoke_executable }}" --identifier com.yam.platform-validation
+      - name: Validate Linux background process lifecycle in a virtual display
+        if: runner.os == 'Linux'
+        run: xvfb-run -a python3 ../../scripts/background-platform-smoke.py --executable "${{ matrix.smoke_executable }}" --identifier com.yam.platform-validation
       - name: Sign and archive macOS test package
         if: runner.os == 'macOS'
         run: |
-          codesign --force --deep --sign - --identifier com.yam.desktop src-tauri/target/debug/bundle/macos/YAM.app
+          codesign --force --deep --sign - --identifier com.yam.platform-validation src-tauri/target/debug/bundle/macos/YAM.app
           ditto -c -k --sequesterRsrc --keepParent src-tauri/target/debug/bundle/macos/YAM.app src-tauri/target/debug/bundle/macos/YAM-macos.zip
       - name: Save desktop test package
         uses: actions/upload-artifact@v4
