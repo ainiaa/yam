@@ -546,6 +546,10 @@ input::placeholder {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.statusbar .memory-usage {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
 .error-banner {
   display: flex;
   gap: 12px;

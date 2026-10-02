@@ -1,0 +1,126 @@
+{
+  "schema_version": 6,
+  "plan_id": "plan-yam-live-memory",
+  "requirement_fingerprint": "c7b6d35514d653349aaadde9189f8ea2ad804e15c64ff669c48c8e90affd1605",
+  "planner": {
+    "name": "superpowers-writing-plans-v1",
+    "source_path": "/Users/liuwenyuan/.agents/skills/writing-plans/SKILL.md",
+    "source_fingerprint": "4fd4627d2c02367879c0307d7249270bed633317ff9be82e926a6d57bf5d331b"
+  },
+  "context": "short",
+  "baseline": {
+    "commit": "fec6334941e780289e42d06a1ebdeaceb725de8d",
+    "source": {
+      "schema_version": 2,
+      "baseline_commit": "fec6334941e780289e42d06a1ebdeaceb725de8d",
+      "commit_id": "fec6334941e780289e42d06a1ebdeaceb725de8d",
+      "tree_hash": "11282663ed586a09b693e28e7c2a8e5499ab13de",
+      "diff_fingerprint": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "changed_paths": [],
+      "changed_entries": [],
+      "source_fingerprint": "42bc6a6df3c435933aab446ec03ba2d1a4aabbfad79d990dabae740d6ce30189"
+    }
+  },
+  "checkpoint": "same_session",
+  "tasks": [
+    {
+      "task_id": "T1",
+      "task_kind": "vertical_slice",
+      "outcomes": [
+        "Status bar reports current attributed YAM memory and separate workload memory"
+      ],
+      "goal": "Add bounded live memory sampling and statusbar display",
+      "owned_paths": [
+        "apps/desktop/src-tauri/src/memory.rs",
+        "apps/desktop/src-tauri/src/lib.rs",
+        "apps/desktop/src-tauri/src/background.rs",
+        "apps/desktop/src-tauri/src/terminal_runtime.rs",
+        "apps/desktop/src/memory.ts",
+        "apps/desktop/src/App.tsx",
+        "apps/desktop/src/App.css",
+        "apps/desktop/tests/memory.test.mjs",
+        "docs/superpowers/plans/2026-10-02-live-memory.md",
+        "docs/superpowers/plans/2026-10-02-live-memory.json"
+      ],
+      "depends_on": [],
+      "steps": [
+        "Add failing attribution and polling tests",
+        "Implement native process sampling",
+        "Connect authenticated owner process identities",
+        "Render statusbar memory",
+        "Run regression and native smoke checks",
+        "Review current diff"
+      ],
+      "acceptance": [
+        "YAM includes current GUI, WebKit, authenticated owner and terminal parser",
+        "PTY workloads are counted separately",
+        "Failures or incomplete attribution never display a complete total",
+        "Refresh every five seconds without overlapping calls or updates after disposal",
+        "No new dependencies or permissions"
+      ],
+      "verification": [
+        "rtk proxy cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml",
+        "rtk proxy npm --prefix apps/desktop test",
+        "rtk proxy npm --prefix apps/desktop run build"
+      ],
+      "execution": "current",
+      "status": "pending",
+      "provider_run": {
+        "scope": "task",
+        "recursive_planning": false
+      },
+      "provider_binding": {
+        "binding": {
+          "controller": "converge",
+          "stage_providers": {},
+          "workflow_provider": {
+            "contract": {
+              "closure": [],
+              "entrypoint": "references/execution-protocol.md",
+              "preserve_external_behavior": false
+            },
+            "contract_fingerprint": "2fb1c069b1686ca2b67c505882e2ae27a404663386e5e72df4b2f65a6ec62822",
+            "id": "native-v1",
+            "manifest": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/providers/native-v1.json",
+            "manifest_fingerprint": "da79b6af45fa1e1a94b5ce9b4b0cf84d5f43a798e57f5e1c50b510f6b7e954ee",
+            "role": "workflow",
+            "source_root": "/Users/liuwenyuan/www/tools/skills-convergent-delivery",
+            "sources": [
+              {
+                "fingerprint": "a43c016ea5daecbf5e74ea93840c1e489fe7ce85f926bb651fdbf36064028770",
+                "kind": "entrypoint",
+                "path": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/references/execution-protocol.md",
+                "relative_path": "references/execution-protocol.md"
+              }
+            ],
+            "task_kind": "feature",
+            "version": "1"
+          }
+        },
+        "binding_fingerprint": "e04abc991b64aa44f1f760489b8c33bb40c03458b1e8c63a6eea860247bd300c",
+        "reason": "native engine was selected",
+        "selection": "explicit",
+        "task_kind": "feature"
+      }
+    }
+  ],
+  "final_acceptance": [
+    "Statusbar updates from bounded native sampler with explicit metric and separate workload memory"
+  ],
+  "decisions": [
+    {
+      "id": "D1",
+      "status": "resolved",
+      "question": "Memory scope",
+      "resolution": "YAM application process sum; PTY workloads separately; no shared-page deduplication",
+      "source": "user"
+    },
+    {
+      "id": "D2",
+      "status": "resolved",
+      "question": "Refresh cadence",
+      "resolution": "Five seconds, one in-flight request, hidden-view sampling paused",
+      "source": "reversible-default"
+    }
+  ]
+}

@@ -2,6 +2,7 @@ mod agent_bridge;
 mod agent_events;
 mod background;
 mod claude_resume;
+mod memory;
 mod session_logs;
 mod terminal_runtime;
 pub fn agent_helper_entry() -> bool {
@@ -642,6 +643,69 @@ macro_rules! proxy {
                 .map_err(|_| "Invalid background command result".into());
         }
     };
+}
+
+fn memory_processes(manager: &SessionManager) -> Result<memory::OwnerProcesses, String> {
+    proxy!(manager, "memory_processes", serde_json::json!({}));
+    let sessions: Vec<_> = manager
+        .sessions
+        .lock()
+        .map_err(|_| "Session manager lock poisoned")?
+        .values()
+        .cloned()
+        .collect();
+    let mut workloads = Vec::new();
+    for session in sessions {
+        if ["starting", "running"].contains(
+            &session
+                .status
+                .lock()
+                .map_err(|_| "Session status lock poisoned")?
+                .as_str(),
+        ) {
+            if let Some(pid) = session
+                .child
+                .lock()
+                .map_err(|_| "Session child lock poisoned")?
+                .process_id()
+            {
+                workloads.push(pid);
+            }
+        }
+    }
+    workloads.sort_unstable();
+    workloads.dedup();
+    let runtime_pid = manager
+        .terminal_runtime
+        .lock()
+        .map_err(|_| "Terminal runtime lock poisoned")?
+        .as_ref()
+        .ok_or("Terminal runtime unavailable")?
+        .process_id()?;
+    Ok(memory::OwnerProcesses {
+        pid: std::process::id(),
+        runtime_pid,
+        workloads,
+    })
+}
+
+#[tauri::command]
+async fn memory_usage(app: AppHandle) -> Result<memory::Sample, String> {
+    static SAMPLING: Mutex<()> = Mutex::new(());
+    tauri::async_runtime::spawn_blocking(move || {
+        let _sampling = SAMPLING
+            .try_lock()
+            .map_err(|_| "Memory sampling already in progress")?;
+        let manager = app.state::<SessionManager>();
+        let before = memory_processes(&manager)?;
+        let sample = memory::sample(&before)?;
+        if memory_processes(&manager)? != before {
+            return Err("Task membership changed during memory sampling".into());
+        }
+        Ok(sample)
+    })
+    .await
+    .map_err(|_| "Memory sampling worker failed")?
 }
 
 struct TerminalAttachment {
@@ -3284,6 +3348,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             health_check,
+            memory_usage,
             validate_project_directory,
             list_adapters,
             create_session,

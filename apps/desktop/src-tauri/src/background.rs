@@ -504,6 +504,7 @@ fn validate_command(command: &str, args: &serde_json::Value) -> Result<(), Strin
         "list_sessions"
         | "shutdown"
         | "background_status"
+        | "memory_processes"
         | "retry_agent_notifications"
         | "cancel_log_search" => (&[], &[]),
         "poll_events" => (&["cursor", "foreground"], &["cursor"]),
@@ -680,6 +681,7 @@ fn dispatch(app: &tauri::AppHandle, request: Request) -> Result<serde_json::Valu
             argument(args, "session_id")?,
             argument(args, "line")?,
         )?),
+        "memory_processes" => serde_json::to_value(super::memory_processes(&manager)?),
         "background_status" => Ok(serde_json::json!({"pid":std::process::id(),
             "desktop_connected":manager.desktop_connected.load(Ordering::Acquire) && manager.desktop_focus.lock().map_err(|_|"Desktop focus lock poisoned")?.0.elapsed() < Duration::from_secs(3),
             "active_sessions":manager.sessions.lock().map_err(|_|"Session manager lock poisoned")?.len()})),
@@ -1439,6 +1441,8 @@ mod tests {
     fn owner_status_has_no_arguments_or_arbitrary_inspection_targets() {
         assert!(validate_command("background_status", &serde_json::json!({})).is_ok());
         assert!(validate_command("background_status", &serde_json::json!({"pid":1})).is_err());
+        assert!(validate_command("memory_processes", &serde_json::json!({})).is_ok());
+        assert!(validate_command("memory_processes", &serde_json::json!({"pid":1})).is_err());
     }
     #[test]
     fn input_ownership_expires_and_cannot_be_stolen_by_another_live_client() {

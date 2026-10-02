@@ -88,6 +88,13 @@ pub(super) struct Runtime {
     instance: String,
 }
 impl Runtime {
+    pub(super) fn process_id(&self) -> Result<u32, String> {
+        Ok(self
+            .child
+            .lock()
+            .map_err(|_| "Terminal process lock poisoned")?
+            .id())
+    }
     pub(super) fn start(
         executable: &Path,
         input: impl Fn(String, String) -> Result<(), String> + Send + 'static,

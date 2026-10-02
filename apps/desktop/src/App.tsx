@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import {memoryLabel, startMemoryPolling, type MemorySample} from "./memory";
 import { open as openDirectoryDialog } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -182,6 +183,12 @@ function App() {
 
   const titlesRef = useRef(sessionTitles);
   titlesRef.current = sessionTitles;
+
+  const [memory, setMemory] = useState<MemorySample | null>(null);
+  useEffect(() => startMemoryPolling(
+    () => invoke<MemorySample>("memory_usage"), setMemory,
+    () => document.visibilityState !== "hidden",
+  ), []);
 
   useEffect(()=>{
     try {localStorage.setItem("yam.launchMode",JSON.stringify(launchMode));localStorage.setItem("yam.shortcuts",JSON.stringify(shortcuts));}
@@ -1186,7 +1193,12 @@ function App() {
           </div>
         )}
         <footer className="statusbar">
-          <span>{session ? session.session_id : "No session selected"}</span>
+            <span>{session ? session.session_id : "No session selected"}</span>
+            <span className="memory-usage" title={memory
+              ? `${memory.metric}: YAM desktop, WebKit, background and terminal parser. Tasks: PTY/Agent processes. Per-process sum; shared pages are not deduplicated. Refreshes every 5 seconds.`
+              : "Memory sampling unavailable or incomplete. Refreshes every 5 seconds while visible."}>
+              {memoryLabel(memory)}
+            </span>
           <span>{session ? "Terminal" : (health?.platform ?? "Local")}</span>
         </footer>
       </main>
