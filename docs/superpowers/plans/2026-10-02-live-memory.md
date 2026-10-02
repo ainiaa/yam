@@ -69,6 +69,8 @@
 
 先增加默认计时器 receiver 的失败回归，再将四个默认 timer 方法绑定到 globalThis。前端 82 项测试与构建通过。新增 native WebKit smoke 加载完整构建前端，使用明确的 IPC/visibility 测试替身，实际 DOM 出现 footer 与 `YAM 100.0 MiB · Tasks 50.0 MiB`，捕获的 JavaScript errors 为空；此测试不代表真实 IPC 后端验收。macOS CI 已接入该回归。
 
-本地重新打包并只重启生产 GUI，后台 owner 和工作任务保留。
+本地重新打包并重启生产 GUI，没有执行任务停止命令。最终确认一个生产 GUI，前端 heartbeat 已连接，active_sessions=0。
 
 新增 native gate 另经构建产物反向验证：仅恢复原来的 setInterval 调用即检测到 blank frontend 并以非零退出；恢复修复产物后 footer/memory 渲染通过。独立 spec/quality 复核通过，并独立执行 native smoke 成功。
+
+修复提交 `ca396c400fd115127fd0f3af8ed2459a161292f6` 的 [CI 36957990014](https://github.com/ainiaa/yam/actions/runs/36957990014)：新增 macOS 原生 WebKit 前端启动检查已成功；记录时其余整包作业仍运行中，未称全平台最终结果已通过。
