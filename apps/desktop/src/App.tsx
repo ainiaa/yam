@@ -91,7 +91,7 @@ type SessionStateEvent = {
   reason: string | null;
 };
 
-type TerminalView = { instance: Terminal; fit: FitAddon; element: HTMLDivElement; cursor: number | null; ready: boolean; replayVersion:number; firstAttachment:boolean; parsing:Promise<void>|null; finishReplay:(()=>void)|null; live: boolean; status:string|null; notice: string | null; projection:boolean; frameRevision:number; frameInstance:string|null; dirty:boolean; updating:boolean; selecting:boolean; lifecycleRevision:number; projecting:boolean; viewportRevision:number; dispose(): void };
+type TerminalView = { instance: Terminal; fit: FitAddon; element: HTMLDivElement; cursor: number | null; ready: boolean; replayVersion:number; firstAttachment:boolean; parsing:Promise<void>|null; finishReplay:(()=>void)|null; live: boolean; status:string|null; notice: string | null; persisted:boolean; projection:boolean; frameRevision:number; frameInstance:string|null; dirty:boolean; updating:boolean; selecting:boolean; lifecycleRevision:number; projecting:boolean; viewportRevision:number; dispose(): void };
 
 type AgentPhase = "idle" | "working" | "waiting";
 
@@ -105,7 +105,7 @@ const statusLabels: Record<string, string> = {
 };
 
 function App() {
-  // ponytail: 16 views measured at ~8.7 MB JS heap in Chromium; native WebKit stress validation remains separate.
+  // Live views stay warm; ended background-owned scenes release idle hidden renderers after selection.
   const terminalViews = useRef(new TerminalViews<TerminalView>(16));
   const createView = useRef<((id: string) => TerminalView) | null>(null);
   const creatingSession = useRef(false);
@@ -338,7 +338,7 @@ function App() {
       try { instance.loadAddon(fit); instance.open(element); }
       catch (reason) { instance.dispose(); element.remove(); throw reason; }
       const view: TerminalView = {
-        instance, fit, element, cursor: null, ready:false, replayVersion:0, firstAttachment:false, parsing:null, finishReplay:null, live:false, status:null, notice:null, projection:false, frameRevision:-1, frameInstance:null,dirty:true,updating:false,selecting:false,lifecycleRevision:0,projecting:false,viewportRevision:0,
+        instance, fit, element, cursor: null, ready:false, replayVersion:0, firstAttachment:false, parsing:null, finishReplay:null, live:false, status:null, notice:null,persisted:false, projection:false, frameRevision:-1, frameInstance:null,dirty:true,updating:false,selecting:false,lifecycleRevision:0,projecting:false,viewportRevision:0,
         dispose() { view.finishReplay?.(); onData.dispose(); onScroll.dispose(); instance.dispose(); element.remove(); },
       };
       const onData = instance.onData(data => {
@@ -602,6 +602,7 @@ function App() {
       try{await parsing;}finally{view.projecting=false;if(view.parsing===parsing)view.parsing=null;}
       view.frameRevision=frame.projection.revision;view.frameInstance=frame.projection.instance;
     }
+    view.persisted=frame.persisted===true && terminalStatuses.has(frame.status);
     view.cursor=frame.end_offset;view.ready=true;view.firstAttachment=false;
     if(view.lifecycleRevision===lifecycleRevision){view.status=frame.status;view.live=["starting","running"].includes(frame.status);}
     view.element.inert=sessionId.current!==id;
@@ -695,6 +696,8 @@ function App() {
       }
       await view.parsing;
       if (version !== selectionVersion.current) return;
+      if (view.projection) terminalViews.current.retain(other =>
+        other === view || other.live || !other.projection || !other.persisted || !!other.parsing || other.updating);
       const bufferedState = pendingState.current.get(id);
       if (bufferedState) {
         pendingState.current.delete(id);

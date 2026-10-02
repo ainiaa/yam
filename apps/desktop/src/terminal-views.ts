@@ -26,5 +26,10 @@ export class TerminalViews<T extends { dispose(): void }> {
   return value;
  }
  setRunning(id: string, running: boolean) { const entry = this.views.get(id); if (entry) entry.running = running; }
+ retain(keep: (value: T) => boolean) {
+  for (const [id, entry] of this.views) {
+   if (!keep(entry.value)) { entry.value.dispose(); this.views.delete(id); }
+  }
+ }
  clear() { for (const entry of this.views.values()) entry.value.dispose(); this.views.clear(); }
 }

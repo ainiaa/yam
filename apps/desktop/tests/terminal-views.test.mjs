@@ -35,6 +35,17 @@ test('invalid limits and failed creation cannot consume capacity',()=>{
  pool.setRunning('a',false);assert.equal(pool.canOpen,true);
 });
 
+test('retaining selected values disposes excluded renderers once, including recoverable live views',()=>{
+ const pool=new TerminalViews(2),disposed=[];
+ const a=pool.open('a',true,()=>({dispose(){disposed.push('a')}}));
+ const b=pool.open('b',true,()=>({dispose(){disposed.push('b')}}));
+ pool.retain(value=>value===b);
+ assert.equal(pool.get('a'),undefined);assert.equal(pool.get('b'),b);
+ assert.equal(pool.size,1);assert.deepEqual(disposed,['a']);
+ pool.retain(value=>value===b);assert.deepEqual(disposed,['a']);
+ pool.clear();assert.deepEqual(disposed,['a','b']);
+});
+
 import ts from 'typescript';
 import {readFileSync} from 'node:fs';
 import {applyTerminalFrame,validateTerminalFrame} from '../src/terminal-frame.ts';
@@ -46,7 +57,7 @@ const js=ts.transpileModule(renderCode+'\n'+code,{compilerOptions:{target:ts.Scr
 function harness(invoke, delayWrite=false, fullFrame=()=>Promise.resolve(null)){
  const refs={previousSession:{current:null},creatingSession:{current:false},selectionVersion:{current:0},sessionId:{current:null},selectedRecord:{current:null},outputCursor:{current:null},terminal:{current:null},fitAddon:{current:null},agentOutputWindow:{current:''},pendingOutput:{current:{drain:()=>[],delete(){}}},pendingState:{current:new Map()},terminalViews:{current:new TerminalViews(2)}};
  let resets=0,focus=0;const frames=[],writes=[];
- const make=()=>{const element={style:{},inert:true};return {instance:{_core:{_inputHandler:{_activeBuffer:{x:0}}},resize(cols,rows){this.cols=cols;this.rows=rows;},scrollToLine(){},reset(){resets++},write(_s,done){if(delayWrite)writes.push(done);else done?.()},focus(){if(!element.inert)focus++},cols:100,rows:30},fit:{fit(){}},element,cursor:null,ready:false,dispose(){}}};
+ const make=id=>{const element={dataset:{sessionId:id},style:{},inert:true};return {instance:{_core:{_inputHandler:{_activeBuffer:{x:0}}},resize(cols,rows){this.cols=cols;this.rows=rows;},scrollToLine(){},reset(){resets++},write(_s,done){if(delayWrite)writes.push(done);else done?.()},focus(){if(!element.inert)focus++},cols:100,rows:30},fit:{fit(){}},element,cursor:null,ready:false,dispose(){}}};
  refs.terminal.current=make().instance;refs.fitAddon.current=make().fit;
  const args={...refs,invoke:(command,args)=>command==='read_terminal_frame'?fullFrame(args):invoke(command,args),applyTerminalFrame,validateTerminalFrame,createTerminalView:make,setSession(){},setActiveProject(){},setSessionStatus(){},setTerminalNotice(){},setAgentPhase(){},updateAgentPhase(){},setError(){},document:{activeElement:{}},terminalStatuses:new Set(['succeeded','failed','stopped']),replayOutput:(s)=>({data:s.data,nextOffset:s.end_offset}),requestAnimationFrame:fn=>frames.push(fn),applyStateEvent(){}};
  const open=new Function(...Object.keys(args),js+';return openHistory')(...Object.values(args));
@@ -261,6 +272,65 @@ test('actual coordinator restores a full scene without reading a log or answerin
  await h.open(record('a'));const view=h.refs.terminalViews.current.get('a');
  assert.equal(view.projection,true);assert.equal(view.instance.cols,20);assert.equal(view.instance.rows,8);assert.equal(view.instance._core._inputHandler._activeBuffer.x,20);assert.equal(view.cursor,42);assert.equal(view.notice,null);
  await h.open(record('a'));assert.equal(h.resets,1);
+});
+
+test('successful full-scene selection releases ended hidden renderers and reconstructs on return',async()=>{
+ const h=harness(async()=>{throw Error('full scene must not replay logs')},false,async args=>({...full(args.sessionId),status:'stopped',persisted:true}));
+ await h.open(record('a'));const a=h.refs.terminal.current;
+ await h.open(record('b'));assert.equal(h.refs.terminalViews.current.size,1);
+ assert.equal(h.refs.terminalViews.current.get('a'),undefined);
+ await h.open(record('c'));assert.equal(h.refs.sessionId.current,'c');
+ await h.open(record('a'));assert.notEqual(h.refs.terminal.current,a);
+ assert.equal(h.refs.terminalViews.current.size,1);
+ assert.equal(h.refs.terminal.current._core._inputHandler._activeBuffer.x,20);
+ assert.equal(h.refs.outputCursor.current,42);
+});
+
+test('live projections stay cached and receive every window resize, including a pending size reversal',async()=>{
+ const h=harness(async()=>null,false,async args=>full(args.sessionId));
+ await h.open(record('a'));await h.open(record('b'));
+ assert.ok(h.refs.terminalViews.current.get('a'));
+ let resizeCode;
+ function findResize(node){if(ts.isVariableDeclaration(node)&&node.name.getText(source)==='resize')resizeCode=node.initializer.getText(source);ts.forEachChild(node,findResize)}
+ findResize(source);assert.ok(resizeCode);
+ const calls=[];h.refs.terminal.current.resize(100,30);
+ const args={...h.refs,invoke:async(name,value)=>calls.push({name,...value})};
+ const resize=new Function(...Object.keys(args),ts.transpileModule('const resize='+resizeCode,{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText+';return resize')(...Object.values(args));
+ h.refs.terminalViews.current.get('a').instance.resize(100,30);
+ resize();assert.ok(calls.some(call=>call.sessionId==='a'&&call.cols===100&&call.rows===30));
+ h.refs.terminal.current.resize(20,8);h.refs.terminalViews.current.get('a').instance.resize(20,8);
+ resize();assert.ok(calls.some(call=>call.sessionId==='a'&&call.cols===20&&call.rows===8));
+ const a=h.refs.terminalViews.current.get('a');await h.open(record('a'));
+ assert.equal(h.refs.terminalViews.current.get('a'),a);
+});
+
+test('hidden legacy, parsing and updating views remain retained',async()=>{
+ for(const state of [{projection:false},{projection:true,parsing:Promise.resolve()},{projection:true,updating:true}]){
+  const h=harness(async()=>null,false,async args=>({...full(args.sessionId),status:'stopped',persisted:true}));
+  await h.open(record('a'));const a=h.refs.terminalViews.current.get('a');Object.assign(a,state);
+  await h.open(record('b'));assert.equal(h.refs.terminalViews.current.get('a'),a);
+ }
+});
+
+test('an ended renderer without a verified saved frame remains the full-scene fallback',async()=>{
+ for(const persisted of [undefined,false]){
+  let saved=true,logs=0;
+  const h=harness(async()=>{logs++;return {data:'incomplete log',offset:0,end_offset:42}},false,async args=>
+   args.sessionId==='a'&&!saved?null:{...full(args.sessionId),status:'stopped',persisted});
+  await h.open(record('a'));const a=h.refs.terminalViews.current.get('a');saved=false;
+  await h.open(record('b'));assert.equal(h.refs.terminalViews.current.get('a'),a);
+  await h.open(record('a'));assert.equal(h.refs.terminal.current,a.instance);assert.equal(logs,0);
+ }
+});
+
+test('failed or stale frame selection cannot discard the current renderer',async()=>{
+ let reject,release;
+ const h=harness(async()=>null,false,args=>args.sessionId==='b'?new Promise((resolve,fail)=>{release=resolve;reject=fail}):Promise.resolve(full(args.sessionId)));
+ await h.open(record('a'));const a=h.refs.terminalViews.current.get('a');
+ const failed=h.open(record('b'));reject(Error('offline'));await failed;
+ assert.equal(h.refs.terminalViews.current.get('a'),a);
+ const stale=h.open(record('b'));await h.open(record('a'));release(full('b'));await stale;
+ assert.equal(h.refs.sessionId.current,'a');assert.equal(h.refs.terminalViews.current.get('a'),a);
 });
 test('a late running projection cannot revive a newer stopped lifecycle',async()=>{
  let release;const h=harness(async()=>null,false,()=>new Promise(resolve=>release=resolve));

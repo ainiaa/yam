@@ -45,6 +45,9 @@ jobs:
       - name: Verify frontend renders in native WebKit
         if: runner.os == 'macOS'
         run: python3 ../../scripts/webkit-memory-smoke.py
+      - name: Verify asynchronous WebKit startup regression
+        if: runner.os == 'macOS'
+        run: python3 -m unittest discover -s ../../scripts -p test_webkit_memory_smoke.py
       - run: pnpm build:terminal
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings

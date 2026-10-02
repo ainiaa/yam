@@ -734,6 +734,8 @@ struct TerminalFrame {
     projection: serde_json::Value,
     end_offset: u64,
     status: String,
+    #[serde(default)]
+    persisted: bool,
 }
 fn active_frame(session: &Session) -> Result<TerminalFrame, String> {
     let terminal = session
@@ -757,6 +759,7 @@ fn active_frame(session: &Session) -> Result<TerminalFrame, String> {
         projection,
         end_offset: log.end_offset,
         status: status.clone(),
+        persisted: false,
     })
 }
 #[tauri::command]
@@ -888,16 +891,29 @@ fn read_terminal_frame(
     let Some(bytes) = saved_frame_bytes(&path)? else {
         return Ok(None);
     };
-    let frame: TerminalFrame =
-        serde_json::from_slice(&bytes).map_err(|_| "Invalid final terminal frame")?;
-    terminal_runtime::validate_snapshot(&frame.projection, &session_id, None)?;
-    if !is_terminal(&record.status)
-        || frame.status != record.status
-        || frame.end_offset != record.output_end_offset
-    {
+    decode_saved_frame(
+        &bytes,
+        &session_id,
+        &record.status,
+        record.output_end_offset,
+    )
+    .map(Some)
+}
+
+fn decode_saved_frame(
+    bytes: &[u8],
+    session_id: &str,
+    status: &str,
+    end_offset: u64,
+) -> Result<TerminalFrame, String> {
+    let mut frame: TerminalFrame =
+        serde_json::from_slice(bytes).map_err(|_| "Invalid final terminal frame")?;
+    terminal_runtime::validate_snapshot(&frame.projection, session_id, None)?;
+    if !is_terminal(status) || frame.status != status || frame.end_offset != end_offset {
         return Err("Final terminal frame does not match recorded lifecycle".into());
     }
-    Ok(Some(frame))
+    frame.persisted = true;
+    Ok(frame)
 }
 
 pub struct SessionManager {
@@ -3845,6 +3861,24 @@ mod tests {
         assert!(is_terminal("stopped"));
         assert!(is_terminal("needs_attention"));
         assert!(!is_terminal("running"));
+    }
+
+    #[test]
+    fn saved_scene_confirmation_requires_valid_identity_and_recorded_lifecycle() {
+        let value = serde_json::json!({"projection":{"version":1,"instance":"a".repeat(64),"session":"s-one","terminal_version":"6.0.0","serialize_version":"0.14.0","revision":0,"data":"ALT","cols":20,"rows":8,"cursorX":3,"viewport":0,"buffer":"alternate"},"end_offset":42,"status":"stopped"});
+        let bytes = serde_json::to_vec(&value).unwrap();
+        let frame: super::TerminalFrame = serde_json::from_slice(&bytes).unwrap();
+        assert!(!frame.persisted);
+        assert!(
+            super::decode_saved_frame(&bytes, "s-one", "stopped", 42)
+                .unwrap()
+                .persisted
+        );
+        assert!(super::decode_saved_frame(&bytes, "s-other", "stopped", 42).is_err());
+        assert!(super::decode_saved_frame(&bytes, "s-one", "running", 42).is_err());
+        assert!(super::decode_saved_frame(&bytes, "s-one", "failed", 42).is_err());
+        assert!(super::decode_saved_frame(&bytes, "s-one", "stopped", 41).is_err());
+        assert!(super::decode_saved_frame(b"broken", "s-one", "stopped", 42).is_err());
     }
 
     #[test]

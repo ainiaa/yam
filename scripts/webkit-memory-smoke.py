@@ -25,8 +25,8 @@ view.load(URLRequest(url:URL(string:CommandLine.arguments[1])!))
 func check() {
  view.evaluateJavaScript("JSON.stringify({memory:document.querySelector('.memory-usage')?.textContent,footer:!!document.querySelector('.statusbar'),errors:window.__yamErrors})") { result,error in
   if let text=result as? String,let data=text.data(using:.utf8),let value=try? JSONSerialization.jsonObject(with:data) as? [String:Any],value["footer"] as? Bool == true {
-   print(text)
-   exit((value["memory"] as? String)?.contains("YAM 100.0 MiB") == true && (value["errors"] as? [String])?.isEmpty == true ? 0 : 1)
+   if (value["errors"] as? [String])?.isEmpty == false { print(text); exit(1) }
+   if (value["memory"] as? String)?.contains("YAM 100.0 MiB") == true { print(text); exit(0) }
   }
   if let error=error {print(error)}
   DispatchQueue.main.asyncAfter(deadline:.now()+0.2,execute:check)

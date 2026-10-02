@@ -1,5 +1,5 @@
 // Author: Jeff.Liu. Render a validated full projection; the background remains the parser owner.
-export type TerminalFrame = {projection: {version:number;instance:string;session:string;terminal_version:string;serialize_version:string;revision:number;data:string;cols:number;rows:number;cursorX:number;viewport:number;buffer:string};end_offset:number;status:string};
+export type TerminalFrame = {projection: {version:number;instance:string;session:string;terminal_version:string;serialize_version:string;revision:number;data:string;cols:number;rows:number;cursorX:number;viewport:number;buffer:string};end_offset:number;status:string;persisted?:boolean};
 type Target = {reset():void;resize(cols:number,rows:number):void;write(data:string,callback:()=>void):void;scrollToLine(line:number):void};
 export function validateTerminalFrame(frame:TerminalFrame,session:string):TerminalFrame {
  const p=frame?.projection;
@@ -8,7 +8,8 @@ export function validateTerminalFrame(frame:TerminalFrame,session:string):Termin
   || !Number.isSafeInteger(p.revision) || p.revision<0 || typeof p.data!=="string" || p.data.length>8*1024*1024
   || !Number.isSafeInteger(p.cols) || p.cols<2 || p.cols>500 || !Number.isSafeInteger(p.rows) || p.rows<2 || p.rows>200
   || !Number.isSafeInteger(p.cursorX) || p.cursorX<0 || p.cursorX>p.cols || !Number.isSafeInteger(p.viewport) || p.viewport<0 || p.viewport>2000
-  || !["normal","alternate"].includes(p.buffer) || !Number.isSafeInteger(frame.end_offset) || frame.end_offset<0 || typeof frame.status!=="string") throw Error("Terminal frame identity or version contract is invalid");
+  || !["normal","alternate"].includes(p.buffer) || !Number.isSafeInteger(frame.end_offset) || frame.end_offset<0 || typeof frame.status!=="string"
+  || (frame.persisted!==undefined && typeof frame.persisted!=="boolean")) throw Error("Terminal frame identity or version contract is invalid");
  return frame;
 }
 export async function applyTerminalFrame(terminal:Target,frame:TerminalFrame,session:string):Promise<void> {

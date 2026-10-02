@@ -36,6 +36,7 @@ test('all frame budgets and numeric boundaries reject malformed payloads before 
  assert.throws(()=>validateTerminalFrame(null,'s-one'));
  const cases=[['serialize_version','0.15.0'],['instance',null],['instance','z'.repeat(64)],['revision',-1],['revision',1.5],['data','x'.repeat(8*1024*1024+1)],['cols',1.5],['cols',501],['rows',0],['rows',1.5],['cursorX',-1],['cursorX',1.5],['viewport',-1],['viewport',1.5],['buffer','unknown']];
  for(const [key,value] of cases){const invalid=structuredClone(good);invalid.projection[key]=value;assert.throws(()=>validateTerminalFrame(invalid,'s-one'),undefined,key);}
- for(const [key,value] of [['end_offset',-1],['end_offset',1.5],['status',null]]){const invalid=structuredClone(good);invalid[key]=value;assert.throws(()=>validateTerminalFrame(invalid,'s-one'));}
+ for(const [key,value] of [['end_offset',-1],['end_offset',1.5],['status',null],['persisted',null],['persisted','true']]){const invalid=structuredClone(good);invalid[key]=value;assert.throws(()=>validateTerminalFrame(invalid,'s-one'));}
+ for(const persisted of [true,false])assert.equal(validateTerminalFrame({...good,persisted},'s-one').persisted,persisted);
  await assert.rejects(applyTerminalFrame({},good,'s-one'),/renderer version contract/);
 });
