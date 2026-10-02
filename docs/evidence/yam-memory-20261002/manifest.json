@@ -1,0 +1,235 @@
+{
+  "schema_version": 1,
+  "author": "Jeff.Liu",
+  "date": "2026-10-02",
+  "production_source_unchanged_at": "4cb533d",
+  "fixture_file": "output-fixture.py",
+  "fixture_sha256": "696a1d9fcf1788fab83d1a074f57ff922497749f0a47895a66689e7a104bea1e",
+  "note": "Per-process footprint sum includes shared accounting. Sources and scenarios differ; partial runs are preserved. This is measurement evidence, not a Converge Review v3 receipt.",
+  "records": [
+    {
+      "file": "yam-continuity-four-baseline.jsonl.gz",
+      "business_source": "2c2ff7b",
+      "raw_sha256": "eb472eaaf39f9bf75816e7ecc4b480b993ccdfcdbd86735274a60697819f4014",
+      "compressed_sha256": "298a6ec7935caf58c7f00f3dc106cdc7d337d9d4c1ad947e14a9dbca10bc28ba",
+      "samples": 6,
+      "complete_samples": 6,
+      "start_utc": "2026-10-01T14:52:28.356416+00:00",
+      "end_utc": "2026-10-01T14:52:38.380357+00:00",
+      "workload_counts": [
+        4
+      ],
+      "status": "complete"
+    },
+    {
+      "file": "yam-continuity-idle-baseline.jsonl.gz",
+      "business_source": "2c2ff7b",
+      "raw_sha256": "52279c678baf33c3a3d05b56ad504afbe627fe8fae24b194998f4868f3dae878",
+      "compressed_sha256": "5edcbe16aa73763d652dc884c37d9ce806cac16951e723cf99a6aa2365f944c8",
+      "samples": 6,
+      "complete_samples": 6,
+      "start_utc": "2026-10-01T14:49:29.967718+00:00",
+      "end_utc": "2026-10-01T14:49:40.051484+00:00",
+      "workload_counts": [
+        0
+      ],
+      "status": "complete"
+    },
+    {
+      "file": "yam-continuity-new-desktop-exited-20261002.jsonl.gz",
+      "business_source": "6666b61",
+      "raw_sha256": "2569a04498c2804ec24c830d16e61c78e6995ecd8d9b62ef53bf0f510b6117df",
+      "compressed_sha256": "6d714e5f667075929c877c2f71c303481c1b35e1ded6d7320c441a100ad2bc4e",
+      "samples": 6,
+      "complete_samples": 6,
+      "start_utc": "2026-10-01T22:40:56.670720+00:00",
+      "end_utc": "2026-10-01T22:41:21.703837+00:00",
+      "workload_counts": [
+        0
+      ],
+      "status": "complete"
+    },
+    {
+      "file": "yam-continuity-new-four-20261002.jsonl.gz",
+      "business_source": "6666b61",
+      "raw_sha256": "33bd53e73e4d5563308710f57cf434f970114b95ffc77d030b1487d53354193e",
+      "compressed_sha256": "586e88e80b6a6eb82de0ba9911db6994a1b30279998bf32c830f1283c2d1f030",
+      "samples": 6,
+      "complete_samples": 6,
+      "start_utc": "2026-10-01T22:09:23.242845+00:00",
+      "end_utc": "2026-10-01T22:09:48.281385+00:00",
+      "workload_counts": [
+        4
+      ],
+      "status": "complete"
+    },
+    {
+      "file": "yam-continuity-new-idle-20261002.jsonl.gz",
+      "business_source": "6666b61",
+      "raw_sha256": "7f2995dfd2d7ed357bbfb5ee9ac05f9759a2272255dce970837abf3608976dc3",
+      "compressed_sha256": "0add0ecb9c58f179de7d3d4b726c4bbf82006ff49a5ba324829bba7fa16b9217",
+      "samples": 1,
+      "complete_samples": 1,
+      "start_utc": "2026-10-01T22:08:13.609942+00:00",
+      "end_utc": "2026-10-01T22:08:13.609942+00:00",
+      "workload_counts": [
+        0
+      ],
+      "status": "complete"
+    },
+    {
+      "file": "yam-continuity-new-one-20261002.jsonl.gz",
+      "business_source": "6666b61",
+      "raw_sha256": "19afb5d1e966a707f7412ac963a2dc342c332e3191881cc4e53f665aa268ec4d",
+      "compressed_sha256": "f401f9a9358105e89e649a0faa064eec7e6bfd36bddffebb1b900cbdd3f190b3",
+      "samples": 6,
+      "complete_samples": 6,
+      "start_utc": "2026-10-01T22:08:55.564664+00:00",
+      "end_utc": "2026-10-01T22:09:20.612485+00:00",
+      "workload_counts": [
+        1
+      ],
+      "status": "complete"
+    },
+    {
+      "file": "yam-continuity-new-sixteen-20261002.jsonl.gz",
+      "business_source": "6666b61",
+      "raw_sha256": "d7f8c3093a7570ae02dc18b5130381050ba792deae35e519568879f7e1aa6cc9",
+      "compressed_sha256": "1efb69f6afe7af305a892c427ca419c013774d9abbf84d433f92718327370659",
+      "samples": 344,
+      "complete_samples": 344,
+      "start_utc": "2026-10-01T22:09:52.175634+00:00",
+      "end_utc": "2026-10-01T22:39:52.242971+00:00",
+      "workload_counts": [
+        16
+      ],
+      "status": "complete"
+    },
+    {
+      "file": "yam-continuity-new-stopped-20261002.jsonl.gz",
+      "business_source": "6666b61",
+      "raw_sha256": "b82a5607814652db4cf02fde6b36c6fda9ce2212798058ff8cb99fbb3b7833e7",
+      "compressed_sha256": "bd9aa81dd1057e01916d33237ffd7f3eac0b98325919222b84e8758a99bf8fa2",
+      "samples": 13,
+      "complete_samples": 13,
+      "start_utc": "2026-10-01T22:39:53.407960+00:00",
+      "end_utc": "2026-10-01T22:40:53.425049+00:00",
+      "workload_counts": [
+        0
+      ],
+      "status": "complete"
+    },
+    {
+      "file": "yam-continuity-one-baseline.jsonl.gz",
+      "business_source": "2c2ff7b",
+      "raw_sha256": "8ce2a5415c3f7612ba03f6368de8b43f4f7876a751345d02b2dd247ee6d6d3bd",
+      "compressed_sha256": "b4579ca5a5956ce3b4b6bf14d0f8430350d8f8c230fdc1bd5a49f0e708ba71a6",
+      "samples": 6,
+      "complete_samples": 6,
+      "start_utc": "2026-10-01T14:51:44.396201+00:00",
+      "end_utc": "2026-10-01T14:51:54.416089+00:00",
+      "workload_counts": [
+        1
+      ],
+      "status": "complete"
+    },
+    {
+      "file": "yam-continuity-sixteen-baseline.jsonl.gz",
+      "business_source": "2c2ff7b",
+      "raw_sha256": "ec0b7cc36b23ed14dc2b6ac3b82960ed047c2c815b0b75135a277809242a14f8",
+      "compressed_sha256": "3fdfefa9799fb9cd61d96b6c063f74a428daf1f51b430ef589a20d1335628098",
+      "samples": 347,
+      "complete_samples": 347,
+      "start_utc": "2026-10-01T14:55:43.396949+00:00",
+      "end_utc": "2026-10-01T15:25:43.270145+00:00",
+      "workload_counts": [
+        16
+      ],
+      "status": "complete"
+    },
+    {
+      "file": "yam-final-long-sixteen-desktop-20261002.jsonl.gz",
+      "business_source": "400f5ba",
+      "raw_sha256": "6b734f96ea89800a67ad3bf9ed141ee94c747f8b9df9886bbc26117bf6524582",
+      "compressed_sha256": "1d68c7359739e81f1df8d3b0abd77003d704438f09599c6752ea69bbfb5a1675",
+      "samples": 343,
+      "complete_samples": 343,
+      "start_utc": "2026-10-02T00:57:03.699366+00:00",
+      "end_utc": "2026-10-02T01:27:03.642979+00:00",
+      "workload_counts": [
+        16
+      ],
+      "status": "complete"
+    },
+    {
+      "file": "yam-final-long-sixteen-desktop-exited-20261002.jsonl.gz",
+      "business_source": "400f5ba",
+      "raw_sha256": "4c29bc74e77c79cea5bf0d9e3c85bb78c07b5373d80534107dddd84ad1bc166f",
+      "compressed_sha256": "180ba786d05d3b55a583919709e0158ae5b94c1f97f77c49a4d0d3e4e8fae2b6",
+      "samples": 13,
+      "complete_samples": 13,
+      "start_utc": "2026-10-02T01:27:06.990098+00:00",
+      "end_utc": "2026-10-02T01:28:07.024746+00:00",
+      "workload_counts": [
+        16
+      ],
+      "status": "complete"
+    },
+    {
+      "file": "yam-final-reopen-check-sixteen-desktop-reopened-20261002.jsonl.gz",
+      "business_source": "400f5ba",
+      "raw_sha256": "7a3a3c328ccba6cbcec15f832a3ddb11bad106bd6de885ad2584003803d960ec",
+      "compressed_sha256": "290d0cb2df172bbea1a7508703aac8d97a99286ac455e054648d0d6b276c96c0",
+      "samples": 13,
+      "complete_samples": 13,
+      "start_utc": "2026-10-02T01:30:28.291388+00:00",
+      "end_utc": "2026-10-02T01:31:28.308084+00:00",
+      "workload_counts": [
+        16
+      ],
+      "status": "complete"
+    },
+    {
+      "file": "yam-final-sixteen-desktop-20261002.jsonl.gz",
+      "business_source": "400f5ba",
+      "raw_sha256": "120abb911a93e3ec5f6d19ccceac02a35b50165cf20326f3a70d8c814e0a2907",
+      "compressed_sha256": "a705802ea1ea4cd417bfbe87dae24ab0b43fa20f1c847f8a731a58f40e79f6d9",
+      "samples": 13,
+      "complete_samples": 13,
+      "start_utc": "2026-10-01T23:05:25.915570+00:00",
+      "end_utc": "2026-10-01T23:06:25.908782+00:00",
+      "workload_counts": [
+        16
+      ],
+      "status": "complete"
+    },
+    {
+      "file": "yam-final-sixteen-desktop-exited-20261002.jsonl.gz",
+      "business_source": "400f5ba",
+      "raw_sha256": "cae008a1793b6fec9e16601cf346f39213cbbca92b72c08d69d3094fc890b98b",
+      "compressed_sha256": "23c2e3d87550577e749c6e0f1582ee5abf6bb015b7b978f9cc78f2301d37cba5",
+      "samples": 13,
+      "complete_samples": 13,
+      "start_utc": "2026-10-01T23:06:29.295501+00:00",
+      "end_utc": "2026-10-01T23:07:29.299672+00:00",
+      "workload_counts": [
+        16
+      ],
+      "status": "complete"
+    },
+    {
+      "file": "yam-final-sixteen-desktop-reopened-20261002.jsonl.gz",
+      "business_source": "400f5ba",
+      "raw_sha256": "d212ec64515293898864d2e3375fe22b40fb8876c116a3e9ec1d169b1866c4f2",
+      "compressed_sha256": "d3ebfb3d91779da60ad6a21f04b0219f6d8365a6f2c9182c6feec91c6c96427d",
+      "samples": 13,
+      "complete_samples": 12,
+      "start_utc": "2026-10-01T23:07:30.237207+00:00",
+      "end_utc": "2026-10-01T23:08:30.200971+00:00",
+      "workload_counts": [
+        16
+      ],
+      "status": "partial"
+    }
+  ]
+}
