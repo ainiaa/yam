@@ -133,7 +133,7 @@ fn sample_for_desktop(owner: &OwnerProcesses, desktop: u32) -> Result<Sample, St
 }
 
 #[cfg(target_os = "macos")]
-fn coalition_members(text: &str, pid: u32) -> Result<Vec<u32>, String> {
+fn coalition_members(text: &str, pid: u32, measurement_pid: u32) -> Result<Vec<u32>, String> {
     let mut blocks = Vec::new();
     let mut current = String::new();
     for line in text.lines() {
@@ -177,6 +177,9 @@ fn coalition_members(text: &str, pid: u32) -> Result<Vec<u32>, String> {
         .collect::<Result<Vec<_>, _>>()?;
     members.sort_unstable();
     members.dedup();
+    // The query is spawned by this app and appears in its own coalition while
+    // lsappinfo runs. It has exited before sampling and must not count as YAM.
+    members.retain(|member| *member != measurement_pid);
     if !members.contains(&pid) || members.len() > MAX_ATTRIBUTED {
         return Err("WebKit coalition membership is incomplete".into());
     }
@@ -289,6 +292,7 @@ mod platform {
         coalition_members(
             std::str::from_utf8(&bytes).map_err(|_| "Invalid LaunchServices output")?,
             pid,
+            child.id(),
         )
     }
 }
@@ -565,10 +569,12 @@ mod tests {
     #[test]
     fn coalition_parser_requires_exact_live_root_and_explicit_membership() {
         let text="1) other bundleID=\"x\" pid = 12 coalition: 9 { 12 21 }\n2) YAM bundleID=\"yam\" pid = 123 coalition: 10 { 123 456 }\n3) other pid = 777 coalition: 11 { 777 }";
-        assert_eq!(coalition_members(text, 123).unwrap(), vec![123, 456]);
-        assert!(coalition_members(text, 12_345).is_err());
-        assert!(coalition_members("1) YAM pid = 123 coalition: 10", 123).is_err());
-        assert!(coalition_members("1) YAM pid = 123 coalition: 10 { 456 }", 123).is_err());
+        assert_eq!(coalition_members(text, 123, 0).unwrap(), vec![123, 456]);
+        assert_eq!(coalition_members(text, 123, 456).unwrap(), vec![123]);
+        assert!(coalition_members(text, 123, 123).is_err());
+        assert!(coalition_members(text, 12_345, 0).is_err());
+        assert!(coalition_members("1) YAM pid = 123 coalition: 10", 123, 0).is_err());
+        assert!(coalition_members("1) YAM pid = 123 coalition: 10 { 456 }", 123, 0).is_err());
     }
     #[test]
     fn native_sampler_can_measure_current_process() {
@@ -606,6 +612,25 @@ mod tests {
         println!(
             "YAM_MEMORY_SAMPLE {}",
             serde_json::to_string(&sample).unwrap()
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "must launch this test binary as an isolated LaunchServices app"]
+    fn native_application_self_sampling() {
+        let owner: OwnerProcesses =
+            serde_json::from_str(&std::env::var("YAM_MEMORY_TEST_OWNER").unwrap()).unwrap();
+        let result = sample(&owner);
+        std::fs::write(
+            std::env::var("YAM_MEMORY_TEST_RESULT").unwrap(),
+            serde_json::to_vec(&result).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            result.is_ok(),
+            "Internal application sampling failed: {:?}",
+            result.err()
         );
     }
 }

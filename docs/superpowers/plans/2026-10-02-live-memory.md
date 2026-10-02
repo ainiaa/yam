@@ -74,3 +74,15 @@
 新增 native gate 另经构建产物反向验证：仅恢复原来的 setInterval 调用即检测到 blank frontend 并以非零退出；恢复修复产物后 footer/memory 渲染通过。独立 spec/quality 复核通过，并独立执行 native smoke 成功。
 
 修复提交 `ca396c400fd115127fd0f3af8ed2459a161292f6` 的 [CI 36957990014](https://github.com/ainiaa/yam/actions/runs/36957990014)：新增 macOS 原生 WebKit 前端启动检查已成功；记录时其余整包作业仍运行中，未称全平台最终结果已通过。
+
+## 用户实机发现的内存不可用修复
+
+作者：Jeff.Liu。此前从外部测试进程采样 GUI 的验收漏掉了应用内部查询路径。将 Rust 测试二进制作为隔离 LaunchServices 应用启动，并在其内部调用 sample，先复现 `WebKit process membership changed during sampling`：应用启动的 lsappinfo 自己进入应用 coalition，查询退出后该瞬时 PID 导致两次进程集合不同。
+
+修复仅排除本轮查询 child.id()，保留真正的 WebKit、后台、parser 和任务进程，以及前后集合与进程身份校验。新增正常、查询 PID 排除及误排除主进程的回归；隔离自采样 smoke 接入 macOS CI。debug 构建记录实际命令返回的字节数或固定错误，以验证真实前端 IPC，不记录凭据。
+
+本地 Rust 164 项通过、2 项原生 fixture 默认 ignored；本次分别单独验证原生 fixture。Clippy、格式及 app 打包通过，独立审查无可执行问题，自采样 smoke 连续六次通过。
+
+实际 GUI 的连续三次前端请求分别返回 application_bytes=230595664、198467024、198598096，workload_bytes 均为 3801496。最后一次约为应用 189.4 MiB、任务 3.6 MiB。切换前后认证 owner、parser 和活动终端 PID 完全一致，只有一个生产 GUI，后台连接正常。此证据是真实前端 IPC；CUA 可见 UI 读取仍超时，未声称截图验收。
+
+为避免覆盖活动后台正在使用的旧 bundle，新版构建并启动于 `apps/desktop/src-tauri/target/memory-fix/debug/bundle/macos/YAM.app`；原 target/debug bundle 暂未覆盖。当前修复的远程 CI 尚待提交后运行，不将前次 CI 当作本次结果。

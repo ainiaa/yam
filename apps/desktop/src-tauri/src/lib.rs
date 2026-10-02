@@ -692,7 +692,7 @@ fn memory_processes(manager: &SessionManager) -> Result<memory::OwnerProcesses, 
 #[tauri::command]
 async fn memory_usage(app: AppHandle) -> Result<memory::Sample, String> {
     static SAMPLING: Mutex<()> = Mutex::new(());
-    tauri::async_runtime::spawn_blocking(move || {
+    let result = tauri::async_runtime::spawn_blocking(move || {
         let _sampling = SAMPLING
             .try_lock()
             .map_err(|_| "Memory sampling already in progress")?;
@@ -705,7 +705,16 @@ async fn memory_usage(app: AppHandle) -> Result<memory::Sample, String> {
         Ok(sample)
     })
     .await
-    .map_err(|_| "Memory sampling worker failed")?
+    .map_err(|_| "Memory sampling worker failed")?;
+    #[cfg(debug_assertions)]
+    match &result {
+        Ok(sample) => eprintln!(
+            "[YAM memory] application_bytes={} workload_bytes={}",
+            sample.application_bytes, sample.workload_bytes
+        ),
+        Err(error) => eprintln!("[YAM memory] {error}"),
+    }
+    result
 }
 
 struct TerminalAttachment {
