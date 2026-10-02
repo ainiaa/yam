@@ -3,6 +3,8 @@ import importlib.util,json,pathlib,struct,unittest
 from unittest import mock
 spec=importlib.util.spec_from_file_location('background_smoke',pathlib.Path(__file__).with_name('background-smoke.py'))
 smoke=importlib.util.module_from_spec(spec);spec.loader.exec_module(smoke)
+platform_spec=importlib.util.spec_from_file_location('background_platform_smoke',pathlib.Path(__file__).with_name('background-platform-smoke.py'))
+platform_smoke=importlib.util.module_from_spec(platform_spec);platform_spec.loader.exec_module(platform_smoke)
 
 class Stream:
  def __init__(self,change=None,budget=None):self.change=change or {};self.budget=budget;self.response=b'';self.request=None
@@ -35,3 +37,19 @@ class SmokeProtocolTests(unittest.TestCase):
   with mock.patch.object(smoke.socket,'create_connection') as connect:
    with self.assertRaises(AssertionError):smoke.rpc({**self.descriptor,'address':'example.com:12345'},'c'*64,7,'list_sessions')
    connect.assert_not_called()
+
+class RetainedLogFlowTests(unittest.TestCase):
+ def replies(self):
+  return [{'complete':True,'hits':[{'session_id':'s-fixture','offset':0,'column':0,'text':'NATIVE_CONTINUITY 中😀'}]},'NATIVE_CONTINUITY 中😀\n',{'data':'\x1b[?1049hNATIVE_CONTINUITY 中😀\r\n'}]
+ def test_unicode_search_hit_routes_to_the_same_recorded_excerpt_and_snapshot(self):
+  call=mock.Mock(side_effect=self.replies())
+  platform_smoke.check_retained_log(call,'s-fixture')
+  self.assertEqual(call.call_args_list,[
+   mock.call('search_session_logs',{'session_id':'s-fixture','request':{'query':'NATIVE_CONTINUITY 中😀','case_sensitive':True,'skip':0,'limit':50}}),
+   mock.call('read_log_excerpt',{'session_id':'s-fixture','offset':0,'column':0}),
+   mock.call('read_session_snapshot',{'session_id':'s-fixture'})])
+ def test_partial_missing_wrong_session_and_wrong_excerpt_never_pass(self):
+  for page in [{'complete':False,'hits':[]},{'complete':True,'hits':[]},{'complete':True,'hits':[{'session_id':'s-other','offset':0,'column':0,'text':'NATIVE_CONTINUITY 中😀'}]}]:
+   with self.assertRaises(AssertionError):platform_smoke.check_retained_log(mock.Mock(return_value=page),'s-fixture')
+  replies=self.replies();replies[1]='wrong retained output'
+  with self.assertRaises(AssertionError):platform_smoke.check_retained_log(mock.Mock(side_effect=replies),'s-fixture')

@@ -1237,6 +1237,180 @@ impl Prepared {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn three_agent_receipts_and_logs_remain_isolated_across_connections_and_history_reopen() {
+        use super::super::{session_logs, AgentLaunch, HistoryStore, SessionSummary};
+        let root = std::env::temp_dir().join(format!(
+            "yam-joint-flow-{}",
+            super::super::next_session_id()
+        ));
+        let history = Arc::new(HistoryStore::open(root.clone()).unwrap());
+        let bridge = Bridge::start(history.clone(), |_, _| {}).unwrap();
+        let sessions = Mutex::new(std::collections::HashMap::new());
+        let mut bindings = vec![];
+        for adapter in ["codex", "claude", "opencode"] {
+            let id = format!("s-{adapter}");
+            let native = format!("main-{adapter}");
+            let token = credential().unwrap();
+            history
+                .start(&SessionSummary {
+                    session_id: id.clone(),
+                    cwd: root.to_string_lossy().into_owned(),
+                    command: None,
+                    status: "running".into(),
+                    launch: Some(AgentLaunch {
+                        adapter: adapter.into(),
+                        mode: "interactive".into(),
+                        extra_args: String::new(),
+                        prompt: None,
+                    }),
+                })
+                .unwrap();
+            history.configure_agent(&id, adapter).unwrap();
+            bridge.register(&id, &token, adapter).unwrap();
+            bindings.push((adapter, id, native, token));
+        }
+        let address = bridge.address;
+        std::thread::scope(|scope| {
+            for (adapter, id, native, token) in bindings {
+                let history = history.clone();
+                scope.spawn(move || {
+                    let event = |kind: &str, turn: Option<&str>| AgentEvent {
+                        kind: kind.into(),
+                        agent_session_id: native.clone(),
+                        turn_id: turn.map(str::to_owned),
+                        permission_key: None,
+                        source: (adapter != "codex").then(|| adapter.into()),
+                    };
+                    // Each submit uses a new authenticated TCP connection; receipts belong to the launch.
+                    submit(address, &token, event("SessionStart", None)).unwrap();
+                    for kind in ["UserPromptSubmit", "PermissionRequest", "ToolProgress"] {
+                        submit(address, &token, event(kind, Some("one"))).unwrap();
+                    }
+                    let finished = if adapter == "claude" {
+                        "ResponseReady"
+                    } else {
+                        "TurnComplete"
+                    };
+                    submit(address, &token, event(finished, Some("one"))).unwrap();
+                    submit(address, &token, event(finished, Some("one"))).unwrap();
+                    let mut child = event("TurnComplete", Some("child-turn"));
+                    child.agent_session_id = format!("child-{adapter}");
+                    submit(address, &token, child).unwrap();
+                    for kind in ["UserPromptSubmit", "TurnFailed", "TurnComplete"] {
+                        submit(address, &token, event(kind, Some("two"))).unwrap();
+                    }
+                    assert!(
+                        submit(address, &credential().unwrap(), event("SessionStart", None))
+                            .is_err()
+                    );
+                    let record = history
+                        .list()
+                        .unwrap()
+                        .into_iter()
+                        .find(|r| r.summary.session_id == id)
+                        .unwrap();
+                    assert_eq!(record.agent.phase, "failed");
+                    assert_eq!(
+                        record.agent.agent_session_id.as_deref(),
+                        Some(native.as_str())
+                    );
+                    assert_eq!(
+                        record.agent.inbox.len(),
+                        3,
+                        "duplicate, child and failed-round completions must not add receipts"
+                    );
+                    let receipt = &record.agent.inbox[0];
+                    assert!(history
+                        .read_agent_receipt(&id, &receipt.id, receipt.revision + 1)
+                        .is_err());
+                    history
+                        .read_agent_receipt(&id, &receipt.id, receipt.revision)
+                        .unwrap();
+
+                    let output =
+                        format!("\x1b[31m联合验证 {adapter} 中😀\x1b[0m\r\nsecond line\r\n");
+                    std::fs::write(history.log_path(&id), &output).unwrap();
+                    history
+                        .update(&id, "stopped", None, None, Some(output.len() as u64))
+                        .unwrap();
+                    assert!(
+                        submit(address, &token, event("UserPromptSubmit", Some("three"))).is_err()
+                    );
+                });
+            }
+        });
+        bridge.stop();
+        let reopened = HistoryStore::open(root.clone()).unwrap();
+        let records = reopened.list().unwrap();
+        assert_eq!(records.len(), 3);
+        assert!(records
+            .iter()
+            .all(|r| r.status == "stopped" && r.agent.inbox.len() == 3 && r.agent.inbox[0].read));
+        let sources = records
+            .iter()
+            .map(|r| session_logs::LogSource {
+                session_id: r.summary.session_id.clone(),
+                cwd: r.summary.cwd.clone(),
+            })
+            .collect::<Vec<_>>();
+        let read = |id: &str| {
+            let record = records
+                .iter()
+                .find(|r| r.summary.session_id == id)
+                .ok_or("Unknown log session")?;
+            super::super::recorded_log(&reopened, &sessions, record)
+        };
+        let page = session_logs::search(
+            &sources,
+            read,
+            &session_logs::SearchRequest {
+                query: "联合验证".into(),
+                case_sensitive: false,
+                skip: 0,
+                limit: 50,
+            },
+            || false,
+        )
+        .unwrap();
+        let page = serde_json::to_value(page).unwrap();
+        assert_eq!(page["complete"], true);
+        let hits = page["hits"].as_array().unwrap();
+        assert_eq!(hits.len(), 3);
+        let mut hit_ids = hits
+            .iter()
+            .map(|hit| hit["session_id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        hit_ids.sort_unstable();
+        assert_eq!(hit_ids, ["s-claude", "s-codex", "s-opencode"]);
+        for hit in hits {
+            let id = hit["session_id"].as_str().unwrap();
+            let adapter = id.strip_prefix("s-").unwrap();
+            let unique = format!("联合验证 {adapter} 中😀");
+            assert!(hit["text"].as_str().unwrap().contains(&unique));
+            let log = read(id).unwrap();
+            assert_eq!(
+                log.data,
+                format!("\x1b[31m{unique}\x1b[0m\r\nsecond line\r\n")
+            );
+            let excerpt = session_logs::excerpt(
+                &log,
+                hit["offset"].as_u64().unwrap(),
+                hit["column"].as_u64().unwrap() as usize,
+            )
+            .unwrap();
+            assert!(excerpt.contains(&unique));
+            let plain = session_logs::export_text("", &log, false);
+            assert!(plain.contains(&unique) && !plain.contains('\x1b'));
+            assert_eq!(session_logs::export_text("", &log, true), log.data);
+            let target = root.join(format!("{id}.txt"));
+            session_logs::write_export(&target, plain.as_bytes()).unwrap();
+            assert_eq!(std::fs::read_to_string(&target).unwrap(), plain);
+            assert!(session_logs::write_export(&target, b"overwrite").is_err());
+            assert_eq!(std::fs::read_to_string(&target).unwrap(), plain);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
     fn valid_wire() -> Vec<u8> {
         br#"{"version":1,"token":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","event":{"kind":"SessionStart","agent_session_id":"main","turn_id":null}}"#.to_vec()
     }

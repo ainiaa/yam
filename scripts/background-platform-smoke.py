@@ -9,6 +9,15 @@ def app_data(identifier):
  if platform.system()=='Windows':return pathlib.Path(os.environ['APPDATA'])/identifier
  return pathlib.Path(os.environ.get('XDG_DATA_HOME',str(pathlib.Path.home()/'.local/share')))/identifier
 
+def check_retained_log(call,session):
+ needle='NATIVE_CONTINUITY 中😀'
+ page=call('search_session_logs',{'session_id':session,'request':{'query':needle,'case_sensitive':True,'skip':0,'limit':50}})
+ assert page['complete'] and len(page['hits'])==1,'Retained log search is incomplete or lost its unique fixture line'
+ hit=page['hits'][0];assert hit['session_id']==session and needle in hit['text']
+ excerpt=call('read_log_excerpt',{'session_id':session,'offset':hit['offset'],'column':hit['column']})
+ assert needle in excerpt,'Search hit does not locate the same retained output'
+ assert needle in call('read_session_snapshot',{'session_id':session})['data']
+
 def main():
  parser=argparse.ArgumentParser();parser.add_argument('--executable',type=pathlib.Path,required=True);parser.add_argument('--identifier',required=True);parser.add_argument('--desktop',action='store_true');args=parser.parse_args()
  assert args.identifier.startswith('com.yam.') and 'validation' in args.identifier
@@ -18,9 +27,9 @@ def main():
  else:assert os.environ.get('GITHUB_ACTIONS')=='true','Non-macOS validation requires the CI-built isolated package'
  root=app_data(args.identifier);assert not root.exists() or not any(root.iterdir()),'Refusing a pre-existing validation data namespace'
  connection=root/'background/connection.json';owner=None;desktop=None;descriptor=None;client=None;request_id=0
- def call(command,arguments=None):
+ def call(command,arguments=None,*,error=False):
   nonlocal request_id
-  request_id+=1;return smoke.rpc(descriptor,client,request_id,command,arguments)
+  request_id+=1;return smoke.rpc(descriptor,client,request_id,command,arguments,error=error)
  def start(previous=None):
   nonlocal owner,descriptor,client,request_id
   owner=subprocess.Popen([str(executable),'--yam-background'],stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
@@ -68,6 +77,8 @@ def main():
   client=secrets.token_hex(32);request_id=0 # A genuinely disconnected client is replaced; no desktop process remains.
   assert call('background_status')['active_sessions']==1;assert call('background_status')['pid']==first_pid
   assert sum(r['summary']['session_id']==session for r in call('list_sessions'))==1
+  check_retained_log(call,session)
+  assert 'Unknown log session' in call('search_session_logs',{'session_id':'s-not-created','request':{'query':'NATIVE_CONTINUITY','case_sensitive':True,'skip':0,'limit':50}},error=True)
   if args.desktop:
    for _ in range(2):
     desktop=subprocess.Popen([str(executable)],stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
@@ -88,6 +99,7 @@ def main():
   start(first_instance)
   assert call('background_status')['active_sessions']==0
   assert call('read_terminal_frame',{'session_id':session})==saved,'Cold owner must preserve the recorded final scene'
+  check_retained_log(call,session)
   interrupted,crash_target=create('interrupted');crash_instance=descriptor['instance']
   owner.kill();owner.wait(timeout=10);owner.stderr.close();owner=None
   time.sleep(.3);last_marker=marker(crash_target);time.sleep(.2);assert marker(crash_target)==last_marker,'An owner crash retained its PTY workload'
@@ -97,7 +109,7 @@ def main():
   assert record['status']=='needs_attention','An interrupted task was silently rerun or marked complete'
   assert marker(crash_target)==last_marker
   create('stop-all');call('shutdown');owner.wait(timeout=10);owner.stderr.close();owner=None
-  print(json.dumps({'platform':platform.system(),'background_disconnect':True,'desktop_exit_reopen':args.desktop,'desktop_exit_method':'terminate fixture process' if args.desktop else None,'frozen_scene_after_owner_restart':True,'owner_crash_stops_workload':True,'no_automatic_rerun':True,'explicit_stop_all':True,'notification_delivery':'paused for validation'}))
+  print(json.dumps({'platform':platform.system(),'background_disconnect':True,'desktop_exit_reopen':args.desktop,'desktop_exit_method':'terminate fixture process' if args.desktop else None,'retained_log_search_and_location_after_reconnect':True,'unknown_log_session_rejected':True,'frozen_scene_after_owner_restart':True,'owner_crash_stops_workload':True,'no_automatic_rerun':True,'explicit_stop_all':True,'notification_delivery':'paused for validation'}))
  finally:
   close_desktop()
   if owner is not None:
