@@ -17,8 +17,8 @@ export function startMemoryPolling(
   read: () => Promise<MemorySample>,
   publish: (sample: MemorySample | null) => void,
   visible: () => boolean,
-  clock = {now: Date.now, setInterval: globalThis.setInterval, clearInterval: globalThis.clearInterval,
-    setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout},
+  clock = {now: Date.now, setInterval: globalThis.setInterval.bind(globalThis), clearInterval: globalThis.clearInterval.bind(globalThis),
+    setTimeout: globalThis.setTimeout.bind(globalThis), clearTimeout: globalThis.clearTimeout.bind(globalThis)},
 ): () => void {
   let disposed = false, pending = false, sample: MemorySample | null = null;
   let expiry: ReturnType<typeof globalThis.setTimeout> | undefined;

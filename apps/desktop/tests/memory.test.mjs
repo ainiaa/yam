@@ -2,6 +2,17 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {memoryLabel, startMemoryPolling} from '../src/memory.ts';
 
+test('default clock calls browser timers with their Window receiver through start, refresh and disposal',async()=>{
+ const keys=['setInterval','clearInterval','setTimeout','clearTimeout'];
+ const originals=Object.fromEntries(keys.map(key=>[key,globalThis[key]]));const calls=[];
+ try {
+  for(const key of keys)globalThis[key]=function(){assert.equal(this,globalThis,`${key} requires Window`);calls.push(key);return 1;};
+  const stop=startMemoryPolling(()=>Promise.resolve({application_bytes:1,workload_bytes:0,metric:'RSS',sampled_at:Date.now()}),()=>{},()=>true);
+  await new Promise(setImmediate);stop();
+  assert.deepEqual(calls,['setInterval','setTimeout','clearInterval','clearTimeout']);
+ } finally {for(const key of keys)globalThis[key]=originals[key];}
+});
+
 test('memory label separates application/workloads and refuses incomplete or invalid totals',()=>{
  const sample={application_bytes:104857600,workload_bytes:52428800,metric:'physical footprint',sampled_at:1000};
  assert.equal(memoryLabel(sample,2000),'YAM 100.0 MiB · Tasks 50.0 MiB');

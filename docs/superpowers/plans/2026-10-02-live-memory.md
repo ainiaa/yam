@@ -62,3 +62,13 @@
 - desktop (windows-latest, nsis, nsis, src-tauri/target/debug/yam-desktop.exe): success; 2026-10-02T02:42:59.3361178Z test result: ok. 143 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 10.27s
 
 生产身份 YAM 已启动，确认一个 GUI 和认证 owner 正常连接；native 采样 application_bytes=110893536，workload_bytes=0。测试用隔离应用与后台均已关闭。
+
+## 用户实机发现的白屏修复
+
+此前通过的 Node 测试和原生后端采样不能证明前端能在 WebKit 中启动。用户截图确认主界面空白。真实 WKWebView 复现错误：`TypeError: Can only call Window.setInterval on instances of Window`。根因是默认 clock 将 Window timer 方法挂在普通对象上调用，Node 没有同样的 receiver 校验。
+
+先增加默认计时器 receiver 的失败回归，再将四个默认 timer 方法绑定到 globalThis。前端 82 项测试与构建通过。新增 native WebKit smoke 加载完整构建前端，使用明确的 IPC/visibility 测试替身，实际 DOM 出现 footer 与 `YAM 100.0 MiB · Tasks 50.0 MiB`，捕获的 JavaScript errors 为空；此测试不代表真实 IPC 后端验收。macOS CI 已接入该回归。
+
+本地重新打包并只重启生产 GUI，后台 owner 和工作任务保留。
+
+新增 native gate 另经构建产物反向验证：仅恢复原来的 setInterval 调用即检测到 blank frontend 并以非零退出；恢复修复产物后 footer/memory 渲染通过。独立 spec/quality 复核通过，并独立执行 native smoke 成功。
