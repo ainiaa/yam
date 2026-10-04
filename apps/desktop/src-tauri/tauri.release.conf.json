@@ -1,0 +1,13 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "build": {
+    "beforeBuildCommand": "pnpm build && pnpm build:terminal --notice-mode release"
+  },
+  "bundle": {
+    "resources": [
+      "target/terminal-runtime/yam-terminal",
+      "target/terminal-runtime/THIRD-PARTY-NOTICES.txt",
+      "target/terminal-runtime/THIRD-PARTY-NOTICES.report.json"
+    ]
+  }
+}

@@ -1,3 +1,4 @@
+PROTOCOL_VERSION = 2
 """Author: Jeff.Liu. Measure a macOS app coalition without collecting argv/env."""
 import argparse
 import datetime
@@ -13,6 +14,8 @@ import re
 import subprocess
 import tempfile
 import time
+import ctypes
+import math
 
 
 def parse_apps(text):
@@ -130,7 +133,7 @@ def read_connection(path):
         data = source.read(4097)
     if len(data) > 4096: raise ValueError("Background descriptor exceeds budget")
     descriptor = json.loads(data)
-    if set(descriptor) != {'version','address','instance','token'} or descriptor['version'] != 1:
+    if set(descriptor) != {'version','address','instance','token'} or descriptor['version'] != PROTOCOL_VERSION:
         raise ValueError("Invalid background descriptor")
     if not all(isinstance(descriptor[key],str) and re.fullmatch(r'[0-9a-fA-F]{64}',descriptor[key]) for key in ['instance','token']):
         raise ValueError("Invalid background identity")
@@ -162,7 +165,7 @@ def owner_status(descriptor):
         size=struct.unpack('!I',read(4))[0]
         if not 0<size<=4096: raise ValueError("Background status exceeds budget")
         reply=json.loads(read(size))
-    if reply.get('version')!=1 or reply.get('instance')!=descriptor['instance'] or reply.get('client')!=identity or reply.get('id')!=1:
+    if reply.get('version')!=PROTOCOL_VERSION or reply.get('instance')!=descriptor['instance'] or reply.get('client')!=identity or reply.get('id')!=1:
         raise ValueError("Background measurement identity changed")
     status=reply.get('result',{}).get('Ok',{})
     if type(status.get('pid')) is not int or status['pid']<=1 or type(status.get('desktop_connected')) is not bool:
@@ -181,7 +184,41 @@ def run(argv):
     return subprocess.run(argv,check=True,capture_output=True,text=True,timeout=20).stdout
 
 
+def native_metrics(pids):
+    """The same macOS rusage v2 physical footprint used by the native renderer probe."""
+    lib = ctypes.CDLL('/usr/lib/libproc.dylib')
+    class Timebase(ctypes.Structure):
+        _fields_ = [('numer', ctypes.c_uint32), ('denom', ctypes.c_uint32)]
+    timebase = Timebase()
+    if ctypes.CDLL('/usr/lib/libSystem.B.dylib').mach_timebase_info(ctypes.byref(timebase)) != 0:
+        raise ValueError("CPU timebase unavailable")
+    result = {}
+    for pid in pids:
+        buf = ctypes.create_string_buffer(256)
+        if lib.proc_pid_rusage(pid, 2, ctypes.byref(buf)) == 0:
+            result[pid] = {"phys_footprint_bytes": ctypes.c_uint64.from_buffer(buf, 72).value,
+                           "cpu_seconds": cpu_seconds_from_ticks(ctypes.c_uint64.from_buffer(buf, 16).value +
+                                           ctypes.c_uint64.from_buffer(buf, 24).value, timebase.numer, timebase.denom)}
+    return result
+
+
+def cpu_seconds_from_ticks(ticks, numer, denom):
+    if any(type(value) is not int for value in [ticks, numer, denom]) or ticks < 0 or numer <= 0 or denom <= 0:
+        raise ValueError("Invalid Mach CPU timebase")
+    return ticks * numer / denom / 1e9
+
+
+def sample_timing(scheduled, started, ended, interval):
+    if any(type(value) not in (int, float) or not math.isfinite(value) for value in [scheduled, started, ended, interval]) or interval <= 0 or scheduled < 0 or started < scheduled or ended < started:
+        raise ValueError("Invalid sampling schedule")
+    return {"scheduled_monotonic_seconds": scheduled,
+            "sample_start_monotonic_seconds": started, "sample_end_monotonic_seconds": ended,
+            "late": ended > scheduled + interval,
+            "missed_slots": max(0, math.ceil((ended - scheduled) / interval) - 1)}
+
+
 def collect(bundle, connection=None):
+    started = time.monotonic()
     apps = parse_apps(run(['lsappinfo','list']))
     descriptor = read_connection(connection) if connection else None
     ps = ['ps','-axo','pid=,ppid=,rss=,lstart=,comm='] if descriptor else ['ps','-p',','.join(str(pid) for pid in sorted(set(root_app(bundle,apps)['members']))),'-o','pid=,ppid=,rss=,lstart=,comm=']
@@ -190,16 +227,18 @@ def collect(bundle, connection=None):
     # Resolve only attributed identities before requesting physical footprint.
     selection = attribute_sample(bundle,apps,before,before,{'unit':'byte','errors':['pending']},owner)
     ids = sorted(row['pid'] for row in selection['application']+selection['agents'])
-    with tempfile.TemporaryDirectory(prefix='yam-footprint-') as temporary:
-        target = pathlib.Path(temporary)/'sample.json'
-        try:
-            run(['footprint',*sum((['-p',str(pid)] for pid in ids),[]),
-                 '-j',str(target),'--noCategories','-f','bytes'])
-            footprint = json.loads(target.read_text())
-        except (OSError,subprocess.SubprocessError,ValueError):
-            footprint = {'unit':'byte','processes':[],'errors':['unavailable']}
+    try:
+        metrics = native_metrics(ids)
+    except (OSError, ValueError): metrics = {}
+    footprint = {'unit':'byte','processes':[{'pid':pid,'auxiliary':{'phys_footprint':value['phys_footprint_bytes']}}
+                 for pid,value in metrics.items()], 'errors':[]}
     after = parse_processes(run(ps))
     result = attribute_sample(bundle,apps,before,after,footprint,owner)
+    for row in result['application'] + result['agents']:
+        row['cpu_seconds'] = metrics.get(row['pid'], {}).get('cpu_seconds')
+    if any(type(row['cpu_seconds']) not in (int, float) or not math.isfinite(row['cpu_seconds']) or row['cpu_seconds'] < 0 for row in result['application']):
+        result['status'] = 'partial'; result['issues'].append('Application CPU measurement is incomplete')
+        result['phys_footprint_sum_bytes'] = None
     current_apps = parse_apps(run(['lsappinfo','list']))
     current_owner = measured_owner(descriptor,after) if descriptor else None
     current = attribute_sample(bundle,current_apps,after,after,{'unit':'byte','errors':['pending']},current_owner)
@@ -207,6 +246,10 @@ def collect(bundle, connection=None):
         result['status']='partial'; result['issues'].append('Coalition membership changed during measurement')
         result['phys_footprint_sum_bytes']=None
     result['time']=datetime.datetime.now(datetime.timezone.utc).isoformat()
+    result['sample_start_monotonic_seconds'] = started
+    result['sample_end_monotonic_seconds'] = time.monotonic()
+    result['monotonic_seconds'] = result['sample_end_monotonic_seconds']
+    result['measurement_tool'] = 'macOS proc_pid_rusage v2 physical footprint; user+system Mach ticks converted with host mach_timebase_info'
     return result
 
 
@@ -222,20 +265,23 @@ def main():
     if platform.system() != 'Darwin': parser.error('This collector requires macOS')
     if not 0 <= args.duration <= 7200 or not 0.1 <= args.interval <= 60:
         parser.error('Duration must be 0..7200 seconds and interval 0.1..60 seconds')
-    failed=False; deadline=time.monotonic()+args.duration
+    failed=False; slot=time.monotonic(); deadline=slot+args.duration
     # Never replace an earlier measurement, even after a crash or repeated command.
     with args.output.open('x',encoding='utf-8') as output:
         while True:
+            delay = slot - time.monotonic()
+            if delay > 0: time.sleep(delay)
+            started = time.monotonic()
             try: result=collect(args.bundle,pathlib.Path.home()/'Library/Application Support'/args.bundle/'background/connection.json' if args.background else None)
             except (OSError,ValueError,subprocess.SubprocessError) as error:
                 result={'status':'partial','issues':[type(error).__name__],
                         'time':datetime.datetime.now(datetime.timezone.utc).isoformat()}
-            failed |= result['status'] != 'complete'
+            result.update(sample_timing(slot, started, time.monotonic(), args.interval))
+            failed |= result['status'] != 'complete' or result['late'] or result['missed_slots'] > 0
             result.update(scenario=args.scenario,platform=platform.platform(),machine=platform.machine())
             output.write(json.dumps(result,ensure_ascii=False)+'\n'); output.flush()
-            remaining=deadline-time.monotonic()
-            if remaining <= 0: break
-            time.sleep(min(args.interval,remaining))
+            slot += args.interval * (1 + result['missed_slots'])
+            if slot > deadline: break
     print(json.dumps({'output':str(args.output),'status':'partial' if failed else 'complete'}))
     return 2 if failed else 0
 

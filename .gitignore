@@ -1,0 +1,13 @@
+# Local caches and runtime output
+.DS_Store
+__pycache__/
+*.py[cod]
+*.log
+/coverage/
+/.artifacts/
+# Raw development evidence is archived outside Git; keep Markdown summaries.
+/docs/evidence/**/*
+!/docs/evidence/**/
+!/docs/evidence/**/*.md
+# Machine execution snapshots; human-readable plans remain versioned.
+/docs/superpowers/plans/*.json

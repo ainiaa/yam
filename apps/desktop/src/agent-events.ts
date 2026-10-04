@@ -1,5 +1,5 @@
 export type AgentReceipt = {id:string;revision:number;turn_id:string;kind:string;delivery:string;read:boolean;error:string|null};
-export type AgentState = {phase:string;integration:string;agent_session_id:string|null;inbox:AgentReceipt[]};
+export type AgentState = {generation?:string;turn_id?:string|null;revision?:number;phase:string;integration:string;agent_session_id:string|null;inbox:AgentReceipt[]};
 export function unreadCount(agent?:AgentState):number{return agent?.inbox.filter(entry=>!entry.read).length??0;}
 export function agentLabel(agent?:AgentState,status="running"):string{
  if(!agent||agent.integration.startsWith('unavailable'))return 'Integration unavailable';

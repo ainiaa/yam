@@ -1365,6 +1365,7 @@ mod tests {
             &sources,
             read,
             &session_logs::SearchRequest {
+                source_cursor: None,
                 query: "联合验证".into(),
                 case_sensitive: false,
                 skip: 0,

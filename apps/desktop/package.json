@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "test:coverage": "node --test --experimental-test-coverage --test-coverage-include=src/*.ts --test-coverage-lines=95 --test-coverage-branches=90 --test-coverage-functions=95 tests/*.test.mjs",
-    "build:terminal": "python3 ../../scripts/build-terminal-runtime.py"
+    "build:terminal": "python3 ../../scripts/build-terminal-runtime.py",
+    "build:release": "tauri build --config src-tauri/tauri.release.conf.json"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

@@ -1,20 +1,30 @@
 import {useEffect,useRef,useState} from "react";
 import {invoke} from "@tauri-apps/api/core";
+import {formatRetainedRange,normalizeLogExport} from "./session-logs";
 
 export function SessionLogExport({sessionId,title,onClose}:{sessionId:string;title:string;onClose:()=>void}) {
  const dialog=useRef<HTMLDialogElement>(null);
+ const identity=useRef({sessionId,title,version:0,mounted:true,request:0});
+ // Render-time fencing also covers the interval before passive effects and same-ID ABA.
+ if(identity.current.sessionId!==sessionId||identity.current.title!==title){
+  identity.current={...identity.current,sessionId,title,version:identity.current.version+1};
+ }
+ const version=identity.current.version;
  const [raw,setRaw]=useState(false);
- const [busy,setBusy]=useState(false);
- const [message,setMessage]=useState<string|null>(null);
- const [error,setError]=useState<string|null>(null);
- useEffect(()=>{dialog.current?.showModal();},[]);
+ const [state,setState]=useState<{version:number;busy:boolean;message:string|null;error:string|null}>({version,busy:false,message:null,error:null});
+ const current=state.version===version?state:{version,busy:false,message:null,error:null};
+ const {busy,message,error}=current;
+ useEffect(()=>{identity.current.mounted=true;setState(value=>({...value,busy:false}));dialog.current?.showModal();return()=>{identity.current.mounted=false;identity.current.request++;};},[]);
  async function save() {
-  setBusy(true);setError(null);setMessage(null);
+  if(!identity.current.mounted||identity.current.version!==version||busy)return;
+  const request=++identity.current.request;
+  const valid=()=>identity.current.mounted&&identity.current.version===version&&identity.current.request===request;
+  setState({version,busy:true,error:null,message:null});
   try{
-   const path=await invoke<string|null>("export_session_log",{sessionId,title,raw});
-   if(path)setMessage(`Saved to ${path}`);
-  }catch(reason){setError(String(reason));}
-  finally{setBusy(false);}
+   const receipt=normalizeLogExport(await invoke<unknown>("export_session_log",{sessionId,title,raw}));
+   if(valid())setState({version,busy:false,error:null,message:receipt?`Saved to ${receipt.path} · ${formatRetainedRange(receipt.range)}`:null});
+  }catch(reason){if(valid())setState({version,busy:false,error:String(reason),message:null});}
+  finally{if(valid())setState(value=>({...value,busy:false}));}
  }
  return <dialog ref={dialog} className="app-dialog" aria-labelledby="log-export-title" onCancel={event=>{event.preventDefault();if(!busy)onClose();}}>
   <form onSubmit={event=>{event.preventDefault();void save();}}>

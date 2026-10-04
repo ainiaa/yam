@@ -746,3 +746,91 @@ input::placeholder {
 .agent-inbox span { font-size:11px; color:var(--muted); overflow-wrap:anywhere; }
 .inbox-toggle { margin:4px 12px; min-height:32px; font-size:12px; }
 .round-status { max-width:110px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:11px; }
+
+.history-capacity-controls {padding: 8px 12px; font-size: 12px;}
+.history-capacity-controls button {margin: 4px 4px 4px 0;}
+.history-capacity-controls dl div {display:flex;justify-content:space-between;gap:8px;}
+.history-capacity-controls dd {margin:0;}
+
+.history-archive-dialog { width: min(760px, 94vw); max-height: 85vh; overflow: auto; }
+.history-archive-dialog section { margin-top: 18px; }
+.history-archive-dialog ul { list-style: none; padding: 0; }
+.history-archive-dialog li { display: flex; align-items: center; gap: 10px; margin: 8px 0; }
+.history-archive-dialog li > button:first-of-type { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.history-archive-dialog li > input { flex: 0 0 auto; }
+.history-archive-dialog > label { display: flex; align-items: center; gap: 10px; }
+.history-archive-dialog .deletion-preview { border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
+
+.project-config-preview { border-top: 1px solid var(--border-color, #444); padding-top: 12px; }
+.project-config-preview pre { max-height: 180px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* Terminal preferences and finite command navigation. Author: Jeff.Liu. */
+.session-item {display:flex;align-items:center;min-width:0;}
+.session-item .session-row {flex:1;min-width:0;}
+.session-pin {border:0;background:transparent;color:var(--muted);font-size:10px;padding:4px;cursor:pointer;}
+.session-pin[aria-pressed="true"] {color:var(--foreground);}
+.terminal-preference-error {position:absolute;bottom:28px;left:16px;right:16px;z-index:3;padding:8px;background:#402622;color:#ffd4ca;font-size:12px;}
+.terminal-settings-dialog {width:min(420px,90vw);}
+.command-palette-dialog {width:min(520px,90vw);}
+.command-palette-results {list-style:none;margin:0;padding:0;max-height:320px;overflow:auto;}
+.command-palette-results button {display:block;width:100%;padding:8px;text-align:left;border:0;background:transparent;color:inherit;cursor:pointer;}
+.command-palette-results button.selected,.command-palette-results button:hover {background:#383838;}
+
+.git-context { display:flex;flex-direction:column;gap:3px;color:var(--muted);font-size:12px;overflow-wrap:anywhere; }
+
+.worktree-controls { border-top: 1px solid var(--border); padding-top: 12px; margin-top: 12px; overflow-wrap: anywhere; }
+.worktree-controls summary { cursor: pointer; font-weight: 600; }
+.worktree-controls label { display: grid; gap: 4px; margin: 8px 0; }
+.worktree-controls p { margin: 8px 0; }
+.worktree-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.worktree-controls li { margin: 8px 0; }
+
+/* Fixed pane geometry; narrow windows scroll instead of hiding terminal slots. */
+.terminal-cache-host { visibility: hidden; pointer-events: none; }
+.terminal-layout-shell { position:absolute; inset:0; display:flex; flex-direction:column; min-height:0; }
+.terminal-layout-toolbar { position:relative; z-index:1; display:flex; gap:4px; flex-wrap:wrap; padding:4px 8px; flex-shrink:0; }
+.terminal-layout-toolbar button { font-size:11px; padding:3px 6px; border:1px solid var(--border); border-radius:4px; }
+.terminal-layout-toolbar button[aria-pressed="true"] { background:var(--hover); }
+.terminal-layout { flex:1; min-height:0; display:grid; gap:4px; padding:4px; overflow:auto; }
+.layout-single { grid-template-columns:minmax(240px,1fr); grid-template-rows:minmax(180px,1fr); }
+.layout-horizontal { grid-template-columns:repeat(2,minmax(240px,1fr)); grid-template-rows:minmax(180px,1fr); }
+.layout-vertical { grid-template-columns:minmax(240px,1fr); grid-template-rows:repeat(2,minmax(180px,1fr)); }
+.layout-grid { grid-template-columns:repeat(2,minmax(240px,1fr)); grid-template-rows:repeat(2,minmax(180px,1fr)); }
+.layout-horizontal.split-two { grid-template-columns:minmax(240px,var(--split-first,1fr)) 8px minmax(240px,var(--split-second,1fr)); grid-template-rows:minmax(180px,1fr); }
+.layout-vertical.split-two { grid-template-columns:minmax(240px,1fr); grid-template-rows:minmax(180px,var(--split-first,1fr)) 8px minmax(180px,var(--split-second,1fr)); }
+.layout-horizontal.split-two .terminal-pane:nth-child(1) { grid-column:1; grid-row:1; }
+.layout-horizontal.split-two .terminal-pane:nth-child(2) { grid-column:3; grid-row:1; }
+.layout-vertical.split-two .terminal-pane:nth-child(1) { grid-column:1; grid-row:1; }
+.layout-vertical.split-two .terminal-pane:nth-child(2) { grid-column:1; grid-row:3; }
+.terminal-layout-splitter { z-index:1; min-width:0; min-height:0; border:1px solid var(--border); border-radius:4px; background:var(--hover); touch-action:none; outline-offset:2px; }
+.terminal-layout-splitter:focus-visible { outline:2px solid var(--muted); }
+.terminal-layout-splitter.splitter-x { grid-column:2; grid-row:1; cursor:col-resize; }
+.terminal-layout-splitter.splitter-y { grid-column:1; grid-row:2; cursor:row-resize; }
+.terminal-pane { position:relative; display:flex; flex-direction:column; min-width:0; min-height:0; border:1px solid var(--border); border-radius:4px; overflow:hidden; }
+.terminal-pane.pane-focused { border-color:var(--muted); }
+.terminal-pane-header { display:flex; align-items:center; flex-shrink:0; height:26px; padding:0 6px; border-bottom:1px solid var(--border); }
+.terminal-pane-title { flex:1; text-align:left; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:11px; }
+.terminal-pane-host { position:relative; flex:1; min-height:0; margin:4px 8px; }
+.terminal-pane-host .xterm { height:100%; }
+.terminal-pane-empty { position:absolute; inset:35px 10px 10px; display:flex; align-items:center; justify-content:center; font-size:12px; color:var(--muted); pointer-events:none; }
+
+.system-entry-dialog { position:fixed; inset:20% auto auto 50%; transform:translateX(-50%); z-index:30; width:min(520px,90vw); padding:24px; border:1px solid var(--border); border-radius:12px; background:var(--bg,#16191d); box-shadow:0 16px 64px #0008; }
+.system-entry-settings label { display:flex; align-items:center; gap:8px; }
+.system-entry-settings p { line-height:1.5; }
+
+.git-changes { border-top: 1px solid var(--border, #34404c); padding: 12px 0; }
+.git-changes-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.git-changes ul { list-style: none; padding: 0; max-height: 240px; overflow: auto; }
+.git-changes li { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 6px 0; }
+.git-changes li > span:first-child { overflow-wrap: anywhere; flex: 1 1 160px; }
+.git-patch pre { max-height: 360px; overflow: auto; white-space: pre; text-align: left; }
+.launch-templates{display:grid;gap:8px;border:1px solid var(--border);border-radius:8px;padding:12px;margin-top:12px}
+.launch-templates h3{font-size:13px;margin:0}
+.launch-templates ul{list-style:none;display:grid;gap:6px;margin:0;padding:0;max-height:140px;overflow:auto}
+.launch-templates li,.launch-template-actions{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.launch-templates li>button:first-child{flex:1;text-align:left;min-width:0}
+.launch-template-actions button{flex:1 1 130px}
+.launch-templates [aria-pressed="true"]{outline:2px solid var(--success);outline-offset:1px}
+
+.attention-card { display: grid; gap: .4rem; padding: .75rem; border: 1px solid var(--border); border-radius: .5rem; }
+.attention-card p { margin: 0; }

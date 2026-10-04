@@ -6,6 +6,9 @@ import pathlib
 import plistlib
 import subprocess
 import tempfile
+import third_party_notices as notices
+
+NOTICE_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 def run(args):
@@ -37,6 +40,7 @@ def signature(app, identity=None):
 
 def check(app):
     app = bundle(app)
+    notices.validate_packaged(NOTICE_ROOT, app / "Contents/Resources/target/terminal-runtime")
     signature(app)
     run(["xcrun", "stapler", "validate", str(app)])
     run(["spctl", "--assess", "--type", "execute", "--verbose=4", str(app)])
@@ -44,6 +48,7 @@ def check(app):
 
 def deliver(app, identity, profile, *, sign=False):
     app = bundle(app)
+    notices.validate_packaged(NOTICE_ROOT, app / "Contents/Resources/target/terminal-runtime")
     if not identity.startswith("Developer ID Application: ") or any(c in identity + profile for c in "\0\n\r") or not profile.strip():
         raise ValueError("Provide an existing Developer ID certificate name and Keychain notary profile")
     if sign:
@@ -82,8 +87,16 @@ def main():
                 parser.error("--identity and --notary-profile are required")
             deliver(args.app, args.identity, args.notary_profile, sign=args.mode == "sign-notarize")
     except (ValueError, OSError, subprocess.SubprocessError) as error:
-        # Avoid printing arbitrary command stdout/stderr or secrets from tools.
-        print(f"Release validation failed: {error}")
+        # Exception strings may contain arguments, credentials or tool output.
+        if isinstance(error, subprocess.TimeoutExpired):
+            category = "release command timed out"
+        elif isinstance(error, subprocess.SubprocessError):
+            category = "release command failed"
+        elif isinstance(error, OSError):
+            category = "release tool or file operation failed"
+        else:
+            category = "bundle, signature or notarization rejected"
+        print(f"Release validation failed: {category}")
         return 1
     print("Developer ID signature, notarization ticket and Gatekeeper assessment passed; nothing published")
     return 0

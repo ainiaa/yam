@@ -1,3 +1,5 @@
+import {sessionRecovery} from '../src/session-recovery.ts';
+import {paletteShortcut} from '../src/command-palette.ts';
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {unreadCount,agentLabel,nextAttention,defaultShortcuts,isShortcuts,shortcutAction,isLaunchMode} from '../src/agent-events.ts';
@@ -29,7 +31,8 @@ function find(node){if(ts.isFunctionDeclaration(node)&&node.name?.text==='refres
 const refreshJs=ts.transpileModule(refreshSource,{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText;
 test('older history responses and errors cannot replace the newest visible round state',async()=>{
  const pending=[];let history=[];const errors=[];
- const refresh=new Function('invoke','setHistory','setError','notifySession','historyRefreshVersion',refreshJs+';return refreshHistory')(()=>new Promise((resolve,reject)=>pending.push({resolve,reject})),records=>history=records,error=>errors.push(error),()=>{}, {current:0});
+ const bindings={invoke:command=>command==='history_overview'?Promise.resolve({}):new Promise((resolve,reject)=>pending.push({resolve:items=>resolve({items,next_cursor:null}),reject})),setHistory:records=>history=records,setError:error=>errors.push(error),notifySession:()=>{},historyRefreshVersion:{current:0},setHistoryLoading:()=>{},historyContext:{current:{query:'',status:'all',titles:{},projects:[]}},historyRequest:()=>({page_size:100}),setHistoryCursor:()=>{},setHistoryOverview:()=>{},refreshInbox:()=>{},refreshPendingNotifications:()=>{},selectedRecord:{current:null},setSelectedAgent:()=>{}};
+ const refresh=new Function(...Object.keys(bindings),refreshJs+';return refreshHistory')(...Object.values(bindings));
  const older=refresh();const newer=refresh();
  pending[1].resolve([{agent:agent(),notification_pending:false}]);await newer;
  pending[0].resolve([{agent:agent('working'),notification_pending:false}]);await older;
@@ -72,7 +75,7 @@ test('actual keyboard coordinator shares selection, defers search focus and skip
  assert.ok(code);const js=ts.transpileModule(code,{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText;
  let modal=false,editing=false,sidebar=false,paused=false,focused=0,selected=0,attention=0;const opened=[],frames=[];
  class Element {closest(){return editing?{}:null}}
- const args={document:{querySelector(){return modal?{}:null}},Element,shortcuts:defaultShortcuts,shortcutAction,jumpToAttention(){attention++},history:[{summary:{session_id:'a'}}],previousSession:{current:'a'},openHistory(record){opened.push(record.summary.session_id)},setSidebarOpen(value){sidebar=value},requestAnimationFrame(fn){frames.push(fn)},searchInput:{current:{focus(){focused++},select(){selected++}}},setNotificationsPaused(fn){paused=fn(paused)}};
+ const args={paletteShortcut,openCommandPalette:()=>assert.fail('existing shortcut actions must not open palette'),document:{querySelector(){return modal?{}:null}},Element,shortcuts:defaultShortcuts,shortcutAction,jumpToAttention(){attention++},history:[{summary:{session_id:'a'}}],previousSession:{current:'a'},openSession(id){if(id==='a')opened.push(id)},setSidebarOpen(value){sidebar=value},requestAnimationFrame(fn){frames.push(fn)},searchInput:{current:{focus(){focused++},select(){selected++}}},setNotificationsPaused(fn){paused=fn(paused)},toggleNotificationPause(){paused=!paused}};
  const handler=new Function(...Object.keys(args),js+';return handleShortcut')(...Object.values(args));
  const event=key=>({key,metaKey:true,shiftKey:true,target:new Element(),preventDefault(){this.prevented=true},stopPropagation(){this.stopped=true}});
  for(const key of [']','[','k','m']){const e=event(key);handler(e);assert.equal(e.prevented,true);assert.equal(e.stopped,true)}
@@ -82,8 +85,12 @@ test('actual keyboard coordinator shares selection, defers search focus and skip
 });
 
 test('native resume is an explicit action passing only the YAM history identity',()=>{
- let code;function find(node){if(ts.isFunctionDeclaration(node)&&node.name?.text==='resumeSelectedSession')code=node.getText(source);ts.forEachChild(node,find)}find(source);assert.ok(code);
- const js=ts.transpileModule(code,{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText;
- const calls=[];const handler=new Function('session','startSession',js+';return resumeSelectedSession')({session_id:'source',cwd:'/repo',command:'must not run'},args=>calls.push(args));handler();assert.deepEqual(calls,[{resumeFrom:'source'}]);
- new Function('session','startSession',js+';return resumeSelectedSession')(null,()=>assert.fail('no selection'))();
+ const functions=[];
+ function find(node){if(ts.isFunctionDeclaration(node)&&['selectedRecovery','resumeSelectedSession'].includes(node.name?.text))functions.push(node.getText(source));ts.forEachChild(node,find)}find(source);assert.equal(functions.length,2);
+ const js=ts.transpileModule(functions.join('\n'),{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText;
+ const calls=[];
+ const record={summary:{session_id:'source',command:null,launch:{adapter:'codex',mode:'interactive',extra_args:''}},status:'stopped',agent:{generation:'trusted-generation',agent_session_id:'01a0f6ec-5463-78c3-a404-5a7ad3b933fa'}};
+ const bindings={ownerConnectionAvailable:{current:{available:true,version:0}},session:{session_id:'source',cwd:'/repo',command:'must not run'},selectedRecord:{current:record},sessionId:{current:'source'},sessionStatus:'stopped',starting:false,terminalViews:{current:{get:()=>undefined}},sessionRecovery,startSession:args=>calls.push(args)};
+ const handler=new Function(...Object.keys(bindings),js+';return resumeSelectedSession')(...Object.values(bindings));handler();assert.deepEqual(calls,[{resumeFrom:'source'}]);
+ new Function(...Object.keys(bindings),js+';return resumeSelectedSession')(...Object.values({...bindings,session:null,startSession:()=>assert.fail('no selection')}))();
 });

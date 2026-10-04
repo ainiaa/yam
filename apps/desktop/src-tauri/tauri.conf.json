@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.yam.desktop",
   "build": {
-    "beforeDevCommand": "pnpm build:terminal && pnpm dev",
+    "beforeDevCommand": "pnpm build:terminal --notice-mode developer && pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm build && pnpm build:terminal",
+    "beforeBuildCommand": "pnpm build && pnpm build:terminal --notice-mode developer",
     "frontendDist": "../dist"
   },
   "app": {
@@ -21,7 +21,8 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; base-uri 'none'; object-src 'none'; frame-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; font-src 'self'; connect-src ipc: http://ipc.localhost; form-action 'none'",
+      "devCsp": "default-src 'self'; base-uri 'none'; object-src 'none'; frame-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self'; font-src 'self'; connect-src ipc: http://ipc.localhost http://localhost:1420 ws://localhost:1420 ws://localhost:1421; form-action 'none'"
     },
     "enableGTKAppId": true
   },
@@ -40,7 +41,8 @@
     },
     "resources": [
       "target/terminal-runtime/yam-terminal",
-      "target/terminal-runtime/THIRD-PARTY-NOTICES.txt"
+      "target/terminal-runtime/DEVELOPER-INCOMPLETE-NOTICES.txt",
+      "target/terminal-runtime/DEVELOPER-INCOMPLETE-NOTICES.report.json"
     ]
   },
   "plugins": {

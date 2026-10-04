@@ -1,4 +1,9 @@
 # Agent 能力证据
+
+当前声明入口：[当前能力清单](yam-capability-matrix.md)，源码基线 `6b00a7d`。以下是按日期累积的历史探针/验收原文；“待验证”和“仅支持 Codex”等结论只适用于各段当时的版本。当前已实现 Claude 原生续聊及 OpenCode 1.18.34 接入，后续证据见 [阶段执行记录](yam-next-stage-execution.md) 与 [持续会话记录](yam-session-continuity-plan.md)。允许兼容升级不等于升级版本已实测；三真实 CLI 的同一原生联合流程仍未验收。
+
+## 历史证据（原文）
+
 作者：Jeff.Liu。2026-10-01；macOS 本机；本阶段尚未形成正式支持声明。
 
 | CLI | 实测结果 | 接入结论 |

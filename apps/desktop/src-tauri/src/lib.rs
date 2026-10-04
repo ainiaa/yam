@@ -2,9 +2,17 @@ mod agent_bridge;
 mod agent_events;
 mod background;
 mod claude_resume;
+mod cli;
+mod diagnostics;
+mod git_context;
+mod history;
 mod memory;
+mod project_config;
 mod session_logs;
+mod system_entry;
 mod terminal_runtime;
+mod updater;
+mod worktree_manager;
 pub fn agent_helper_entry() -> bool {
     agent_bridge::helper_entry()
 }
@@ -21,9 +29,30 @@ pub fn background_entry() -> bool {
     }
     true
 }
+pub fn binary_entry() {
+    let args: Vec<_> = std::env::args_os().collect();
+    // Preflight precedes helpers which retain their valid UTF-8 entry contract.
+    let result = if args.iter().any(|arg| arg.to_str().is_none()) {
+        Err(cli::ErrorClass::Arguments)
+    } else {
+        cli::entry_dispatch(
+            &args[1..],
+            agent_helper_entry,
+            background_entry,
+            cli::run_entry,
+            run,
+        )
+    };
+    if let Err(class) = result {
+        let (code, message) = cli::diagnostic(class, None);
+        eprintln!("{message}");
+        std::process::exit(code);
+    }
+}
 fn app_context() -> tauri::Context<tauri::Wry> {
     tauri::generate_context!()
 }
+use history::HistoryStore;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -191,15 +220,14 @@ fn valid_resume_id(id: &str) -> bool {
             }
         })
 }
+#[cfg(test)]
 fn resume_source(
     history: &HistoryStore,
     session_id: &str,
 ) -> Result<(String, AgentLaunch, String), String> {
-    let record = history
-        .list()?
-        .into_iter()
-        .find(|record| record.summary.session_id == session_id)
-        .ok_or("Resume source is missing from YAM history")?;
+    resume_record_source(history.get(session_id)?)
+}
+fn resume_record_source(record: SessionRecord) -> Result<(String, AgentLaunch, String), String> {
     if matches!(record.status.as_str(), "starting" | "running") {
         return Err("This conversation is already running; select its terminal".into());
     }
@@ -419,6 +447,8 @@ struct LogSnapshot {
     offset: u64,
     end_offset: u64,
     status: String,
+    #[serde(default)]
+    range: Option<session_logs::RetainedLogRange>,
 }
 
 struct SessionLog {
@@ -581,6 +611,7 @@ struct ResumeClaim {
     id: String,
 }
 impl ResumeClaim {
+    #[cfg(test)]
     fn acquire(
         claims: Arc<Mutex<std::collections::HashSet<String>>>,
         id: &str,
@@ -882,11 +913,7 @@ fn read_terminal_frame(
         return active_frame(&session).map(Some);
     }
     let history = manager.history(&app)?;
-    let record = history
-        .list()?
-        .into_iter()
-        .find(|r| r.summary.session_id == session_id)
-        .ok_or("Unknown terminal session")?;
+    let record = history.get(&session_id)?;
     let path = history.root.join(format!("{session_id}.frame.json"));
     let Some(bytes) = saved_frame_bytes(&path)? else {
         return Ok(None);
@@ -925,6 +952,7 @@ pub struct SessionManager {
     history: Mutex<Option<Arc<HistoryStore>>>,
     agent_bridge: Mutex<Option<agent_bridge::Bridge>>,
     background_owner: bool,
+    cli_namespace: std::sync::OnceLock<String>,
     background_client: Mutex<Option<Arc<background::Client>>>,
     relay: Mutex<background::Relay>,
     input_leases: Mutex<background::InputLeases>,
@@ -935,6 +963,9 @@ pub struct SessionManager {
     last_request: AtomicU64,
     terminal_runtime: Mutex<Option<Arc<terminal_runtime::Runtime>>>,
     history_owner: Mutex<Option<background::OwnerLock>>,
+    system_entry: Mutex<system_entry::EntryState>,
+    system_entry_busy: AtomicBool,
+    system_entry_native: Mutex<Option<system_entry::NativeEntry>>,
 }
 
 impl Default for SessionManager {
@@ -948,6 +979,7 @@ impl Default for SessionManager {
             history: Mutex::new(None),
             agent_bridge: Mutex::new(None),
             background_owner: false,
+            cli_namespace: std::sync::OnceLock::new(),
             background_client: Mutex::new(None),
             relay: Mutex::new(background::Relay::default()),
             input_leases: Mutex::new(background::InputLeases::default()),
@@ -958,6 +990,9 @@ impl Default for SessionManager {
             last_request: AtomicU64::new(0),
             terminal_runtime: Mutex::new(None),
             history_owner: Mutex::new(None),
+            system_entry: Mutex::new(system_entry::EntryState::default()),
+            system_entry_busy: AtomicBool::new(false),
+            system_entry_native: Mutex::new(None),
         }
     }
 }
@@ -1022,248 +1057,6 @@ impl SessionManager {
         }
         self.shutdown_complete.store(true, Ordering::Release);
         Ok(())
-    }
-}
-
-struct HistoryStore {
-    root: PathBuf,
-    records: Mutex<Vec<SessionRecord>>,
-}
-fn bounded_history(path: &Path) -> Result<String, String> {
-    let mut bytes = Vec::new();
-    File::open(path)
-        .and_then(|file| {
-            file.take(MAX_SESSION_HISTORY_BYTES + 1)
-                .read_to_end(&mut bytes)
-        })
-        .map_err(|error| format!("Failed to read session history: {error}"))?;
-    if bytes.len() as u64 > MAX_SESSION_HISTORY_BYTES {
-        return Err("Session history exceeds its 32 MiB budget; preserve the file and archive history before retrying".into());
-    }
-    String::from_utf8(bytes).map_err(|_| "Session history has invalid encoding".into())
-}
-
-impl HistoryStore {
-    fn open(root: PathBuf) -> Result<Self, String> {
-        fs::create_dir_all(&root)
-            .map_err(|error| format!("Failed to create session data directory: {error}"))?;
-        let records_path = root.join("sessions.json");
-        let records = if records_path.exists() {
-            let contents = bounded_history(&records_path)?;
-            match serde_json::from_str::<Vec<SessionRecord>>(&contents) {
-                Ok(records) => records,
-                Err(error) => {
-                    let backup = root.join("sessions.json.bak");
-                    let backup_contents = bounded_history(&backup).map_err(|_| {
-                        format!(
-                            "Session history is corrupt ({error}). Original file preserved at {}",
-                            records_path.display()
-                        )
-                    })?;
-                    let records =
-                        serde_json::from_str(&backup_contents).map_err(|backup_error| {
-                            format!("Session history and backup are corrupt: {backup_error}")
-                        })?;
-                    fs::copy(
-                        &records_path,
-                        root.join(format!("sessions.corrupt-{}", next_session_id())),
-                    )
-                    .map_err(|error| format!("Failed to preserve corrupt history: {error}"))?;
-                    fs::copy(&backup, &records_path).map_err(|error| {
-                        format!("Failed to restore session history backup: {error}")
-                    })?;
-                    records
-                }
-            }
-        } else {
-            Vec::new()
-        };
-        if records_path.exists() {
-            let original = bounded_history(&records_path)?;
-            let json: serde_json::Value =
-                serde_json::from_str(&original).map_err(|e| e.to_string())?;
-            if json
-                .as_array()
-                .is_some_and(|records| records.iter().any(|record| record.get("agent").is_none()))
-            {
-                let backup = root.join("sessions.before-agent-events.json");
-                if backup.exists() {
-                    serde_json::from_str::<Vec<SessionRecord>>(&bounded_history(&backup)?).map_err(|_|"Pre-upgrade history backup is invalid; preserve it and repair before continuing")?;
-                } else {
-                    let mut file = OpenOptions::new()
-                        .write(true)
-                        .create_new(true)
-                        .open(&backup)
-                        .map_err(|e| format!("Cannot preserve pre-upgrade history: {e}"))?;
-                    file.write_all(original.as_bytes())
-                        .and_then(|_| file.sync_all())
-                        .map_err(|e| format!("Cannot flush pre-upgrade history: {e}"))?;
-                }
-            }
-        }
-        Ok(Self {
-            root,
-            records: Mutex::new(records),
-        })
-    }
-
-    fn records_path(&self) -> PathBuf {
-        self.root.join("sessions.json")
-    }
-
-    fn save_locked(&self, records: &[SessionRecord]) -> Result<(), String> {
-        let temp_path = self.root.join("sessions.json.tmp");
-        let data = serde_json::to_vec_pretty(records)
-            .map_err(|error| format!("Failed to encode session history: {error}"))?;
-        if data.len() as u64 > MAX_SESSION_HISTORY_BYTES {
-            return Err(
-                "Session history budget reached; unread agent receipts were preserved".into(),
-            );
-        }
-        let mut file = File::create(&temp_path)
-            .map_err(|error| format!("Failed to write session history: {error}"))?;
-        file.write_all(&data)
-            .and_then(|_| file.sync_all())
-            .map_err(|error| format!("Failed to flush session history: {error}"))?;
-        if self.records_path().exists() {
-            let backup_temp = self.root.join("sessions.json.bak.tmp");
-            fs::copy(self.records_path(), &backup_temp)
-                .map_err(|error| format!("Failed to back up session history: {error}"))?;
-            OpenOptions::new()
-                .write(true)
-                .open(&backup_temp)
-                .and_then(|file| file.sync_all())
-                .map_err(|error| format!("Failed to flush history backup: {error}"))?;
-            fs::rename(&backup_temp, self.root.join("sessions.json.bak"))
-                .map_err(|error| format!("Failed to commit history backup: {error}"))?;
-        }
-        fs::rename(&temp_path, self.records_path())
-            .map_err(|error| format!("Failed to commit session history: {error}"))?;
-        #[cfg(unix)]
-        File::open(&self.root)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|error| format!("Failed to flush history directory: {error}"))?;
-        Ok(())
-    }
-
-    fn start(&self, summary: &SessionSummary) -> Result<(), String> {
-        let mut records = self
-            .records
-            .lock()
-            .map_err(|_| "Session history lock poisoned".to_string())?;
-        let mut updated = records.clone();
-        updated.retain(|record| record.summary.session_id != summary.session_id);
-        updated.push(SessionRecord {
-            summary: summary.clone(),
-            status: summary.status.clone(),
-            exit_code: None,
-            reason: None,
-            started_at: unix_timestamp(),
-            ended_at: None,
-            output_end_offset: 0,
-            notification_pending: false,
-            agent: agent_events::AgentState::default(),
-        });
-        self.save_locked(&updated)?;
-        *records = updated;
-        Ok(())
-    }
-
-    fn update(
-        &self,
-        session_id: &str,
-        status: &str,
-        exit_code: Option<u32>,
-        reason: Option<String>,
-        output_end_offset: Option<u64>,
-    ) -> Result<(), String> {
-        let mut records = self
-            .records
-            .lock()
-            .map_err(|_| "Session history lock poisoned".to_string())?;
-        let mut updated = records.clone();
-        let record = updated
-            .iter_mut()
-            .find(|record| record.summary.session_id == session_id)
-            .ok_or_else(|| format!("Unknown session: {session_id}"))?;
-        record.status = status.to_string();
-        record.summary.status = status.to_string();
-        record.exit_code = exit_code;
-        record.reason = reason;
-        if let Some(offset) = output_end_offset {
-            record.output_end_offset = offset;
-        }
-        if is_terminal(status) {
-            record.ended_at = Some(unix_timestamp());
-            record.notification_pending = true;
-        }
-        self.save_locked(&updated)?;
-        *records = updated;
-        Ok(())
-    }
-
-    fn acknowledge_notification(
-        &self,
-        session_id: &str,
-        expected_status: &str,
-    ) -> Result<(), String> {
-        let mut records = self
-            .records
-            .lock()
-            .map_err(|_| "Session history lock poisoned".to_string())?;
-        let mut updated = records.clone();
-        let record = updated
-            .iter_mut()
-            .find(|record| record.summary.session_id == session_id)
-            .ok_or_else(|| "Unknown notification session".to_string())?;
-        // Validate under the history lock: an old receipt must not consume a new state.
-        if record.status != expected_status {
-            return Ok(());
-        }
-        record.notification_pending = false;
-        self.save_locked(&updated)?;
-        *records = updated;
-        Ok(())
-    }
-
-    fn list(&self) -> Result<Vec<SessionRecord>, String> {
-        self.records
-            .lock()
-            .map(|records| {
-                let mut result = records.clone();
-                result.reverse();
-                result
-            })
-            .map_err(|_| "Session history lock poisoned".to_string())
-    }
-
-    fn recover_running(&self) -> Result<(), String> {
-        let mut records = self
-            .records
-            .lock()
-            .map_err(|_| "Session history lock poisoned".to_string())?;
-        let mut changed = false;
-        let mut updated = records.clone();
-        for record in updated.iter_mut() {
-            if matches!(record.status.as_str(), "starting" | "running") {
-                record.status = "needs_attention".to_string();
-                record.summary.status = "needs_attention".to_string();
-                record.reason =
-                    Some("The application closed while this session was running".to_string());
-                record.ended_at = Some(unix_timestamp());
-                record.notification_pending = true;
-                changed = true;
-            }
-        }
-        if changed {
-            self.save_locked(&updated)?;
-            *records = updated;
-        }
-        Ok(())
-    }
-
-    fn log_path(&self, session_id: &str) -> PathBuf {
-        self.root.join(format!("{session_id}.log"))
     }
 }
 
@@ -1405,12 +1198,11 @@ fn session_id_from_link(link: &str) -> Option<String> {
 
 pub(crate) fn route_notification_session(app: &AppHandle, session_id: &str) -> Result<(), String> {
     let manager = app.state::<SessionManager>();
-    if !list_sessions(app.clone(), app.state::<SessionManager>())?
-        .iter()
-        .any(|record| record.summary.session_id == session_id)
-    {
-        return Err("Notification refers to an unknown session".into());
-    }
+    get_session(
+        app.clone(),
+        app.state::<SessionManager>(),
+        session_id.into(),
+    )?;
     *manager
         .notification_selection
         .lock()
@@ -2234,7 +2026,407 @@ fn list_adapters() -> Vec<AgentAdapter> {
     agent_adapters()
 }
 
+fn claim_resume_source(
+    history: &HistoryStore,
+    claims: Arc<Mutex<std::collections::HashSet<String>>>,
+    source: &str,
+) -> Result<(SessionRecord, ResumeClaim), String> {
+    let mut held = claims.lock().map_err(|_| "Resume claim lock poisoned")?;
+    let records = history.lock_records()?;
+    let record = history.get_locked(&records, source)?;
+    let id = record
+        .agent
+        .agent_session_id
+        .as_deref()
+        .filter(|id| valid_resume_id(id))
+        .ok_or("No trusted native conversation ID is available")?
+        .to_owned();
+    if !held.insert(id.clone()) {
+        return Err("This conversation is already being resumed".into());
+    }
+    drop(records);
+    drop(held);
+    Ok((record, ResumeClaim { claims, id }))
+}
 #[tauri::command]
+fn archive_session(
+    app: AppHandle,
+    manager: State<'_, SessionManager>,
+    session_id: String,
+) -> Result<(), String> {
+    proxy!(
+        manager,
+        "archive_session",
+        serde_json::json!({"session_id":session_id})
+    );
+    let history = manager.history(&app)?;
+    // Every owned Session remains in this map until final log/frame persistence finishes.
+    let active = manager
+        .sessions
+        .lock()
+        .map_err(|_| "Session manager lock poisoned")?
+        .keys()
+        .cloned()
+        .collect();
+    let _gate = agent_events::NATIVE_DELIVERY
+        .lock()
+        .map_err(|_| "Notification delivery lock poisoned")?;
+    let claims = manager
+        .resume_claims
+        .lock()
+        .map_err(|_| "Resume claim lock poisoned")?;
+    history.archive(&session_id, &claims, &active)
+}
+#[tauri::command]
+fn get_history_policy(
+    app: AppHandle,
+    manager: State<'_, SessionManager>,
+) -> Result<serde_json::Value, String> {
+    proxy!(manager, "get_history_policy", serde_json::json!({}));
+    manager.history(&app)?.retention_policy()
+}
+#[tauri::command]
+fn set_history_policy(
+    app: AppHandle,
+    manager: State<'_, SessionManager>,
+    auto_archive_30_days: bool,
+) -> Result<(), String> {
+    proxy!(
+        manager,
+        "set_history_policy",
+        serde_json::json!({"auto_archive_30_days":auto_archive_30_days})
+    );
+    manager
+        .history(&app)?
+        .set_retention_policy(auto_archive_30_days)
+}
+#[tauri::command]
+fn preview_archive_deletion(
+    app: AppHandle,
+    manager: State<'_, SessionManager>,
+    session_ids: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    proxy!(
+        manager,
+        "preview_archive_deletion",
+        serde_json::json!({"session_ids":session_ids})
+    );
+    let history = manager.history(&app)?;
+    let active = manager
+        .sessions
+        .lock()
+        .map_err(|_| "Session manager lock poisoned")?
+        .keys()
+        .cloned()
+        .collect();
+    let _gate = agent_events::NATIVE_DELIVERY
+        .lock()
+        .map_err(|_| "Notification delivery lock poisoned")?;
+    let claims = manager
+        .resume_claims
+        .lock()
+        .map_err(|_| "Resume claim lock poisoned")?;
+    history.preview_archive_deletion(&session_ids, &claims, &active)
+}
+#[tauri::command]
+fn cancel_archive_deletion_preview(
+    app: AppHandle,
+    manager: State<'_, SessionManager>,
+    preview_id: String,
+) -> Result<(), String> {
+    proxy!(
+        manager,
+        "cancel_archive_deletion_preview",
+        serde_json::json!({"preview_id":preview_id})
+    );
+    manager
+        .history(&app)?
+        .cancel_archive_deletion_preview(&preview_id)
+}
+#[tauri::command]
+fn confirm_archive_deletion(
+    app: AppHandle,
+    manager: State<'_, SessionManager>,
+    preview_id: String,
+) -> Result<history::DeletionResult, String> {
+    proxy!(
+        manager,
+        "confirm_archive_deletion",
+        serde_json::json!({"preview_id":preview_id})
+    );
+    let history = manager.history(&app)?;
+    let active = manager
+        .sessions
+        .lock()
+        .map_err(|_| "Session manager lock poisoned")?
+        .keys()
+        .cloned()
+        .collect();
+    let _gate = agent_events::NATIVE_DELIVERY
+        .lock()
+        .map_err(|_| "Notification delivery lock poisoned")?;
+    let claims = manager
+        .resume_claims
+        .lock()
+        .map_err(|_| "Resume claim lock poisoned")?;
+    history.delete_result(&preview_id, &claims, &active)
+}
+#[tauri::command]
+fn restore_archive(
+    app: AppHandle,
+    manager: State<'_, SessionManager>,
+    session_id: String,
+) -> Result<(), String> {
+    proxy!(
+        manager,
+        "restore_archive",
+        serde_json::json!({"session_id":session_id})
+    );
+    let history = manager.history(&app)?;
+    let _gate = agent_events::NATIVE_DELIVERY
+        .lock()
+        .map_err(|_| "Notification delivery lock poisoned")?;
+    let _claims = manager
+        .resume_claims
+        .lock()
+        .map_err(|_| "Resume claim lock poisoned")?;
+    history.restore_archive(&session_id)
+}
+#[tauri::command]
+fn list_archived_sessions(
+    app: AppHandle,
+    manager: State<'_, SessionManager>,
+    request: history::PageRequest,
+) -> Result<history::HistoryPage<history::HistoryItem>, String> {
+    proxy!(
+        manager,
+        "list_archived_sessions",
+        serde_json::json!({"request":request})
+    );
+    manager.history(&app)?.archive_page(request)
+}
+
+#[cfg(test)]
+thread_local! {static T09_MISSING_CLI: std::cell::Cell<bool> = const {std::cell::Cell::new(false)};}
+#[cfg(test)]
+thread_local! {static T13_ALLOCATION_SESSION:std::cell::RefCell<Option<String>>=const {std::cell::RefCell::new(None)};}
+#[cfg(test)]
+thread_local! {static T09_ALLOCATION_BOUNDARY: std::cell::Cell<usize> = const {std::cell::Cell::new(0)};}
+
+fn worktree_private(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map_err(|_| "worktree_manifest_unavailable".into())
+}
+#[tauri::command]
+fn preview_worktree_create(
+    app: AppHandle,
+    manager: State<'_, SessionManager>,
+    root: String,
+    target: String,
+    reference: String,
+    branch: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let args =
+        serde_json::json!({"root":root,"target":target,"reference":reference,"branch":branch});
+    proxy!(manager, "preview_worktree_create", args);
+    worktree_manager::owner_command(&worktree_private(&app)?, "preview_worktree_create", args)
+}
+#[tauri::command]
+fn create_worktree(
+    app: AppHandle,
+    manager: State<'_, SessionManager>,
+    attempt: String,
+) -> Result<serde_json::Value, String> {
+    let args = serde_json::json!({"attempt":attempt});
+    proxy!(manager, "create_worktree", args);
+    worktree_manager::owner_command(&worktree_private(&app)?, "create_worktree", args)
+}
+#[tauri::command]
+fn list_managed_worktrees(
+    app: AppHandle,
+    manager: State<'_, SessionManager>,
+) -> Result<serde_json::Value, String> {
+    let args = serde_json::json!({});
+    proxy!(manager, "list_managed_worktrees", args);
+    worktree_manager::owner_command(&worktree_private(&app)?, "list_managed_worktrees", args)
+}
+#[tauri::command]
+fn preview_worktree_cleanup(
+    app: AppHandle,
+    manager: State<'_, SessionManager>,
+    attempt: String,
+) -> Result<serde_json::Value, String> {
+    let args = serde_json::json!({"attempt":attempt});
+    proxy!(manager, "preview_worktree_cleanup", args);
+    worktree_manager::owner_cleanup_command(
+        &worktree_private(&app)?,
+        &manager,
+        "preview_worktree_cleanup",
+        args,
+        worktree_manager::native_trash,
+    )
+}
+#[tauri::command]
+fn cleanup_worktree(
+    app: AppHandle,
+    manager: State<'_, SessionManager>,
+    attempt: String,
+    preview: String,
+) -> Result<serde_json::Value, String> {
+    let args = serde_json::json!({"attempt":attempt,"preview":preview});
+    proxy!(manager, "cleanup_worktree", args);
+    worktree_manager::owner_cleanup_command(
+        &worktree_private(&app)?,
+        &manager,
+        "cleanup_worktree",
+        args,
+        worktree_manager::native_trash,
+    )
+}
+
+#[tauri::command]
+async fn get_git_context(
+    manager: State<'_, SessionManager>,
+    path: String,
+) -> Result<git_context::GitContext, String> {
+    let client = manager
+        .background_client
+        .lock()
+        .map_err(|_| "git_query_failed")?
+        .clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Some(client) = client {
+            serde_json::from_value(
+                client.call("get_git_context", serde_json::json!({"path":path}))?,
+            )
+            .map_err(|_| "git_query_failed".into())
+        } else {
+            git_context::query(Path::new(&path))
+        }
+    })
+    .await
+    .map_err(|_| "git_query_failed")?
+}
+#[tauri::command(rename_all = "snake_case")]
+async fn get_git_changes(
+    manager: State<'_, SessionManager>,
+    path: String,
+    query_token: String,
+    selected_path: Option<String>,
+    side: Option<String>,
+) -> Result<git_context::GitChanges, String> {
+    let client = manager
+        .background_client
+        .lock()
+        .map_err(|_| "git_query_failed")?
+        .clone()
+        .ok_or("git_query_failed")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut args = serde_json::json!({"path":path,"query_token":query_token});
+        if let Some(path) = selected_path {
+            args["selected_path"] = path.into();
+        }
+        if let Some(side) = side {
+            args["side"] = side.into();
+        }
+        serde_json::from_value(client.call("get_git_changes", args)?)
+            .map_err(|_| "git_query_failed".into())
+    })
+    .await
+    .map_err(|_| "git_query_failed")?
+}
+#[tauri::command(rename_all = "snake_case")]
+async fn cancel_git_changes(
+    manager: State<'_, SessionManager>,
+    query_token: String,
+) -> Result<serde_json::Value, String> {
+    let client = manager
+        .background_client
+        .lock()
+        .map_err(|_| "git_query_failed")?
+        .clone()
+        .ok_or("git_query_failed")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        client.call(
+            "cancel_git_changes",
+            serde_json::json!({"query_token":query_token}),
+        )
+    })
+    .await
+    .map_err(|_| "git_query_failed")?
+}
+
+#[tauri::command]
+fn get_launch_defaults(
+    app: AppHandle,
+    manager: State<'_, SessionManager>,
+) -> Result<project_config::LaunchSettings, String> {
+    proxy!(manager, "get_launch_defaults", serde_json::json!({}));
+    project_config::get_global(
+        &app.path()
+            .app_data_dir()
+            .map_err(|_| "project_config_preferences")?,
+    )
+}
+#[tauri::command]
+fn set_launch_defaults(
+    app: AppHandle,
+    manager: State<'_, SessionManager>,
+    defaults: project_config::LaunchSettings,
+) -> Result<(), String> {
+    proxy!(
+        manager,
+        "set_launch_defaults",
+        serde_json::json!({"defaults":defaults})
+    );
+    project_config::set_global(
+        &app.path()
+            .app_data_dir()
+            .map_err(|_| "project_config_preferences")?,
+        &defaults,
+    )
+}
+#[tauri::command]
+fn preview_project_config(
+    app: AppHandle,
+    manager: State<'_, SessionManager>,
+    cwd: String,
+) -> Result<project_config::Preview, String> {
+    proxy!(
+        manager,
+        "preview_project_config",
+        serde_json::json!({"cwd":cwd})
+    );
+    project_config::preview(
+        Path::new(&cwd),
+        &app.path()
+            .app_data_dir()
+            .map_err(|_| "project_config_preferences")?,
+    )
+}
+#[tauri::command]
+fn trust_project_config(
+    app: AppHandle,
+    manager: State<'_, SessionManager>,
+    cwd: String,
+    preview: project_config::Preview,
+) -> Result<project_config::Preview, String> {
+    proxy!(
+        manager,
+        "trust_project_config",
+        serde_json::json!({"cwd":cwd,"preview":preview})
+    );
+    let private = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "project_config_preferences")?;
+    project_config::trust(Path::new(&cwd), &private, &preview)?;
+    project_config::preview(Path::new(&cwd), &private)
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
 fn create_session(
     app: AppHandle,
     manager: State<'_, SessionManager>,
@@ -2242,30 +2434,157 @@ fn create_session(
     command: Option<String>,
     launch: Option<AgentLaunch>,
     resume_from: Option<String>,
+    project_config: Option<project_config::ProjectStart>,
+    worktree_attempt: Option<String>,
 ) -> Result<SessionSummary, String> {
-    proxy!(
+    let mut arguments =
+        serde_json::json!({"cwd":cwd,"command":command,"launch":launch,"resume_from":resume_from});
+    if let Some(project) = &project_config {
+        arguments["project_config"] =
+            serde_json::to_value(project).map_err(|_| "project_config_invalid")?;
+    }
+    if let Some(attempt) = &worktree_attempt {
+        arguments["worktree_attempt"] = serde_json::json!(attempt);
+    }
+    proxy!(manager, "create_session", arguments);
+    let private_root = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "project_config_preferences")?;
+    create_session_owner_with_worktree(
+        Some(app),
+        &manager,
+        &private_root,
+        cwd,
+        command,
+        launch,
+        resume_from,
+        project_config,
+        worktree_attempt,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+#[cfg(test)]
+fn create_session_owner(
+    app: Option<AppHandle>,
+    manager: &SessionManager,
+    private_root: &Path,
+    cwd: Option<String>,
+    command: Option<String>,
+    launch: Option<AgentLaunch>,
+    resume_from: Option<String>,
+    project: Option<project_config::ProjectStart>,
+) -> Result<SessionSummary, String> {
+    let _serial = worktree_manager::serial_owner_test();
+    create_session_owner_with_worktree(
+        app,
         manager,
-        "create_session",
-        serde_json::json!({"cwd":cwd,"command":command,"launch":launch,"resume_from":resume_from})
-    );
+        private_root,
+        cwd,
+        command,
+        launch,
+        resume_from,
+        project,
+        None,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+fn create_session_owner_with_worktree(
+    app: Option<AppHandle>,
+    manager: &SessionManager,
+    private_root: &Path,
+    cwd: Option<String>,
+    command: Option<String>,
+    launch: Option<AgentLaunch>,
+    resume_from: Option<String>,
+    project: Option<project_config::ProjectStart>,
+    worktree_attempt: Option<String>,
+) -> Result<SessionSummary, String> {
+    let prepared = if let Some(project) = project {
+        if cwd.is_some() || command.is_some() || launch.is_some() || resume_from.is_some() {
+            return Err("project_config_invalid".into());
+        }
+        Some(project_config::prepare(
+            Path::new(&project.root),
+            private_root,
+            project.template.as_deref(),
+            &project.overrides,
+            &|name| {
+                #[cfg(test)]
+                if T09_MISSING_CLI.with(|missing| missing.get()) {
+                    return None;
+                }
+                find_executable(name)
+            },
+            &|key| std::env::var(key).ok(),
+        )?)
+    } else {
+        None
+    };
+    let (cwd, command, launch, env) = match prepared {
+        Some(prepared) => (
+            Some(prepared.cwd.to_string_lossy().into_owned()),
+            prepared.command,
+            prepared.launch,
+            prepared.env,
+        ),
+        None => (cwd, command, launch, std::collections::BTreeMap::new()),
+    };
+    let _worktree_lifecycle = worktree_manager::start_guard()?;
+    if worktree_attempt.is_some() && resume_from.is_some() {
+        return Err("worktree_invalid_start".into());
+    }
+    let initial_cwd = cwd
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or(std::env::current_dir().map_err(|_| "worktree_invalid_target")?);
+    let initial_check = if resume_from.is_none() {
+        Some(worktree_manager::prepare_start(
+            private_root,
+            &initial_cwd,
+            worktree_attempt.as_deref(),
+        )?)
+    } else {
+        None
+    };
+    #[cfg(test)]
+    if app.is_none() {
+        T13_ALLOCATION_SESSION.with(|id| {
+            *id.borrow_mut() = initial_check
+                .as_ref()
+                .and_then(|check| check.session_id.clone())
+        });
+        T09_ALLOCATION_BOUNDARY.with(|hit| hit.set(hit.get() + 1));
+        return Err("test_entry_reached_allocation".into());
+    }
+    let app = app.ok_or("Application handle unavailable")?;
     if manager.shutting_down.load(Ordering::Acquire) {
         return Err("Application is closing".into());
     }
     let history = manager.history(&app)?;
-    let (cwd, launch, resume_id) = if let Some(source) = resume_from {
+    let (cwd, launch, resume_id, resume_claim) = if let Some(source) = resume_from {
         if cwd.is_some() || command.is_some() || launch.is_some() {
             return Err("Resume cannot override the stored conversation launch".into());
         }
-        let (cwd, launch, id) = resume_source(&history, &source)?;
-        (Some(cwd), Some(launch), Some(id))
+        let (record, claim) =
+            claim_resume_source(&history, manager.resume_claims.clone(), &source)?;
+        let (cwd, launch, id) = resume_record_source(record)?;
+        (Some(cwd), Some(launch), Some(id), Some(claim))
     } else {
-        (cwd, launch, None)
+        (cwd, launch, None, None)
     };
-    let resume_claim = resume_id
-        .as_deref()
-        .map(|id| ResumeClaim::acquire(manager.resume_claims.clone(), id))
-        .transpose()?;
-    let id = next_session_id();
+    let resumed_check;
+    let start_check = if let Some(check) = initial_check.as_ref() {
+        check
+    } else {
+        let resumed_cwd = Path::new(cwd.as_deref().ok_or("Resume directory is missing")?);
+        resumed_check = worktree_manager::prepare_start(private_root, resumed_cwd, None)?;
+        &resumed_check
+    };
+    let id = start_check
+        .session_id
+        .clone()
+        .unwrap_or_else(next_session_id);
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -2319,6 +2638,9 @@ fn create_session(
         });
     validate_working_directory(&working_directory)?;
     builder.cwd(&working_directory);
+    for (key, value) in env {
+        builder.env(key, value);
+    }
     let integration = launch
         .as_ref()
         .filter(|launch| launch.mode == "interactive")
@@ -2360,6 +2682,8 @@ fn create_session(
         .take_writer()
         .map_err(|error| format!("Failed to open PTY input: {error}"))?;
 
+    validate_working_directory(&summary.cwd)?;
+    worktree_manager::recheck_start(start_check, Path::new(&summary.cwd))?;
     let mut active = manager
         .sessions
         .lock()
@@ -2865,35 +3189,94 @@ fn send_native_notification(
 }
 
 #[tauri::command]
+fn get_notification_pause_state(
+    manager: State<'_, SessionManager>,
+) -> Result<system_entry::PauseState, String> {
+    proxy!(
+        manager,
+        "get_notification_pause_state",
+        serde_json::json!({})
+    );
+    serde_json::from_value(system_entry::pause_command(
+        &manager,
+        "get_notification_pause_state",
+        &serde_json::json!({}),
+    )?)
+    .map_err(|_| "system_entry_unavailable".into())
+}
+#[tauri::command(rename_all = "snake_case")]
+fn initialize_notification_pause(
+    manager: State<'_, SessionManager>,
+    legacy_paused: bool,
+    expected_owner_instance: String,
+) -> Result<system_entry::PauseState, String> {
+    let args = serde_json::json!({"legacy_paused":legacy_paused,"expected_owner_instance":expected_owner_instance});
+    proxy!(manager, "initialize_notification_pause", args.clone());
+    serde_json::from_value(system_entry::pause_command(
+        &manager,
+        "initialize_notification_pause",
+        &args,
+    )?)
+    .map_err(|_| "system_entry_unavailable".into())
+}
+#[tauri::command(rename_all = "snake_case")]
+fn set_notification_paused(
+    manager: State<'_, SessionManager>,
+    paused: bool,
+    expected_revision: u64,
+    expected_owner_instance: String,
+) -> Result<system_entry::PauseState, String> {
+    let args = serde_json::json!({"paused":paused,"expected_revision":expected_revision,"expected_owner_instance":expected_owner_instance});
+    proxy!(manager, "set_notification_paused", args.clone());
+    serde_json::from_value(system_entry::pause_command(
+        &manager,
+        "set_notification_paused",
+        &args,
+    )?)
+    .map_err(|_| "system_entry_unavailable".into())
+}
+#[tauri::command]
+fn get_system_entry_status(
+    manager: State<'_, SessionManager>,
+) -> Result<serde_json::Value, String> {
+    proxy!(manager, "get_system_entry_status", serde_json::json!({}));
+    system_entry::status(&manager)
+}
+#[tauri::command]
+fn set_global_shortcut(
+    app: AppHandle,
+    manager: State<'_, SessionManager>,
+    enabled: bool,
+    expected_owner_instance: String,
+) -> Result<serde_json::Value, String> {
+    let args =
+        serde_json::json!({"enabled":enabled,"expected_owner_instance":expected_owner_instance});
+    proxy!(manager, "set_global_shortcut", args);
+    system_entry::set_shortcut_native(&app, enabled, &expected_owner_instance)
+}
+#[tauri::command]
 fn set_agent_notification_context(
     app: AppHandle,
     manager: State<'_, SessionManager>,
     selected: Option<String>,
-    paused: bool,
+    paused: Option<bool>,
+    pause_revision: Option<u64>,
 ) -> Result<(), String> {
-    proxy!(
-        manager,
-        "set_agent_notification_context",
-        serde_json::json!({"selected":selected,"paused":paused})
-    );
-    let history = manager.history(&app)?;
-    let records = history.list()?;
-    if selected
-        .as_ref()
-        .is_some_and(|id| !records.iter().any(|r| r.summary.session_id == *id))
-    {
-        return Err("Unknown selected agent session".into());
+    let mut args = serde_json::json!({"selected":selected});
+    if let Some(paused) = paused {
+        args["paused"] = paused.into();
     }
+    if let Some(revision) = pause_revision {
+        args["pause_revision"] = revision.into();
+    }
+    proxy!(manager, "set_agent_notification_context", args.clone());
+    let history = manager.history(&app)?;
+    if let Some(id) = selected.as_ref() {
+        history.get(id)?;
+    }
+    // Bridge startup does not acquire settings. Its disabled context is synchronized only after it returns.
     manager.start_agent_runtime(&app, history)?;
-    let runtime = manager
-        .agent_bridge
-        .lock()
-        .map_err(|_| "Agent bridge lock poisoned")?;
-    let bridge = runtime.as_ref().ok_or("Agent bridge unavailable")?;
-    *bridge
-        .context
-        .lock()
-        .map_err(|_| "Agent context lock poisoned")? = (true, selected, paused);
+    system_entry::pause_command(&manager, "set_agent_notification_context", &args)?;
     Ok(())
 }
 #[tauri::command]
@@ -2929,12 +3312,97 @@ fn read_agent_receipt(
 }
 
 #[tauri::command]
-fn list_sessions(
+fn list_session_summaries(
     app: AppHandle,
     manager: State<'_, SessionManager>,
-) -> Result<Vec<SessionRecord>, String> {
-    proxy!(manager, "list_sessions", serde_json::json!({}));
-    manager.history(&app)?.list()
+    request: history::PageRequest,
+) -> Result<history::HistoryPage<history::HistoryItem>, String> {
+    proxy!(
+        manager,
+        "list_session_summaries",
+        serde_json::json!({"request":request})
+    );
+    manager.history(&app)?.page(request)
+}
+#[tauri::command]
+fn get_session(
+    app: AppHandle,
+    manager: State<'_, SessionManager>,
+    session_id: String,
+) -> Result<SessionRecord, String> {
+    proxy!(
+        manager,
+        "get_session",
+        serde_json::json!({"session_id":session_id})
+    );
+    manager.history(&app)?.get(&session_id)
+}
+#[tauri::command]
+fn history_overview(
+    app: AppHandle,
+    manager: State<'_, SessionManager>,
+) -> Result<history::Overview, String> {
+    proxy!(manager, "history_overview", serde_json::json!({}));
+    manager.history(&app)?.overview()
+}
+#[tauri::command]
+fn list_unread_receipts(
+    app: AppHandle,
+    manager: State<'_, SessionManager>,
+    request: history::PageRequest,
+) -> Result<history::HistoryPage<history::InboxItem>, String> {
+    proxy!(
+        manager,
+        "list_unread_receipts",
+        serde_json::json!({"request":request})
+    );
+    manager.history(&app)?.inbox(request)
+}
+#[tauri::command]
+fn next_attention(
+    app: AppHandle,
+    manager: State<'_, SessionManager>,
+    current_session_id: Option<String>,
+) -> Result<Option<String>, String> {
+    proxy!(
+        manager,
+        "next_attention",
+        serde_json::json!({"current_session_id":current_session_id})
+    );
+    manager
+        .history(&app)?
+        .next_attention(current_session_id.as_deref())
+}
+#[tauri::command]
+fn list_pending_notifications(
+    app: AppHandle,
+    manager: State<'_, SessionManager>,
+    limit: usize,
+    after_key: Option<history::PendingKey>,
+) -> Result<history::PendingPage, String> {
+    proxy!(
+        manager,
+        "list_pending_notifications",
+        serde_json::json!({"limit":limit,"after_key":after_key})
+    );
+    manager.history(&app)?.pending(limit, after_key)
+}
+#[tauri::command]
+async fn scan_history_capacity(
+    app: AppHandle,
+    manager: State<'_, SessionManager>,
+) -> Result<history::Capacity, String> {
+    proxy!(manager, "scan_history_capacity", serde_json::json!({}));
+    let root = manager.history(&app)?.root.clone();
+    tauri::async_runtime::spawn_blocking(move || history::scan_capacity(&root))
+        .await
+        .map_err(|_| "Capacity worker failed")?
+}
+#[tauri::command]
+fn cancel_history_capacity(manager: State<'_, SessionManager>) -> Result<(), String> {
+    proxy!(manager, "cancel_history_capacity", serde_json::json!({}));
+    history::cancel_capacity();
+    Ok(())
 }
 
 fn recorded_log(
@@ -2942,7 +3410,19 @@ fn recorded_log(
     sessions: &Mutex<HashMap<String, Arc<Session>>>,
     record: &SessionRecord,
 ) -> Result<session_logs::LogData, String> {
-    let session_id = &record.summary.session_id;
+    recorded_log_source(
+        history,
+        sessions,
+        &record.summary.session_id,
+        record.output_end_offset,
+    )
+}
+fn recorded_log_source(
+    history: &HistoryStore,
+    sessions: &Mutex<HashMap<String, Arc<Session>>>,
+    session_id: &str,
+    output_end_offset: u64,
+) -> Result<session_logs::LogData, String> {
     if session_id_from_link(&format!("yam://session/{session_id}")).is_none() {
         return Err("Invalid log session identity".into());
     }
@@ -2958,21 +3438,21 @@ fn recorded_log(
     if let Some(error) = log.as_ref().and_then(|log| log.error.as_ref()) {
         return Err(error.clone());
     }
-    let mut bytes = Vec::new();
-    File::open(history.log_path(session_id))
-        .and_then(|file| file.take(MAX_SESSION_LOG_BYTES + 1).read_to_end(&mut bytes))
-        .map_err(|error| format!("Cannot read retained log: {error}"))?;
-    if bytes.len() as u64 > MAX_SESSION_LOG_BYTES {
-        return Err("Log exceeds its 8 MiB budget".into());
-    }
-    let end = log
+    let data = session_logs::read_bounded_log(
+        File::open(history.log_path(session_id)).map_err(|_| "Cannot read retained log")?,
+    )?;
+    let reported_end = log
         .as_ref()
         .map(|log| log.end_offset)
-        .unwrap_or(record.output_end_offset)
-        .max(bytes.len() as u64);
-    let offset = end - bytes.len() as u64;
-    let data = String::from_utf8(bytes).map_err(|_| "Log encoding is invalid")?;
-    Ok(session_logs::LogData { data, offset })
+        .unwrap_or(output_end_offset);
+    let range = session_logs::retained_range(data.len(), reported_end, log.is_some());
+    // The legacy parser base remains separate from authoritative absolute provenance.
+    let offset = reported_end.max(data.len() as u64) - data.len() as u64;
+    Ok(session_logs::LogData {
+        data,
+        offset,
+        range: Some(range),
+    })
 }
 
 #[tauri::command]
@@ -2989,50 +3469,166 @@ async fn search_session_logs(
     );
     let generation = LOG_SEARCH_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
     let history = manager.history(&app)?;
-    let records = history.list()?;
-    if session_id
-        .as_ref()
-        .is_some_and(|id| !records.iter().any(|r| &r.summary.session_id == id))
-    {
-        return Err("Unknown log session".into());
-    }
-    let records = records
-        .into_iter()
-        .filter(|r| {
-            session_id
-                .as_ref()
-                .is_none_or(|id| &r.summary.session_id == id)
-        })
-        .collect::<Vec<_>>();
-    let sources = records
-        .iter()
-        .map(|r| session_logs::LogSource {
-            session_id: r.summary.session_id.clone(),
-            cwd: r.summary.cwd.clone(),
-        })
-        .collect::<Vec<_>>();
-    let by_id = records
-        .into_iter()
-        .map(|r| (r.summary.session_id.clone(), r))
-        .collect::<HashMap<_, _>>();
     let sessions = manager.sessions.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = LOG_SEARCH_LOCK.lock().map_err(|_| "Search lock poisoned")?;
-        session_logs::search(
-            &sources,
-            |id| {
-                recorded_log(
-                    &history,
-                    &sessions,
-                    by_id.get(id).ok_or("Unknown log session")?,
-                )
-            },
-            &request,
-            || LOG_SEARCH_GENERATION.load(Ordering::Acquire) != generation,
-        )
+        search_retained_logs(&history, &sessions, session_id, request, || {
+            LOG_SEARCH_GENERATION.load(Ordering::Acquire) != generation
+        })
     })
     .await
-    .map_err(|error| error.to_string())?
+    .map_err(|_| "Log search worker failed".to_string())?
+}
+
+fn search_retained_logs(
+    history: &HistoryStore,
+    sessions: &Mutex<HashMap<String, Arc<Session>>>,
+    session_id: Option<String>,
+    request: session_logs::SearchRequest,
+    cancelled: impl Fn() -> bool,
+) -> Result<session_logs::SearchPage, String> {
+    let original = request.source_cursor.clone();
+    let batch = if let Some(id) = session_id.as_ref() {
+        let record = history.get(id).map_err(|_| "Unknown log session")?;
+        history::LogSourceBatch {
+            sources: vec![session_logs::LogSource {
+                session_id: id.clone(),
+                cwd: record.summary.cwd,
+            }],
+            positions: vec![0],
+            end_offsets: vec![record.output_end_offset],
+            end: 1,
+            total: 1,
+            snapshot: history.instance.clone(),
+        }
+    } else {
+        history.log_source_batch(original.as_ref().map_or(0, |c| c.source_offset), &cancelled)?
+    };
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(
+        &(
+            &batch.snapshot,
+            &request.query,
+            request.case_sensitive,
+            &session_id,
+        ),
+        &mut hash,
+    );
+    let snapshot = format!("{:016x}", std::hash::Hasher::finish(&hash));
+    if original
+        .as_ref()
+        .is_some_and(|c| c.snapshot.as_deref() != Some(snapshot.as_str()))
+    {
+        return Err("Log search cursor expired; restart search".into());
+    }
+    let mut bounded = request;
+    bounded.source_cursor = None;
+    let offsets = batch
+        .sources
+        .iter()
+        .zip(&batch.end_offsets)
+        .map(|(source, offset)| (source.session_id.as_str(), *offset))
+        .collect::<HashMap<_, _>>();
+    let mut page = session_logs::search(
+        &batch.sources,
+        |id| {
+            recorded_log_source(
+                history,
+                sessions,
+                id,
+                *offsets.get(id).ok_or("Unknown log source")?,
+            )
+        },
+        &bounded,
+        cancelled,
+    )?;
+    page.current_cursor = Some(session_logs::SearchCursor {
+        source_offset: original.as_ref().map_or(0, |c| c.source_offset),
+        snapshot: Some(snapshot.clone()),
+    });
+    if let Some(cursor) = page.next_cursor.as_mut() {
+        cursor.source_offset = batch
+            .positions
+            .get(cursor.source_offset)
+            .copied()
+            .unwrap_or(batch.end);
+        cursor.snapshot = Some(snapshot);
+    } else if !page.has_more && batch.end < batch.total {
+        page.next_cursor = Some(session_logs::SearchCursor {
+            source_offset: batch.end,
+            snapshot: Some(snapshot),
+        });
+        page.complete = false;
+    }
+    Ok(page)
+}
+
+#[tauri::command]
+async fn export_diagnostics(app: AppHandle) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let bytes = diagnostics::report(&app.state::<SessionManager>())?;
+        let Some(destination) = app
+            .dialog()
+            .file()
+            .set_file_name("yam-diagnostics.json")
+            .add_filter("JSON", &["json"])
+            .blocking_save_file()
+        else {
+            return Ok(false);
+        };
+        let path = destination.into_path().map_err(|_| "invalid_destination")?;
+        diagnostics::write_selected(Some(&path), &bytes)
+    })
+    .await
+    .map_err(|_| "worker_failed".to_string())?
+    .map_err(str::to_owned)
+}
+
+#[derive(Debug, Serialize)]
+struct LogExportReceipt {
+    path: String,
+    range: session_logs::RetainedLogRange,
+}
+fn prepare_log_export(
+    record: &SessionRecord,
+    snapshot: LogSnapshot,
+    title: &str,
+    raw: bool,
+) -> Result<(String, session_logs::RetainedLogRange), String> {
+    if snapshot.data.len() > 8 * 1024 * 1024 {
+        return Err("Log exceeds its 8 MiB budget".into());
+    }
+    let range = snapshot
+        .range
+        .unwrap_or_else(|| session_logs::retained_range(snapshot.data.len(), 0, false));
+    let metadata = serde_json::to_string_pretty(&serde_json::json!({"session_id":record.summary.session_id,"title":title,
+        "cwd":record.summary.cwd,"status":snapshot.status,"started_at":record.started_at,"ended_at":record.ended_at,
+        "retained_output_offset":snapshot.offset,"retained_range":range,"format":if raw {"raw terminal output"}else{"plain text"}})).map_err(|e|e.to_string())?;
+    let log = session_logs::LogData {
+        data: snapshot.data,
+        offset: snapshot.offset,
+        range: Some(range.clone()),
+    };
+    let content = session_logs::export_text(
+        &format!("YAM recorded session output\n{metadata}\n\n"),
+        &log,
+        raw,
+    );
+    Ok((content, range))
+}
+fn publish_log_export(
+    path: Option<&Path>,
+    content: &str,
+    range: session_logs::RetainedLogRange,
+) -> Result<Option<LogExportReceipt>, String> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    session_logs::write_export(path, content.as_bytes())?;
+    Ok(Some(LogExportReceipt {
+        path: path.to_string_lossy().into_owned(),
+        range,
+    }))
 }
 
 #[tauri::command]
@@ -3042,31 +3638,34 @@ async fn export_session_log(
     session_id: String,
     title: String,
     raw: bool,
-) -> Result<Option<String>, String> {
+) -> Result<Option<LogExportReceipt>, String> {
     if title.chars().count() > 200 || title.contains('\0') {
         return Err("Invalid export title".into());
     }
-    let records = list_sessions(app.clone(), app.state::<SessionManager>())?;
-    let record = records
-        .into_iter()
-        .find(|r| r.summary.session_id == session_id)
-        .ok_or("Unknown log session")?;
+    let record = get_session(
+        app.clone(),
+        app.state::<SessionManager>(),
+        session_id.clone(),
+    )?;
     let snapshot = read_session_snapshot(
         app.clone(),
         app.state::<SessionManager>(),
         session_id.clone(),
     )?;
     tauri::async_runtime::spawn_blocking(move || {
-        let metadata = serde_json::to_string_pretty(&serde_json::json!({"session_id":session_id,"title":title,
-            "cwd":record.summary.cwd,"status":record.status,"started_at":record.started_at,"ended_at":record.ended_at,
-            "retained_output_offset":snapshot.offset,"format":if raw {"raw terminal output"}else{"plain text"}})).map_err(|e|e.to_string())?;
-        let log = session_logs::LogData {data:snapshot.data, offset:snapshot.offset};
-        let content = session_logs::export_text(&format!("YAM recorded session output\n{metadata}\n\n"),&log,raw);
-        let Some(path)=app.dialog().file().set_file_name(format!("yam-{session_id}.txt")).add_filter("Text",&["txt"]).blocking_save_file() else {return Ok(None);};
-        let path=path.into_path().map_err(|e|e.to_string())?;
-        session_logs::write_export(&path,content.as_bytes())?;
-        Ok(Some(path.to_string_lossy().into_owned()))
-    }).await.map_err(|error|error.to_string())?
+        let (content, range) = prepare_log_export(&record, snapshot, &title, raw)?;
+        let path = app
+            .dialog()
+            .file()
+            .set_file_name(format!("yam-{session_id}.txt"))
+            .add_filter("Text", &["txt"])
+            .blocking_save_file()
+            .map(|path| path.into_path().map_err(|e| e.to_string()))
+            .transpose()?;
+        publish_log_export(path.as_deref(), &content, range)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -3085,11 +3684,7 @@ async fn read_log_excerpt(
     let history = manager.history(&app)?;
     let sessions = manager.sessions.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let record = history
-            .list()?
-            .into_iter()
-            .find(|r| r.summary.session_id == session_id)
-            .ok_or("Unknown log session")?;
+        let record = history.get(&session_id)?;
         let log = recorded_log(&history, &sessions, &record)?;
         session_logs::excerpt(&log, offset, column)
     })
@@ -3122,16 +3717,14 @@ fn read_session_log(
         serde_json::json!({"session_id":session_id})
     );
     let history = manager.history(&app)?;
-    if !history
-        .list()?
-        .iter()
-        .any(|record| record.summary.session_id == session_id)
-    {
-        return Err(format!("Unknown session: {session_id}"));
-    }
-    let path = history.log_path(&session_id);
-    let bytes = fs::read(&path).map_err(|error| format!("Failed to read session log: {error}"))?;
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
+    read_recorded_log_string(&history, &session_id)
+}
+
+fn read_recorded_log_string(history: &HistoryStore, session_id: &str) -> Result<String, String> {
+    history.get(session_id)?;
+    let path = history.log_path(session_id);
+    let file = fs::File::open(&path).map_err(|_| "Log could not be read".to_string())?;
+    session_logs::read_bounded_log(file)
 }
 
 #[tauri::command]
@@ -3151,46 +3744,32 @@ fn read_session_snapshot(
         .map_err(|_| "Session manager lock poisoned".to_string())?
         .get(&session_id)
         .cloned();
-    if let Some(session) = active {
-        let log = session
-            .log
+    let (log, status) = if let Some(session) = active {
+        let data = recorded_log_source(&session.history, &manager.sessions, &session_id, 0)?;
+        let status = session
+            .status
             .lock()
-            .map_err(|_| "Session log lock poisoned".to_string())?;
-        if let Some(error) = &log.error {
-            return Err(error.clone());
-        }
-        let bytes =
-            fs::read(session.history.log_path(&session_id)).map_err(|error| error.to_string())?;
-        let data =
-            String::from_utf8(bytes).map_err(|error| format!("Invalid UTF-8 log: {error}"))?;
-        let end_offset = log.end_offset;
-        drop(log);
-        Ok(LogSnapshot {
-            offset: end_offset.saturating_sub(data.len() as u64),
-            end_offset,
-            data,
-            status: session
-                .status
-                .lock()
-                .map_err(|_| "Session status lock poisoned".to_string())?
-                .clone(),
-        })
+            .map_err(|_| "Session status lock poisoned")?
+            .clone();
+        (data, status)
     } else {
         let history = manager.history(&app)?;
-        let record = history
-            .list()?
-            .into_iter()
-            .find(|record| record.summary.session_id == session_id)
-            .ok_or_else(|| format!("Unknown session: {session_id}"))?;
-        let data = read_session_log(app, manager, session_id)?;
-        let end_offset = record.output_end_offset.max(data.len() as u64);
-        Ok(LogSnapshot {
-            offset: end_offset - data.len() as u64,
-            end_offset,
-            data,
-            status: record.status,
-        })
-    }
+        let record = history.get(&session_id)?;
+        let data = recorded_log_source(
+            &history,
+            &manager.sessions,
+            &session_id,
+            record.output_end_offset,
+        )?;
+        (data, record.status)
+    };
+    Ok(LogSnapshot {
+        end_offset: log.offset.saturating_add(log.data.len() as u64),
+        offset: log.offset,
+        data: log.data,
+        status,
+        range: log.range,
+    })
 }
 
 #[tauri::command]
@@ -3324,6 +3903,7 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            updater::initialize(app.handle())?;
             if let Some(window) = app.get_webview_window("main") {
                 record_desktop_focus(
                     &app.state::<SessionManager>(),
@@ -3372,17 +3952,55 @@ pub fn run() {
         .manage(SessionManager::default())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
+            updater::updater_status,
+            updater::updater_check,
+            updater::updater_download,
+            updater::updater_cancel,
+            updater::updater_set_automatic_checks,
+            updater::updater_install,
             health_check,
             memory_usage,
             validate_project_directory,
             list_adapters,
+            archive_session,
+            get_history_policy,
+            set_history_policy,
+            preview_archive_deletion,
+            cancel_archive_deletion_preview,
+            confirm_archive_deletion,
+            restore_archive,
+            list_archived_sessions,
+            get_launch_defaults,
+            get_git_context,
+            get_git_changes,
+            cancel_git_changes,
+            preview_worktree_create,
+            create_worktree,
+            list_managed_worktrees,
+            preview_worktree_cleanup,
+            cleanup_worktree,
+            set_launch_defaults,
+            preview_project_config,
+            trust_project_config,
             create_session,
             write_session,
             resize_session,
             stop_session,
-            list_sessions,
+            list_session_summaries,
+            get_session,
+            history_overview,
+            list_unread_receipts,
+            next_attention,
+            list_pending_notifications,
+            scan_history_capacity,
+            cancel_history_capacity,
             notify_session,
             acknowledge_notification,
+            get_notification_pause_state,
+            initialize_notification_pause,
+            set_notification_paused,
+            get_system_entry_status,
+            set_global_shortcut,
             set_agent_notification_context,
             retry_agent_notifications,
             read_agent_receipt,
@@ -3393,6 +4011,7 @@ pub fn run() {
             cancel_log_search,
             read_log_excerpt,
             export_session_log,
+            export_diagnostics,
             read_session_snapshot,
             read_terminal_frame,
             stop_all_and_quit,
@@ -3422,6 +4041,29 @@ fn handle_owner_exit(app: &AppHandle, event: tauri::RunEvent) {
             // The zero-window owner must stay alive until shutdown or its idle deadline.
             api.prevent_exit();
             return;
+        }
+    }
+    // GUI update work is fenced and exactly joined before the detached-client early return.
+    if !manager.background_owner {
+        if let Some(controller) = app.try_state::<Arc<updater::Controller>>() {
+            if let tauri::RunEvent::ExitRequested { code, api, .. } = &event {
+                if controller.prepare_exit() {
+                    api.prevent_exit();
+                    if controller.claim_exit_cleanup() {
+                        let controller = controller.inner().clone();
+                        let handle = app.clone();
+                        let code = code.unwrap_or(0);
+                        thread::spawn(move || {
+                            controller.shutdown_and_join();
+                            handle.exit(code);
+                        });
+                    }
+                    return;
+                }
+            }
+            if matches!(event, tauri::RunEvent::Exit) {
+                controller.shutdown_and_join();
+            }
         }
     }
     if manager
@@ -3910,7 +4552,7 @@ mod tests {
         assert!(record
             .reason
             .unwrap_or_default()
-            .contains("application closed"));
+            .contains("background owner restarted"));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -4844,5 +5486,440 @@ mod tests {
         let exit = child.wait().expect("wait for stopped command");
 
         assert!(!exit.success());
+    }
+}
+
+#[cfg(test)]
+mod t09_entry_tests {
+    use super::*;
+    #[test]
+    fn t09_owner_entry_rejects_config_errors_before_the_allocation_boundary() {
+        let base = std::env::temp_dir().join(format!(
+            "yam-t09-entry-{}-{}",
+            std::process::id(),
+            unix_timestamp_millis()
+        ));
+        fs::create_dir(&base).unwrap();
+        struct OwnFixture(PathBuf);
+        impl Drop for OwnFixture {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = OwnFixture(base.clone());
+        let root = base.join("project");
+        let private = base.join("app-private");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&private).unwrap();
+        let manager = SessionManager::default();
+        let before_counter = SESSION_COUNTER.load(Ordering::Relaxed);
+        for (source, expected) in [
+            (serde_json::json!({"version":2}), "project_config_invalid"),
+            (
+                serde_json::json!({"version":1,"defaults":{"adapter":"custom","command":"touch must-not-execute"}}),
+                "project_config_untrusted",
+            ),
+        ] {
+            fs::write(root.join("yam.json"), serde_json::to_vec(&source).unwrap()).unwrap();
+            T09_ALLOCATION_BOUNDARY.with(|hit| hit.set(0));
+            let project: project_config::ProjectStart = serde_json::from_value(
+                serde_json::json!({"root":root,"template":null,"overrides":{}}),
+            )
+            .unwrap();
+            let result = create_session_owner(
+                None,
+                &manager,
+                &private,
+                None,
+                None,
+                None,
+                None,
+                Some(project),
+            );
+            assert_eq!(result.unwrap_err(), expected);
+            assert_eq!(T09_ALLOCATION_BOUNDARY.with(|hit| hit.get()), 0);
+            assert_eq!(SESSION_COUNTER.load(Ordering::Relaxed), before_counter);
+            assert!(manager.history.lock().unwrap().is_none());
+            assert!(manager.sessions.lock().unwrap().is_empty());
+            assert!(fs::read_dir(&private).unwrap().next().is_none());
+        }
+    }
+    #[test]
+    fn t09_owner_entry_changed_env_cwd_and_cli_errors_never_reach_allocations() {
+        let base = std::env::temp_dir().join(format!(
+            "yam-t09-entry-more-{}-{}",
+            std::process::id(),
+            unix_timestamp_millis()
+        ));
+        fs::create_dir(&base).unwrap();
+        struct OwnFixture(PathBuf);
+        impl Drop for OwnFixture {
+            fn drop(&mut self) {
+                T09_MISSING_CLI.with(|flag| flag.set(false));
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = OwnFixture(base.clone());
+        let root = base.join("project");
+        let private = base.join("app-private");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&private).unwrap();
+        let manager = SessionManager::default();
+        let before_counter = SESSION_COUNTER.load(Ordering::Relaxed);
+        let write = |value: serde_json::Value| {
+            fs::write(root.join("yam.json"), serde_json::to_vec(&value).unwrap()).unwrap()
+        };
+        let approve = || {
+            let p = project_config::preview(&root, &private).unwrap();
+            project_config::trust(&root, &private, &p).unwrap();
+        };
+        let run = |overrides: serde_json::Value, expected: &str| {
+            let before = fs::read(private.join("project-launch.json")).unwrap();
+            T09_ALLOCATION_BOUNDARY.with(|hit| hit.set(0));
+            let project = serde_json::from_value(
+                serde_json::json!({"root":root,"template":null,"overrides":overrides}),
+            )
+            .unwrap();
+            let result = create_session_owner(
+                None,
+                &manager,
+                &private,
+                None,
+                None,
+                None,
+                None,
+                Some(project),
+            );
+            assert_eq!(result.unwrap_err(), expected);
+            assert_eq!(T09_ALLOCATION_BOUNDARY.with(|hit| hit.get()), 0);
+            assert_eq!(SESSION_COUNTER.load(Ordering::Relaxed), before_counter);
+            assert!(manager.history.lock().unwrap().is_none());
+            assert!(manager.sessions.lock().unwrap().is_empty());
+            assert_eq!(
+                fs::read(private.join("project-launch.json")).unwrap(),
+                before
+            );
+            assert_eq!(fs::read_dir(&private).unwrap().count(), 1);
+            assert!(!private.join("sessions").exists());
+        };
+        write(
+            serde_json::json!({"version":1,"defaults":{"adapter":"custom","command":"echo literal"}}),
+        );
+        approve();
+        write(
+            serde_json::json!({"version":1,"defaults":{"adapter":"custom","command":"echo changed"}}),
+        );
+        run(serde_json::json!({}), "project_config_untrusted");
+        approve();
+        run(serde_json::json!({"cwd":"missing"}), "project_config_cwd");
+        let missing = format!("T09_REQUIRED_ENV_{}", std::process::id());
+        assert!(std::env::var_os(&missing).is_none());
+        write(
+            serde_json::json!({"version":1,"defaults":{"adapter":"custom","command":"echo literal","env":{"TARGET_KEY":missing}}}),
+        );
+        approve();
+        run(serde_json::json!({}), "project_config_env_missing");
+        write(serde_json::json!({"version":1,"defaults":{"adapter":"codex","mode":"interactive"}}));
+        approve();
+        T09_MISSING_CLI.with(|flag| flag.set(true));
+        run(serde_json::json!({}), "project_config_cli_missing");
+        T09_MISSING_CLI.with(|flag| flag.set(false));
+        write(
+            serde_json::json!({"version":1,"defaults":{"adapter":"custom","command":"echo literal"}}),
+        );
+        approve();
+        T09_ALLOCATION_BOUNDARY.with(|hit| hit.set(0));
+        let project =
+            serde_json::from_value(serde_json::json!({"root":root,"template":null,"overrides":{}}))
+                .unwrap();
+        assert_eq!(
+            create_session_owner(
+                None,
+                &manager,
+                &private,
+                None,
+                None,
+                None,
+                None,
+                Some(project)
+            )
+            .unwrap_err(),
+            "test_entry_reached_allocation"
+        );
+        assert_eq!(T09_ALLOCATION_BOUNDARY.with(|hit| hit.get()), 1);
+    }
+    #[test]
+    fn t09_owner_entry_missing_trusted_source_never_falls_back_or_allocates() {
+        for rename in [false, true] {
+            let base = std::env::temp_dir().join(format!(
+                "yam-t09-source-missing-{}-{}-{rename}",
+                std::process::id(),
+                unix_timestamp_millis()
+            ));
+            fs::create_dir(&base).unwrap();
+            struct OwnFixture(PathBuf);
+            impl Drop for OwnFixture {
+                fn drop(&mut self) {
+                    let _ = fs::remove_dir_all(&self.0);
+                }
+            }
+            let _cleanup = OwnFixture(base.clone());
+            let root = base.join("project");
+            let private = base.join("app-private");
+            fs::create_dir(&root).unwrap();
+            fs::create_dir(&private).unwrap();
+            fs::write(
+                root.join("yam.json"),
+                br#"{"version":1,"defaults":{"adapter":"custom","command":"echo trusted"}}"#,
+            )
+            .unwrap();
+            let preview = project_config::preview(&root, &private).unwrap();
+            project_config::trust(&root, &private, &preview).unwrap();
+            let before = fs::read(private.join("project-launch.json")).unwrap();
+            if rename {
+                fs::rename(root.join("yam.json"), root.join("yam.moved.json")).unwrap();
+            } else {
+                fs::remove_file(root.join("yam.json")).unwrap();
+            }
+            let manager = SessionManager::default();
+            let before_counter = SESSION_COUNTER.load(Ordering::Relaxed);
+            T09_ALLOCATION_BOUNDARY.with(|hit| hit.set(0));
+            let project = serde_json::from_value(
+                serde_json::json!({"root":root,"template":null,"overrides":{}}),
+            )
+            .unwrap();
+            assert_eq!(
+                create_session_owner(
+                    None,
+                    &manager,
+                    &private,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(project)
+                )
+                .unwrap_err(),
+                "project_config_untrusted"
+            );
+            assert_eq!(T09_ALLOCATION_BOUNDARY.with(|hit| hit.get()), 0);
+            assert_eq!(SESSION_COUNTER.load(Ordering::Relaxed), before_counter);
+            assert!(manager.history.lock().unwrap().is_none());
+            assert!(manager.sessions.lock().unwrap().is_empty());
+            assert_eq!(
+                fs::read(private.join("project-launch.json")).unwrap(),
+                before
+            );
+            assert_eq!(fs::read_dir(&private).unwrap().count(), 1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod f6_log_tests {
+    use super::*;
+    fn string_log_fixture(bytes: &[u8]) -> (HistoryStore, PathBuf, String) {
+        let root = std::env::temp_dir().join(format!(
+            "yam-f6-string-{}-{}",
+            std::process::id(),
+            next_session_id()
+        ));
+        let store = HistoryStore::open(root.clone()).unwrap();
+        let id = "s-f6-string".to_string();
+        store
+            .start(&SessionSummary {
+                session_id: id.clone(),
+                status: "running".into(),
+                cwd: root.to_string_lossy().into(),
+                command: None,
+                launch: None,
+            })
+            .unwrap();
+        fs::write(store.log_path(&id), bytes).unwrap();
+        (store, root, id)
+    }
+    #[test]
+    fn f6_legacy_string_read_normal_exact_budget_and_missing_session() {
+        let (store, root, id) = string_log_fixture("中文\r\n".as_bytes());
+        assert_eq!(read_recorded_log_string(&store, &id).unwrap(), "中文\r\n");
+        fs::write(store.log_path(&id), vec![b'x'; 8 * 1024 * 1024]).unwrap();
+        assert_eq!(
+            read_recorded_log_string(&store, &id).unwrap().len(),
+            8 * 1024 * 1024
+        );
+        assert!(read_recorded_log_string(&store, "s-missing").is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn f6_legacy_string_read_rejects_invalid_utf8() {
+        let (store, root, id) = string_log_fixture(&[0xff]);
+        let result = read_recorded_log_string(&store, &id);
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(result.unwrap_err(), "Log encoding is invalid");
+    }
+    #[test]
+    fn f6_legacy_string_read_rejects_oversize_before_partial_utf8() {
+        let mut bytes = vec![b'x'; 8 * 1024 * 1024];
+        bytes.extend_from_slice("中".as_bytes());
+        let (store, root, id) = string_log_fixture(&bytes);
+        let result = read_recorded_log_string(&store, &id);
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(result.unwrap_err(), "Log exceeds its 8 MiB budget");
+    }
+    #[test]
+    fn f6_actual_recorded_source_range_preserves_legacy_and_utf8() {
+        let root = std::env::temp_dir().join(format!(
+            "yam-f6-{}-{}",
+            std::process::id(),
+            next_session_id()
+        ));
+        struct Own(PathBuf);
+        impl Drop for Own {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let _own = Own(root.clone());
+        let history = HistoryStore::open(root).unwrap();
+        fs::create_dir_all(history.log_path("s-f6").parent().unwrap()).unwrap();
+        fs::write(history.log_path("s-f6"), "中文").unwrap();
+        let sessions = Mutex::new(HashMap::new());
+        let legacy = recorded_log_source(&history, &sessions, "s-f6", 0).unwrap();
+        assert_eq!(legacy.range.as_ref().unwrap().truncation, "unknown");
+        assert_eq!(legacy.range.as_ref().unwrap().retained_bytes, 6);
+        let known = recorded_log_source(&history, &sessions, "s-f6", 106).unwrap();
+        assert_eq!(
+            known.range.as_ref().unwrap().start_offset.as_deref(),
+            Some("100")
+        );
+        let broken = recorded_log_source(&history, &sessions, "s-f6", 3).unwrap();
+        assert_eq!(broken.range.as_ref().unwrap().truncation, "unknown");
+        fs::write(history.log_path("s-f6"), [0xff]).unwrap();
+        assert!(recorded_log_source(&history, &sessions, "s-f6", 1).is_err());
+    }
+}
+
+#[cfg(test)]
+mod f6_export_tests {
+    use super::*;
+    #[test]
+    fn f6_r1_received_export_snapshot_budget_is_checked_before_assembly() {
+        let root = std::env::temp_dir().join(format!(
+            "yam-f6-received-{}-{}",
+            std::process::id(),
+            next_session_id()
+        ));
+        let store = HistoryStore::open(root.clone()).unwrap();
+        let summary = SessionSummary {
+            session_id: "s-f6-received".into(),
+            status: "running".into(),
+            cwd: root.to_string_lossy().into(),
+            command: None,
+            launch: None,
+        };
+        store.start(&summary).unwrap();
+        let record = store.get(&summary.session_id).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+        for raw in [false, true] {
+            for supplied in [false, true] {
+                for size in [8 * 1024 * 1024, 8 * 1024 * 1024 + 1] {
+                    let range =
+                        supplied.then(|| session_logs::retained_range(size, size as u64, true));
+                    let snapshot = LogSnapshot {
+                        data: "x".repeat(size),
+                        offset: 0,
+                        end_offset: size as u64,
+                        status: "running".into(),
+                        range,
+                    };
+                    let result = prepare_log_export(&record, snapshot, "received fixture", raw);
+                    if size == 8 * 1024 * 1024 {
+                        let (content, range) = result.unwrap();
+                        assert!(content.starts_with("YAM recorded session output\n"));
+                        assert_eq!(range.retained_bytes, size);
+                    } else {
+                        assert!(result.is_err(),"over-budget received snapshot must fail (raw={raw}, supplied={supplied})");
+                        assert_eq!(result.err().unwrap(), "Log exceeds its 8 MiB budget");
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn f6_actual_export_capture_metadata_content_and_saved_receipt_share_snapshot() {
+        let root = std::env::temp_dir().join(format!(
+            "yam-f6-export-{}-{}",
+            std::process::id(),
+            next_session_id()
+        ));
+        struct Own(PathBuf);
+        impl Drop for Own {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let _own = Own(root.clone());
+        let store = HistoryStore::open(root.clone()).unwrap();
+        let summary = SessionSummary {
+            session_id: "s-f6-export".into(),
+            status: "running".into(),
+            cwd: root.to_string_lossy().into(),
+            command: Some("fixture".into()),
+            launch: None,
+        };
+        store.start(&summary).unwrap();
+        let record = store.get(&summary.session_id).unwrap();
+        for raw in [false, true] {
+            let snapshot = LogSnapshot {
+                data: "中文\n".into(),
+                offset: 100,
+                end_offset: 107,
+                status: "running".into(),
+                range: None,
+            };
+            let (content, range) = prepare_log_export(&record, snapshot, "captured", raw).unwrap();
+            assert!(content.contains("中文"));
+            assert!(content.contains("retained_range"));
+            assert_eq!(range.retained_bytes, 7);
+            // Legacy receiving-owner snapshot lacks new provenance: do not infer exact range.
+            assert_eq!(range.truncation, "unknown");
+            assert!(publish_log_export(None, &content, range.clone())
+                .unwrap()
+                .is_none());
+            let path = root.join(if raw { "raw.txt" } else { "plain.txt" });
+            let result = publish_log_export(Some(&path), &content, range)
+                .unwrap()
+                .unwrap();
+            assert_eq!(fs::read_to_string(&path).unwrap(), content);
+            assert_eq!(result.path, path.to_string_lossy());
+            assert!(publish_log_export(Some(&path), "overwrite", result.range).is_err());
+            assert_eq!(fs::read_to_string(path).unwrap(), content);
+        }
+        let source_path = store.log_path(&summary.session_id);
+        fs::write(&source_path, "中文\n").unwrap();
+        let captured = recorded_log_source(
+            &store,
+            &Mutex::new(HashMap::new()),
+            &summary.session_id,
+            107,
+        )
+        .unwrap();
+        let snapshot = LogSnapshot {
+            data: captured.data,
+            offset: captured.offset,
+            end_offset: 107,
+            status: "stopped".into(),
+            range: captured.range,
+        };
+        fs::write(source_path, "later append must not be exported").unwrap();
+        let (content, range) = prepare_log_export(&record, snapshot, "captured", true).unwrap();
+        assert_eq!(range.start_offset.as_deref(), Some("100"));
+        assert_eq!(range.end_offset_exclusive.as_deref(), Some("107"));
+        assert!(content.contains("\"100\""));
+        assert!(!content.contains("later append"));
+        let receipt = publish_log_export(Some(&root.join("captured.txt")), &content, range)
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.range.retained_bytes, 7);
     }
 }

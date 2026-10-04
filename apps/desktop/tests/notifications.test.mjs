@@ -88,21 +88,22 @@ test('terminal notification supersedes an older waiting retry for the same sessi
 
 // Execute the actual App coordinator with mocked IPC; rendering the terminal is unnecessary.
 const appSource = ts.createSourceFile('App.tsx', readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-let coordinator;
+let coordinator,focusPredicate;
 function findCoordinator(node) {
+ if(ts.isFunctionDeclaration(node)&&node.name?.text==='terminalHasInputFocus')focusPredicate=node.getText(appSource);
  if (ts.isFunctionDeclaration(node) && node.name?.text === 'notifySession') coordinator = node.getText(appSource);
  ts.forEachChild(node, findCoordinator);
 }
 findCoordinator(appSource);
 assert.ok(coordinator, 'App notification coordinator must exist');
-const coordinatorJs = ts.transpileModule(coordinator, {compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText;
+const coordinatorJs = ts.transpileModule(focusPredicate+"\n"+coordinator, {compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText;
 function notificationHarness(options = {}) {
  const q = new NotificationQueue();
  const pending = new Map();
  const sends = []; const receipts = []; const errors = [];
  const invoke = async (command,args) => {
-  if (command === 'list_sessions' && options.listSessions) return options.listSessions();
-  if (command === 'list_sessions') return [{summary:{session_id:'s-one',cwd:'/repo'},status:options.status ?? 'succeeded'}];
+  if (command === 'get_session' && options.listSessions) return (await options.listSessions())[0];
+  if (command === 'get_session') return {summary:{session_id:'s-one',cwd:'/repo'},status:options.status ?? 'succeeded'};
   if (command === 'notify_session') {
    sends.push(args);
    if (options.sendGate) await options.sendGate;
@@ -114,8 +115,8 @@ function notificationHarness(options = {}) {
   }
  };
  const paused={current:options.paused??false};
- const factory = new Function('invoke','notifications','retryNotifications','document','sessionId','titlesRef','projectName','statusLabels','terminalStatuses','setNotificationError','discardAttentionRetries','pausedRef', `${coordinatorJs}; return notifySession;`);
- const notify = factory(invoke,{current:q},{current:pending},{hasFocus:()=>false},{current:null},{current:{}},()=> 'repo',{},terminalStatuses,error=>errors.push(error),discardAttentionRetries,paused);
+ const factory = new Function('invoke','notifications','retryNotifications','document','sessionId','titlesRef','projectName','statusLabels','terminalStatuses','setNotificationError','discardAttentionRetries','pausedRef','terminalLayoutRef','terminalViews', `${coordinatorJs}; return notifySession;`);
+ const notify = factory(invoke,{current:q},{current:pending},{hasFocus:()=>false},{current:null},{current:{}},()=> 'repo',{},terminalStatuses,error=>errors.push(error),discardAttentionRetries,paused,{current:{panes:[null],focused:0}},{current:new Map()});
  if(options.pauseRef)options.pauseRef.current=paused;
  return {notify,q,pending,sends,receipts,errors};
 }

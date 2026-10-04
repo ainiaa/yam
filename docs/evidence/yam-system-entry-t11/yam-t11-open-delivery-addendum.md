@@ -1,0 +1,7 @@
+# T11 Open delivery clarification
+
+Author: Jeff.Liu. Normative Root clarification after independent actual-body RED, inside existing authorized Open scope and unchanged owned paths. Original frozen feature/pause contracts remain preserved.
+
+A fresh owner heartbeat is an advisory hint, not proof a GUI remains alive or consumed a relay message. Owner Open admission uses existing shutdown/session gate, then releases business/settings locks. It may issue the fixed bounded desktop-open relay to a recent desktop, but must also invoke exactly one fixed current_exe zero-argument normal GUI launch through the existing single-instance route. Relay failure alone cannot suppress that fallback. No fake session ID, PTY/Agent creation, automatic input claim, changed owner idle rules or new ack/RPC/framework is added. Existing GUI single-instance callback only shows/focuses the current window and retains pending notification selection. Native single-instance behavior still needs current-source isolated acceptance; source tests do not certify it.
+
+Root actual-operation probe /tmp/yam-t11-root-fresh-disconnected-open-red.json compiled0/probe101: owner desktop_connected=true and heartbeat fresh but GUI absent/no consumer, relay succeeds locally, fixed launch skipped (0 vs1). Preserve initial delivery oracle logs, add true regression, then fix and reverify. This clarification corrects the internal delivery assumption and keeps the public Open outcome intact.

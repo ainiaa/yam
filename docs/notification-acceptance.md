@@ -1,5 +1,17 @@
 # YAM 通知与安装验收记录
 
+当前声明入口：[当前能力清单](yam-capability-matrix.md)，源码基线 `6b00a7d`。以下是旧阶段验收原文，保留原提交、退出语义、计数及缺口。当前 GUI 退出保留活跃任务；**Stop all tasks and quit** 是显式停止入口；无活跃任务的 owner 在 60 秒无客户端请求后退出。下文“退出清理后台会话”及步骤 5 的清理要求属于旧基线；新验收须分别检查普通 GUI 退出保持任务和显式停止清理。
+
+当前三平台 [实际包生命周期检查](yam-session-continuity-plan.md) 使用 terminate fixture process、暂停通知，不能替代正常 Cmd+Q 或通知点击。macOS 2026-10-01 隔离包卡片点击/退出唤醒证据有效于该样本；当前架构通知联合流程、Windows/Linux 实机点击/唤醒、正式签名升级与旧通知身份稳定性仍未原生验收。
+
+## 2026-10-03 T08 当前包边界
+
+作者：Jeff.Liu。[当前包原始回执与验收表](evidence/yam-native-t08/README.md) 使用 T06 一次冻结的 unsigned release 包，实际 identifier `com.yam.performance-validation-t06`、执行文件 `yam-desktop`，绑定 T05 dirty 产品源码及包/资源 SHA；不能只用 HEAD 或沿用 10 月 1–2 日样本声明本轮通过。一次纯 owner RPC 合成 PTY run 实际 exit 0、stderr 为空：重连同 owner、Unicode 日志搜索定位、两 RPC client 显式输入接管、停止后场景重启保留、owner 崩溃标 needs_attention 且不自动重跑、显式 stop-all 均通过。三个本轮 owner PID 均已退出；原先不存在的隔离数据目录现非空并保留，没有清空或重跑。
+
+通知在每次 create 前暂停，本轮没有启动 GUI、发送/点击系统通知、真实 CLI/Hook、或调整通知/辅助权限。真实 GUI 红关闭、普通 Cmd+Q/GUI 重开、原生输入复制/TUI/控制 UI、通知点击及退出唤醒仍未验收；RPC 接管不等于双窗口 UI 接管，owner restart 不等于 App 重开。CUA 三次库存读取超时说明本轮自动控制不可用，不是缺权限诊断。Windows/Linux 真实桌面仍未覆盖；旧 CI terminate fixture 与旧通知样本保留历史归属。
+
+## 历史证据（原文）
+
 作者：Jeff.Liu。基线：b8176a2。源码测试、CI、系统点击和正式安装验收分别记录。
 
 ## 遗留通知

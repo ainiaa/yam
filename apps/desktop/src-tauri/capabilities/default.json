@@ -6,9 +6,8 @@
     "main"
   ],
   "permissions": [
-    "core:default",
-    "opener:default",
-    "dialog:allow-open",
-    "deep-link:default"
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "dialog:allow-open"
   ]
 }

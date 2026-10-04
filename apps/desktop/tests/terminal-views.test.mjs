@@ -2,6 +2,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {TerminalViews} from '../src/terminal-views.ts';
+import {createTerminalLayout,assignTerminalPane,isTerminalProtocolResponse} from '../src/terminal-layout.ts';
 
 test('switching reuses the exact active terminal and preserves its state',()=>{
  const pool=new TerminalViews(2);let created=0,disposed=0;
@@ -48,18 +49,20 @@ test('retaining selected values disposes excluded renderers once, including reco
 
 import ts from 'typescript';
 import {readFileSync} from 'node:fs';
+import {queueTerminalResize} from '../src/terminal-settings.ts';
 import {applyTerminalFrame,validateTerminalFrame} from '../src/terminal-frame.ts';
 const source=ts.createSourceFile('App.tsx',readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
-let code,renderCode;
-function find(node){if(ts.isFunctionDeclaration(node)&&node.name?.text==='openHistory')code=node.getText(source);if(ts.isFunctionDeclaration(node)&&node.name?.text==='renderFrame')renderCode=node.getText(source);ts.forEachChild(node,find)}
+let code,renderCode,syncCode,fitCode;
+const layoutHelpers=[];
+function find(node){if(ts.isFunctionDeclaration(node)&&["cancelLayoutRestore","finishLayoutRestore","terminalPaneVisible","terminalPaneHasSize","terminalHasInputFocus","syncNotificationContext","showTerminalLayout","focusTerminalPane"].includes(node.name?.text))layoutHelpers.push(node.getText(source));if(ts.isFunctionDeclaration(node)&&node.name?.text==='syncViewSize')syncCode=node.getText(source);if(ts.isFunctionDeclaration(node)&&node.name?.text==='fitTerminalViews')fitCode=node.getText(source);if(ts.isFunctionDeclaration(node)&&node.name?.text==='openHistory')code=node.getText(source);if(ts.isFunctionDeclaration(node)&&node.name?.text==='renderFrame')renderCode=node.getText(source);ts.forEachChild(node,find)}
 find(source);
-const js=ts.transpileModule(renderCode+'\n'+code,{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText;
+const js=ts.transpileModule(layoutHelpers.join('\n')+'\n'+syncCode+'\n'+renderCode+'\n'+code,{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText;
 function harness(invoke, delayWrite=false, fullFrame=()=>Promise.resolve(null)){
- const refs={previousSession:{current:null},creatingSession:{current:false},selectionVersion:{current:0},sessionId:{current:null},selectedRecord:{current:null},outputCursor:{current:null},terminal:{current:null},fitAddon:{current:null},agentOutputWindow:{current:''},pendingOutput:{current:{drain:()=>[],delete(){}}},pendingState:{current:new Map()},terminalViews:{current:new TerminalViews(2)}};
+ const refs={ownerConnectionAvailable:{current:{available:true,version:0}},terminalLayoutRef:{current:createTerminalLayout()},paneHosts:{current:new Map()},terminalHost:{current:null},pausedRef:{current:false},notificationContextVersion:{current:0},notificationContextFlight:{current:{sending:false,pending:null}},terminalMounted:{current:true},detailVersion:{current:0},previousSession:{current:null},creatingSession:{current:false},selectionVersion:{current:0},sessionId:{current:null},selectedRecord:{current:null},outputCursor:{current:null},terminal:{current:null},fitAddon:{current:null},agentOutputWindow:{current:''},pendingOutput:{current:{drain:()=>[],delete(){}}},pendingState:{current:new Map()},terminalViews:{current:new TerminalViews(2)}};
  let resets=0,focus=0;const frames=[],writes=[];
- const make=id=>{const element={dataset:{sessionId:id},style:{},inert:true};return {instance:{_core:{_inputHandler:{_activeBuffer:{x:0}}},resize(cols,rows){this.cols=cols;this.rows=rows;},scrollToLine(){},reset(){resets++},write(_s,done){if(delayWrite)writes.push(done);else done?.()},focus(){if(!element.inert)focus++},cols:100,rows:30},fit:{fit(){}},element,cursor:null,ready:false,dispose(){}}};
+ const make=id=>{const element={dataset:{sessionId:id},style:{},inert:true,getBoundingClientRect:()=>({width:600,height:400}),contains:()=>false};return {instance:{_core:{_inputHandler:{_activeBuffer:{x:0}}},resize(cols,rows){this.cols=cols;this.rows=rows;},scrollToLine(){},reset(){resets++},write(_s,done){if(delayWrite)writes.push(done);else done?.()},focus(){if(!element.inert)focus++},cols:100,rows:30},fit:{fit(){}},element,cursor:null,ready:false,writable:false,disposed:false,resizePending:null,resizing:false,viewportRevision:0,dispose(){this.disposed=true;}}};
  refs.terminal.current=make().instance;refs.fitAddon.current=make().fit;
- const args={...refs,invoke:(command,args)=>command==='read_terminal_frame'?fullFrame(args):invoke(command,args),applyTerminalFrame,validateTerminalFrame,createTerminalView:make,setSession(){},setActiveProject(){},setSessionStatus(){},setTerminalNotice(){},setAgentPhase(){},updateAgentPhase(){},setError(){},document:{activeElement:{}},terminalStatuses:new Set(['succeeded','failed','stopped']),replayOutput:(s)=>({data:s.data,nextOffset:s.end_offset}),requestAnimationFrame:fn=>frames.push(fn),applyStateEvent(){}};
+ const args={setRecoveryRevision(){},layoutRestore:{current:{version:0,pending:false}},setLayoutRestoreReady(){},...refs,assignTerminalPane,setTerminalLayout(next){refs.terminalLayoutRef.current=next;},queueTerminalResize,invoke:(command,args)=>command==='set_agent_notification_context'?Promise.resolve(null):command==='read_terminal_frame'?fullFrame(args):invoke(command,args),applyTerminalFrame,validateTerminalFrame,createTerminalView:make,setSession(){},setActiveProject(){},setSessionStatus(){},setTerminalNotice(){},setAgentPhase(){},setSelectedAgent(){},updateAgentPhase(){},setError(){},document:{activeElement:{},hasFocus:()=>true},terminalStatuses:new Set(['succeeded','failed','stopped']),replayOutput:(s)=>({data:s.data,nextOffset:s.end_offset}),requestAnimationFrame:fn=>frames.push(fn),applyStateEvent(){}};
  const open=new Function(...Object.keys(args),js+';return openHistory')(...Object.values(args));
  return {open,refs,frames,writes,document:args.document,get resets(){return resets},get focus(){return focus}};
 }
@@ -103,17 +106,17 @@ test('refused admission leaves the previous in-flight selection able to complete
 let inputCode;
 function findInput(node){if(ts.isVariableDeclaration(node)&&node.name.getText(source)==='onData')inputCode=node.initializer.arguments[0].getText(source);ts.forEachChild(node,findInput)}
 findInput(source);
-const inputJs=ts.transpileModule('const handler='+inputCode,{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText;
+const inputJs=ts.transpileModule('const terminalHasInputFocus=()=>false;const terminalPaneVisible=()=>true;const terminalPaneHasSize=()=>true;const isTerminalProtocolResponse='+isTerminalProtocolResponse.toString()+';\n'+syncCode+'\nconst handler='+inputCode,{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText;
 test('hidden live terminal protocol answers return to their own PTY',async()=>{
  const writes=[];
- const handler=new Function('sessionId','view','invoke','id','setError',inputJs+';return handler')({current:'b'},{cursor:10,ready:true,live:true},async(name,args)=>writes.push({name,...args}),'a',()=>{});
+ const handler=new Function('queueTerminalResize','sessionId','view','invoke','id','setError','ownerConnectionAvailable',inputJs+';return handler')(queueTerminalResize,{current:'b'},{cursor:10,ready:true,live:true,instance:{cols:0,rows:0},element:{dataset:{sessionId:'a'}}},async(name,args)=>{if(name!=="resize_session")writes.push({name,...args});},'a',()=>{},{current:{available:true,version:0}});
  handler('\x1b[1;1R');await new Promise(setImmediate);
  assert.deepEqual(writes,[{name:'write_session',sessionId:'a',data:'\x1b[1;1R'}]);
 });
 
 test('old protocol queries replayed from a cold snapshot never inject input',async()=>{
  const writes=[];
- const handler=new Function('sessionId','view','invoke','id','setError',inputJs+';return handler')({current:'a'},{cursor:10,ready:false,live:true},async(name,args)=>writes.push({name,...args}),'a',()=>{});
+ const handler=new Function('queueTerminalResize','sessionId','view','invoke','id','setError','ownerConnectionAvailable',inputJs+';return handler')(queueTerminalResize,{current:'a'},{cursor:10,ready:false,live:true},async(name,args)=>{if(name!=="resize_session")writes.push({name,...args});},'a',()=>{},{current:{available:true,version:0}});
  handler('\x1b[1;11R');await new Promise(setImmediate);
  assert.deepEqual(writes,[]);
 });
@@ -131,7 +134,7 @@ test('the first attachment of a newly spawned PTY answers its pending startup qu
  const h=harness(async()=>({data:'\x1b[6n',offset:0,end_offset:4}),true);
  const loading=h.open(record('a'),true);await new Promise(setImmediate);
  const writes=[];const view=h.refs.terminalViews.current.get('a');
- const handler=new Function('sessionId','view','invoke','id','setError',inputJs+';return handler')({current:'a'},view,async(name,args)=>writes.push({name,...args}),'a',()=>{});
+ const handler=new Function('queueTerminalResize','sessionId','view','invoke','id','setError','ownerConnectionAvailable',inputJs+';return handler')(queueTerminalResize,{current:'a'},view,async(name,args)=>{if(name!=="resize_session")writes.push({name,...args});},'a',()=>{},h.refs.ownerConnectionAvailable);
  handler('\x1b[1;1R');await new Promise(setImmediate);
  assert.deepEqual(writes,[{name:'write_session',sessionId:'a',data:'\x1b[1;1R'}]);
  h.writes.shift()();await loading;assert.equal(view.firstAttachment,false);
@@ -151,14 +154,14 @@ test('newer buffered lifecycle wins over an old running snapshot and releases ca
  const loading=h.open(record('a'));const view=h.refs.terminalViews.current.get('a');
  h.refs.pendingState.current.set('a',{session_id:'a',status:'stopped'});view.live=false;h.refs.terminalViews.current.setRunning('a',false);
  await new Promise(setImmediate);release({data:'A',offset:0,end_offset:1,status:'running'});await loading;
- assert.equal(view.live,false);assert.equal(h.refs.terminalViews.current.canOpen,true);
+ assert.equal(view.live,false);assert.equal(h.refs.terminalViews.current.canOpen,false);h.refs.terminalLayoutRef.current.panes=[null];h.refs.terminalViews.current.setProtected([]);assert.equal(h.refs.terminalViews.current.canOpen,true);
 });
 test('warm selection cannot revive a stopped view from stale history',async()=>{
  const h=harness(async()=>({data:'A',offset:0,end_offset:1}));h.refs.terminalViews.current=new TerminalViews(1);
  await h.open(record('a'));const view=h.refs.terminalViews.current.get('a');
  view.live=false;view.status='stopped';h.refs.terminalViews.current.setRunning('a',false);
  await h.open(record('a'));
- assert.equal(view.live,false);assert.equal(h.refs.terminalViews.current.canOpen,true);
+ assert.equal(view.live,false);assert.equal(h.refs.terminalViews.current.canOpen,false);h.refs.terminalLayoutRef.current.panes=[null];h.refs.terminalViews.current.setProtected([]);assert.equal(h.refs.terminalViews.current.canOpen,true);
  assert.equal(h.refs.selectedRecord.current.status,'stopped');
 });
 test('switching away before the initial snapshot keeps startup query authorization',async()=>{
@@ -169,7 +172,7 @@ test('switching away before the initial snapshot keeps startup query authorizati
  const view=h.refs.terminalViews.current.get('a');assert.equal(view.firstAttachment,true);
  pending[0]({data:'old',offset:0,end_offset:3});await first;
  pending[1]({data:'\x1b[6n',offset:0,end_offset:4});await new Promise(setImmediate);
- const writes=[];const handler=new Function('sessionId','view','invoke','id','setError',inputJs+';return handler')({current:'a'},view,async(name,args)=>writes.push({name,...args}),'a',()=>{});
+ const writes=[];const handler=new Function('queueTerminalResize','sessionId','view','invoke','id','setError','ownerConnectionAvailable',inputJs+';return handler')(queueTerminalResize,{current:'a'},view,async(name,args)=>{if(name!=="resize_session")writes.push({name,...args});},'a',()=>{},h.refs.ownerConnectionAvailable);
  handler('\x1b[1;1R');await new Promise(setImmediate);assert.equal(writes.length,1);
  h.writes.shift()();await again;assert.equal(view.firstAttachment,false);
 });
@@ -184,25 +187,25 @@ test('a newer stop during replay cannot be replaced by an older buffered running
  const h=harness(async()=>({data:'A',offset:0,end_offset:1}),true);h.refs.terminalViews.current=new TerminalViews(1);
  h.refs.pendingState.current.set('a',{session_id:'a',status:'running'});
  const loading=h.open(record('a'));await new Promise(setImmediate);
- const args={...h.refs,active:true,notifySession(){},refreshHistory(){},terminalStatuses:new Set(['stopped']),applyStateEvent(_term,event){h.refs.selectedRecord.current.status=event.status;}};
+ const args={setRecoveryRevision(){},...h.refs,active:true,notifySession(){},refreshHistory(){},terminalStatuses:new Set(['stopped']),applyStateEvent(_term,event){h.refs.selectedRecord.current.status=event.status;}};
  const handler=new Function(...Object.keys(args),stateJs+';return handler')(...Object.values(args));
  handler({payload:{session_id:'a',status:'stopped'}});
  h.writes.shift()();await loading;
  assert.equal(h.refs.terminalViews.current.get('a').live,false);
- assert.equal(h.refs.terminalViews.current.canOpen,true);
+ assert.equal(h.refs.terminalViews.current.canOpen,false);h.refs.terminalLayoutRef.current.panes=[null];h.refs.terminalViews.current.setProtected([]);assert.equal(h.refs.terminalViews.current.canOpen,true);
  assert.equal(h.refs.selectedRecord.current.status,'stopped');
 });
 test('an older parse callback cannot enable protocol input during a new cold replay',async()=>{
  let reload;let reads=0;const h=harness(async()=>++reads===1?({data:'A',offset:0,end_offset:1}):new Promise(resolve=>reload=resolve),true);
  const first=h.open(record('a'),true);await new Promise(setImmediate);const view=h.refs.terminalViews.current.get('a');
  h.refs.pendingOutput.current.push=()=>{};
- const args={...h.refs,active:true,consumeOutput(){throw Error('gap');},updateAgentPhase(){},setError(){}};
+ const args={setRecoveryRevision(){},...h.refs,active:true,consumeOutput(){throw Error('gap');},updateAgentPhase(){},setError(){}};
  const output=new Function(...Object.keys(args),outputJs+';return handler')(...Object.values(args));
  output({payload:{session_id:'a',offset:2,end_offset:3,data:'X'}});
  const second=h.open(record('a'));await new Promise(setImmediate);
  h.writes.shift()();await first;
  reload({data:'\x1b[6n',offset:0,end_offset:4});await new Promise(setImmediate);
- const writes=[];const handler=new Function('view','invoke','id','setError',inputJs+';return handler')(view,async(name,args)=>writes.push({name,...args}),'a',()=>{});
+ const writes=[];const handler=new Function('queueTerminalResize','view','invoke','id','setError','ownerConnectionAvailable',inputJs+';return handler')(queueTerminalResize,view,async(name,args)=>{if(name!=="resize_session")writes.push({name,...args});},'a',()=>{},h.refs.ownerConnectionAvailable);
  handler('\x1b[1;1R');await new Promise(setImmediate);assert.deepEqual(writes,[]);assert.equal(view.ready,false);
  h.writes.shift()();await second;assert.equal(view.ready,true);
 });
@@ -212,8 +215,8 @@ const startJs=ts.transpileModule(startCode,{compilerOptions:{target:ts.ScriptTar
 test('a pending launch keeps its final slot while existing warm terminals remain selectable',async()=>{
  let release;const h=harness(async()=>({data:'A',offset:0,end_offset:1}));
  await h.open(record('warm'));
- const args={...h.refs,starting:false,adapters:[],selectedAdapter:'shell',command:'',cwd:'/repo',prompt:'',adapterArgs:'',launchMode:'interactive',setStarting(){},setError(){},setActiveProject(){},setCollapsedProjects(){},setSessionTitles(){},projectKey:path=>path,launchDialog:{current:null},refreshHistory(){},openHistory:h.open,invoke:()=>new Promise(resolve=>release=resolve)};
- const start=new Function(...Object.keys(args),startJs+';return startSession')(...Object.values(args));
+ const args={setRecoveryRevision(){},layoutRestore:{current:{version:0,pending:false}},setLayoutRestoreReady(){},...h.refs,starting:false,adapters:[],selectedAdapter:'shell',command:'',cwd:'/repo',prompt:'',adapterArgs:'',launchMode:'interactive',setStarting(){},setError(){},setActiveProject(){},setCollapsedProjects(){},setSessionTitles(){},projectKey:path=>path,launchDialog:{current:null},refreshHistory(){},openHistory:h.open,invoke:()=>new Promise(resolve=>release=resolve)};
+ const start=new Function(...Object.keys(args),ts.transpileModule(layoutHelpers.join('\n'),{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText+startJs+';return startSession')(...Object.values(args));
  const loading=start({cwd:'/repo',command:'test'});
  await h.open(record('warm'));assert.equal(h.refs.sessionId.current,'warm');
  await h.open(record('other'));
@@ -260,8 +263,8 @@ test('previous session records successful navigation only and does not overwrite
 
 test('rerun titles use the actual agent and prompt instead of the open dialog selection',async()=>{
  for(const [launch,expected] of [[{adapter:'claude',mode:'interactive',prompt:null},'Claude Code'],[{adapter:'codex',mode:'task',prompt:'Original task'},'Original task'],[null,'Interactive shell']]){
-  let titles={};const args={starting:false,creatingSession:{current:false},terminalViews:{current:{canOpen:true}},adapters:[{id:'shell',label:'System shell'},{id:'claude',label:'Claude Code'},{id:'codex',label:'OpenAI Codex'}],selectedAdapter:'shell',command:'',cwd:'/repo',prompt:'Unsubmitted draft',adapterArgs:'',launchMode:'interactive',setStarting(){},setError(){},setActiveProject(){},setCollapsedProjects(){},setSessionTitles(update){titles=update({})},projectKey:path=>path,launchDialog:{current:null},refreshHistory(){},openHistory:async()=>{},terminal:{current:null},invoke:async()=>({session_id:'new',cwd:'/repo',status:'running',command:null,launch})};
-  const start=new Function(...Object.keys(args),startJs+';return startSession')(...Object.values(args));
+  let titles={};const args={setRecoveryRevision(){},layoutRestore:{current:{version:0,pending:false}},setLayoutRestoreReady(){},starting:false,creatingSession:{current:false},terminalViews:{current:new TerminalViews(16)},adapters:[{id:'shell',label:'System shell'},{id:'claude',label:'Claude Code'},{id:'codex',label:'OpenAI Codex'}],selectedAdapter:'shell',command:'',cwd:'/repo',prompt:'Unsubmitted draft',adapterArgs:'',launchMode:'interactive',setStarting(){},setError(){},setActiveProject(){},setCollapsedProjects(){},setSessionTitles(update){titles=update({})},projectKey:path=>path,launchDialog:{current:null},refreshHistory(){},openHistory:async()=>{},terminal:{current:null},invoke:async()=>({session_id:'new',cwd:'/repo',status:'running',command:null,launch})};
+  const start=new Function(...Object.keys(args),ts.transpileModule(layoutHelpers.join('\n'),{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText+startJs+';return startSession')(...Object.values(args));
   await start({cwd:'/repo',command:'',launch});assert.equal(titles.new,expected);
  }
 });
@@ -286,7 +289,7 @@ test('successful full-scene selection releases ended hidden renderers and recons
  assert.equal(h.refs.outputCursor.current,42);
 });
 
-test('live projections stay cached and receive every window resize, including a pending size reversal',async()=>{
+test('visible live projections stay cached and receive every window resize, including a pending size reversal',async()=>{
  const h=harness(async()=>null,false,async args=>full(args.sessionId));
  await h.open(record('a'));await h.open(record('b'));
  assert.ok(h.refs.terminalViews.current.get('a'));
@@ -294,12 +297,14 @@ test('live projections stay cached and receive every window resize, including a 
  function findResize(node){if(ts.isVariableDeclaration(node)&&node.name.getText(source)==='resize')resizeCode=node.initializer.getText(source);ts.forEachChild(node,findResize)}
  findResize(source);assert.ok(resizeCode);
  const calls=[];h.refs.terminal.current.resize(100,30);
- const args={...h.refs,invoke:async(name,value)=>calls.push({name,...value})};
- const resize=new Function(...Object.keys(args),ts.transpileModule('const resize='+resizeCode,{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText+';return resize')(...Object.values(args));
+ h.refs.terminalLayoutRef.current={mode:'horizontal',panes:['a','b'],focused:1,revision:1};
+ const args={setRecoveryRevision(){},...h.refs,terminalPaneVisible:id=>h.refs.terminalLayoutRef.current.panes.includes(id),terminalPaneHasSize:view=>view.element.getBoundingClientRect().width>0,queueTerminalResize,setError:()=>{},invoke:async(name,value)=>calls.push({name,...value})};
+ for(const view of h.refs.terminalViews.current.all)view.writable=true;
+ const resize=new Function(...Object.keys(args),ts.transpileModule(syncCode+'\n'+fitCode+'\nconst resize='+resizeCode,{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText+';return resize')(...Object.values(args));
  h.refs.terminalViews.current.get('a').instance.resize(100,30);
  resize();assert.ok(calls.some(call=>call.sessionId==='a'&&call.cols===100&&call.rows===30));
  h.refs.terminal.current.resize(20,8);h.refs.terminalViews.current.get('a').instance.resize(20,8);
- resize();assert.ok(calls.some(call=>call.sessionId==='a'&&call.cols===20&&call.rows===8));
+ resize();await new Promise(setImmediate);assert.ok(calls.some(call=>call.sessionId==='a'&&call.cols===20&&call.rows===8));
  const a=h.refs.terminalViews.current.get('a');await h.open(record('a'));
  assert.equal(h.refs.terminalViews.current.get('a'),a);
 });
@@ -348,16 +353,25 @@ test('actual background recovery invalidates old frames without claiming a buffe
   ts.forEachChild(node,locate);
  }
  locate(source);assert.ok(callback);
- const callbackJs=ts.transpileModule('const callback='+callback,{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText;
+ const callbackJs=ts.transpileModule(layoutHelpers.join('\n')+'\nconst callback='+callback,{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText;
  for(const missing of [false,true]){
-  const view={cursor:9,ready:true,firstAttachment:true,dirty:false,lifecycleRevision:4,viewportRevision:2};
+  const view={record:{id:'a'},cursor:9,ready:true,firstAttachment:true,dirty:false,lifecycleRevision:4,viewportRevision:2};
   let clears=0,refreshes=0,reopens=0;const errors=[];
-  const args={terminalViews:{current:{all:[view]}},outputCursor:{current:9},pendingOutput:{current:{clear(){clears++}}},setError:message=>errors.push(message),refreshHistory(){refreshes++},selectedRecord:{current:{id:'a'}},openHistory(){reopens++}};
+  const args={setRecoveryRevision(){},layoutRestore:{current:{version:0,pending:false}},setLayoutRestoreReady(){},terminalLayoutRef:{current:{panes:['a']}},terminalViews:{current:{all:[view],get:()=>view}},outputCursor:{current:9},pendingOutput:{current:{clear(){clears++}}},setError:message=>errors.push(message),refreshHistory(){refreshes++},selectedRecord:{current:{id:'a'}},openHistory(){reopens++}};
   const onGap=new Function(...Object.keys(args),callbackJs+';return callback')(...Object.values(args));
   onGap({payload:{missing_events:missing}});
   assert.equal(view.cursor,null);assert.equal(view.ready,false);assert.equal(view.dirty,true);
   assert.equal(view.lifecycleRevision,5);assert.equal(view.viewportRevision,3);
   assert.equal(args.outputCursor.current,null);assert.equal(clears,1);assert.equal(refreshes,1);assert.equal(reopens,1);
   assert.equal(errors.length,missing?1:0);
+ }
+});
+
+
+test('T10 explicit newly created or continued first attachment synchronizes its initial dimensions',async()=>{
+ for(const launch of ['new','continue']){
+  const calls=[],h=harness(async(name,args)=>{calls.push({name,...args});return null;},false,async args=>full(args.sessionId));
+  await h.open(record('a'),true);for(const frame of h.frames)frame();await new Promise(setImmediate);
+  assert.equal(h.refs.terminalViews.current.get('a').writable,true,launch+' owns its new first attachment');assert.ok(calls.some(call=>call.name==='resize_session'&&call.sessionId==='a'&&call.cols===20&&call.rows===8));
  }
 });

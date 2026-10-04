@@ -5,6 +5,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 SPEC = importlib.util.spec_from_file_location("yam_memory", pathlib.Path(__file__).with_name("yam-memory.py"))
 memory = importlib.util.module_from_spec(SPEC)
@@ -30,6 +31,60 @@ PROCESSES = '''10 1 100 Thu Oct 1 22:45:22 2026 /apps/YAM Validation.app/Content
 
 
 class MemoryTests(unittest.TestCase):
+    def test_t06_collector_records_monotonic_time_without_relying_on_wall_clock(self):
+        footprint = {"unit": "byte", "errors": [], "processes": [
+            {"pid": pid, "auxiliary": {"phys_footprint": pid * 110}}
+            for pid in [10, 11, 12, 13, 14]]}
+        def run(argv):
+            if argv[0] == "lsappinfo": return APPS
+            if argv[0] == "ps": return PROCESSES
+            if argv[0] == "footprint":
+                pathlib.Path(argv[argv.index("-j") + 1]).write_text(json.dumps(footprint))
+                return ""
+            self.fail("unexpected process command")
+        metrics = {pid: {"phys_footprint_bytes": pid * 110, "cpu_seconds": .2} for pid in [10, 11, 12, 13, 14]}
+        with mock.patch.object(memory, "run", side_effect=run), mock.patch.object(memory.time, "monotonic", return_value=12.5), mock.patch.object(memory, "native_metrics", return_value=metrics):
+            value = memory.collect("com.yam.validation")
+        self.assertEqual(value["status"], "complete")
+        self.assertEqual(value.get("monotonic_seconds"), 12.5)
+        self.assertEqual(value.get("sample_start_monotonic_seconds"), 12.5)
+        self.assertEqual(value.get("sample_end_monotonic_seconds"), 12.5)
+        self.assertEqual([row["cpu_seconds"] for row in value["application"]], [.2, .2, .2])
+
+    def test_t06_actual_collector_does_not_mark_invalid_cpu_counters_complete(self):
+        for cpu in [None, float("nan"), -1]:
+            metrics = {pid: {"phys_footprint_bytes": pid * 110, "cpu_seconds": cpu}
+                       for pid in [10, 11, 12, 13, 14]}
+            def run(argv):
+                if argv[0] == "lsappinfo": return APPS
+                if argv[0] == "ps": return PROCESSES
+                self.fail("unexpected process command")
+            with self.subTest(cpu=cpu), mock.patch.object(memory, "run", side_effect=run), mock.patch.object(memory, "native_metrics", return_value=metrics):
+                value = memory.collect("com.yam.validation")
+                self.assertEqual(value["status"], "partial")
+                self.assertIsNone(value["phys_footprint_sum_bytes"])
+
+    def test_t06_twenty_second_sample_reports_missed_five_second_slots(self):
+        timing = getattr(memory, "sample_timing", None)
+        self.assertTrue(callable(timing), "T06 sample schedule timing is missing")
+        value = timing(10, 10, 30, 5)
+        self.assertEqual(value["scheduled_monotonic_seconds"], 10)
+        self.assertEqual(value["missed_slots"], 3)
+        self.assertTrue(value["late"])
+        timely = timing(10, 10, 14, 5)
+        self.assertEqual(timely["missed_slots"], 0)
+        self.assertFalse(timely["late"])
+        for values in [(10, 9, 14, 5), (10, 12, 11, 5), (10, 10, 14, 0)]:
+            with self.subTest(values=values), self.assertRaises(ValueError): timing(*values)
+
+    def test_t06_mach_cpu_ticks_use_host_timebase_before_seconds(self):
+        convert = getattr(memory, "cpu_seconds_from_ticks", None)
+        self.assertTrue(callable(convert), "Mach CPU ticks must not be relabeled as nanoseconds")
+        self.assertEqual(convert(24_000_000, 125, 3), 1)
+        self.assertEqual(convert(1_000_000_000, 1, 1), 1)
+        for values in [(1, 1, 0), (-1, 125, 3), (1, 0, 3)]:
+            with self.subTest(values=values), self.assertRaises(ValueError): convert(*values)
+
     def sample(self, apps=APPS, after=PROCESSES, footprint=None):
         before = memory.parse_processes(PROCESSES)
         return memory.attribute_sample("com.yam.validation", memory.parse_apps(apps), before,
@@ -77,10 +132,10 @@ class MemoryTests(unittest.TestCase):
     def test_connection_descriptor_is_private_bounded_and_loopback_only(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = pathlib.Path(temporary)/'connection.json'
-            descriptor = {"version":1,"address":"127.0.0.1:12345","token":"a"*64,"instance":"b"*64}
+            descriptor = {"version":2,"address":"127.0.0.1:12345","token":"a"*64,"instance":"b"*64}
             path.write_text(json.dumps(descriptor)); path.chmod(0o600)
             self.assertEqual(memory.read_connection(path),descriptor)
-            for change in [{"address":"example.com:12345"},{"token":"short"},{"version":2}]:
+            for change in [{"address":"example.com:12345"},{"token":"short"},{"version":1}]:
                 path.write_text(json.dumps({**descriptor,**change}))
                 with self.assertRaises(ValueError): memory.read_connection(path)
             path.write_text(json.dumps(descriptor)); path.chmod(0o644)
@@ -90,6 +145,12 @@ class MemoryTests(unittest.TestCase):
             with self.assertRaises((ValueError,OSError)):memory.read_connection(link)
             path.write_bytes(b'x'*4097)
             with self.assertRaises(ValueError):memory.read_connection(path)
+
+    def test_t04_legacy_protocol_is_rejected_without_memory_rpc(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = pathlib.Path(temporary)/"connection.json"
+            path.write_text(json.dumps({"version":1,"address":"127.0.0.1:12345","token":"a"*64,"instance":"b"*64})); path.chmod(0o600)
+            with self.assertRaises(ValueError): memory.read_connection(path)
 
     def test_ambiguous_roots_and_no_members_fail_closed(self):
         for apps in [APPS + APPS, APPS.replace('coalition: 50 { 10 11 12 13 14 }', 'coalition: 50')]:

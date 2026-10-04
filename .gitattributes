@@ -1,0 +1,2 @@
+# Preserve checksum-bound upstream license bodies byte for byte.
+scripts/third-party-notices/bodies/* -whitespace

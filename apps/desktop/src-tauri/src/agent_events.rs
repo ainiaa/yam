@@ -319,10 +319,7 @@ impl super::HistoryStore {
         id: &str,
         edit: impl FnOnce(&mut AgentState) -> Result<T, String>,
     ) -> Result<T, String> {
-        let mut records = self
-            .records
-            .lock()
-            .map_err(|_| "Session history lock poisoned")?;
+        let mut records = self.lock_records()?;
         let mut next = records.clone();
         let record = next
             .iter_mut()
@@ -370,10 +367,7 @@ impl super::HistoryStore {
         generation: &str,
         reason: &str,
     ) -> Result<(), String> {
-        let mut records = self
-            .records
-            .lock()
-            .map_err(|_| "Session history lock poisoned")?;
+        let mut records = self.lock_records()?;
         let mut next = records.clone();
         let record = next
             .iter_mut()
@@ -397,10 +391,7 @@ impl super::HistoryStore {
         event: &AgentEvent,
     ) -> Result<Option<String>, String> {
         // Lifecycle and launch identity are checked inside the same lock as the atomic commit.
-        let mut records = self
-            .records
-            .lock()
-            .map_err(|_| "Session history lock poisoned")?;
+        let mut records = self.lock_records()?;
         let mut next = records.clone();
         let record = next
             .iter_mut()
@@ -457,7 +448,7 @@ pub(super) enum NativeSource<'a> {
     Round(&'a AgentReceipt),
 }
 // ponytail: serialize native notification requests globally; use per-session gates if measured delivery latency requires it.
-static NATIVE_DELIVERY: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static NATIVE_DELIVERY: std::sync::Mutex<()> = std::sync::Mutex::new(());
 impl super::HistoryStore {
     pub(super) fn native_delivery(
         &self,

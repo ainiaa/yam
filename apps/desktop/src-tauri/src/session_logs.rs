@@ -1,8 +1,46 @@
 use serde::{Deserialize, Serialize};
+use std::io::Read;
 
 const MAX_LOG_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SCAN_BYTES: usize = 64 * 1024 * 1024;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct RetainedLogRange {
+    pub start_offset: Option<String>,
+    pub end_offset_exclusive: Option<String>,
+    pub retained_bytes: usize,
+    pub truncation: String,
+}
+pub(super) fn retained_range(bytes: usize, end: u64, active: bool) -> RetainedLogRange {
+    let mut range = RetainedLogRange {
+        start_offset: None,
+        end_offset_exclusive: None,
+        retained_bytes: bytes,
+        truncation: "unknown".into(),
+    };
+    if bytes > MAX_LOG_BYTES || (!active && end == 0) {
+        return range;
+    }
+    let Some(start) = u64::try_from(bytes).ok().and_then(|n| end.checked_sub(n)) else {
+        return range;
+    };
+    range.start_offset = Some(start.to_string());
+    range.end_offset_exclusive = Some(end.to_string());
+    range.truncation = if start == 0 { "complete" } else { "truncated" }.into();
+    range
+}
+pub(super) fn read_bounded_log(reader: impl std::io::Read) -> Result<String, String> {
+    let mut bytes = Vec::new();
+    reader
+        .take(MAX_LOG_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "Cannot read retained log")?;
+    // The cutoff may split a valid code point: classify the byte budget before decoding.
+    if bytes.len() > MAX_LOG_BYTES {
+        return Err("Log exceeds its 8 MiB budget".into());
+    }
+    String::from_utf8(bytes).map_err(|_| "Log encoding is invalid".into())
+}
 pub(super) struct LogSource {
     pub session_id: String,
     pub cwd: String,
@@ -10,13 +48,24 @@ pub(super) struct LogSource {
 pub(super) struct LogData {
     pub data: String,
     pub offset: u64,
+    pub range: Option<RetainedLogRange>,
 }
 #[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct SearchRequest {
     pub query: String,
     pub case_sensitive: bool,
     pub skip: usize,
     pub limit: usize,
+    #[serde(default)]
+    pub source_cursor: Option<SearchCursor>,
+}
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SearchCursor {
+    pub source_offset: usize,
+    #[serde(default)]
+    pub snapshot: Option<String>,
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub(super) struct LogHit {
@@ -28,10 +77,20 @@ pub(super) struct LogHit {
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub(super) struct SearchPage {
-    hits: Vec<LogHit>,
-    has_more: bool,
-    complete: bool,
-    issues: Vec<String>,
+    pub hits: Vec<LogHit>,
+    pub has_more: bool,
+    pub complete: bool,
+    pub issues: Vec<String>,
+    pub next_cursor: Option<SearchCursor>,
+    pub current_cursor: Option<SearchCursor>,
+    #[serde(default)]
+    pub scanned_ranges: Vec<ScannedLogRange>,
+}
+#[derive(Debug, Serialize, Deserialize)]
+pub(super) struct ScannedLogRange {
+    pub session_id: String,
+    pub range: Option<RetainedLogRange>,
+    pub line_scan_complete: bool,
 }
 pub(super) struct RecordedLine {
     pub offset: u64,
@@ -63,7 +122,9 @@ pub(super) fn plain_lines(raw: &str, base: u64) -> impl Iterator<Item = Recorded
                     '\u{90}' | '\u{9e}' | '\u{9f}' => state = Parse::Payload(false),
                     '\r' | '\n' => {
                         let start = offset;
-                        offset = base + index as u64 + ch.len_utf8() as u64;
+                        offset = base
+                            .saturating_add(index as u64)
+                            .saturating_add(ch.len_utf8() as u64);
                         if !crlf {
                             return Some(RecordedLine {
                                 offset: start,
@@ -152,6 +213,13 @@ pub(super) fn search(
             "Use 1–256 query characters, up to 50 results, and at most 5000 skipped lines".into(),
         );
     }
+    let start = request
+        .source_cursor
+        .as_ref()
+        .map_or(0, |c| c.source_offset);
+    if start > sources.len() {
+        return Err("Log search cursor expired; restart search".into());
+    }
     let needle = if request.case_sensitive {
         request.query.clone()
     } else {
@@ -162,20 +230,37 @@ pub(super) fn search(
         has_more: false,
         complete: true,
         issues: Vec::new(),
+        next_cursor: None,
+        current_cursor: request.source_cursor.clone(),
+        scanned_ranges: Vec::new(),
     };
     let mut bytes = 0usize;
     let mut matches = 0usize;
-    for (index, source) in sources.iter().enumerate() {
+    for (index, source) in sources.iter().enumerate().skip(start) {
         if cancelled() {
             return Err("Search cancelled".into());
         }
-        if index == 256 {
+        if index - start == 256 {
+            page.next_cursor = Some(SearchCursor {
+                source_offset: index,
+                snapshot: request
+                    .source_cursor
+                    .as_ref()
+                    .and_then(|c| c.snapshot.clone()),
+            });
             page.complete = false;
             page.issues
                 .push("256-session scan budget reached; narrow the search to one session".into());
             break;
         }
         if bytes >= MAX_SCAN_BYTES {
+            page.next_cursor = Some(SearchCursor {
+                source_offset: index,
+                snapshot: request
+                    .source_cursor
+                    .as_ref()
+                    .and_then(|c| c.snapshot.clone()),
+            });
             page.complete = false;
             page.issues
                 .push("64 MiB scan budget reached; narrow the search to one session".into());
@@ -196,12 +281,24 @@ pub(super) fn search(
             continue;
         }
         if log.data.len() > MAX_SCAN_BYTES.saturating_sub(bytes) {
+            page.next_cursor = Some(SearchCursor {
+                source_offset: index,
+                snapshot: request
+                    .source_cursor
+                    .as_ref()
+                    .and_then(|c| c.snapshot.clone()),
+            });
             page.complete = false;
             page.issues
                 .push("64 MiB scan budget reached; narrow the search to one session".into());
             break;
         }
         bytes += log.data.len();
+        page.scanned_ranges.push(ScannedLogRange {
+            session_id: source.session_id.clone(),
+            range: log.range.clone(),
+            line_scan_complete: false,
+        });
         for line in plain_lines(&log.data, log.offset) {
             if cancelled() {
                 return Err("Search cancelled".into());
@@ -228,6 +325,7 @@ pub(super) fn search(
                 matches += 1;
             }
         }
+        page.scanned_ranges.last_mut().unwrap().line_scan_complete = true;
     }
     Ok(page)
 }
@@ -331,6 +429,144 @@ fn publish_export(
 mod tests {
     use super::*;
 
+    #[test]
+    fn f6_range_provenance_exact_u64_and_legacy_unknown() {
+        assert_eq!(
+            serde_json::to_value(retained_range(4, u64::MAX, true)).unwrap(),
+            serde_json::json!({"start_offset":"18446744073709551611","end_offset_exclusive":"18446744073709551615","retained_bytes":4,"truncation":"truncated"})
+        );
+        assert_eq!(retained_range(0, 0, true).truncation, "complete");
+        for (bytes, end) in [(0, 0), (4, 0), (4, 3)] {
+            let range = retained_range(bytes, end, false);
+            assert_eq!(range.truncation, "unknown");
+            assert_eq!(range.start_offset, None);
+        }
+    }
+
+    #[test]
+    fn f6_strict_bounded_read_classifies_oversize_before_partial_utf8() {
+        let mut data = vec![b'x'; MAX_LOG_BYTES - 1];
+        data.extend_from_slice("😀".as_bytes());
+        assert_eq!(
+            read_bounded_log(data.as_slice()).unwrap_err(),
+            "Log exceeds its 8 MiB budget"
+        );
+        assert_eq!(
+            read_bounded_log([0xff].as_slice()).unwrap_err(),
+            "Log encoding is invalid"
+        );
+        assert_eq!(read_bounded_log("中文".as_bytes()).unwrap(), "中文");
+        assert_eq!(
+            read_bounded_log(vec![b'x'; MAX_LOG_BYTES].as_slice())
+                .unwrap()
+                .len(),
+            MAX_LOG_BYTES
+        );
+    }
+
+    #[test]
+    fn f6_actual_search_zero_hits_includes_only_admitted_sources() {
+        let page = search(&sources(), read, &request("no hit"), || false).unwrap();
+        let value = serde_json::to_value(page).unwrap();
+        assert_eq!(value["scanned_ranges"].as_array().unwrap().len(), 2);
+        assert_eq!(value["scanned_ranges"][0]["line_scan_complete"], true);
+        let page = search(
+            &sources(),
+            |id| {
+                if id == "s-one" {
+                    Err("missing".into())
+                } else {
+                    read(id)
+                }
+            },
+            &request("no hit"),
+            || false,
+        )
+        .unwrap();
+        let value = serde_json::to_value(page).unwrap();
+        assert_eq!(value["scanned_ranges"].as_array().unwrap().len(), 1);
+        assert_eq!(value["scanned_ranges"][0]["session_id"], "s-two");
+    }
+
+    #[test]
+    fn f6_actual_search_hit_limit_is_not_complete_line_scan() {
+        let value =
+            serde_json::to_value(search(&sources(), read, &request("first"), || false).unwrap())
+                .unwrap();
+        assert_eq!(value["scanned_ranges"][0]["line_scan_complete"], true);
+        assert_eq!(value["scanned_ranges"][1]["line_scan_complete"], false);
+        let mut bounded = request("first");
+        bounded.limit = 1;
+        let value =
+            serde_json::to_value(search(&sources(), read, &bounded, || false).unwrap()).unwrap();
+        assert_eq!(value["scanned_ranges"].as_array().unwrap().len(), 1);
+        assert_eq!(value["scanned_ranges"][0]["line_scan_complete"], false);
+    }
+
+    #[test]
+    fn f6_actual_search_source_and_byte_pages_never_claim_unread_ranges() {
+        let many: Vec<_> = (0..257)
+            .map(|i| LogSource {
+                session_id: format!("s-{i}"),
+                cwd: "/fixture".into(),
+            })
+            .collect();
+        let read = |_: &str| {
+            Ok(LogData {
+                data: "no hits".into(),
+                offset: 0,
+                range: Some(retained_range(7, 7, true)),
+            })
+        };
+        let page = search(&many, read, &request("absent"), || false).unwrap();
+        assert_eq!(page.scanned_ranges.len(), 256);
+        assert_eq!(page.next_cursor.unwrap().source_offset, 256);
+        assert!(page.scanned_ranges.iter().all(|r| r.line_scan_complete));
+        let mut next = request("absent");
+        next.source_cursor = Some(SearchCursor {
+            source_offset: 256,
+            snapshot: None,
+        });
+        assert_eq!(
+            search(&many, read, &next, || false)
+                .unwrap()
+                .scanned_ranges
+                .len(),
+            1
+        );
+        let page = search(
+            &many[..9],
+            |_| {
+                Ok(LogData {
+                    data: "x".repeat(MAX_LOG_BYTES),
+                    offset: 0,
+                    range: None,
+                })
+            },
+            &request("absent"),
+            || false,
+        )
+        .unwrap();
+        assert_eq!(page.scanned_ranges.len(), 8);
+        assert_eq!(page.next_cursor.unwrap().source_offset, 8);
+        let page = search(
+            &sources(),
+            |_| {
+                Ok(LogData {
+                    data: "x".repeat(MAX_LOG_BYTES + 1),
+                    offset: 0,
+                    range: None,
+                })
+            },
+            &request("absent"),
+            || false,
+        )
+        .unwrap();
+        assert!(page.scanned_ranges.is_empty());
+        assert!(!page.complete);
+        assert!(search(&sources(), read, &request("absent"), || true).is_err());
+    }
+
     fn sources() -> Vec<LogSource> {
         vec![
             LogSource {
@@ -348,6 +584,7 @@ mod tests {
             query: query.into(),
             case_sensitive: false,
             skip: 0,
+            source_cursor: None,
             limit: 2,
         }
     }
@@ -360,6 +597,7 @@ mod tests {
             }
             .into(),
             offset: 100,
+            range: None,
         })
     }
 
@@ -444,6 +682,56 @@ mod tests {
     }
 
     #[test]
+    fn t04_global_unicode_log_search_continues_past_first_256_sources() {
+        let sources = (0..513)
+            .map(|i| LogSource {
+                session_id: format!("s-{i:05}"),
+                cwd: "/中文/😀".into(),
+            })
+            .collect::<Vec<_>>();
+        let mut cursor = serde_json::Value::Null;
+        let mut hits = Vec::new();
+        let mut reads = 0;
+        for _ in 0..4 {
+            let request: SearchRequest = serde_json::from_value(serde_json::json!({"query":"中文 😀","case_sensitive":true,"skip":0,"limit":50,"source_cursor":cursor})).unwrap();
+            let count = std::cell::Cell::new(0);
+            let page = search(
+                &sources,
+                |id| {
+                    count.set(count.get() + 1);
+                    Ok(LogData {
+                        data: if id == "s-00512" {
+                            "中文 😀 hit\n".into()
+                        } else {
+                            "empty\n".into()
+                        },
+                        offset: 0,
+                        range: None,
+                    })
+                },
+                &request,
+                || false,
+            )
+            .unwrap();
+            assert!(count.get() <= 256, "each continuation must stay bounded");
+            reads += count.get();
+            let value = serde_json::to_value(page).unwrap();
+            hits.extend(value["hits"].as_array().unwrap().iter().cloned());
+            if value["complete"] == true {
+                break;
+            }
+            cursor = value["next_cursor"].clone();
+            assert!(
+                !cursor.is_null(),
+                "partial scan must expose continuation rather than permanently hide later archives"
+            );
+        }
+        assert_eq!(reads, 513);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0]["session_id"], "s-00512");
+        assert_eq!(hits[0]["text"], "中文 😀 hit");
+    }
+    #[test]
     fn oversized_logs_are_reported_and_matching_long_lines_keep_the_match_visible() {
         let page = search(
             &sources()[..1],
@@ -451,6 +739,7 @@ mod tests {
                 Ok(LogData {
                     data: "x".repeat(MAX_LOG_BYTES + 1),
                     offset: 0,
+                    range: None,
                 })
             },
             &request("x"),
@@ -465,6 +754,7 @@ mod tests {
                 Ok(LogData {
                     data: format!("{}needle{}", "中".repeat(1000), "😀".repeat(1000)),
                     offset: 0,
+                    range: None,
                 })
             },
             &request("needle"),
@@ -480,6 +770,7 @@ mod tests {
         let log = LogData {
             data: "one\n中文 😀 needle\nthree\n".into(),
             offset: 100,
+            range: None,
         };
         assert!(excerpt(&log, 104, 5).unwrap().contains("中文 😀 needle"));
         for (offset, column) in [(99, 0), (102, 0), (999, 0), (104, 1000)] {
@@ -488,6 +779,7 @@ mod tests {
         let log = LogData {
             data: format!("{}needle", "中".repeat(2000)),
             offset: 400,
+            range: None,
         };
         let value = excerpt(&log, 400, 2000).unwrap();
         assert!(value.contains("needle"));
@@ -499,6 +791,7 @@ mod tests {
         let log = LogData {
             data: "\x1b[31m中文 😀\x1b[0m\n\x1b]52;c;secret\x07done\n".into(),
             offset: 123,
+            range: None,
         };
         let plain = export_text("metadata\n", &log, false);
         assert!(plain.starts_with("metadata\n"));
@@ -515,6 +808,7 @@ mod tests {
         let log = LogData {
             data: "one\r\n\r\ntwo\n\n".into(),
             offset: 0,
+            range: None,
         };
         assert_eq!(export_text("", &log, false), "one\n\ntwo\n\n");
         assert_eq!(plain_lines(&"\n".repeat(1024 * 1024), 0).take(2).count(), 2);
@@ -524,6 +818,7 @@ mod tests {
                 Ok(LogData {
                     data: "İ".repeat(1000) + "needle",
                     offset: 0,
+                    range: None,
                 })
             },
             &request("NEEDLE"),

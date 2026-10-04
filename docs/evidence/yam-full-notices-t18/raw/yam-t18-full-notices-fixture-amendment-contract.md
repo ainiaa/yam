@@ -1,0 +1,13 @@
+# T18 fixture-only compatibility amendment
+
+Author: Jeff.Liu. Root controller, user-authorized remaining-plan implementation.
+
+The original source contract SHA b74fab99846e18dbba685292a864bf63515bb5a6b9626232acbb8c387faf7166 and original plan SHA 4886d2991783a88b980c7cbab68c378026fee205206302943dfd685859a50708 remain immutable. All source acceptance, 535+12 inventory, no new dependency/lock/Rust/UI writes, deadline/budget and sole native smoke exclusion remain in force.
+
+Actual filtered host run /tmp/yam-t18-full-notices-host-stage.log failed 119 tests/1 failure/1 designated native skip. The sole failure is scripts/test_updater_dependency.py::UpdaterDependencyTests::test_no_runtime_plugin_registration_or_frontend_calls, which asserts no tauri_plugin_updater token anywhere in Rust. That blanket SDK-only-stage guard predates the accepted GUI-only T20 source closure, independent SourceReview and native unconfigured subset. It is stale; do not skip it or claim an all-green host run.
+
+Add ownership ONLY for scripts/test_updater_dependency.py, original SHA 3489a51350d00d4c61f8478a946861ee36bf413e6a2ba306f84515f1a65ffc0f. Replace only the obsolete blanket registration prohibition with current-stage assertions for GUI-only updater initialization/registration isolation and no frontend updater SDK. Preserve existing Rust desktop SDK declaration/lock integrity, no frontend dependency and no updater feed/key/artifacts/capability checks. Do not introduce runtime helpers, loosen owner/CLI/Agent isolation or change any production T20 source. Existing semantic runtime isolation tests remain primary; the Python fixture is an integration/source-shape guard, not new native acceptance.
+
+Preserve original fixture bytes and real failing host raw, update the fixture, run its exact targeted suite once, then rerun the unchanged full host command with exactly its one designated native smoke excluded. Other frozen checks run on the final source candidate. T18 scope remains its one source-level full inventory/release gate outcome, with this fixture required for compatibility verification. No old evidence archive mutation, publication/signing/credentials or user policy decision.
+
+The amended plan adds its own administrative plan path to the ownership audit as a controller-only artifact. Source author may edit the original 17 paths plus this one fixture. Root controls the new plan; the original plan is untouched. Final source/delta audit compares the original T18 start receipt using the union of effective owned paths, including the new administrative plan. No source baseline is reset and no prior candidate failure is erased.
