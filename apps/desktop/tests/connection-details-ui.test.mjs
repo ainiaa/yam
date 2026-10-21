@@ -60,10 +60,10 @@ test('launch-time CLI facts and receipt capability hints distinguish supported, 
  const supported=text(renderConnection(launch,{cli_version:'codex-cli 0.162.1',cli_platform:'macos',integration:'connected'}));
  assert.match(supported,/CLI version.*codex-cli 0\.162\.1/);
  assert.match(supported,/Launch platform.*macos/);
- assert.match(supported,/Failure fallback.*Supported format/);
+ assert.match(supported,/Failure fallback.*Event validation enabled/);
  assert.match(supported,/does not prove.*receipt.*delivered/i);
- for(const agent of [undefined,{integration:'connected'},{cli_version:'codex-cli 99.0.0',cli_platform:'macos',integration:'connected'},{cli_version:'codex-cli 0.162.1',cli_platform:'linux',integration:'connected'}]){
-  const info=text(renderConnection(launch,agent));assert.match(info,/Failure fallback.*Unverified/);assert.doesNotMatch(info,/Failure fallback.*Supported format/);
+ for(const agent of [undefined,{integration:'connected'},{cli_version:'codex-cli 0.162.1',cli_platform:'linux',integration:'connected'}]){
+  const info=text(renderConnection(launch,agent));assert.match(info,/Failure fallback.*Unverified/);assert.doesNotMatch(info,/Failure fallback.*Event validation enabled/);
  }
  const disconnected=text(renderConnection(launch,{cli_version:'codex-cli 0.162.1',cli_platform:'macos',integration:'connecting'}));
  assert.match(disconnected,/Failure fallback.*Not connected/);
@@ -78,12 +78,13 @@ test('capability disclosure receives current session agent metadata',()=>{
  const rendered=new Function('React','SessionConnection','session','currentAgent',bindings)(React,()=>{}, {launch:{adapter:'codex',mode:'interactive'}},currentAgent);
  assert.equal(rendered.props.agent,currentAgent);
 });
-test('measured Codex 0.163.0 is disclosed as supported only with connected macOS hooks',()=>{
+test('Codex fallback eligibility follows connected platform capability, not exact CLI versions',()=>{
  const launch={adapter:'codex',mode:'interactive'};
  const info=text(renderConnection(launch,{cli_version:'codex-cli 0.163.0',cli_platform:'macos',integration:'connected'}));
- assert.match(info,/Failure fallback.*Supported format/);
+ assert.match(info,/Failure fallback.*Event validation enabled/);
  assert.match(info,/0\.162\.1.*0\.163\.0/);
- for(const agent of [{cli_version:'codex-cli 0.163.0',cli_platform:'windows',integration:'connected'},{cli_version:'codex-cli 0.164.0',cli_platform:'macos',integration:'connected'}])assert.match(text(renderConnection(launch,agent)),/Failure fallback.*Unverified/);
+ for(const version of ['codex-cli 0.163.0','codex-cli 0.164.0','codex-cli 1.0.0'])assert.match(text(renderConnection(launch,{cli_version:version,cli_platform:'macos',integration:'connected'})),/Failure fallback.*Event validation enabled/);
+ assert.match(text(renderConnection(launch,{cli_version:'codex-cli 0.163.0',cli_platform:'windows',integration:'connected'})),/Failure fallback.*Unverified/);
  assert.match(text(renderConnection(launch,{cli_version:'codex-cli 0.163.0',cli_platform:'macos',integration:'connecting'})),/Failure fallback.*Not connected/);
 });
 

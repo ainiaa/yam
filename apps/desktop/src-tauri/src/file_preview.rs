@@ -578,7 +578,7 @@ fn read_bytes(
     Err("file_platform_unavailable")
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn read_text(
     root: &Path,
     path: &Path,

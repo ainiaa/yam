@@ -1,11 +1,14 @@
 // Author: Jeff.Liu. Independently authored from the Zsh startup and hook documentation.
 use portable_pty::CommandBuilder;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+#[cfg(any(unix, test))]
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub(crate) const WARNING: &str = "directory_reporting_unavailable";
 pub(crate) const COMMAND_WARNING: &str = "command_reporting_unavailable";
 static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+#[cfg(any(unix, test))]
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn validate(
@@ -193,6 +196,7 @@ pub(crate) fn prepare_modes(
     Err(())
 }
 
+#[cfg(unix)]
 const TRAMPOLINE: &str = r#"typeset -g _yam_zsh_present=$YAM_ZSH_ENV_PRESENT _yam_zsh_value=$YAM_ZSH_ENV_VALUE _yam_zsh_init=$YAM_ZSH_INIT
 unset YAM_ZSH_ENV_PRESENT YAM_ZSH_ENV_VALUE YAM_ZSH_INIT
 if [[ $_yam_zsh_present == 1 ]]; then
@@ -218,6 +222,7 @@ typeset -ga precmd_functions
 precmd_functions+=( _yam_zsh_initialize )
 "#;
 
+#[cfg(unix)]
 const COMMAND_INTEGRATION: &str = r#"typeset -gi _yam_zsh_pending=0
 function _yam_zsh_preexec {
   printf '\033]133;C\007'
@@ -240,6 +245,7 @@ typeset -ga preexec_functions
 preexec_functions+=( _yam_zsh_preexec )
 "#;
 
+#[cfg(unix)]
 const INTEGRATION: &str = r#"function _yam_zsh_report {
   local -a _yam_zsh_entry=( "$?" "${pipestatus[@]}" )
   setopt localoptions no_shwordsplit

@@ -302,7 +302,9 @@ fn resolve_agent(adapter: &str) -> Option<PathBuf> {
     super::find_executable(adapter)
 }
 fn owner_command(program: &Path) -> std::process::Command {
-    let mut command = super::terminal_runtime::service_command(program);
+    let command = super::terminal_runtime::service_command(program);
+    #[cfg(unix)]
+    let mut command = command;
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -551,10 +553,11 @@ fn bind_start_key(
 mod tests {
     use super::*;
     use serde_json::json;
+    #[cfg(unix)]
+    use std::time::Instant;
     use std::{
         fs,
         sync::atomic::{AtomicU64, Ordering},
-        time::Instant,
     };
     static NEXT: AtomicU64 = AtomicU64::new(0);
     struct Fixture(PathBuf);

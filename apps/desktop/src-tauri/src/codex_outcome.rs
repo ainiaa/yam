@@ -12,11 +12,10 @@ impl Decoder<'_> {
         let value: Value = serde_json::from_slice(line).map_err(|_| "Invalid outcome record")?;
         let payload = &value["payload"];
         if !self.metadata {
-            // Rollout JSONL is not a stable API; accept only the measured native format.
+            // Validate the event contract and identity; diagnostic CLI versions do not gate compatibility.
             if value["type"] != "session_meta"
                 || payload["id"] != self.session
                 || payload["cwd"] != self.cwd
-                || !matches!(payload["cli_version"].as_str(), Some("0.162.1" | "0.163.0"))
             {
                 return Err("Unsupported outcome identity or format");
             }
@@ -380,6 +379,39 @@ mod tests {
         assert!(feed(&mut foreign, records[0].clone()).is_err());
     }
     #[test]
+    fn structurally_compatible_releases_do_not_require_version_whitelist() {
+        for version in [
+            json!("0.164.0"),
+            json!("1.0.0"),
+            json!("0.164.0-alpha.1"),
+            Value::Null,
+        ] {
+            for (kind, error, expected) in [
+                ("task_complete", json!({"message":"PRIVATE"}), true),
+                ("task_complete", Value::Null, false),
+                ("turn_aborted", Value::Null, false),
+            ] {
+                let mut d = decoder();
+                let mut metadata = meta();
+                metadata["payload"]["cli_version"] = version.clone();
+                metadata["payload"]["new_diagnostic_field"] = json!(true);
+                assert_eq!(feed(&mut d, metadata).unwrap(), None);
+                feed(&mut d, event("task_started", "turn-1")).unwrap();
+                let mut terminal = event(kind, "turn-1");
+                terminal["payload"]["error"] = error;
+                terminal["payload"]["new_diagnostic_field"] = json!({"future":true});
+                assert_eq!(feed(&mut d, terminal).unwrap(), Some(expected));
+            }
+        }
+        let mut d = started();
+        let mut unknown = event("future_terminal_event", "turn-1");
+        unknown["payload"]["error"] = json!({"message":"PRIVATE"});
+        assert_eq!(feed(&mut d, unknown).unwrap(), None);
+        let mut malformed = event("task_complete", "turn-1");
+        malformed["payload"]["error"] = json!("changed-error-format");
+        assert!(feed(&mut d, malformed).is_err());
+    }
+    #[test]
     fn success_and_abort_stop_observation_without_synthesizing_failure() {
         for kind in ["task_complete", "turn_aborted"] {
             let mut d = started();
@@ -392,11 +424,7 @@ mod tests {
     }
     #[test]
     fn wrong_identity_unknown_format_and_missing_start_fail_closed() {
-        for (key, value) in [
-            ("id", "other"),
-            ("cwd", "/elsewhere"),
-            ("cli_version", "99.0.0"),
-        ] {
+        for (key, value) in [("id", "other"), ("cwd", "/elsewhere")] {
             let mut d = decoder();
             let mut v = meta();
             v["payload"][key] = value.into();

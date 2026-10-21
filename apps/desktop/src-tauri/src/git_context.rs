@@ -57,7 +57,7 @@ impl Budget {
             }
         }
     }
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn run(&mut self, program: &Path, args: &[&str], cwd: &Path) -> Result<Output, String> {
         self.run_env(program, args, cwd, &[])
     }
@@ -127,11 +127,13 @@ impl Budget {
                 use std::os::windows::io::AsRawHandle;
                 crate::WindowsJob::attach(child.as_raw_handle()).map_err(|_| "git_query_failed")?
             };
-            let mut stdout = child.stdout.take().ok_or("git_query_failed")?;
-            let mut stderr = child.stderr.take().ok_or("git_query_failed")?;
+            let stdout = child.stdout.take().ok_or("git_query_failed")?;
+            let stderr = child.stderr.take().ok_or("git_query_failed")?;
             #[cfg(unix)]
             {
                 use std::os::fd::AsRawFd;
+                let mut stdout = stdout;
+                let mut stderr = stderr;
                 for fd in [stdout.as_raw_fd(), stderr.as_raw_fd()] {
                     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
                     if flags < 0
@@ -261,7 +263,7 @@ impl Budget {
         result
     }
 }
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn run_bounded(
     program: &Path,
     args: &[&str],
@@ -295,7 +297,9 @@ impl Shadow {
             std::process::id(),
             NEXT_SHADOW.fetch_add(1, Ordering::Relaxed)
         ));
-        let mut directory = fs::DirBuilder::new();
+        let directory = fs::DirBuilder::new();
+        #[cfg(unix)]
+        let mut directory = directory;
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;

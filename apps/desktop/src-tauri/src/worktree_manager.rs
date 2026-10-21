@@ -686,7 +686,9 @@ mod tests {
         manifest.records[0].state = RecordState::Creating;
         manifest.records[0].checkout_complete = false;
         save_manifest(&fixture.private, &manifest).unwrap();
-        let mut paths = vec![fixture.target.join("sub")];
+        let paths = vec![fixture.target.join("sub")];
+        #[cfg(unix)]
+        let mut paths = paths;
         #[cfg(unix)]
         {
             let alias = fixture.owned.0.join("alias");

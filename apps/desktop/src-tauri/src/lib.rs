@@ -8157,10 +8157,12 @@ mod tests {
         assert!(error.contains("does not exist"));
     }
 
-    use super::{
-        output_stage_enabled, run_output_worker, terminal_runtime, OutputStages, TerminalAttachment,
-    };
-    use std::sync::{atomic::AtomicBool, Arc};
+    use super::output_stage_enabled;
+    #[cfg(unix)]
+    use super::{run_output_worker, terminal_runtime, OutputStages, TerminalAttachment};
+    #[cfg(unix)]
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
 
     #[test]
     fn output_stage_enablement_requires_developer_owner_and_explicit_one() {
