@@ -142,15 +142,29 @@ mod tests {
         assert!(ready_at(app.handle(), &socket, Duration::ZERO).is_err());
         assert!(app.state::<Gate>().0.lock().unwrap().is_some());
         let listener = UnixListener::bind(&socket).unwrap();
+        let inherited = app
+            .state::<Gate>()
+            .0
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .try_clone()
+            .unwrap();
+        let child = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(30));
+            drop(inherited);
+        });
         ready_at(app.handle(), &socket, Duration::ZERO).unwrap();
         assert!(app.state::<Gate>().0.lock().unwrap().is_none());
-        let other_owner = acquire_lock(&root.0, Duration::ZERO).unwrap();
+        let other_owner = acquire_lock(&root.0, Duration::from_secs(1)).unwrap();
         ready_at(app.handle(), &socket, Duration::ZERO).unwrap();
         assert!(
             acquire_lock(&root.0, Duration::ZERO).is_err(),
             "duplicate readiness released a different lock owner"
         );
         drop(other_owner);
+        child.join().unwrap();
         drop(listener);
         assert!(acquire_lock(&root.0, Duration::ZERO).is_ok());
     }

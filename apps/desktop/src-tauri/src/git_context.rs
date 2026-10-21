@@ -1600,22 +1600,29 @@ mod tests {
                 .unwrap_err(),
             "git_output_limit"
         );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         let mut budget = Budget {
-            deadline: std::time::Instant::now() + std::time::Duration::from_millis(100),
+            deadline,
             remaining: 1024,
         };
         budget
             .run(
                 std::path::Path::new("/bin/sh"),
-                &["-c", "sleep 0.07"],
+                &["-c", "printf ready"],
                 &repo.0,
             )
             .unwrap();
         assert_eq!(
+            budget.deadline, deadline,
+            "a child must not reset the shared deadline"
+        );
+        // Expire the shared budget directly; scheduling latency is not the behavior under test.
+        budget.deadline = std::time::Instant::now() - std::time::Duration::from_millis(1);
+        assert_eq!(
             budget
                 .run(
-                    std::path::Path::new("/bin/sh"),
-                    &["-c", "sleep 0.07"],
+                    std::path::Path::new("/missing-after-deadline"),
+                    &[],
                     &repo.0
                 )
                 .unwrap_err(),
