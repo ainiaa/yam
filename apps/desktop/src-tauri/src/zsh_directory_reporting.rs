@@ -1,14 +1,14 @@
 // Author: Jeff.Liu. Independently authored from the Zsh startup and hook documentation.
 use portable_pty::CommandBuilder;
 use std::path::{Path, PathBuf};
-#[cfg(any(unix, test))]
+#[cfg(unix)]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub(crate) const WARNING: &str = "directory_reporting_unavailable";
 pub(crate) const COMMAND_WARNING: &str = "command_reporting_unavailable";
 static ACTIVE: AtomicUsize = AtomicUsize::new(0);
-#[cfg(any(unix, test))]
+#[cfg(unix)]
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn validate(

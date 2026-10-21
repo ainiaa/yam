@@ -40,7 +40,7 @@ test('primary Agent connection disclosure makes native round receipt limits visi
  const claude=text(Component({launch:{adapter:'claude',mode:'interactive'}}));
  assert.match(claude,/Esc.*external.*receipt.*not guaranteed/i);assert.match(claude,/native terminal/i);
  const codex=text(Component({launch:{adapter:'codex',mode:'interactive'}}));
- assert.match(codex,/macOS.*0\.162\.1/);assert.match(codex,/other versions.*unverified/i);
+ assert.match(codex,/0\.162\.1.*macOS/);assert.match(codex,/not a CLI version whitelist/i);assert.match(codex,/Unknown structures do not synthesize failure/);
  assert.doesNotMatch(text(Component({launch:{adapter:'shell'}})),/0\.162\.1|Esc/);
  assert.doesNotMatch(text(Component({launch:{adapter:'claude',mode:'task'}})),/Esc/);
 });
