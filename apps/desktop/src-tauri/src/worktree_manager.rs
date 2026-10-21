@@ -1642,8 +1642,10 @@ mod tests {
         assert!(fixture.target.exists());
     }
 
+    #[cfg(target_os = "macos")]
     #[derive(Debug)]
     struct InertChild;
+    #[cfg(target_os = "macos")]
     impl portable_pty::ChildKiller for InertChild {
         fn kill(&mut self) -> std::io::Result<()> {
             Ok(())
@@ -1652,6 +1654,7 @@ mod tests {
             Box::new(Self)
         }
     }
+    #[cfg(target_os = "macos")]
     impl portable_pty::Child for InertChild {
         fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
             Ok(None)
@@ -1667,6 +1670,7 @@ mod tests {
             None
         }
     }
+    #[cfg(target_os = "macos")]
     fn inert_session(
         fixture: &GitFixture,
         cwd: &Path,
@@ -3957,7 +3961,7 @@ pub(crate) fn native_trash(path: &Path) -> Result<std::path::PathBuf, String> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum CleanupFault {
     Prepared,
@@ -3969,9 +3973,9 @@ enum CleanupFault {
     NativeReturned,
     ReturnedSaved,
 }
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 type CleanupAction = Box<dyn Fn(CleanupFault)>;
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 thread_local! {static CLEANUP_FAULT:std::cell::Cell<Option<CleanupFault>>=const{std::cell::Cell::new(None)};static CLEANUP_FAULT_HIT:std::cell::Cell<Option<CleanupFault>>=const{std::cell::Cell::new(None)};static CLEANUP_ACTION:std::cell::RefCell<Option<CleanupAction>>=const{std::cell::RefCell::new(None)};}
 #[cfg(test)]
 #[cfg(target_os = "macos")]

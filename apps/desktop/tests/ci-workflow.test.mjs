@@ -59,3 +59,15 @@ test('macOS cleanup fixture helper chain is compiled only where cleanup is suppo
   assert.match(source,new RegExp('#\\[cfg\\(target_os = "macos"\\)\\]\\s+fn '+name+'\\('));
  }
 });
+
+test('macOS cleanup inert child and fault state share the test platform boundary',()=>{
+ const source=readFileSync(new URL('apps/desktop/src-tauri/src/worktree_manager.rs',root),'utf8');
+ for(const declaration of ['struct InertChild;','impl portable_pty::ChildKiller for InertChild','impl portable_pty::Child for InertChild','fn inert_session(']){
+  const offset=source.indexOf(declaration);assert.ok(offset>0);
+  assert.match(source.slice(Math.max(0,offset-100),offset),/#\[cfg\(target_os = "macos"\)\]/,declaration);
+ }
+ for(const declaration of ['enum CleanupFault','type CleanupAction','thread_local! {static CLEANUP_FAULT']){
+  const offset=source.indexOf(declaration);assert.ok(offset>0);
+  assert.match(source.slice(Math.max(0,offset-100),offset),/#\[cfg\(all\(test, target_os = "macos"\)\)\]/,declaration);
+ }
+});
