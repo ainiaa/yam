@@ -1,7 +1,9 @@
 // Author: Jeff.Liu. External terminals are views of an existing YAM-owned PTY.
 use std::ffi::OsString;
 #[cfg(any(target_os = "macos", test))]
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(target_os = "macos")]
+use std::path::PathBuf;
 
 fn valid_attachment(id: &str, instance: &str) -> bool {
     !id.is_empty()
@@ -13,7 +15,7 @@ fn valid_attachment(id: &str, instance: &str) -> bool {
         && instance.len() == 64
         && instance.bytes().all(|b| b.is_ascii_hexdigit())
 }
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 fn installed(roots: &[PathBuf]) -> Vec<&'static str> {
     [("terminal", "Terminal.app"), ("iterm2", "iTerm.app")]
         .into_iter()
