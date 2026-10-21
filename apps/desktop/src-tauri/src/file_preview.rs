@@ -1405,6 +1405,13 @@ mod tests {
                     }
                     "modify" => {
                         fs::write(f.0.join("plain"), "NEW").unwrap();
+                        // Some CI filesystems coalesce timestamps for consecutive writes.
+                        fs::File::options()
+                            .write(true)
+                            .open(f.0.join("plain"))
+                            .unwrap()
+                            .set_modified(std::time::UNIX_EPOCH)
+                            .unwrap();
                     }
                     _ => {
                         fs::rename(f.0.join("plain"), f.0.join("old")).unwrap();

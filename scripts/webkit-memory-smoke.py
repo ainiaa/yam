@@ -8,6 +8,7 @@ import functools
 import http.server
 import pathlib
 import platform
+import socketserver
 import subprocess
 import tempfile
 import threading
@@ -56,9 +57,10 @@ def main(dist=None):
         def log_message(self, *_args):
             pass
 
-    server = http.server.ThreadingHTTPServer(
+    server = socketserver.ThreadingTCPServer(
         ("127.0.0.1", 0), functools.partial(Quiet, directory=str(dist))
     )
+    server.daemon_threads = True
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
         with tempfile.TemporaryDirectory(prefix="yam-webkit-smoke-") as folder:
@@ -67,7 +69,7 @@ def main(dist=None):
             binary = pathlib.Path(folder) / "render"
             subprocess.run(["/usr/bin/swiftc", str(script), "-o", str(binary)], check=True, timeout=120)
             subprocess.run(
-                [str(binary), f"http://127.0.0.1:{server.server_port}/"],
+                [str(binary), f"http://127.0.0.1:{server.server_address[1]}/"],
                 check=True, timeout=30,
             )
     finally:

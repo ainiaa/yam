@@ -1066,6 +1066,7 @@ mod tests {
         assert_creation_fault(CreateFault::Checkout);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn t13_cleanup_actual_endpoint_previews_clean_created_worktree_without_mutation() {
         let _serial = serial_worktree_test();
@@ -1090,6 +1091,7 @@ mod tests {
             .git(&["worktree", "list", "--porcelain"])
             .contains(&record.target));
     }
+    #[cfg(target_os = "macos")]
     #[test]
     fn t13_cleanup_actual_endpoint_refuses_ignored_untracked_and_staged_before_any_move() {
         let _serial = serial_worktree_test();
@@ -1129,6 +1131,7 @@ mod tests {
                 .contains(&record.target));
         }
     }
+    #[cfg(target_os = "macos")]
     #[test]
     fn t13_cleanup_index_flags_refuse_clean_and_hidden_changes_before_preview_or_confirm() {
         let _serial = serial_worktree_test();
@@ -1174,6 +1177,7 @@ mod tests {
             }
         }
     }
+    #[cfg(target_os = "macos")]
     #[test]
     fn t13_cleanup_config_checkpoint_recreated_target_prevents_remove_and_trash() {
         let _serial = serial_worktree_test();
@@ -1218,6 +1222,7 @@ mod tests {
             .git(&["worktree", "list", "--porcelain"])
             .contains(&record.target));
     }
+    #[cfg(target_os = "macos")]
     #[test]
     fn t13_cleanup_actual_unknown_native_adapter_and_reopen_projection_preserve_uncertainty() {
         let _serial = serial_worktree_test();
@@ -1297,6 +1302,25 @@ mod tests {
             );
         }
     }
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn t13_native_trash_is_explicitly_unsupported_without_filesystem_mutation() {
+        let fixture = GitFixture::new();
+        let manager = cleanup_manager();
+        assert_eq!(
+            owner_cleanup_command(
+                &fixture.private,
+                &manager,
+                "preview_worktree_cleanup",
+                json!({"attempt":"a".repeat(64)}),
+                |_| panic!("unsupported platform must not trash")
+            )
+            .unwrap_err(),
+            "worktree_cleanup_unsupported"
+        );
+        assert!(!fixture.target.exists());
+        assert!(fixture.repository.join("file.txt").is_file());
+    }
     fn cleanup_manager() -> crate::SessionManager {
         let manager = crate::SessionManager {
             background_owner: true,
@@ -1310,6 +1334,7 @@ mod tests {
             .unwrap();
         manager
     }
+    #[cfg(target_os = "macos")]
     fn cleanup_preview(
         fixture: &GitFixture,
         manager: &crate::SessionManager,
@@ -1393,18 +1418,21 @@ mod tests {
         assert_eq!(fixture.git(&["rev-parse", &record.branch]), record.commit);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn t13_native_attributes_sibling_layout_cleanup_reaches_removed() {
         let _serial = serial_worktree_test();
         assert_native_attribute_cleanup("synthetic-repository", "synthetic-worktree");
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn t13_native_attributes_reverse_lexical_layout_cleanup_reaches_removed() {
         let _serial = serial_worktree_test();
         assert_native_attribute_cleanup("z-repository", "a-worktree");
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn t13_native_attributes_value_and_presence_changes_refuse_disposition() {
         let _serial = serial_worktree_test();
@@ -1453,6 +1481,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn t13_cleanup_native_injected_success_retains_branch_and_idempotent_result() {
         let _serial = serial_worktree_test();
@@ -1497,6 +1526,7 @@ mod tests {
         assert_eq!(result, replay);
         assert_eq!(calls.get(), 1);
     }
+    #[cfg(target_os = "macos")]
     #[test]
     fn t13_cleanup_current_clean_commit_is_confirmed_and_retained() {
         let _serial = serial_worktree_test();
@@ -1522,6 +1552,7 @@ mod tests {
         let preview = cleanup_preview(&fixture, &manager, &record);
         assert_eq!(preview["commit"], head);
     }
+    #[cfg(target_os = "macos")]
     #[test]
     fn t13_cleanup_native_error_and_wrong_result_are_durable_manual_recovery() {
         let _serial = serial_worktree_test();
@@ -1570,6 +1601,7 @@ mod tests {
             );
         }
     }
+    #[cfg(target_os = "macos")]
     #[test]
     fn t13_cleanup_preview_change_and_owner_replacement_refuse_before_move() {
         let _serial = serial_worktree_test();
@@ -1681,6 +1713,7 @@ mod tests {
             status: Mutex::new("succeeded".into()),
         })
     }
+    #[cfg(target_os = "macos")]
     #[test]
     fn t13_cleanup_actual_sessions_finishing_child_alias_guard_and_ended_release() {
         let _serial = serial_worktree_test();
@@ -1731,6 +1764,7 @@ mod tests {
         drop(gate);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn t13_cleanup_every_reached_boundary_reopens_without_disposition_or_false_success() {
         let _serial = serial_worktree_test();
@@ -1816,6 +1850,7 @@ mod tests {
             assert_eq!(fixture.git(&["rev-parse", &record.branch]), record.commit);
         }
     }
+    #[cfg(target_os = "macos")]
     #[test]
     fn t13_cleanup_quarantine_cannot_be_started_as_unmanaged_directory() {
         let _serial = serial_worktree_test();
@@ -1838,6 +1873,7 @@ mod tests {
             Some("worktree_not_ready")
         );
     }
+    #[cfg(target_os = "macos")]
     #[test]
     fn t13_cleanup_late_handle_write_remains_in_injected_trash() {
         use std::io::Write;
@@ -1870,6 +1906,7 @@ mod tests {
             .ends_with(b"late data"));
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn t13_cleanup_filters_nested_gitlink_and_inventory_limit_fail_closed() {
         let _serial = serial_worktree_test();
@@ -1941,6 +1978,7 @@ mod tests {
             assert!(fixture.target.join("file.txt").exists());
         }
     }
+    #[cfg(target_os = "macos")]
     #[test]
     fn t13_cleanup_expired_revision_locked_and_dirty_after_preview_never_move() {
         let _serial = serial_worktree_test();
@@ -1993,6 +2031,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn t13_cleanup_observed_postrename_mutation_and_recreated_target_preserve_both() {
         let _serial = serial_worktree_test();
@@ -2052,6 +2091,7 @@ mod tests {
                 .contains(&record.target));
         }
     }
+    #[cfg(target_os = "macos")]
     #[test]
     fn t13_cleanup_journal_wrong_path_and_phase_are_rejected_without_recovery_action() {
         let _serial = serial_worktree_test();

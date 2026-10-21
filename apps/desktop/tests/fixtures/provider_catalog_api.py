@@ -1,6 +1,7 @@
 """Author: Jeff.Liu. Fixed loopback catalog fixture; never forwards requests."""
 import argparse
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
+from socketserver import ThreadingTCPServer
 import json
 from pathlib import Path
 import time
@@ -56,10 +57,11 @@ def serve(mode, receipt):
                 output.write(json.dumps({"method": "POST", "path": self.path}) + "\n")
             self.send_error(405)
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    server.daemon_threads = True
-    print(json.dumps({"endpoint": f"http://127.0.0.1:{server.server_port}/v1"}), flush=True)
-    server.serve_forever()
+    with ThreadingTCPServer(("127.0.0.1", 0), Handler) as server:
+        server.daemon_threads = True
+        print(json.dumps({"endpoint": f"http://127.0.0.1:{server.server_address[1]}/v1"}), flush=True)
+        server.serve_forever()
+
 
 
 if __name__ == "__main__":

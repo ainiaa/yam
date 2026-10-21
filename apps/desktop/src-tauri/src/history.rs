@@ -35,6 +35,11 @@ impl PendingSessionLog {
         let path = history.log_path(id);
         let mut options = OpenOptions::new();
         options.read(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
         let (file, created) = match options.create_new(true).open(&path) {
             Ok(file) => (file, true),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (
@@ -132,7 +137,7 @@ impl HistoryStore {
         root: PathBuf,
         restore: impl FnOnce(&Path, &Path) -> std::io::Result<u64>,
     ) -> Result<Self, String> {
-        fs::create_dir_all(&root)
+        super::background::private_root(&root)
             .map_err(|error| format!("Failed to create session data directory: {error}"))?;
         let records_path = root.join("sessions.json");
         let records = if records_path.exists() {
@@ -2752,6 +2757,58 @@ mod tests {
 
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn history_data_permissions_do_not_depend_on_the_process_umask() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "yam-private-history-{}-{}",
+            std::process::id(),
+            crate::next_session_id()
+        ));
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o770)).unwrap();
+        let history = std::sync::Arc::new(HistoryStore::open(root.clone()).unwrap());
+        assert_eq!(
+            fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        let pending = PendingSessionLog::open(history.clone(), "s-new-private").unwrap();
+        assert_eq!(
+            pending
+                .file
+                .as_ref()
+                .unwrap()
+                .metadata()
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        drop(pending);
+        fs::write(history.log_path("s-legacy"), b"legacy").unwrap();
+        fs::set_permissions(
+            history.log_path("s-legacy"),
+            fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        let pending = PendingSessionLog::open(history, "s-legacy").unwrap();
+        assert_eq!(
+            pending
+                .file
+                .as_ref()
+                .unwrap()
+                .metadata()
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o644
+        );
+        drop(pending);
+        fs::remove_dir_all(root).unwrap();
+    }
     struct RetentionFixture {
         history: std::sync::Arc<HistoryStore>,
         native: PathBuf,

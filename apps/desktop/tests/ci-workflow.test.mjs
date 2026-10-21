@@ -48,3 +48,7 @@ test('MSVC test executables receive the same Common Controls v6 manifest as the 
  assert.match(build,/cargo:rustc-link-arg=\/MANIFESTINPUT:/);
  assert.match(xml,/Microsoft\.Windows\.Common-Controls/);assert.match(xml,/version="6\.0\.0\.0"/);
 });
+
+test('Linux CI installs the real Zsh needed by shell integration regressions',()=>{const workflow=readFileSync(new URL('.github/workflows/ci.yml',root),'utf8');assert.match(workflow,/apt-get install -y[^\n]*\bzsh\b/);});
+
+test('native CI gives cold builds enough time and selects the Zsh fixture environment',()=>{const workflow=readFileSync(new URL('.github/workflows/ci.yml',root),'utf8');assert.match(workflow,/timeout-minutes: 45/);assert.match(workflow,/SHELL=\/bin\/zsh/);});
