@@ -7295,7 +7295,7 @@ mod tests {
         #[cfg(not(windows))]
         let builder = {
             // Worker fixtures must not inherit login-shell profiles or Zsh's delayed PTY teardown.
-            let mut builder = CommandBuilder::new("/bin/sh");
+            let mut builder = portable_pty::CommandBuilder::new("/bin/sh");
             builder.arg("-c");
             builder.arg(command);
             builder
