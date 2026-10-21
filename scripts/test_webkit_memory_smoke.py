@@ -3,8 +3,10 @@ import importlib.util
 import os
 import pathlib
 import subprocess
+import tempfile
 import sys
 import unittest
+from unittest import mock
 
 
 @unittest.skipUnless(sys.platform == 'darwin', 'Requires native WebKit')
@@ -40,3 +42,19 @@ class WebKitStartup(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class WebKitBuildBudget(unittest.TestCase):
+    def test_compile_budget_is_separate_from_browser_execution(self):
+        module = WebKitStartup().smoke()
+        with tempfile.TemporaryDirectory() as directory:
+            dist = pathlib.Path(directory)
+            (dist / 'index.html').write_text('fixture')
+            with mock.patch.object(module.platform, 'system', return_value='Darwin'), mock.patch.object(module.subprocess, 'run') as run:
+                module.main(dist)
+            self.assertEqual(run.call_count, 2)
+            compile_call, browser_call = run.call_args_list
+            self.assertEqual(compile_call.args[0][0], '/usr/bin/swiftc')
+            self.assertIn('-o', compile_call.args[0])
+            self.assertEqual(compile_call.kwargs['timeout'], 120)
+            self.assertEqual(browser_call.kwargs['timeout'], 30)
+            self.assertEqual(browser_call.args[0][0], compile_call.args[0][-1])

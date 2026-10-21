@@ -2,3 +2,6 @@
 scripts/third-party-notices/bodies/* -text -whitespace
 # Source-inspection tests use the same LF text on every checkout platform.
 *.rs text eol=lf
+# These lockfiles are bound by the verified notice manifest SHA-256.
+apps/desktop/src-tauri/Cargo.lock text eol=lf
+apps/desktop/pnpm-lock.yaml text eol=lf

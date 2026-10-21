@@ -20,3 +20,14 @@ test('Windows checkout keeps inspected Rust source LF and upstream notice bytes 
  for(const file of ['system_entry.rs','lib.rs'])assert.match(result,new RegExp(file.replace('.','\\.')+': eol: lf'));
  assert.match(result,/bodies\/fixture: text: unset/);
 });
+
+test('CI pins a supported Python before checksum-bound runtime preparation',()=>{
+ const workflow=readFileSync(new URL('.github/workflows/ci.yml',root),'utf8');
+ const python=workflow.indexOf('uses: actions/setup-python@v5');
+ assert.ok(python>=0&&python<workflow.indexOf('- run: pnpm build:terminal'));
+ assert.match(workflow.slice(python,workflow.indexOf('      - ',python)),/python-version: ['"]3\.12['"]/);
+ for(const file of ['apps/desktop/src-tauri/Cargo.lock','apps/desktop/pnpm-lock.yaml']){
+  const attrs=execFileSync('git',['check-attr','eol','--',file],{cwd:root,encoding:'utf8'});
+  assert.match(attrs,/: eol: lf/,'hash-bound lockfile bytes must not change with Windows autocrlf');
+ }
+});

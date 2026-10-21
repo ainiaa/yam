@@ -64,8 +64,10 @@ def main(dist=None):
         with tempfile.TemporaryDirectory(prefix="yam-webkit-smoke-") as folder:
             script = pathlib.Path(folder) / "render.swift"
             script.write_text(SWIFT, encoding="utf-8")
+            binary = pathlib.Path(folder) / "render"
+            subprocess.run(["/usr/bin/swiftc", str(script), "-o", str(binary)], check=True, timeout=120)
             subprocess.run(
-                ["/usr/bin/swift", str(script), f"http://127.0.0.1:{server.server_port}/"],
+                [str(binary), f"http://127.0.0.1:{server.server_port}/"],
                 check=True, timeout=30,
             )
     finally:
