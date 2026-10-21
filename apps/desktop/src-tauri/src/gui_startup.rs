@@ -163,10 +163,16 @@ mod tests {
             acquire_lock(&root.0, Duration::ZERO).is_err(),
             "duplicate readiness released a different lock owner"
         );
+        let inherited = other_owner.try_clone().unwrap();
+        let second_child = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(30));
+            drop(inherited);
+        });
         drop(other_owner);
         child.join().unwrap();
         drop(listener);
-        assert!(acquire_lock(&root.0, Duration::ZERO).is_ok());
+        assert!(acquire_lock(&root.0, Duration::from_secs(1)).is_ok());
+        second_child.join().unwrap();
     }
 
     #[test]
