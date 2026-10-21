@@ -5,12 +5,13 @@ use std::collections::{HashMap, VecDeque};
 use std::io::Read;
 #[cfg(target_os = "macos")]
 use std::io::Write;
+#[cfg(any(target_os = "macos", test))]
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 const BODY_LIMIT: usize = 1024 * 1024;
 #[cfg(target_os = "macos")]
 const STDERR_LIMIT: usize = 8192;
