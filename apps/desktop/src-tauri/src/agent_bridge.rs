@@ -434,18 +434,14 @@ impl Bridge {
                         },
                         !context.0 || context.2,
                         |id, entry| {
-                            let (title, body) = super::system_entry::notification_round(&entry.kind,super::system_entry::notification_chinese(&app));
+                            let (title, body) = super::system_entry::notification_round(
+                                &entry.kind,
+                                super::system_entry::notification_chinese(&app),
+                            );
                             history.native_delivery(
                                 id,
                                 super::agent_events::NativeSource::Round(entry),
-                                |_| {
-                                    send_native(
-                                        &app,
-                                        id,
-                                        title,
-                                        body,
-                                    )
-                                },
+                                |_| send_native(&app, id, title, body),
                             )
                         },
                     );

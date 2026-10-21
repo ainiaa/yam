@@ -9,9 +9,27 @@ struct Fixture {
     url: String,
     token: String,
 }
+fn fixture_root() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "yam-native-provider-{}-{}",
+        std::process::id(),
+        next_session_id()
+    ))
+}
+#[test]
+fn native_provider_fixture_paths_are_process_scoped_and_unique() {
+    let first = fixture_root();
+    assert_ne!(first, fixture_root());
+    assert!(first
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .starts_with(&format!("yam-native-provider-{}-", std::process::id())));
+}
 impl Fixture {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!("yam-native-provider-{}", next_session_id()));
+        let root = fixture_root();
         fs::create_dir_all(root.join("official/.codex")).unwrap();
         fs::create_dir(root.join("project")).unwrap();
         assert!(Command::new("git")

@@ -1,2 +1,4 @@
 # Preserve checksum-bound upstream license bodies byte for byte.
-scripts/third-party-notices/bodies/* -whitespace
+scripts/third-party-notices/bodies/* -text -whitespace
+# Source-inspection tests use the same LF text on every checkout platform.
+*.rs text eol=lf

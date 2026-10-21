@@ -201,7 +201,7 @@ function SessionConnection({launch,agent}:{launch:AgentLaunch|null|undefined;age
         <dt>{t("CLI")}</dt><dd>{connection.cli}</dd>
         <dt>{t("CLI version at launch")}</dt><dd>{agent?.cli_version??t("Unknown")}</dd>
         <dt>{t("Launch platform")}</dt><dd>{agent?.cli_platform??t("Unknown")}</dd>
-        {launch?.mode==='interactive'&&launch.adapter==='codex'&&<><dt>{t("Failure fallback")}</dt><dd>{agent?.integration!=="connected"&&agent?.cli_version?t("Not connected; trusted hooks required"):agent?.cli_version==="codex-cli 0.162.1"&&agent.cli_platform==="macos"?t("Supported format; trusted hooks and readable native transcript required"):t("Unverified version or platform")}</dd></>}
+        {launch?.mode==='interactive'&&launch.adapter==='codex'&&<><dt>{t("Failure fallback")}</dt><dd>{agent?.integration!=="connected"&&agent?.cli_version?t("Not connected; trusted hooks required"):agent&&["codex-cli 0.162.1","codex-cli 0.163.0"].includes(agent.cli_version??"")&&agent.cli_platform==="macos"?t("Supported format; trusted hooks and readable native transcript required"):t("Unverified version or platform")}</dd></>}
         <dt>{t("Configuration")}</dt><dd>{t(connection.source)}</dd>
         <dt>{t("Configured model")}</dt><dd>{connection.model}</dd>
         <dt>{t("Configured endpoint")}</dt><dd>{connection.endpoint}</dd>
@@ -209,7 +209,7 @@ function SessionConnection({launch,agent}:{launch:AgentLaunch|null|undefined;age
       </dl>
       <p>{t("Current model, authentication, billing and final upstream are not verified. Values above are the saved launch settings. Launch-time compatibility does not prove a receipt was delivered.")}</p>
       {launch?.mode==='interactive'&&launch.adapter==='claude'&&<p>{t("Esc interrupts Claude in the native terminal. An external interruption receipt is not guaranteed; check the terminal before submitting again.")}</p>}
-      {launch?.mode==='interactive'&&launch.adapter==='codex'&&<p>{t("API failure receipts are verified for macOS with Codex 0.162.1. Other versions and platforms remain unverified; native hooks must be trusted and active. Retrying or silent output does not prove failure.")}</p>}
+      {launch?.mode==='interactive'&&launch.adapter==='codex'&&<p>{t("API failure receipts are verified for macOS with Codex 0.162.1 and 0.163.0. Other versions and platforms remain unverified; native hooks must be trusted and active. Retrying or silent output does not prove failure.")}</p>}
     </div>
   </details>;
 }

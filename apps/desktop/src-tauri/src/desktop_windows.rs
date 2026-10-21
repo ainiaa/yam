@@ -2156,7 +2156,16 @@ mod file_job_tests {
 }
 fn settings_target(target: Option<&str>) -> Result<&str, String> {
     match target.unwrap_or("settings") {
-        value @ ("appearance" | "settings" | "profiles" | "keyboard-shortcuts" | "updates" | "paste-settings" | "system-entry" | "directory-reporting" | "command-reporting" | "launch-settings") => Ok(value),
+        value @ ("appearance"
+        | "settings"
+        | "profiles"
+        | "keyboard-shortcuts"
+        | "updates"
+        | "paste-settings"
+        | "system-entry"
+        | "directory-reporting"
+        | "command-reporting"
+        | "launch-settings") => Ok(value),
         _ => Err("invalid_settings_target".into()),
     }
 }
@@ -2164,8 +2173,22 @@ fn settings_target(target: Option<&str>) -> Result<&str, String> {
 #[test]
 fn settings_targets_preserve_pages_and_reject_unknown_values() {
     assert_eq!(settings_target(None).unwrap(), "settings");
-    for page in ["appearance","settings","profiles","keyboard-shortcuts","updates","paste-settings","system-entry","directory-reporting","command-reporting"] {assert_eq!(settings_target(Some(page)).unwrap(),page);}
-    for page in ["", "constructor", "stop-all", "../updates"] {assert!(settings_target(Some(page)).is_err());}
+    for page in [
+        "appearance",
+        "settings",
+        "profiles",
+        "keyboard-shortcuts",
+        "updates",
+        "paste-settings",
+        "system-entry",
+        "directory-reporting",
+        "command-reporting",
+    ] {
+        assert_eq!(settings_target(Some(page)).unwrap(), page);
+    }
+    for page in ["", "constructor", "stop-all", "../updates"] {
+        assert!(settings_target(Some(page)).is_err());
+    }
 }
 #[tauri::command]
 pub(super) fn open_main_settings<R: tauri::Runtime>(
@@ -2187,13 +2210,31 @@ pub(super) fn open_main_settings<R: tauri::Runtime>(
         .map_err(|_| ERROR.into())
 }
 #[tauri::command]
-pub(super) fn set_notification_locale<R: tauri::Runtime>(window: Webview<R>, manager: State<'_, SessionManager>, desktop_epoch: u64, locale: String) -> Result<(), String> {
+pub(super) fn set_notification_locale<R: tauri::Runtime>(
+    window: Webview<R>,
+    manager: State<'_, SessionManager>,
+    desktop_epoch: u64,
+    locale: String,
+) -> Result<(), String> {
     trusted_slot(&window)?;
-    if Slot::parse(window.label())? != Slot::Main {return Err(ERROR.into());}
-    manager.desktop_windows.lock().map_err(|_|ERROR)?.valid(Slot::Main,desktop_epoch)?;
-    super::background::validate_command("set_notification_locale",&serde_json::json!({"locale":locale}))?;
-    manager.system_entry.lock().map_err(|_|ERROR)?.notification_chinese=locale=="zh-CN";
-    super::set_notification_locale(manager,locale)
+    if Slot::parse(window.label())? != Slot::Main {
+        return Err(ERROR.into());
+    }
+    manager
+        .desktop_windows
+        .lock()
+        .map_err(|_| ERROR)?
+        .valid(Slot::Main, desktop_epoch)?;
+    super::background::validate_command(
+        "set_notification_locale",
+        &serde_json::json!({"locale":locale}),
+    )?;
+    manager
+        .system_entry
+        .lock()
+        .map_err(|_| ERROR)?
+        .notification_chinese = locale == "zh-CN";
+    super::set_notification_locale(manager, locale)
 }
 #[tauri::command]
 pub(super) fn set_agent_notification_context(
@@ -2685,9 +2726,14 @@ mod b05b_tests {
         (t, g)
     }
     #[test]
-    fn app_palette_survives_the_same_validated_window_move_contract(){
-        let (mut table,generation)=source();let mut preferences=appearance();preferences["theme"]="app".into();
-        assert!(matches!(table.prepare_move(Slot::Main,1,"s-1-1",generation,preferences),MoveReply::Pending{..}));
+    fn app_palette_survives_the_same_validated_window_move_contract() {
+        let (mut table, generation) = source();
+        let mut preferences = appearance();
+        preferences["theme"] = "app".into();
+        assert!(matches!(
+            table.prepare_move(Slot::Main, 1, "s-1-1", generation, preferences),
+            MoveReply::Pending { .. }
+        ));
     }
     fn appearance() -> serde_json::Value {
         serde_json::json!({"fontFamily":"Menlo","fontSize":19,"theme":"system"})

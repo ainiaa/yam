@@ -99,19 +99,54 @@ impl EntryState {
     }
 }
 pub(super) fn notification_status(status: &str, chinese: bool) -> String {
-    let label = if chinese { match status { "starting"=>"正在启动", "running"=>"运行中", "succeeded"=>"已完成", "failed"=>"失败", "stopped"=>"已停止", "needs_attention"=>"需要关注", _=>return format!("Session {status}") } } else { return format!("Session {status}") };
+    let label = if chinese {
+        match status {
+            "starting" => "正在启动",
+            "running" => "运行中",
+            "succeeded" => "已完成",
+            "failed" => "失败",
+            "stopped" => "已停止",
+            "needs_attention" => "需要关注",
+            _ => return format!("Session {status}"),
+        }
+    } else {
+        return format!("Session {status}");
+    };
     format!("会话{label}")
 }
 pub(super) fn notification_round(kind: &str, chinese: bool) -> (String, String) {
-    let label = match (kind,chinese) {
-        ("response_finished",true)=>"回复已结束", ("needs_permission",true)=>"需要授权", ("interrupted",true)=>"本轮已中断", ("failed",true)=>"本轮失败", ("needs_attention",true)=>"回复已就绪；钩子可能仍在运行", (_,true)=>"智能体需要关注",
-        ("response_finished",false)=>"Response finished", ("needs_permission",false)=>"Permission required", ("interrupted",false)=>"Round interrupted", ("failed",false)=>"Round failed", ("needs_attention",false)=>"Response ready; hooks may continue", (_,false)=>"Agent attention",
+    let label = match (kind, chinese) {
+        ("response_finished", true) => "回复已结束",
+        ("needs_permission", true) => "需要授权",
+        ("interrupted", true) => "本轮已中断",
+        ("failed", true) => "本轮失败",
+        ("needs_attention", true) => "回复已就绪；钩子可能仍在运行",
+        (_, true) => "智能体需要关注",
+        ("response_finished", false) => "Response finished",
+        ("needs_permission", false) => "Permission required",
+        ("interrupted", false) => "Round interrupted",
+        ("failed", false) => "Round failed",
+        ("needs_attention", false) => "Response ready; hooks may continue",
+        (_, false) => "Agent attention",
     };
-    (format!("YAM · {label}"), if chinese {format!("{label}。打开 YAM 查看本轮内容。")}else{format!("{label}. Open YAM to review this round.")})
+    (
+        format!("YAM · {label}"),
+        if chinese {
+            format!("{label}。打开 YAM 查看本轮内容。")
+        } else {
+            format!("{label}. Open YAM to review this round.")
+        },
+    )
 }
 pub(super) fn notification_chinese<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
     use tauri::Manager;
-    app.try_state::<super::SessionManager>().is_some_and(|manager| manager.system_entry.lock().is_ok_and(|state| state.notification_chinese))
+    app.try_state::<super::SessionManager>()
+        .is_some_and(|manager| {
+            manager
+                .system_entry
+                .lock()
+                .is_ok_and(|state| state.notification_chinese)
+        })
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -431,15 +466,21 @@ mod tests {
         s
     }
     #[test]
-    fn language_theme_tray_confirmation_and_unknown_counts_follow_locale(){
-        assert_eq!(native_entry_text("Open YAM",true),"打开 YAM");
-        assert_eq!(native_entry_text("literal",true),"literal");
-        assert_eq!(native_entry_text("Cancel",true),"取消");
-        assert_eq!(tray_summary(Some(2),None,true),"任务：2／未读：不可用");
-        assert_eq!(tray_summary(None,Some(3),false),"Tasks: unavailable / unread: 3");
-        assert!(localized_stop_message(Some(7),true).contains("7 个任务"));
-        assert!(localized_stop_message(None,true).contains("任务数量不可用"));
-        assert_eq!(localized_stop_message(Some(7),false),stop_confirmation_message(Some(7)));
+    fn language_theme_tray_confirmation_and_unknown_counts_follow_locale() {
+        assert_eq!(native_entry_text("Open YAM", true), "打开 YAM");
+        assert_eq!(native_entry_text("literal", true), "literal");
+        assert_eq!(native_entry_text("Cancel", true), "取消");
+        assert_eq!(tray_summary(Some(2), None, true), "任务：2／未读：不可用");
+        assert_eq!(
+            tray_summary(None, Some(3), false),
+            "Tasks: unavailable / unread: 3"
+        );
+        assert!(localized_stop_message(Some(7), true).contains("7 个任务"));
+        assert!(localized_stop_message(None, true).contains("任务数量不可用"));
+        assert_eq!(
+            localized_stop_message(Some(7), false),
+            stop_confirmation_message(Some(7))
+        );
     }
     #[test]
     fn language_theme_native_notification_words_follow_locale_and_preserve_raw_content() {
@@ -451,10 +492,22 @@ mod tests {
         assert_eq!(body, "回复已结束。打开 YAM 查看本轮内容。");
         assert_eq!(notification_round("failed", false).0, "YAM · Round failed");
         for locale in ["en", "zh-CN"] {
-            assert!(super::super::background::validate_command("set_notification_locale", &serde_json::json!({"locale":locale})).is_ok());
+            assert!(super::super::background::validate_command(
+                "set_notification_locale",
+                &serde_json::json!({"locale":locale})
+            )
+            .is_ok());
         }
-        for locale in [serde_json::json!("de"), serde_json::json!(1), serde_json::Value::Null] {
-            assert!(super::super::background::validate_command("set_notification_locale", &serde_json::json!({"locale":locale})).is_err());
+        for locale in [
+            serde_json::json!("de"),
+            serde_json::json!(1),
+            serde_json::Value::Null,
+        ] {
+            assert!(super::super::background::validate_command(
+                "set_notification_locale",
+                &serde_json::json!({"locale":locale})
+            )
+            .is_err());
         }
     }
     #[test]
@@ -1210,17 +1263,31 @@ pub(super) fn open_native(app: &tauri::AppHandle) -> Result<(), String> {
         },
     )
 }
-fn native_entry_text(text:&str,chinese:bool)->&str {
-    if !chinese{return text;}
+fn native_entry_text(text: &str, chinese: bool) -> &str {
+    if !chinese {
+        return text;
+    }
     match text {"Open YAM"=>"打开 YAM","Pause notifications"=>"暂停通知","Stop all tasks and quit"=>"停止全部任务并退出","Stop all tasks and quit YAM"=>"停止全部任务并退出 YAM","Stop all and quit"=>"停止全部任务并退出","Cancel"=>"取消","Reset launch templates"=>"重置启动模板","Reset templates"=>"重置模板","Reset stored launch templates? This discards the original template data. Copy it first if you want to recover it."=>"重置已保存的启动模板？原始模板数据将被丢弃，如需保留请先复制备份。",_=>text}
 }
-fn tray_summary(running:Option<u64>,unread:Option<u64>,chinese:bool)->String {
-    let number=|value:Option<u64>|value.map(|n|n.to_string()).unwrap_or_else(||if chinese{"不可用"}else{"unavailable"}.into());
-    if chinese{format!("任务：{}／未读：{}",number(running),number(unread))}else{format!("Tasks: {} / unread: {}",number(running),number(unread))}
+fn tray_summary(running: Option<u64>, unread: Option<u64>, chinese: bool) -> String {
+    let number = |value: Option<u64>| {
+        value
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| if chinese { "不可用" } else { "unavailable" }.into())
+    };
+    if chinese {
+        format!("任务：{}／未读：{}", number(running), number(unread))
+    } else {
+        format!("Tasks: {} / unread: {}", number(running), number(unread))
+    }
 }
-fn localized_stop_message(active:Option<usize>,chinese:bool)->String {
-    if !chinese{return stop_confirmation_message(active);}
-    let count=active.map(|n|format!("{n} 个任务")).unwrap_or_else(||"任务数量不可用".into());
+fn localized_stop_message(active: Option<usize>, chinese: bool) -> String {
+    if !chinese {
+        return stop_confirmation_message(active);
+    }
+    let count = active
+        .map(|n| format!("{n} 个任务"))
+        .unwrap_or_else(|| "任务数量不可用".into());
     format!("将停止全部后台任务并退出 YAM。\n当前快照：{count}。对话框打开期间任务数量可能变化。\n仅关闭界面会保留任务运行。是否继续？")
 }
 fn stop_confirmation_message(active: Option<usize>) -> String {
@@ -1243,14 +1310,14 @@ pub(super) async fn confirm_stop_all(app: tauri::AppHandle) -> Result<bool, Stri
             let count = super::history_overview(app.clone(), app.state::<super::SessionManager>())
                 .ok()
                 .map(|overview| overview.active);
-            let chinese=notification_chinese(&app);
+            let chinese = notification_chinese(&app);
             app.dialog()
-                .message(localized_stop_message(count,chinese))
-                .title(native_entry_text("Stop all tasks and quit YAM",chinese))
+                .message(localized_stop_message(count, chinese))
+                .title(native_entry_text("Stop all tasks and quit YAM", chinese))
                 .kind(MessageDialogKind::Warning)
                 .buttons(MessageDialogButtons::OkCancelCustom(
-                    native_entry_text("Stop all and quit",chinese).into(),
-                    native_entry_text("Cancel",chinese).into(),
+                    native_entry_text("Stop all and quit", chinese).into(),
+                    native_entry_text("Cancel", chinese).into(),
                 ))
                 .blocking_show()
         },
@@ -1532,11 +1599,19 @@ pub(super) fn refresh_native(app: &tauri::AppHandle) {
         if let Some(state) = state {
             let _ = native.pause.set_checked(state.paused);
         }
-        let chinese=notification_chinese(app);
-        let _=native.open.set_text(native_entry_text("Open YAM",chinese));
-        let _=native.pause.set_text(native_entry_text("Pause notifications",chinese));
-        let _=native.stop.set_text(native_entry_text("Stop all tasks and quit",chinese));
-        let _=native.summary.set_text(tray_summary(summary.as_ref().and_then(|s|s["running"].as_u64()),summary.as_ref().and_then(|s|s["unread"].as_u64()),chinese));
+        let chinese = notification_chinese(app);
+        let _ = native.open.set_text(native_entry_text("Open YAM", chinese));
+        let _ = native
+            .pause
+            .set_text(native_entry_text("Pause notifications", chinese));
+        let _ = native
+            .stop
+            .set_text(native_entry_text("Stop all tasks and quit", chinese));
+        let _ = native.summary.set_text(tray_summary(
+            summary.as_ref().and_then(|s| s["running"].as_u64()),
+            summary.as_ref().and_then(|s| s["unread"].as_u64()),
+            chinese,
+        ));
     }
 }
 

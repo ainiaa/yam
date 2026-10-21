@@ -1,0 +1,5 @@
+{"type": "session_meta", "payload": {"id": "thread-0163", "cwd": "/project", "cli_version": "0.163.0"}}
+{"type": "event_msg", "payload": {"type": "task_started", "turn_id": "turn-0163"}}
+{"type": "event_msg", "payload": {"type": "task_complete", "turn_id": "turn-0163", "error": {"message": "YAM_LOCAL_ONLY_REFUSAL", "codex_error_info": {"http_connection_failed": {"http_status_code": 401}}}}}
+{"type": "event_msg", "payload": {"type": "task_complete", "turn_id": "turn-0163"}}
+{"type": "event_msg", "payload": {"type": "turn_aborted", "turn_id": "turn-0163"}}

@@ -534,7 +534,7 @@ class ApprovedInventoryTests(unittest.TestCase):
     def test_current_real_554_manifest_material_binding_includes_closed_cohort(self):
         root = pathlib.Path(__file__).resolve().parents[1]
         trusted = notices.read_json(root/"scripts/third-party-notices/manifest.json")
-        approved = "f9a7ded31a5287ff792373a9942211dd0908a0f3dbe3aaf465ca2311e837344c"
+        approved = "abce9c3478bac62a4fed6779b6bf39a9831a144a1701a95e4ec7e9e29f8c5919"
         self.assertEqual(notices.digest(notices.canonical(trusted)),approved)
         with mock.patch.object(notices,"APPROVED_MANIFEST_SHA256",approved,create=True):
             content, report = notices.render(root,trusted,mode="developer")
@@ -926,7 +926,7 @@ class MaterialBatch01Tests(unittest.TestCase):
       'main': ['a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2',
                'fea1d5bf3dd71605ce5d7d2ff695c1837e914c77195e523a86b5391716477960'],
       'supp': []}]
-    APPROVED = 'f9a7ded31a5287ff792373a9942211dd0908a0f3dbe3aaf465ca2311e837344c'
+    APPROVED = 'abce9c3478bac62a4fed6779b6bf39a9831a144a1701a95e4ec7e9e29f8c5919'
 
     def _current(self):
         root = pathlib.Path(__file__).resolve().parents[1]

@@ -760,7 +760,11 @@ pub(crate) fn validate_command(command: &str, args: &serde_json::Value) -> Resul
     {
         return Err("system_entry_invalid".into());
     }
-    if command == "set_notification_locale" && !matches!(args["locale"].as_str(),Some("en"|"zh-CN")) { return Err("system_entry_invalid".into()); }
+    if command == "set_notification_locale"
+        && !matches!(args["locale"].as_str(), Some("en" | "zh-CN"))
+    {
+        return Err("system_entry_invalid".into());
+    }
     if command == "set_agent_notification_context"
         && (args.get("paused").is_some_and(|value| !value.is_boolean())
             || args
@@ -1265,7 +1269,11 @@ fn dispatch(app: &tauri::AppHandle, request: Request) -> Result<serde_json::Valu
                         argument(args, "expected_status")?,
                     ))?)
                 }
-                "set_notification_locale" => {super::set_notification_locale(manager,argument(args,"locale")?)?;super::system_entry::refresh_native(&app);serde_json::to_value(())},
+                "set_notification_locale" => {
+                    super::set_notification_locale(manager, argument(args, "locale")?)?;
+                    super::system_entry::refresh_native(app);
+                    serde_json::to_value(())
+                }
                 "set_agent_notification_context" => {
                     serde_json::to_value(super::set_agent_notification_context(
                         app.clone(),
@@ -2052,7 +2060,7 @@ pub(super) fn notify_lifecycle(app: &tauri::AppHandle, session: &str, status: &s
     let app = app.clone();
     let session = session.to_string();
     let status = status.to_string();
-    let chinese=super::system_entry::notification_chinese(&app);
+    let chinese = super::system_entry::notification_chinese(&app);
     thread::spawn(move || {
         if let Err(error) = history.native_delivery(
             &session,
@@ -2061,7 +2069,7 @@ pub(super) fn notify_lifecycle(app: &tauri::AppHandle, session: &str, status: &s
                 super::send_native_notification(
                     app.clone(),
                     session.clone(),
-                    super::system_entry::notification_status(&record.status,chinese),
+                    super::system_entry::notification_status(&record.status, chinese),
                     record
                         .reason
                         .clone()

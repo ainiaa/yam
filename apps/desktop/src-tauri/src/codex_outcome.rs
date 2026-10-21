@@ -16,7 +16,7 @@ impl Decoder<'_> {
             if value["type"] != "session_meta"
                 || payload["id"] != self.session
                 || payload["cwd"] != self.cwd
-                || payload["cli_version"] != "0.162.1"
+                || !matches!(payload["cli_version"].as_str(), Some("0.162.1" | "0.163.0"))
             {
                 return Err("Unsupported outcome identity or format");
             }
@@ -354,6 +354,30 @@ mod tests {
         v["payload"]["error"] =
             json!({"message":"SECRET provider response","codex_error_info":"other"});
         assert_eq!(feed(&mut d, v).unwrap(), Some(true));
+    }
+    #[test]
+    fn codex_0163_observed_outcomes_keep_failure_success_abort_and_identity_distinct() {
+        // Recorded from the installed CLI against an isolated loopback 401 endpoint; IDs and paths normalized.
+        let records: Vec<Value> = include_str!("../../tests/fixtures/codex-0.163-outcome.jsonl")
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        for (index, expected) in [(2, Some(true)), (3, Some(false)), (4, Some(false))] {
+            let mut d = Decoder {
+                session: "thread-0163",
+                turn: "turn-0163",
+                ..decoder()
+            };
+            assert_eq!(feed(&mut d, records[0].clone()).unwrap(), None);
+            assert_eq!(feed(&mut d, records[1].clone()).unwrap(), None);
+            assert_eq!(feed(&mut d, records[index].clone()).unwrap(), expected);
+        }
+        let mut foreign = Decoder {
+            session: "different-thread",
+            turn: "turn-0163",
+            ..decoder()
+        };
+        assert!(feed(&mut foreign, records[0].clone()).is_err());
     }
     #[test]
     fn success_and_abort_stop_observation_without_synthesizing_failure() {

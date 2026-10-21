@@ -9,7 +9,6 @@ mod codex_conversation;
 #[cfg(any(target_os = "macos", test))]
 mod codex_outcome;
 mod desktop_windows;
-mod terminal_fonts;
 mod diagnostics;
 mod external_terminal;
 mod file_preview;
@@ -32,6 +31,7 @@ mod shell_cwd;
 mod ssh_launch;
 mod system_entry;
 mod terminal_file_actions;
+mod terminal_fonts;
 mod terminal_runtime;
 mod updater;
 mod updater_install;
@@ -2419,7 +2419,9 @@ fn session_has_exited(session: &Session) -> Result<bool, String> {
 }
 
 fn terminate_session(session: &Session) -> Result<(), String> {
-    if session_has_exited(session)? { return Ok(()); }
+    if session_has_exited(session)? {
+        return Ok(());
+    }
     let child = session
         .child
         .lock()
@@ -2761,8 +2763,14 @@ fn finish_session_with<R: tauri::Runtime>(
             return Err("Terminal output is still draining; the application remains open".into());
         }
         // The reader is finished; native reaping can no longer discard output.
-        if session.child.lock().map_err(|_| "Child lock poisoned")?
-            .try_wait().map_err(|error| error.to_string())?.is_none() {
+        if session
+            .child
+            .lock()
+            .map_err(|_| "Child lock poisoned")?
+            .try_wait()
+            .map_err(|error| error.to_string())?
+            .is_none()
+        {
             return Err("Session process is still running; the application remains open".into());
         }
         let status_poisoned = session.status.is_poisoned();
@@ -3088,10 +3096,17 @@ fn spawn_session_threads_with<R: tauri::Runtime>(
                             Some("Process exited but terminal output did not close".into()),
                         );
                     }
-                    let exit = match session.child.lock().map_err(|_| "Child lock poisoned".to_string())
-                        .and_then(|mut child| child.try_wait().map_err(|error| error.to_string())) {
+                    let exit = match session
+                        .child
+                        .lock()
+                        .map_err(|_| "Child lock poisoned".to_string())
+                        .and_then(|mut child| child.try_wait().map_err(|error| error.to_string()))
+                    {
                         Ok(Some(exit)) => exit,
-                        Ok(None) => { thread::sleep(Duration::from_millis(40)); continue; },
+                        Ok(None) => {
+                            thread::sleep(Duration::from_millis(40));
+                            continue;
+                        }
                         Err(error) => break ("failed".into(), None, Some(error)),
                     };
                     if session.stop_requested.load(Ordering::Acquire) {
@@ -4914,17 +4929,16 @@ async fn notify_session(
         return Err("Notification title is too long".into());
     }
     let history = manager.history(&app)?;
-    let chinese=system_entry::notification_chinese(&app);
+    let chinese = system_entry::notification_chinese(&app);
     tauri::async_runtime::spawn_blocking(move || {
         history
             .native_delivery(
                 &session_id,
                 agent_events::NativeSource::Lifecycle(&expected_status),
                 |record| {
-                    let body = record
-                        .reason
-                        .clone()
-                        .unwrap_or_else(|| system_entry::notification_status(&record.status,chinese));
+                    let body = record.reason.clone().unwrap_or_else(|| {
+                        system_entry::notification_status(&record.status, chinese)
+                    });
                     send_native_notification(app, session_id.clone(), title, body)
                 },
             )
@@ -5019,11 +5033,18 @@ fn set_global_shortcut(
     proxy!(manager, "set_global_shortcut", args);
     system_entry::set_shortcut_native(&app, enabled, &expected_owner_instance)
 }
-fn set_notification_locale(manager: State<'_, SessionManager>, locale: String) -> Result<(), String> {
-    let args=serde_json::json!({"locale":locale});
+fn set_notification_locale(
+    manager: State<'_, SessionManager>,
+    locale: String,
+) -> Result<(), String> {
+    let args = serde_json::json!({"locale":locale});
     background::validate_command("set_notification_locale", &args)?;
-    proxy!(manager,"set_notification_locale",args);
-    manager.system_entry.lock().map_err(|_|"system_entry_unavailable")?.notification_chinese=locale=="zh-CN";
+    proxy!(manager, "set_notification_locale", args);
+    manager
+        .system_entry
+        .lock()
+        .map_err(|_| "system_entry_unavailable")?
+        .notification_chinese = locale == "zh-CN";
     Ok(())
 }
 fn set_agent_notification_context(
@@ -7130,7 +7151,11 @@ mod tests {
     }
 
     fn test_history() -> (std::path::PathBuf, SessionSummary) {
-        let root = std::env::temp_dir().join(format!("yam-review-test-{}-{}", std::process::id(), next_session_id()));
+        let root = std::env::temp_dir().join(format!(
+            "yam-review-test-{}-{}",
+            std::process::id(),
+            next_session_id()
+        ));
         let summary = SessionSummary {
             ssh: None,
             session_id: "s-test".into(),
@@ -7146,7 +7171,11 @@ mod tests {
     fn history_test_directories_are_process_scoped_and_unique() {
         let (first, _) = test_history();
         let (second, _) = test_history();
-        assert!(first.file_name().unwrap().to_string_lossy().starts_with(&format!("yam-review-test-{}-", std::process::id())));
+        assert!(first
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with(&format!("yam-review-test-{}-", std::process::id())));
         assert_ne!(first, second);
     }
 

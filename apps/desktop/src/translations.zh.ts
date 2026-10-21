@@ -721,7 +721,7 @@ export const zh:Record<string,string>={
   "Configured endpoint": "已配置的服务地址",
   "Codex default": "Codex 默认方式",
   "Existing Codex configuration": "现有 Codex 配置",
-  "API failure receipts are verified for macOS with Codex 0.162.1. Other versions and platforms remain unverified; native hooks must be trusted and active. Retrying or silent output does not prove failure.": "已在 macOS 的 Codex 0.162.1 上验证 API 失败回执。其他版本和平台尚未验证；原生钩子必须已受信任且处于启用状态。重试或没有输出并不代表失败。",
+  "API failure receipts are verified for macOS with Codex 0.162.1 and 0.163.0. Other versions and platforms remain unverified; native hooks must be trusted and active. Retrying or silent output does not prove failure.": "已在 macOS 的 Codex 0.162.1 和 0.163.0 上验证 API 失败回执。其他版本和平台尚未验证；原生钩子必须已受信任且处于启用状态。重试或没有输出并不代表失败。",
   "Main settings window is unavailable.": "主设置窗口不可用。",
   "Terminal move source attachment changed.": "终端移动的源连接已变化。",
   "Move disposal acknowledgment is pending. Check/Continue move.": "正在等待原视图释放确认。请检查或继续移动。",

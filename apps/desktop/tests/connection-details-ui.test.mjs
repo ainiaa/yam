@@ -78,6 +78,14 @@ test('capability disclosure receives current session agent metadata',()=>{
  const rendered=new Function('React','SessionConnection','session','currentAgent',bindings)(React,()=>{}, {launch:{adapter:'codex',mode:'interactive'}},currentAgent);
  assert.equal(rendered.props.agent,currentAgent);
 });
+test('measured Codex 0.163.0 is disclosed as supported only with connected macOS hooks',()=>{
+ const launch={adapter:'codex',mode:'interactive'};
+ const info=text(renderConnection(launch,{cli_version:'codex-cli 0.163.0',cli_platform:'macos',integration:'connected'}));
+ assert.match(info,/Failure fallback.*Supported format/);
+ assert.match(info,/0\.162\.1.*0\.163\.0/);
+ for(const agent of [{cli_version:'codex-cli 0.163.0',cli_platform:'windows',integration:'connected'},{cli_version:'codex-cli 0.164.0',cli_platform:'macos',integration:'connected'}])assert.match(text(renderConnection(launch,agent)),/Failure fallback.*Unverified/);
+ assert.match(text(renderConnection(launch,{cli_version:'codex-cli 0.163.0',cli_platform:'macos',integration:'connecting'})),/Failure fallback.*Not connected/);
+});
 
 
 test('owner preparation reuses the executable resolved for the native launch',()=>{
