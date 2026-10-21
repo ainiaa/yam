@@ -1349,6 +1349,7 @@ mod tests {
         )
         .unwrap()
     }
+    #[cfg(target_os = "macos")]
     fn native_attribute_fixture(repository_name: &str, target_name: &str) -> GitFixture {
         let mut fixture = GitFixture::new();
         let repository = fixture.owned.0.join(repository_name);
@@ -1381,6 +1382,7 @@ mod tests {
         fixture
     }
 
+    #[cfg(target_os = "macos")]
     fn assert_native_attribute_cleanup(repository_name: &str, target_name: &str) {
         let fixture = native_attribute_fixture(repository_name, target_name);
         let manager = cleanup_manager();

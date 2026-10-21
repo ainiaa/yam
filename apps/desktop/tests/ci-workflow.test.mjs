@@ -52,3 +52,10 @@ test('MSVC test executables receive the same Common Controls v6 manifest as the 
 test('Linux CI installs the real Zsh needed by shell integration regressions',()=>{const workflow=readFileSync(new URL('.github/workflows/ci.yml',root),'utf8');assert.match(workflow,/apt-get install -y[^\n]*\bzsh\b/);});
 
 test('native CI gives cold builds enough time and selects the Zsh fixture environment',()=>{const workflow=readFileSync(new URL('.github/workflows/ci.yml',root),'utf8');assert.match(workflow,/timeout-minutes: 45/);assert.match(workflow,/SHELL=\/bin\/zsh/);});
+
+test('macOS cleanup fixture helper chain is compiled only where cleanup is supported',()=>{
+ const source=readFileSync(new URL('apps/desktop/src-tauri/src/worktree_manager.rs',root),'utf8');
+ for(const name of ['cleanup_preview','native_attribute_fixture','assert_native_attribute_cleanup']){
+  assert.match(source,new RegExp('#\\[cfg\\(target_os = "macos"\\)\\]\\s+fn '+name+'\\('));
+ }
+});

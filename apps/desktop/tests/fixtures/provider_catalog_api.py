@@ -42,7 +42,7 @@ def serve(mode, receipt):
                 body = b"x" * (2 * 1024 * 1024)
             self.send_response(status)
             if mode == "redirect":
-                self.send_header("Location", f"http://127.0.0.1:{self.server.server_port}/sink")
+                self.send_header("Location", f"http://127.0.0.1:{self.server.server_address[1]}/sink")
             self.send_header("Content-Type", "application/json")
             if mode != "large-unknown":
                 self.send_header("Content-Length", str(len(body)))
