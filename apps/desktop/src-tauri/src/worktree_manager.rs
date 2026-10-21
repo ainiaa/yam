@@ -3343,6 +3343,9 @@ const CLEANUP_REASONS: &[&str] = &[
     "worktree_target_occupied",
     "worktree_manifest_unavailable",
 ];
+#[cfg(any(target_os = "macos", test))]
+// Non-macOS tests clear the preview store but cannot execute native Trash cleanup.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct PendingCleanup {
     private: std::path::PathBuf,
     attempt: String,
@@ -3353,6 +3356,7 @@ struct PendingCleanup {
     parent_identity: String,
     expires: std::time::Instant,
 }
+#[cfg(any(target_os = "macos", test))]
 static CLEANUP_PREVIEWS: std::sync::Mutex<Vec<PendingCleanup>> = std::sync::Mutex::new(Vec::new());
 fn valid_token(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
@@ -3363,6 +3367,7 @@ fn cleanup_budget() -> crate::git_context::Budget {
         remaining: MAX_MANIFEST_BYTES,
     }
 }
+#[cfg(target_os = "macos")]
 fn cleanup_owner(manager: &crate::SessionManager) -> Result<String, String> {
     if !manager.background_owner
         || manager
@@ -3384,6 +3389,7 @@ fn cleanup_owner(manager: &crate::SessionManager) -> Result<String, String> {
     }
     Ok(owner)
 }
+#[cfg(target_os = "macos")]
 fn cleanup_inactive(manager: &crate::SessionManager, target: &Path) -> Result<(), String> {
     // LIFECYCLE is already held. Clone the actual owned sessions and release the map before any Git I/O.
     let sessions: Vec<_> = manager
@@ -3445,6 +3451,7 @@ fn registry_record(
     }
     Ok(found)
 }
+#[cfg(target_os = "macos")]
 fn cleanup_certificate(
     record: &ManagedRecord,
     identity: Option<&WorktreeIdentity>,
@@ -3487,6 +3494,7 @@ fn record_projection(
     }
     Ok(value)
 }
+#[cfg(target_os = "macos")]
 fn persist_cleanup(
     private: &Path,
     manifest: &mut Manifest,
@@ -3510,6 +3518,7 @@ fn persist_cleanup(
         .ok_or("worktree_manifest_invalid")?;
     save_manifest(private, manifest)
 }
+#[cfg(target_os = "macos")]
 fn cleanup_recovery(
     private: &Path,
     manifest: &mut Manifest,
@@ -3533,11 +3542,13 @@ fn cleanup_recovery(
         .ok_or("worktree_unknown_attempt")?;
     record_projection(current, Some(journal))
 }
+#[cfg(target_os = "macos")]
 fn sync_cleanup_parent(path: &Path) -> Result<(), String> {
     std::fs::File::open(path)
         .and_then(|file| file.sync_all())
         .map_err(|_| "worktree_recovery_needed".into())
 }
+#[cfg(target_os = "macos")]
 fn quarantine_move(from: &Path, to: &Path) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
@@ -3577,7 +3588,7 @@ pub(crate) fn owner_cleanup_command(
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (private, manager, trash);
-        return Err("worktree_cleanup_unsupported".into());
+        Err("worktree_cleanup_unsupported".into())
     }
     #[cfg(target_os = "macos")]
     {
@@ -3919,6 +3930,7 @@ type CleanupAction = Box<dyn Fn(CleanupFault)>;
 #[cfg(test)]
 thread_local! {static CLEANUP_FAULT:std::cell::Cell<Option<CleanupFault>>=const{std::cell::Cell::new(None)};static CLEANUP_FAULT_HIT:std::cell::Cell<Option<CleanupFault>>=const{std::cell::Cell::new(None)};static CLEANUP_ACTION:std::cell::RefCell<Option<CleanupAction>>=const{std::cell::RefCell::new(None)};}
 #[cfg(test)]
+#[cfg(target_os = "macos")]
 fn cleanup_fault(stage: CleanupFault) -> Result<(), String> {
     CLEANUP_ACTION.with(|action| {
         if let Some(action) = action.borrow().as_ref() {
@@ -4012,6 +4024,7 @@ fn reconcile_cleanup(
     Ok(changed)
 }
 
+#[cfg(target_os = "macos")]
 fn cleanup_path_absent(path: &Path) -> bool {
     matches!(std::fs::symlink_metadata(path),Err(error) if error.kind()==std::io::ErrorKind::NotFound)
 }

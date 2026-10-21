@@ -2285,6 +2285,7 @@ pub(crate) struct CleanupSnapshot {
     pub bytes: Vec<u8>,
     pub inventory: Vec<u8>,
 }
+#[cfg(target_os = "macos")]
 pub(crate) fn cleanup_snapshot(
     path: &Path,
     git: &Path,

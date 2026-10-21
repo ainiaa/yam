@@ -1,4 +1,5 @@
 // Author: Jeff.Liu. Keep a local macOS backup until the installed identity and signature pass.
+#[cfg(target_os = "macos")]
 use std::path::Path;
 #[cfg(target_os = "macos")]
 fn command(program: &str, args: &[&str]) -> Result<std::process::Output, &'static str> {

@@ -31,3 +31,10 @@ test('CI pins a supported Python before checksum-bound runtime preparation',()=>
   assert.match(attrs,/: eol: lf/,'hash-bound lockfile bytes must not change with Windows autocrlf');
  }
 });
+
+test('CI uses the validated Rust toolchain while retaining strict platform linting',()=>{
+ const workflow=readFileSync(new URL('.github/workflows/ci.yml',root),'utf8');
+ assert.match(workflow,/uses: dtolnay\/rust-toolchain@1\.98\.1/);
+ assert.match(workflow,/cargo clippy --manifest-path src-tauri\/Cargo.toml --all-targets -- -D warnings/);
+ assert.doesNotMatch(workflow,/RUSTFLAGS:.*allow|clippy.*-A /);
+});

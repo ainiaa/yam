@@ -1,13 +1,18 @@
 // Author: Jeff.Liu. Explicit GUI gateway queries; no background terminal work.
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
-use std::io::{Read, Write};
+#[cfg(any(target_os = "macos", test))]
+use std::io::Read;
+#[cfg(target_os = "macos")]
+use std::io::Write;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "macos")]
 const BODY_LIMIT: usize = 1024 * 1024;
+#[cfg(target_os = "macos")]
 const STDERR_LIMIT: usize = 8192;
 const QUERY_BUDGET: Duration = Duration::from_secs(3);
 
@@ -247,6 +252,7 @@ fn credential(
     value.map(Some).ok_or("credential_unavailable")
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn curl_command(url: &tauri::Url, remaining: Duration) -> Command {
     let mut command = Command::new("/usr/bin/curl");
     command.env_clear().args([
@@ -289,6 +295,7 @@ fn curl_command(url: &tauri::Url, remaining: Duration) -> Command {
     command
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn bounded_read(
     mut pipe: impl Read,
     limit: usize,

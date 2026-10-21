@@ -1,8 +1,7 @@
 // Author: Jeff.Liu. External terminals are views of an existing YAM-owned PTY.
-use std::{
-    ffi::OsString,
-    path::{Path, PathBuf},
-};
+#[cfg(any(target_os = "macos", test))]
+use std::path::PathBuf;
+use std::{ffi::OsString, path::Path};
 
 fn valid_attachment(id: &str, instance: &str) -> bool {
     !id.is_empty()
@@ -14,6 +13,7 @@ fn valid_attachment(id: &str, instance: &str) -> bool {
         && instance.len() == 64
         && instance.bytes().all(|b| b.is_ascii_hexdigit())
 }
+#[cfg(any(target_os = "macos", test))]
 fn installed(roots: &[PathBuf]) -> Vec<&'static str> {
     [("terminal", "Terminal.app"), ("iterm2", "iTerm.app")]
         .into_iter()
@@ -47,6 +47,7 @@ pub(crate) async fn list_external_terminals() -> Result<Vec<&'static str>, Strin
     .await
     .map_err(|_| "External terminal discovery unavailable".into())
 }
+#[cfg(any(target_os = "macos", test))]
 fn launch_command(program: &Path, id: &str, instance: &str) -> Result<String, String> {
     if !program.is_absolute() || !valid_attachment(id, instance) {
         return Err("Invalid external terminal attachment".into());
@@ -167,12 +168,12 @@ pub(super) fn entry(argv: &[OsString]) -> Option<Result<(), String>> {
     })())
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, any(target_os = "macos", test)))]
 struct Tty {
     fd: i32,
     saved: libc::termios,
 }
-#[cfg(unix)]
+#[cfg(all(unix, any(target_os = "macos", test)))]
 impl Tty {
     fn raw(fd: i32) -> Result<Self, String> {
         let mut saved = unsafe { std::mem::zeroed() };
@@ -188,6 +189,7 @@ impl Tty {
         }
         Ok(Self { fd, saved })
     }
+    #[cfg(target_os = "macos")]
     fn size(&self) -> Result<(u16, u16), String> {
         let mut size: libc::winsize = unsafe { std::mem::zeroed() };
         if unsafe { libc::ioctl(self.fd, libc::TIOCGWINSZ, &mut size) } != 0
@@ -199,7 +201,7 @@ impl Tty {
         Ok((size.ws_col.min(500), size.ws_row.min(200)))
     }
 }
-#[cfg(unix)]
+#[cfg(all(unix, any(target_os = "macos", test)))]
 impl Drop for Tty {
     fn drop(&mut self) {
         unsafe {
@@ -208,12 +210,12 @@ impl Drop for Tty {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, any(target_os = "macos", test)))]
 struct Nonblocking {
     fd: i32,
     flags: i32,
 }
-#[cfg(unix)]
+#[cfg(all(unix, any(target_os = "macos", test)))]
 impl Nonblocking {
     fn new(fd: i32) -> Result<Self, String> {
         let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
@@ -223,7 +225,7 @@ impl Nonblocking {
         Ok(Self { fd, flags })
     }
 }
-#[cfg(unix)]
+#[cfg(all(unix, any(target_os = "macos", test)))]
 impl Drop for Nonblocking {
     fn drop(&mut self) {
         unsafe {
@@ -231,7 +233,7 @@ impl Drop for Nonblocking {
         }
     }
 }
-#[cfg(unix)]
+#[cfg(all(unix, any(target_os = "macos", test)))]
 fn output_until(
     output: &mut std::fs::File,
     parts: &[&[u8]],
@@ -395,6 +397,7 @@ pub(super) fn delta(
     )
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn delta_frame(
     value: serde_json::Value,
     id: &str,
@@ -428,6 +431,7 @@ fn delta_frame(
     ))
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn frame(
     value: serde_json::Value,
     id: &str,
@@ -445,6 +449,7 @@ fn frame(
         matches!(status, "starting" | "running"),
     ))
 }
+#[cfg(any(target_os = "macos", test))]
 fn input(pending: &mut Vec<u8>, bytes: &[u8]) -> Result<(String, bool), String> {
     let end = bytes.iter().position(|b| *b == 0x1d);
     pending.extend_from_slice(&bytes[..end.unwrap_or(bytes.len())]);

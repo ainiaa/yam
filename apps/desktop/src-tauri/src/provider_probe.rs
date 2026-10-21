@@ -257,6 +257,7 @@ mod tests {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn installed_gateways(roots: &[std::path::PathBuf]) -> Vec<&'static str> {
     [
         ("magpie", "magpie.app"),
