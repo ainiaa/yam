@@ -1,6 +1,10 @@
+import {englishUiReadAsync} from './fixtures/english-ui-source.mjs';
+import './fixtures/i18n-test-init.mjs';
+import * as windowContext from '../src/window-context.ts';
 import assert from "node:assert/strict";
 import {test} from "node:test";
 import * as templates from "../src/launch-templates.ts";
+import {connectionDetails} from "../src/provider-config.ts";
 import {resolveLaunchDefaults} from "../src/project-config.ts";
 
 const stored = (overrides={}) => ({id:"11111111-1111-4111-8111-111111111111",name:"My template",adapter:"codex",mode:"interactive",extra_args:"--safe",prompt:"hello",command:null,...overrides});
@@ -103,6 +107,86 @@ test("F4 collection mount handles missing/corrupt storage without autosaving",()
  }
 });
 
+test("T1 unreadable template storage stays visible and protected from every mutation",()=>{
+ const malformed=["not-json",JSON.stringify([]),JSON.stringify({version:2,templates:[stored()]}),JSON.stringify({version:1,templates:[stored(),{...stored(),id:"broken"}]})];
+ for(const raw of malformed){
+  const storage=memoryStorage(raw),collection=new templates.LaunchTemplateCollection(storage,()=>"22222222-2222-4222-8222-222222222222");
+  collection.load();
+  assert.equal(typeof collection.loadError,"string","a failed read must not look like an empty collection");
+  assert.equal(collection.rawStorage,raw);
+  for(const mutate of [()=>collection.save("New",defaults),()=>collection.update(stored().id,"Changed",defaults),()=>collection.duplicate(stored().id),()=>collection.delete(stored().id)])assert.throws(mutate);
+  assert.deepEqual(storage.writes,[]);assert.equal(storage.value,raw);assert.deepEqual(collection.templates,[]);
+ }
+ const storage=memoryStorage("unread original");storage.getItem=()=>{throw Error("denied");};
+ const collection=new templates.LaunchTemplateCollection(storage);collection.load();
+ assert.equal(typeof collection.loadError,"string");assert.equal(collection.rawStorage,null);
+ assert.throws(()=>collection.save("New",defaults));assert.deepEqual(storage.writes,[]);assert.equal(storage.value,"unread original");
+});
+
+test("T1 only successful explicit reset unlocks a failed template read",()=>{
+ const storage=memoryStorage("corrupt",true),collection=new templates.LaunchTemplateCollection(storage,()=>"22222222-2222-4222-8222-222222222222");collection.load();
+ assert.equal(typeof collection.reset,"function","recovery requires a separate explicit reset operation");
+ assert.throws(()=>collection.reset());assert.equal(storage.value,"corrupt");assert.equal(collection.rawStorage,"corrupt");assert.ok(collection.loadError);assert.ok(collection.writeError);
+ storage.fail=false;collection.reset();
+ assert.deepEqual(templates.decodeLaunchTemplates(storage.value),[]);assert.equal(collection.loadError,null);assert.equal(collection.rawStorage,null);assert.equal(collection.writeError,null);
+ const created=collection.save("Recovered",defaults);assert.equal(collection.templates[0].id,created.id);assert.equal(collection.templates[0].name,"Recovered");
+});
+
+test("T1 empty storage is writable while a successful reload recovers without replacing raw data",()=>{
+ const storage=memoryStorage(),collection=new templates.LaunchTemplateCollection(storage,()=>"22222222-2222-4222-8222-222222222222");collection.load();
+ assert.equal(collection.loadError,null);collection.save("Normal",defaults);
+ storage.value="bad";collection.load();assert.ok(collection.loadError);
+ storage.value=templates.encodeLaunchTemplates([stored()]);const raw=storage.value,before=storage.writes.length;collection.load();
+ assert.equal(collection.loadError,null);assert.deepEqual(collection.templates,[stored()]);assert.equal(storage.value,raw);assert.equal(storage.writes.length,before);
+});
+
+test("T1 template component explains recovery and disables writes while load failed",async()=>{
+ const fs=await import("node:fs/promises"),ts=await import("typescript"),source=await englishUiReadAsync(fs.readFile,new URL("../src/LaunchTemplates.tsx",import.meta.url),"utf8");
+ const ast=ts.default.createSourceFile("LaunchTemplates.tsx",source,ts.default.ScriptTarget.Latest,true,ts.default.ScriptKind.TSX),component=ast.statements.find(node=>ts.default.isFunctionDeclaration(node)&&node.name?.text==="LaunchTemplates").getText(ast);
+ const React={createElement:(type,props,...children)=>({type,props:props??{},children})},render=new Function("React","connectionDetails",ts.default.transpile(component.replace("export ",""),{jsx:ts.default.JsxEmit.React,target:ts.default.ScriptTarget.ES2022})+";return LaunchTemplates;")(React,connectionDetails);
+ for(const rawStorage of [null,"corrupt"]){
+  const calls=[],tree=render({templates:[],selectedId:null,name:"Typed name",loadError:"Could not read launch templates.",rawStorage,writeError:null,actionError:null,starting:false,onReset:()=>calls.push("reset"),onCopyOriginal:()=>calls.push("copy")});
+  const nodes=[];const walk=node=>{if(node&&typeof node==="object"){nodes.push(node);for(const child of node.children??[])if(Array.isArray(child))child.forEach(walk);else walk(child);}};walk(tree);
+  const text=node=>(node?.children??[]).map(child=>typeof child==="string"?child:Array.isArray(child)?child.map(text).join(""):text(child)).join("");
+  assert.match(text(tree),/could not read launch templates/i);assert.match(text(tree),/reset/i);
+  const button=label=>nodes.find(node=>node.type==="button"&&text(node)===label);
+  for(const label of ["Save current","Update selected","Duplicate selected","Delete selected"])assert.equal(Boolean(button(label)?.props.disabled),true,label);
+  const copy=button("Copy original data"),reset=button("Reset templates");assert.ok(copy&&reset);assert.equal(Boolean(copy.props.disabled),rawStorage===null);assert.equal(Boolean(reset.props.disabled),false);
+  if(rawStorage!==null)copy.props.onClick();reset.props.onClick();assert.deepEqual(calls,rawStorage===null?["reset"]:["copy","reset"]);
+ }
+});
+
+test("T1 App reset needs confirmation and copy failure never resets stored templates",async()=>{
+ const fs=await import("node:fs/promises"),ts=await import("typescript"),app=await englishUiReadAsync(fs.readFile,new URL("../src/App.tsx",import.meta.url),"utf8"),tree=ts.default.createSourceFile("App.tsx",app,ts.default.ScriptTarget.Latest,true,ts.default.ScriptKind.TSX),functions={};
+ const visit=node=>{if(ts.default.isFunctionDeclaration(node)&&["resetLaunchTemplates","copyOriginalLaunchTemplates"].includes(node.name?.text))functions[node.name.text]=node.getText(tree);ts.default.forEachChild(node,visit);};visit(tree);
+ assert.ok(functions.resetLaunchTemplates&&functions.copyOriginalLaunchTemplates,"App supplies explicit recovery actions");
+ assert.match(app,/<LaunchTemplates[^>]*loadError=\{launchTemplateCollection\.loadError\}/s);assert.match(app,/onReset=\{resetLaunchTemplates\}/);assert.match(app,/onCopyOriginal=\{copyOriginalLaunchTemplates\}/);
+ for(const answer of [false,true,"yes",null]){
+  const calls=[],collection={reset:()=>calls.push("reset"),rawStorage:"corrupt"},values={isMainWindow:true,launchTemplateCollection:collection,invoke:async name=>{assert.equal(name,"confirm_template_reset");calls.push("confirm");return answer;},setLaunchTemplateActionError:()=>{},refreshLaunchTemplateUi:()=>{},handleLaunchTemplateError:error=>{throw error;}};
+  await new Function(...Object.keys(values),ts.default.transpile(functions.resetLaunchTemplates,{target:ts.default.ScriptTarget.ES2022})+";return resetLaunchTemplates;")(...Object.values(values))();
+  assert.deepEqual(calls,answer===true?["confirm","reset"]:["confirm"]);
+ }
+ for(const isMainWindow of [false,true]){
+  const calls=[],failure=Error("confirmation unavailable"),values={isMainWindow,launchTemplateCollection:{reset:()=>calls.push("reset"),rawStorage:"corrupt"},invoke:async()=>{calls.push("confirm");throw failure;},setLaunchTemplateActionError:()=>{},refreshLaunchTemplateUi:()=>{},handleLaunchTemplateError:error=>{assert.equal(error,failure);calls.push("error");}};
+  await new Function(...Object.keys(values),ts.default.transpile(functions.resetLaunchTemplates,{target:ts.default.ScriptTarget.ES2022})+";return resetLaunchTemplates;")(...Object.values(values))();
+  assert.deepEqual(calls,isMainWindow?["confirm","error"]:[]);
+ }
+ const calls=[],values={isMainWindow:true,launchTemplateCollection:{rawStorage:"corrupt",reset:()=>calls.push("reset")},navigator:{clipboard:{writeText:async()=>{calls.push("copy");throw Error("denied");}}},setLaunchTemplateActionError:error=>calls.push(error),refreshLaunchTemplateUi:()=>{}};
+ await new Function(...Object.keys(values),ts.default.transpile(functions.copyOriginalLaunchTemplates,{target:ts.default.ScriptTarget.ES2022})+";return copyOriginalLaunchTemplates;")(...Object.values(values))();
+ assert.equal(calls.includes("reset"),false);assert.match(calls.at(-1),/could not copy/i);
+});
+
+test("T1 reset uses a registered parentless native confirmation to avoid macOS sheet redraw deadlock",async()=>{
+ const fs=await import("node:fs/promises"),native=await englishUiReadAsync(fs.readFile,new URL("../src-tauri/src/system_entry.rs",import.meta.url),"utf8"),lib=await englishUiReadAsync(fs.readFile,new URL("../src-tauri/src/lib.rs",import.meta.url),"utf8");
+ const start=native.indexOf("pub(super) async fn confirm_template_reset(");assert.ok(start>=0,"template reset has its own native command");
+ const body=native.slice(start,native.indexOf("\n}\n",start)+3);
+ assert.match(body,/confirmation_with\(&CONFIRMING,"template_confirmation_pending","template_confirmation_unavailable",move \|\|/);
+ const workerStart=native.indexOf('async fn confirmation_with('),worker=native.slice(workerStart,native.indexOf('\n}\n',workerStart)+3);
+ assert.match(worker,/spawn_blocking\(move \|\|/);assert.match(worker,/gate\.try_lock\(\)/);assert.match(worker,/Ok\(show\(\)\)/);
+ assert.match(body,/\.title\(native_entry_text\("Reset launch templates",chinese\)\)/);assert.match(body,/Reset stored launch templates\?/);assert.match(body,/OkCancelCustom\(native_entry_text\("Reset templates",chinese\)\.into\(\),native_entry_text\("Cancel",chinese\)\.into\(\)\)/);assert.match(body,/\.blocking_show\(\)/);assert.doesNotMatch(body,/\.parent\s*\(/);
+ assert.match(lib,/system_entry::confirm_template_reset,/);
+});
+
 test("F4 persistence commits CRUD and selected identity only after setItem succeeds",()=>{
  let serial=2;const storage=memoryStorage(),collection=new templates.LaunchTemplateCollection(storage,()=>`${String(serial++).repeat(8).slice(0,8)}-3333-4333-8333-333333333333`);
  collection.load();const created=collection.save("Saved",defaults);assert.equal(collection.templates[0].id,created.id);assert.equal(collection.selectedId,created.id);assert.equal(collection.writeError,null);
@@ -129,12 +213,12 @@ test("F4 only a successful explicit persistence clears a retained storage error"
 });
 
 test("F4 actual component exposes explicit non-submit CRUD and Apply buttons and disables them while starting",async()=>{
- const fs=await import("node:fs/promises"),ts=await import("typescript"),source=await fs.readFile(new URL("../src/LaunchTemplates.tsx",import.meta.url),"utf8");
+ const fs=await import("node:fs/promises"),ts=await import("typescript"),source=await englishUiReadAsync(fs.readFile,new URL("../src/LaunchTemplates.tsx",import.meta.url),"utf8");
  const tree=ts.default.createSourceFile("LaunchTemplates.tsx",source,ts.default.ScriptTarget.Latest,true,ts.default.ScriptKind.TSX);let component;
  for(const node of tree.statements)if(ts.default.isFunctionDeclaration(node)&&node.name?.text==="LaunchTemplates")component=node.getText(tree);
  assert.ok(component,"LaunchTemplates component exists");
  const React={createElement:(type,props,...children)=>({type,props:props??{},children})};
- const render=new Function("React",ts.default.transpile(component.replace("export ",""),{jsx:ts.default.JsxEmit.React,target:ts.default.ScriptTarget.ES2022})+";return LaunchTemplates;")(React);
+ const render=new Function("React","connectionDetails",ts.default.transpile(component.replace("export ",""),{jsx:ts.default.JsxEmit.React,target:ts.default.ScriptTarget.ES2022})+";return LaunchTemplates;")(React,connectionDetails);
  for(const starting of [false,true]){
   const calls=[],tree=render({templates:[stored({name:"Visible"})],selectedId:stored().id,writeError:null,starting,onSelect:id=>calls.push(["select",id]),onSave:()=>calls.push(["save"]),onUpdate:()=>calls.push(["update"]),onDuplicate:()=>calls.push(["duplicate"]),onDelete:()=>calls.push(["delete"]),onApply:value=>calls.push(["apply",value.id])});
   const nodes=[];const walk=n=>{if(n&&typeof n==="object"){nodes.push(n);for(const child of n.children??[])if(Array.isArray(child))child.forEach(walk);else walk(child);}};walk(tree);
@@ -146,36 +230,36 @@ test("F4 actual component exposes explicit non-submit CRUD and Apply buttons and
 });
 
 test("F4 actual App Apply callback changes five launch fields and preserves cwd/project/environment state",async()=>{
- const fs=await import("node:fs/promises"),ts=await import("typescript"),app=await fs.readFile(new URL("../src/App.tsx",import.meta.url),"utf8"),tree=ts.default.createSourceFile("App.tsx",app,ts.default.ScriptTarget.Latest,true,ts.default.ScriptKind.TSX);let fn;
+ const fs=await import("node:fs/promises"),ts=await import("typescript"),app=await englishUiReadAsync(fs.readFile,new URL("../src/App.tsx",import.meta.url),"utf8"),tree=ts.default.createSourceFile("App.tsx",app,ts.default.ScriptTarget.Latest,true,ts.default.ScriptKind.TSX);let fn;
  const visit=n=>{if(ts.default.isFunctionDeclaration(n)&&n.name?.text==="applyLaunchTemplate")fn=n.getText(tree);ts.default.forEachChild(n,visit);};visit(tree);assert.ok(fn,"actual App Apply callback exists");
- const values={setSelectedAdapter:v=>state.adapter=v,setLaunchMode:v=>state.mode=v,setAdapterArgs:v=>state.extra_args=v,setPrompt:v=>state.prompt=v,setCommand:v=>state.command=v,setProjectLaunchEdits:update=>state.projectLaunchEdits=update(state.projectLaunchEdits)};const state={cwd:"/trusted/project",env:{TOKEN:"OWNER_SECRET"},projectPreview:{root:"/trusted/project"},useProjectSettings:true,projectLaunchEdits:{},adapter:"old",mode:"old",extra_args:"old",prompt:"old",command:"old"};
+ const values={projectLaunchFields:templates.projectLaunchFields,editLaunch:fields=>{Object.assign(state,fields);Object.assign(state.projectLaunchEdits,fields);},launchSettingsDialog:{current:null},launchDialog:{current:null}};const state={cwd:"/trusted/project",env:{TOKEN:"OWNER_SECRET"},projectPreview:{root:"/trusted/project"},useProjectSettings:true,projectLaunchEdits:{},adapter:"old",mode:"old",extra_args:"old",prompt:"old",command:"old",provider:{id:"deepseek"}};
  new Function(...Object.keys(values),ts.default.transpile(fn,{target:ts.default.ScriptTarget.ES2022})+";return applyLaunchTemplate;")(...Object.values(values))(stored({command:""}));
  assert.deepEqual({adapter:state.adapter,mode:state.mode,extra_args:state.extra_args,prompt:state.prompt,command:state.command},{adapter:"codex",mode:"interactive",extra_args:"--safe",prompt:"hello",command:""});
  assert.equal(state.cwd,"/trusted/project");assert.deepEqual(state.env,{TOKEN:"OWNER_SECRET"});assert.deepEqual(state.projectPreview,{root:"/trusted/project"});assert.equal(state.useProjectSettings,true);
- assert.deepEqual(state.projectLaunchEdits,{adapter:"codex",mode:"interactive",extra_args:"--safe",prompt:"hello",command:""});
+ assert.deepEqual(state.projectLaunchEdits,{adapter:"codex",mode:"interactive",extra_args:"--safe",prompt:"hello",command:"",provider:null,codex:{image_mode:"native"}});assert.equal(state.provider,null);
  const body=app.slice(app.indexOf("function applyLaunchTemplate("),app.indexOf("function ",app.indexOf("function applyLaunchTemplate(")+10));
  assert.doesNotMatch(body,/startSession|create_session|take_terminal_control|approveProjectConfig|trust_project_config|cancelProjectPreview|owner/i);
 });
 
 test("F4 actual App Save projects real resolved trusted defaults before storage and masks write failures",async()=>{
- const fs=await import("node:fs/promises"),ts=await import("typescript"),app=await fs.readFile(new URL("../src/App.tsx",import.meta.url),"utf8"),tree=ts.default.createSourceFile("App.tsx",app,ts.default.ScriptTarget.Latest,true,ts.default.ScriptKind.TSX);let save;
+ const fs=await import("node:fs/promises"),ts=await import("typescript"),app=await englishUiReadAsync(fs.readFile,new URL("../src/App.tsx",import.meta.url),"utf8"),tree=ts.default.createSourceFile("App.tsx",app,ts.default.ScriptTarget.Latest,true,ts.default.ScriptKind.TSX);let save;
  const visit=n=>{if(ts.default.isFunctionDeclaration(n)&&n.name?.text==="saveLaunchTemplate")save=n.getText(tree);ts.default.forEachChild(n,visit);};visit(tree);assert.ok(save,"actual App Save callback exists");
  const resolved=resolveLaunchDefaults(defaults,{adapter:"claude",mode:"interactive",extra_args:"",prompt:"trusted",command:"",env:{TOKEN:"SAVE_SECRET"},cwd:"/project",template_name:"project-only"},{});
  assert.match(app,/<LaunchTemplates[^>]*templates=\{launchTemplateCollection\.templates\}[^>]*onApply=\{applyLaunchTemplate\}/s,"actual launch dialog wires persisted rows and Apply callback");
  assert.match(app,/onSave=\{saveLaunchTemplate\}[^>]*onUpdate=\{updateLaunchTemplate\}/s,"actual component wires explicit CRUD callbacks");
  const storage=memoryStorage(),collection=new templates.LaunchTemplateCollection(storage,()=>"22222222-2222-4222-8222-222222222222"),state={actionError:null,revision:0};
- const invokeSave=()=>new Function("launchTemplateCollection","launchTemplateName","formLaunch","setLaunchTemplateActionError","refreshLaunchTemplateUi",ts.default.transpile(save,{target:ts.default.ScriptTarget.ES2022})+";return saveLaunchTemplate;")(collection,"Trusted",resolved,value=>state.actionError=value,()=>state.revision++)();
+ const invokeSave=()=>new Function("isMainWindow","launchTemplateCollection","launchTemplateName","formLaunch","setLaunchTemplateActionError","refreshLaunchTemplateUi",ts.default.transpile(save,{target:ts.default.ScriptTarget.ES2022})+";return saveLaunchTemplate;")(true,collection,"Trusted",resolved,value=>state.actionError=value,()=>state.revision++)();
  invokeSave();assert.deepEqual(collection.templates,[stored({id:"22222222-2222-4222-8222-222222222222",name:"Trusted",adapter:"claude",extra_args:"",prompt:"trusted",command:""})]);
  assert.equal(storage.value.includes("SAVE_SECRET"),false);assert.equal(storage.value.includes("/project"),false);assert.equal(storage.value.includes("project-only"),false);
  const failing=memoryStorage(null,true),failedCollection=new templates.LaunchTemplateCollection(failing,()=>"33333333-3333-4333-8333-333333333333"),failureState={actionError:null,revision:0};
- new Function("launchTemplateCollection","launchTemplateName","formLaunch","setLaunchTemplateActionError","refreshLaunchTemplateUi","handleLaunchTemplateError",ts.default.transpile(save,{target:ts.default.ScriptTarget.ES2022})+";return saveLaunchTemplate;")(failedCollection,"Trusted",resolved,value=>failureState.actionError=value,()=>failureState.revision++,reason=>{failureState.actionError=failedCollection.writeError?null:String(reason);failureState.revision++;})();
+ new Function("isMainWindow","launchTemplateCollection","launchTemplateName","formLaunch","setLaunchTemplateActionError","refreshLaunchTemplateUi","handleLaunchTemplateError",ts.default.transpile(save,{target:ts.default.ScriptTarget.ES2022})+";return saveLaunchTemplate;")(true,failedCollection,"Trusted",resolved,value=>failureState.actionError=value,()=>failureState.revision++,reason=>{failureState.actionError=failedCollection.writeError?null:String(reason);failureState.revision++;})();
  assert.equal(failedCollection.templates.length,0);assert.equal(failedCollection.writeError,"Could not save launch templates.");assert.equal(failureState.actionError,null);
  const saveDefaults=app.slice(app.indexOf("async function saveLaunchDefaults()"),app.indexOf("const [session",app.indexOf("async function saveLaunchDefaults()")));
  assert.match(saveDefaults,/set_launch_defaults/);assert.doesNotMatch(saveDefaults,/yam\.launchTemplates|launchTemplateCollection/);
 });
 
 test("F4 actual App defers denied localStorage access and preserves state on explicit persistence failure",async()=>{
- const fs=await import("node:fs/promises"),ts=await import("typescript"),app=await fs.readFile(new URL("../src/App.tsx",import.meta.url),"utf8"),tree=ts.default.createSourceFile("App.tsx",app,ts.default.ScriptTarget.Latest,true,ts.default.ScriptKind.TSX);let initializer,update,errorHandler;
+ const fs=await import("node:fs/promises"),ts=await import("typescript"),app=await englishUiReadAsync(fs.readFile,new URL("../src/App.tsx",import.meta.url),"utf8"),tree=ts.default.createSourceFile("App.tsx",app,ts.default.ScriptTarget.Latest,true,ts.default.ScriptKind.TSX);let initializer,update,errorHandler;
  const visit=n=>{
   if(ts.default.isVariableDeclaration(n)&&n.name.getText(tree)==="[launchTemplateCollection]"&&n.initializer&&ts.default.isCallExpression(n.initializer))initializer=n.initializer.arguments[0].getText(tree);
   if(ts.default.isFunctionDeclaration(n)&&n.name?.text==="updateLaunchTemplate")update=n.getText(tree);
@@ -188,7 +272,7 @@ test("F4 actual App defers denied localStorage access and preserves state on exp
  try{let collection;assert.doesNotThrow(()=>{collection=initialize();});assert.deepEqual(collection.templates,[]);assert.equal(collection.writeError,null);assert.equal(getterCalls,1,"only the read path is attempted during mount; no write occurs");}
  finally{if(previous)Object.defineProperty(globalThis,"localStorage",previous);else delete globalThis.localStorage;}
  const id="11111111-1111-4111-8111-111111111111",saved=stored({name:"Committed"}),storage=memoryStorage(templates.encodeLaunchTemplates([saved]),true),collection=new templates.LaunchTemplateCollection(storage);collection.load();collection.select(id);const oldRows=collection.templates,currentForm={adapter:"claude",mode:"task",extra_args:"typed",prompt:"form kept",command:null},state={actionError:null,revision:0},templateName="Edited";
- const handle=new Function("launchTemplateCollection","setLaunchTemplateActionError","refreshLaunchTemplateUi",ts.default.transpile(errorHandler,{target:ts.default.ScriptTarget.ES2022})+";return handleLaunchTemplateError;")(collection,value=>state.actionError=value,()=>state.revision++);
- new Function("launchTemplateCollection","launchTemplateName","formLaunch","setLaunchTemplateActionError","refreshLaunchTemplateUi","handleLaunchTemplateError",ts.default.transpile(update,{target:ts.default.ScriptTarget.ES2022})+";return updateLaunchTemplate;")(collection,templateName,currentForm,value=>state.actionError=value,()=>state.revision++,handle)();
+ const handle=new Function("isMainWindow","launchTemplateCollection","setLaunchTemplateActionError","refreshLaunchTemplateUi",ts.default.transpile(errorHandler,{target:ts.default.ScriptTarget.ES2022})+";return handleLaunchTemplateError;" )(true,collection,value=>state.actionError=value,()=>state.revision++);
+ new Function("isMainWindow","launchTemplateCollection","launchTemplateName","formLaunch","setLaunchTemplateActionError","refreshLaunchTemplateUi","handleLaunchTemplateError",ts.default.transpile(update,{target:ts.default.ScriptTarget.ES2022})+";return updateLaunchTemplate;" )(true,collection,templateName,currentForm,value=>state.actionError=value,()=>state.revision++,handle)();
  assert.equal(collection.templates,oldRows);assert.equal(collection.selectedId,id);assert.equal(collection.writeError,"Could not save launch templates.");assert.equal(state.actionError,null);assert.equal(templateName,"Edited");assert.deepEqual(currentForm,{adapter:"claude",mode:"task",extra_args:"typed",prompt:"form kept",command:null});
 });

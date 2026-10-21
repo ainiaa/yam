@@ -13,6 +13,10 @@ pub struct AgentReceipt {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentState {
     pub generation: String,
+    #[serde(default)]
+    pub cli_version: Option<String>,
+    #[serde(default)]
+    pub cli_platform: Option<String>,
     pub agent_session_id: Option<String>,
     pub turn_id: Option<String>,
     pub phase: String,
@@ -29,6 +33,8 @@ impl Default for AgentState {
     fn default() -> Self {
         Self {
             generation: String::new(),
+            cli_version: None,
+            cli_platform: None,
             agent_session_id: None,
             turn_id: None,
             phase: "unknown".into(),
@@ -140,7 +146,10 @@ impl AgentState {
             if self.turns.iter().any(|seen| seen == turn) {
                 // Claude 2.1.286 can submit the previous prompt_id. This hook
                 // confirms activity, while later native hooks establish the new ID.
-                if event.source.as_deref() == Some("claude") && self.phase != "working" {
+                if event.source.as_deref() == Some("claude")
+                    && self.turn_id.as_deref() == Some(turn)
+                    && self.phase != "working"
+                {
                     self.phase = "working".into();
                     self.permission_keys.clear();
                     self.revision = self
@@ -332,10 +341,21 @@ impl super::HistoryStore {
         }
         Ok(result)
     }
+    #[cfg(test)]
     pub(super) fn configure_agent(&self, id: &str, generation: &str) -> Result<(), String> {
+        self.configure_agent_version(id, generation, None)
+    }
+    pub(super) fn configure_agent_version(
+        &self,
+        id: &str,
+        generation: &str,
+        cli_version: Option<&str>,
+    ) -> Result<(), String> {
         self.edit_agent(id, |state| {
             *state = AgentState {
                 generation: generation.into(),
+                cli_version: cli_version.map(str::to_string),
+                cli_platform: Some(std::env::consts::OS.into()),
                 integration: "connecting".into(),
                 ..Default::default()
             };
@@ -693,6 +713,7 @@ mod tests {
         let store = super::super::HistoryStore::open(root.clone()).unwrap();
         store
             .start(&super::super::SessionSummary {
+                ssh: None,
                 session_id: "a".into(),
                 cwd: "/tmp".into(),
                 command: None,
@@ -749,6 +770,7 @@ mod tests {
         let store = std::sync::Arc::new(super::super::HistoryStore::open(root.clone()).unwrap());
         store
             .start(&super::super::SessionSummary {
+                ssh: None,
                 session_id: "a".into(),
                 cwd: "/tmp".into(),
                 command: None,
@@ -832,6 +854,7 @@ mod tests {
         let history = super::super::HistoryStore::open(root.clone()).unwrap();
         history
             .start(&super::super::SessionSummary {
+                ssh: None,
                 session_id: "s".into(),
                 cwd: "/tmp".into(),
                 command: None,
@@ -917,6 +940,7 @@ mod tests {
         let history = super::super::HistoryStore::open(root.clone()).unwrap();
         history
             .start(&super::super::SessionSummary {
+                ssh: None,
                 session_id: "s".into(),
                 cwd: "/tmp".into(),
                 command: None,
@@ -1081,6 +1105,28 @@ mod tests {
         assert!(serde_json::from_value::<AgentState>(old).is_ok());
     }
     #[test]
+    fn failure_recovery_keeps_new_success_and_ignores_old_or_foreign_failures() {
+        let mut s = state();
+        s.apply(&event("UserPromptSubmit", Some("one"))).unwrap();
+        s.apply(&event("TurnFailed", Some("one"))).unwrap();
+        let failure = s.inbox[0].clone();
+        s.apply(&event("UserPromptSubmit", Some("two"))).unwrap();
+        assert_eq!(s.phase, "working");
+        assert_eq!(s.inbox, vec![failure.clone()]);
+        s.apply(&event("TurnComplete", Some("two"))).unwrap();
+        let recovered = s.clone();
+        for kind in ["TurnFailed", "TurnComplete", "Stop", "PermissionRequest"] {
+            s.apply(&event(kind, Some("one"))).unwrap();
+        }
+        let mut foreign = event("TurnFailed", Some("two"));
+        foreign.agent_session_id = "other-thread".into();
+        s.apply(&foreign).unwrap();
+        assert_eq!(s, recovered);
+        assert_eq!(s.inbox[0], failure);
+        assert_eq!(s.inbox[1].kind, "response_finished");
+        assert!(s.inbox.iter().all(|entry| !entry.read));
+    }
+    #[test]
     fn claude_repeated_submit_id_uses_later_native_turn_without_guessing() {
         let native = |kind: &str, turn: &str| {
             serde_json::from_value::<AgentEvent>(serde_json::json!({"kind":kind,"agent_session_id":"main-thread","turn_id":turn,"source":"claude"})).unwrap()
@@ -1115,6 +1161,22 @@ mod tests {
         assert_eq!(s.phase, "needs_permission");
         s.apply(&native("TurnFailed", "three")).unwrap();
         assert_eq!(s.phase, "failed");
+    }
+    #[test]
+    fn claude_old_submit_cannot_restart_a_later_ready_failed_or_permission_turn() {
+        let native = |kind: &str, turn: &str| {
+            serde_json::from_value::<AgentEvent>(serde_json::json!({"kind":kind,"agent_session_id":"main-thread","turn_id":turn,"source":"claude","permission_key":"tool-two"})).unwrap()
+        };
+        for kind in ["ResponseReady", "TurnFailed", "PermissionRequest"] {
+            let mut s = state();
+            s.apply(&native("UserPromptSubmit", "one")).unwrap();
+            s.apply(&native("ResponseReady", "one")).unwrap();
+            s.apply(&native("UserPromptSubmit", "two")).unwrap();
+            s.apply(&native(kind, "two")).unwrap();
+            let current = s.clone();
+            s.apply(&native("UserPromptSubmit", "one")).unwrap();
+            assert_eq!(s, current, "late submit after {kind}");
+        }
     }
     #[test]
     fn reply_readiness_is_attention_not_final_completion_and_can_resume_work() {
@@ -1188,6 +1250,7 @@ mod tests {
         let store = super::super::HistoryStore::open(root.clone()).unwrap();
         store
             .start(&super::super::SessionSummary {
+                ssh: None,
                 session_id: "a".into(),
                 cwd: "/tmp".into(),
                 command: None,
@@ -1322,6 +1385,7 @@ mod tests {
         ));
         let history = super::super::HistoryStore::open(root.clone()).unwrap();
         let summary = super::super::SessionSummary {
+            ssh: None,
             session_id: "s-one".into(),
             cwd: "/tmp".into(),
             command: None,
@@ -1369,6 +1433,7 @@ mod tests {
         ));
         let history = super::super::HistoryStore::open(root.clone()).unwrap();
         let summary = super::super::SessionSummary {
+            ssh: None,
             session_id: "s-one".into(),
             cwd: "/tmp".into(),
             command: None,
@@ -1404,6 +1469,7 @@ mod tests {
         ));
         let history = Arc::new(super::super::HistoryStore::open(root.clone()).unwrap());
         let summary = super::super::SessionSummary {
+            ssh: None,
             session_id: "s-one".into(),
             cwd: "/tmp".into(),
             command: None,
@@ -1439,6 +1505,240 @@ mod tests {
         let results: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
         assert_eq!(results.iter().filter(|result| result.is_some()).count(), 1);
         assert_eq!(history.list().unwrap()[0].agent.inbox.len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn launch_cli_facts_are_additive_and_survive_native_event_updates() {
+        let mut legacy = serde_json::to_value(AgentState::default()).unwrap();
+        legacy.as_object_mut().unwrap().remove("cli_version");
+        legacy.as_object_mut().unwrap().remove("cli_platform");
+        let old: AgentState = serde_json::from_value(legacy.clone()).unwrap();
+        let old = serde_json::to_value(old).unwrap();
+        assert!(old["cli_version"].is_null());
+        assert!(old["cli_platform"].is_null());
+        legacy["generation"] = "generation".into();
+        legacy["cli_version"] = "codex-cli 0.162.1".into();
+        legacy["cli_platform"] = "macos".into();
+        let mut state: AgentState = serde_json::from_value(legacy).unwrap();
+        state.apply(&event("SessionStart", None)).unwrap();
+        state
+            .apply(&event("UserPromptSubmit", Some("one")))
+            .unwrap();
+        let saved = serde_json::to_value(state).unwrap();
+        assert_eq!(saved["cli_version"], "codex-cli 0.162.1");
+        assert_eq!(saved["cli_platform"], "macos");
+    }
+
+    #[test]
+    fn owner_configures_and_persists_cli_facts_per_launch_generation() {
+        let root =
+            std::env::temp_dir().join(format!("yam-cli-facts-{}", super::super::next_session_id()));
+        let history = super::super::HistoryStore::open(root.clone()).unwrap();
+        history
+            .start(&super::super::SessionSummary {
+                ssh: None,
+                session_id: "s-one".into(),
+                cwd: "/tmp".into(),
+                command: None,
+                status: "running".into(),
+                launch: None,
+            })
+            .unwrap();
+        history
+            .configure_agent_version("s-one", "generation", Some("codex-cli 0.162.1"))
+            .unwrap();
+        history
+            .ingest_agent("s-one", "generation", &event("SessionStart", None))
+            .unwrap();
+        let reopened = super::super::HistoryStore::open(root.clone()).unwrap();
+        let saved = &reopened.list().unwrap()[0].agent;
+        assert_eq!(saved.cli_version.as_deref(), Some("codex-cli 0.162.1"));
+        assert_eq!(saved.cli_platform.as_deref(), Some(std::env::consts::OS));
+        reopened.configure_agent("s-one", "new-generation").unwrap();
+        assert!(reopened.list().unwrap()[0].agent.cli_version.is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "bounded isolated HistoryStore load; never uses installed app state"]
+    fn agent_parallel_load_isolates_generations_receipts_and_persistent_history() {
+        use std::sync::{Arc, Barrier};
+        use std::time::{Duration, Instant};
+        const WORKERS: usize = 8;
+        const TURNS: usize = 32;
+        let root = std::env::temp_dir().join(format!(
+            "yam-agent-load-{}",
+            super::super::next_session_id()
+        ));
+        let history = Arc::new(super::super::HistoryStore::open(root.clone()).unwrap());
+        for worker in 0..WORKERS {
+            let id = format!("s-{worker}");
+            history
+                .start(&super::super::SessionSummary {
+                    ssh: None,
+                    session_id: id.clone(),
+                    cwd: "/tmp".into(),
+                    command: None,
+                    status: "running".into(),
+                    launch: None,
+                })
+                .unwrap();
+            history
+                .configure_agent_version(&id, &format!("g-{worker}"), Some("codex-cli 0.162.1"))
+                .unwrap();
+        }
+        let barrier = Arc::new(Barrier::new(WORKERS + 1));
+        let threads: Vec<_> = (0..WORKERS)
+            .map(|worker| {
+                let history = history.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let id = format!("s-{worker}");
+                    let generation = format!("g-{worker}");
+                    let native = format!("native-{worker}");
+                    let make = |kind: &str, turn: Option<&str>| AgentEvent {
+                        agent_session_id: native.clone(),
+                        ..event(kind, turn)
+                    };
+                    barrier.wait();
+                    let start = Instant::now();
+                    history
+                        .ingest_agent(&id, &generation, &make("SessionStart", None))
+                        .unwrap();
+                    let mut seconds = Vec::new();
+                    for round in 0..TURNS {
+                        let turn = format!("t-{worker}-{round}");
+                        let tick = Instant::now();
+                        history
+                            .ingest_agent(&id, &generation, &make("UserPromptSubmit", Some(&turn)))
+                            .unwrap();
+                        let kind =
+                            ["TurnComplete", "TurnFailed", "Interrupt"][(worker + round) % 3];
+                        let done = make(kind, Some(&turn));
+                        let receipt = history
+                            .ingest_agent(&id, &generation, &done)
+                            .unwrap()
+                            .unwrap();
+                        assert!(history
+                            .ingest_agent(&id, &generation, &done)
+                            .unwrap()
+                            .is_none());
+                        assert!(history.ingest_agent(&id, "old-generation", &done).is_err());
+                        let mut foreign = done.clone();
+                        foreign.agent_session_id = "foreign-native".into();
+                        assert!(history
+                            .ingest_agent(&id, &generation, &foreign)
+                            .unwrap()
+                            .is_none());
+                        if round > 0 {
+                            let previous = format!("t-{worker}-{}", round - 1);
+                            let late = ["TurnComplete", "TurnFailed", "Interrupt"]
+                                [(worker + round - 1) % 3];
+                            assert!(history
+                                .ingest_agent(&id, &generation, &make(late, Some(&previous)))
+                                .unwrap()
+                                .is_none());
+                        }
+                        let records = history.list().unwrap();
+                        let entry = records
+                            .iter()
+                            .find(|r| r.summary.session_id == id)
+                            .unwrap()
+                            .agent
+                            .inbox
+                            .iter()
+                            .find(|r| r.id == receipt)
+                            .unwrap();
+                        history
+                            .agent_delivery(&id, &receipt, entry.revision, "accepted", None)
+                            .unwrap();
+                        history
+                            .read_agent_receipt(&id, &receipt, entry.revision)
+                            .unwrap();
+                        seconds.push(tick.elapsed().as_secs_f64());
+                    }
+                    assert!(start.elapsed() < Duration::from_secs(30));
+                    seconds
+                })
+            })
+            .collect();
+        let wall = Instant::now();
+        barrier.wait();
+        let mut latencies: Vec<_> = threads
+            .into_iter()
+            .flat_map(|thread| thread.join().unwrap())
+            .collect();
+        let expected = history.list().unwrap();
+        let restored = super::super::HistoryStore::open(root.clone())
+            .unwrap()
+            .list()
+            .unwrap();
+        assert_eq!(expected, restored);
+        assert_eq!(restored.len(), WORKERS);
+        for worker in 0..WORKERS {
+            let row = restored
+                .iter()
+                .find(|r| r.summary.session_id == format!("s-{worker}"))
+                .unwrap();
+            assert_eq!(row.status, "running");
+            assert_eq!(row.agent.generation, format!("g-{worker}"));
+            assert_eq!(
+                row.agent.agent_session_id.as_deref(),
+                Some(format!("native-{worker}").as_str())
+            );
+            assert_eq!(row.agent.cli_version.as_deref(), Some("codex-cli 0.162.1"));
+            let turns: Vec<_> = (0..TURNS)
+                .map(|round| format!("t-{worker}-{round}"))
+                .collect();
+            let ids: Vec<_> = (0..TURNS)
+                .map(|round| {
+                    format!(
+                        "g-{worker}:t-{worker}-{round}:{}",
+                        ["TurnComplete", "TurnFailed", "Interrupt"][(worker + round) % 3]
+                    )
+                })
+                .collect();
+            assert_eq!(row.agent.turns, turns);
+            assert_eq!(
+                row.agent.turn_id.as_deref(),
+                turns.last().map(String::as_str)
+            );
+            assert_eq!(row.agent.seen, ids);
+            assert_eq!(row.agent.revision, 1 + 2 * TURNS as u64);
+            assert_eq!(row.agent.integration, "connected");
+            assert_eq!(
+                row.agent.cli_platform.as_deref(),
+                Some(std::env::consts::OS)
+            );
+            assert_eq!(row.agent.inbox.len(), TURNS);
+            for (round, receipt) in row.agent.inbox.iter().enumerate() {
+                assert_eq!(receipt.id, ids[round]);
+                assert_eq!(receipt.turn_id, turns[round]);
+                assert_eq!(receipt.revision, 3 + 2 * round as u64);
+                assert_eq!(
+                    receipt.kind,
+                    ["response_finished", "failed", "interrupted"][(worker + round) % 3]
+                );
+                assert_eq!(receipt.error, None);
+            }
+            assert_eq!(
+                row.agent.phase,
+                ["response_finished", "failed", "interrupted"][(worker + TURNS - 1) % 3]
+            );
+            assert!(row.agent.inbox.iter().all(|r| r.read
+                && r.delivery == "accepted"
+                && r.turn_id.starts_with(&format!("t-{worker}-"))));
+        }
+        let unique: std::collections::HashSet<_> = restored
+            .iter()
+            .flat_map(|row| row.agent.inbox.iter().map(|receipt| &receipt.id))
+            .collect();
+        assert_eq!(unique.len(), WORKERS * TURNS);
+        latencies.sort_by(f64::total_cmp);
+        println!(
+            "agent_parallel_load_metrics {}",
+            serde_json::json!({"workers":WORKERS,"turns_per_worker":TURNS,"receipts":WORKERS*TURNS,"wall_seconds":wall.elapsed().as_secs_f64(),"round_p95_seconds":latencies[latencies.len()*95/100],"round_max_seconds":latencies.last().unwrap()})
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }

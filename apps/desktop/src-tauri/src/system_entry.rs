@@ -17,6 +17,7 @@ pub(super) struct EntryState {
     pub shortcut_available: bool,
     pub warning: Option<String>,
     context_requested: bool,
+    pub notification_chinese: bool,
 }
 impl EntryState {
     pub fn initialize(
@@ -96,6 +97,21 @@ impl EntryState {
         self.enabled = enabled;
         Ok(())
     }
+}
+pub(super) fn notification_status(status: &str, chinese: bool) -> String {
+    let label = if chinese { match status { "starting"=>"正在启动", "running"=>"运行中", "succeeded"=>"已完成", "failed"=>"失败", "stopped"=>"已停止", "needs_attention"=>"需要关注", _=>return format!("Session {status}") } } else { return format!("Session {status}") };
+    format!("会话{label}")
+}
+pub(super) fn notification_round(kind: &str, chinese: bool) -> (String, String) {
+    let label = match (kind,chinese) {
+        ("response_finished",true)=>"回复已结束", ("needs_permission",true)=>"需要授权", ("interrupted",true)=>"本轮已中断", ("failed",true)=>"本轮失败", ("needs_attention",true)=>"回复已就绪；钩子可能仍在运行", (_,true)=>"智能体需要关注",
+        ("response_finished",false)=>"Response finished", ("needs_permission",false)=>"Permission required", ("interrupted",false)=>"Round interrupted", ("failed",false)=>"Round failed", ("needs_attention",false)=>"Response ready; hooks may continue", (_,false)=>"Agent attention",
+    };
+    (format!("YAM · {label}"), if chinese {format!("{label}。打开 YAM 查看本轮内容。")}else{format!("{label}. Open YAM to review this round.")})
+}
+pub(super) fn notification_chinese<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    use tauri::Manager;
+    app.try_state::<super::SessionManager>().is_some_and(|manager| manager.system_entry.lock().is_ok_and(|state| state.notification_chinese))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -413,6 +429,33 @@ mod tests {
         s.initialize(&"a".repeat(64), true, true, || Ok(()))
             .unwrap();
         s
+    }
+    #[test]
+    fn language_theme_tray_confirmation_and_unknown_counts_follow_locale(){
+        assert_eq!(native_entry_text("Open YAM",true),"打开 YAM");
+        assert_eq!(native_entry_text("literal",true),"literal");
+        assert_eq!(native_entry_text("Cancel",true),"取消");
+        assert_eq!(tray_summary(Some(2),None,true),"任务：2／未读：不可用");
+        assert_eq!(tray_summary(None,Some(3),false),"Tasks: unavailable / unread: 3");
+        assert!(localized_stop_message(Some(7),true).contains("7 个任务"));
+        assert!(localized_stop_message(None,true).contains("任务数量不可用"));
+        assert_eq!(localized_stop_message(Some(7),false),stop_confirmation_message(Some(7)));
+    }
+    #[test]
+    fn language_theme_native_notification_words_follow_locale_and_preserve_raw_content() {
+        assert_eq!(notification_status("succeeded", true), "会话已完成");
+        assert_eq!(notification_status("failed", false), "Session failed");
+        assert_eq!(notification_status("literal", true), "Session literal");
+        let (title, body) = notification_round("response_finished", true);
+        assert_eq!(title, "YAM · 回复已结束");
+        assert_eq!(body, "回复已结束。打开 YAM 查看本轮内容。");
+        assert_eq!(notification_round("failed", false).0, "YAM · Round failed");
+        for locale in ["en", "zh-CN"] {
+            assert!(super::super::background::validate_command("set_notification_locale", &serde_json::json!({"locale":locale})).is_ok());
+        }
+        for locale in [serde_json::json!("de"), serde_json::json!(1), serde_json::Value::Null] {
+            assert!(super::super::background::validate_command("set_notification_locale", &serde_json::json!({"locale":locale})).is_err());
+        }
     }
     #[test]
     fn t11_owner_only_ready_once_and_default_shortcut_off() {
@@ -916,6 +959,8 @@ mod native_operation_tests {
 pub(super) struct NativeEntry {
     _tray: tauri::tray::TrayIcon,
     summary: tauri::menu::MenuItem<tauri::Wry>,
+    open: tauri::menu::MenuItem<tauri::Wry>,
+    stop: tauri::menu::MenuItem<tauri::Wry>,
     pause: tauri::menu::CheckMenuItem<tauri::Wry>,
     preferences: std::path::PathBuf,
 }
@@ -987,6 +1032,62 @@ mod menu_tests {
     use std::cell::Cell;
     use std::sync::atomic::Ordering;
     #[test]
+    fn closure_t15_confirmation_false_error_and_true_guard_the_actual_action() {
+        static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        static PANIC_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let calls = Cell::new(0);
+        for confirmed in [false, true] {
+            let result = tauri::async_runtime::block_on(confirmation_with(
+                &GATE,
+                "stop_confirmation_pending",
+                "stop_confirmation_unavailable",
+                move || confirmed,
+            ));
+            tauri::async_runtime::block_on(confirmed_action(result, || async {
+                calls.set(calls.get() + 1);
+                Ok(())
+            }))
+            .unwrap();
+            assert_eq!(calls.get(), usize::from(confirmed));
+        }
+        let held = GATE.lock().unwrap();
+        let result = tauri::async_runtime::block_on(confirmation_with(
+            &GATE,
+            "stop_confirmation_pending",
+            "stop_confirmation_unavailable",
+            || panic!("second dialog must not open"),
+        ));
+        drop(held);
+        assert_eq!(
+            tauri::async_runtime::block_on(confirmed_action(result, || async {
+                panic!("pending dialog cannot stop")
+            }))
+            .unwrap_err(),
+            "stop_confirmation_pending"
+        );
+        let result = tauri::async_runtime::block_on(confirmation_with(
+            &PANIC_GATE,
+            "template_confirmation_pending",
+            "template_confirmation_unavailable",
+            || panic!("owned dialog failure"),
+        ));
+        assert_eq!(
+            tauri::async_runtime::block_on(confirmed_action(result, || async {
+                panic!("failed dialog cannot reset")
+            }))
+            .unwrap_err(),
+            "template_confirmation_unavailable"
+        );
+        assert_eq!(
+            tauri::async_runtime::block_on(confirmed_action(Ok(true), || async {
+                Err("stop failed".into())
+            }))
+            .unwrap_err(),
+            "stop failed"
+        );
+        assert_eq!(calls.get(), 1);
+    }
+    #[test]
     fn t11_actual_native_callback_finite_actions_pressed_only_and_status_has_no_heartbeat() {
         let calls = Cell::new(0);
         menu_action("yam-open", false, || panic!(), || panic!(), || panic!()).unwrap();
@@ -1038,16 +1139,10 @@ mod menu_tests {
 }
 
 pub(super) fn show_desktop(app: &tauri::AppHandle) -> Result<(), String> {
-    use tauri::Manager;
-    let window = app
-        .get_webview_window("main")
-        .ok_or("system_entry_open_failed")?;
-    window
-        .show()
-        .and_then(|_| window.unminimize())
-        .and_then(|_| window.set_focus())
+    super::desktop_windows::show_slot(app, super::desktop_windows::Slot::Main)
         .map_err(|_| "system_entry_open_failed".into())
 }
+
 fn report(app: &tauri::AppHandle, warning: &str) {
     use tauri::Manager;
     let manager = app.state::<super::SessionManager>();
@@ -1063,6 +1158,26 @@ fn publish_status(manager: &super::SessionManager) {
         }
     }
 }
+fn desktop_launch_command(executable: &std::path::Path) -> std::process::Command {
+    #[cfg(target_os = "macos")]
+    if executable
+        .parent()
+        .is_some_and(|path| path.ends_with("Contents/MacOS"))
+    {
+        if let Some(bundle) = executable
+            .ancestors()
+            .nth(3)
+            .filter(|path| path.extension() == Some(std::ffi::OsStr::new("app")))
+        {
+            // Launch Services must register the GUI separately from the resident accessory owner.
+            let mut command = std::process::Command::new("/usr/bin/open");
+            command.args(["-n", "-a"]).arg(bundle);
+            return command;
+        }
+    }
+    std::process::Command::new(executable)
+}
+
 pub(super) fn open_native(app: &tauri::AppHandle) -> Result<(), String> {
     use tauri::Manager;
     let manager = app.state::<super::SessionManager>();
@@ -1077,24 +1192,115 @@ pub(super) fn open_native(app: &tauri::AppHandle) -> Result<(), String> {
             Ok(())
         },
         || {
-            std::process::Command::new(
-                std::env::current_exe().map_err(|_| "system_entry_open_failed")?,
+            let mut child = desktop_launch_command(
+                &std::env::current_exe().map_err(|_| "system_entry_open_failed")?,
             )
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
             .map_err(|_| "system_entry_open_failed")?;
+            let app = app.clone();
+            std::thread::spawn(move || {
+                if !child.wait().is_ok_and(|status| status.success()) {
+                    report(&app, "system_entry_open_failed");
+                }
+            });
             Ok(())
         },
     )
 }
+fn native_entry_text(text:&str,chinese:bool)->&str {
+    if !chinese{return text;}
+    match text {"Open YAM"=>"打开 YAM","Pause notifications"=>"暂停通知","Stop all tasks and quit"=>"停止全部任务并退出","Stop all tasks and quit YAM"=>"停止全部任务并退出 YAM","Stop all and quit"=>"停止全部任务并退出","Cancel"=>"取消","Reset launch templates"=>"重置启动模板","Reset templates"=>"重置模板","Reset stored launch templates? This discards the original template data. Copy it first if you want to recover it."=>"重置已保存的启动模板？原始模板数据将被丢弃，如需保留请先复制备份。",_=>text}
+}
+fn tray_summary(running:Option<u64>,unread:Option<u64>,chinese:bool)->String {
+    let number=|value:Option<u64>|value.map(|n|n.to_string()).unwrap_or_else(||if chinese{"不可用"}else{"unavailable"}.into());
+    if chinese{format!("任务：{}／未读：{}",number(running),number(unread))}else{format!("Tasks: {} / unread: {}",number(running),number(unread))}
+}
+fn localized_stop_message(active:Option<usize>,chinese:bool)->String {
+    if !chinese{return stop_confirmation_message(active);}
+    let count=active.map(|n|format!("{n} 个任务")).unwrap_or_else(||"任务数量不可用".into());
+    format!("将停止全部后台任务并退出 YAM。\n当前快照：{count}。对话框打开期间任务数量可能变化。\n仅关闭界面会保留任务运行。是否继续？")
+}
+fn stop_confirmation_message(active: Option<usize>) -> String {
+    let count = active
+        .map(|count| format!("{count} tasks"))
+        .unwrap_or_else(|| "task count unavailable".into());
+    format!("This will stop all background tasks and quit YAM.\nCurrent snapshot: {count}. The task count may change while this dialog is open.\nClosing the GUI alone keeps tasks running. Continue?")
+}
+
+#[tauri::command]
+pub(super) async fn confirm_stop_all(app: tauri::AppHandle) -> Result<bool, String> {
+    use tauri::Manager;
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    static CONFIRMING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    confirmation_with(
+        &CONFIRMING,
+        "stop_confirmation_pending",
+        "stop_confirmation_unavailable",
+        move || {
+            let count = super::history_overview(app.clone(), app.state::<super::SessionManager>())
+                .ok()
+                .map(|overview| overview.active);
+            let chinese=notification_chinese(&app);
+            app.dialog()
+                .message(localized_stop_message(count,chinese))
+                .title(native_entry_text("Stop all tasks and quit YAM",chinese))
+                .kind(MessageDialogKind::Warning)
+                .buttons(MessageDialogButtons::OkCancelCustom(
+                    native_entry_text("Stop all and quit",chinese).into(),
+                    native_entry_text("Cancel",chinese).into(),
+                ))
+                .blocking_show()
+        },
+    )
+    .await
+}
+
+#[tauri::command]
+pub(super) async fn confirm_template_reset(app: tauri::AppHandle) -> Result<bool, String> {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    // A parented macOS sheet can re-enter Tao's redraw handler while its mutex is held.
+    static CONFIRMING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    confirmation_with(&CONFIRMING,"template_confirmation_pending","template_confirmation_unavailable",move || {
+        let chinese=notification_chinese(&app);
+        app.dialog().message(native_entry_text("Reset stored launch templates? This discards the original template data. Copy it first if you want to recover it.",chinese))
+            .title(native_entry_text("Reset launch templates",chinese)).kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::OkCancelCustom(native_entry_text("Reset templates",chinese).into(),native_entry_text("Cancel",chinese).into())).blocking_show()
+    }).await
+}
+
+async fn confirmation_with(
+    gate: &'static std::sync::Mutex<()>,
+    pending: &'static str,
+    unavailable: &'static str,
+    show: impl FnOnce() -> bool + Send + 'static,
+) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _confirmation = gate.try_lock().map_err(|_| pending.to_string())?;
+        Ok(show())
+    })
+    .await
+    .map_err(|_| unavailable.to_string())?
+}
+
+pub(super) async fn confirmed_action<F: std::future::Future<Output = Result<(), String>>>(
+    confirmation: Result<bool, String>,
+    action: impl FnOnce() -> F,
+) -> Result<(), String> {
+    if confirmation? {
+        action().await?;
+    }
+    Ok(())
+}
+
 fn stop_native(app: &tauri::AppHandle) -> Result<(), String> {
     use tauri::Manager;
     let manager = app.state::<super::SessionManager>();
     owner_stop(
         &manager,
-        || manager.shutdown(),
+        || manager.shutdown_for(app, super::background::notify_lifecycle),
         || {
             if let Ok(mut relay) = manager.relay.lock() {
                 relay.push("desktop-owner-quit", "{}".into());
@@ -1120,7 +1326,21 @@ fn dispatch_native(app: &tauri::AppHandle, id: &str, pressed: bool) {
                 .ok_or("system_entry_unavailable")?;
             pause_command(&manager, "set_notification_paused", &serde_json::json!({"paused":!state.paused,"expected_revision":state.revision,"expected_owner_instance":state.owner_instance})).map(|_| ())
         },
-        || stop_native(app),
+        || {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                if confirmed_action(confirm_stop_all(app.clone()).await, || async {
+                    stop_native(&app)
+                })
+                .await
+                .is_err()
+                {
+                    report(&app, "system_entry_action_failed");
+                }
+                refresh_native(&app);
+            });
+            Ok(())
+        },
     );
     if result.is_err() {
         report(app, "system_entry_action_failed");
@@ -1252,6 +1472,8 @@ pub(super) fn initialize_native(app: &tauri::AppHandle, root: &std::path::Path) 
         Ok(NativeEntry {
             _tray: tray,
             summary,
+            open,
+            stop,
             pause,
             preferences: root.join("system-entry.json"),
         })
@@ -1310,19 +1532,11 @@ pub(super) fn refresh_native(app: &tauri::AppHandle) {
         if let Some(state) = state {
             let _ = native.pause.set_checked(state.paused);
         }
-        if let Some(summary) = summary {
-            let number = |key: &str| {
-                summary[key]
-                    .as_u64()
-                    .map(|n| n.to_string())
-                    .unwrap_or_else(|| "unavailable".into())
-            };
-            let _ = native.summary.set_text(format!(
-                "Tasks: {} / unread: {}",
-                number("running"),
-                number("unread")
-            ));
-        }
+        let chinese=notification_chinese(app);
+        let _=native.open.set_text(native_entry_text("Open YAM",chinese));
+        let _=native.pause.set_text(native_entry_text("Pause notifications",chinese));
+        let _=native.stop.set_text(native_entry_text("Stop all tasks and quit",chinese));
+        let _=native.summary.set_text(tray_summary(summary.as_ref().and_then(|s|s["running"].as_u64()),summary.as_ref().and_then(|s|s["unread"].as_u64()),chinese));
     }
 }
 
@@ -1331,6 +1545,38 @@ mod open_delivery_tests {
     use super::*;
     use std::cell::Cell;
     use std::sync::atomic::Ordering;
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn native_reopen_packaged_gui_uses_launch_services_with_literal_bundle_path() {
+        use std::ffi::OsStr;
+        let executable =
+            std::path::Path::new("/Applications/YAM 中文 'test'.app/Contents/MacOS/yam-desktop");
+        let command = desktop_launch_command(executable);
+        assert_eq!(command.get_program(), OsStr::new("/usr/bin/open"));
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            vec![
+                OsStr::new("-n"),
+                OsStr::new("-a"),
+                OsStr::new("/Applications/YAM 中文 'test'.app"),
+            ]
+        );
+    }
+
+    #[test]
+    fn native_reopen_unbundled_development_keeps_direct_executable() {
+        for executable in [
+            "/workspace/target/debug/yam-desktop",
+            "/tmp/Contents/MacOS/yam-desktop",
+            "/tmp/YAM.app/target/debug/yam-desktop",
+        ] {
+            let executable = std::path::Path::new(executable);
+            let command = desktop_launch_command(executable);
+            assert_eq!(command.get_program(), executable.as_os_str());
+            assert_eq!(command.get_args().count(), 0);
+        }
+    }
+
     #[test]
     fn t11_actual_open_fresh_heartbeat_without_consumer_still_delivers_normal_single_instance_launch(
     ) {
@@ -1485,5 +1731,23 @@ mod before_poll_tests {
             .shutdown_complete
             .load(std::sync::atomic::Ordering::Acquire));
         assert!(exited.get());
+    }
+}
+
+#[cfg(test)]
+mod stop_confirmation_tests {
+    use super::*;
+    #[test]
+    fn t5_stop_confirmation_distinguishes_snapshot_zero_and_unavailable() {
+        assert!(stop_confirmation_message(Some(7)).contains("7"));
+        assert!(stop_confirmation_message(Some(0)).contains("0"));
+        let unknown = stop_confirmation_message(None);
+        assert!(unknown.contains("unavailable"));
+        assert!(!unknown.contains("0 tasks"));
+        for count in [None, Some(0), Some(7)] {
+            let message = stop_confirmation_message(count);
+            assert!(message.contains("snapshot"));
+            assert!(message.contains("all background tasks"));
+        }
     }
 }

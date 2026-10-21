@@ -1,0 +1,26 @@
+--- a/src/agent_events.rs
++++ b/src/agent_events.rs
+@@ -317 +317 @@
+-        if entry.revision != revision {
++        if entry.revision != revision {
+@@ -420 +420 @@
+-        if record.agent.generation != generation
++        if record.agent.generation != generation
+@@ -421 +421 @@
+-            || !["starting", "running"].contains(&record.status.as_str())
++            || !["starting", "running"].contains(&record.status.as_str())
+@@ -457 +457 @@
+-            if entry.revision != revision {
++            if entry.revision != revision {
+@@ -500 +500 @@
+-                            && e.revision == expected.revision
++                            && e.revision == expected.revision
+@@ -501 +501 @@
+-                            && !e.read
++                            && !e.read
+@@ -589 +589 @@
+-                    .is_some_and(|(next, _)| now < *next)
++                    .is_some_and(|(next, _)| now < *next)
+@@ -639 +639 @@
+-        if !paused {
++        if !paused {

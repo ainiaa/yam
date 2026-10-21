@@ -40,9 +40,13 @@ class UpdaterDependencyTests(unittest.TestCase):
         for section in ("dependencies", "devDependencies", "optionalDependencies"):
             self.assertNotIn("@tauri-apps/plugin-updater", package.get(section, {}))
 
-    def test_no_updater_service_key_or_bundle_configuration(self):
+    def test_updater_uses_public_release_key_without_plugin_ipc_permissions(self):
         config = json.loads((TAURI / "tauri.conf.json").read_text())
-        self.assertNotIn("updater", config.get("plugins", {}))
+        updater=config["plugins"]["updater"]
+        self.assertTrue(updater["requireSignedVersion"])
+        self.assertFalse(updater["allowDowngrades"])
+        self.assertEqual(updater["endpoints"],["https://github.com/ainiaa/yam/releases/latest/download/latest.json"])
+        self.assertNotIn("PRIVATE",updater["pubkey"])
         self.assertNotIn("createUpdaterArtifacts", config.get("bundle", {}))
         # All capability inputs remain free of updater permissions, including inline ones.
         capabilities = [json.loads(path.read_text()) for path in (TAURI / "capabilities").glob("*.json")]
@@ -53,7 +57,9 @@ class UpdaterDependencyTests(unittest.TestCase):
         gui = (TAURI / "src/lib.rs").read_text()
         updater = (TAURI / "src/updater.rs").read_text()
         self.assertEqual(gui.count("updater::initialize(app.handle())?;"), 1)
-        self.assertIn(".setup(|app| {\n            updater::initialize(app.handle())?;", gui)
+        setup = re.search(r"\.setup\(\|app\|\s*\{(.*?)background::attach\(app\.handle\(\)\)\?;", gui, re.S)
+        self.assertIsNotNone(setup, "GUI setup/owner attachment boundary is missing")
+        self.assertIn("updater::initialize(app.handle())?;", setup.group(1))
         initializer = updater.split("pub(super) fn initialize(app:", 1)[1].split("#[tauri::command]", 1)[0]
         self.assertIn("initialize_with(", initializer)
         self.assertIn('app.config().plugins.0.get("updater")', initializer)

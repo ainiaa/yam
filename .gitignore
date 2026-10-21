@@ -9,5 +9,6 @@ __pycache__/
 /docs/evidence/**/*
 !/docs/evidence/**/
 !/docs/evidence/**/*.md
+!/docs/evidence/yam-memory-20261002/output-fixture.py
 # Machine execution snapshots; human-readable plans remain versioned.
 /docs/superpowers/plans/*.json

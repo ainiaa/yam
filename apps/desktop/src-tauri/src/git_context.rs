@@ -29,6 +29,34 @@ pub(crate) struct Budget {
     pub(crate) remaining: usize,
 }
 impl Budget {
+    #[cfg(unix)]
+    fn drain_pipe(
+        &mut self,
+        stream: &mut dyn Read,
+        target: &mut Vec<u8>,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<bool, String> {
+        let mut bytes = [0; 4096];
+        loop {
+            check_cancel(cancel)?;
+            if Instant::now() >= self.deadline {
+                return Err("git_timeout".into());
+            }
+            match stream.read(&mut bytes) {
+                Ok(0) => return Ok(true),
+                Ok(size) => {
+                    if size > self.remaining {
+                        return Err("git_output_limit".into());
+                    }
+                    self.remaining -= size;
+                    target.extend_from_slice(&bytes[..size]);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => return Err("git_query_failed".into()),
+            }
+        }
+    }
     #[cfg(test)]
     fn run(&mut self, program: &Path, args: &[&str], cwd: &Path) -> Result<Output, String> {
         self.run_env(program, args, cwd, &[])
@@ -128,29 +156,7 @@ impl Budget {
                         if eof[index] {
                             continue;
                         }
-                        let mut bytes = [0; 4096];
-                        loop {
-                            check_cancel(cancel)?;
-                            if Instant::now() >= self.deadline {
-                                return Err("git_timeout".into());
-                            }
-                            match stream.read(&mut bytes) {
-                                Ok(0) => {
-                                    eof[index] = true;
-                                    break;
-                                }
-                                Ok(size) => {
-                                    if size > self.remaining {
-                                        return Err("git_output_limit".into());
-                                    }
-                                    self.remaining -= size;
-                                    target.extend_from_slice(&bytes[..size]);
-                                }
-                                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                                Err(_) => return Err("git_query_failed".into()),
-                            }
-                        }
+                        eof[index] = self.drain_pipe(stream, target, cancel)?;
                     }
                     if status.is_none() {
                         status = child.try_wait().map_err(|_| "git_query_failed")?;
@@ -1234,6 +1240,177 @@ mod tests {
         assert!(
             !still_owned,
             "post-spawn setup failure must kill and reap child"
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn closure_t09_interrupted_pipe_reads_recheck_cancel_deadline_and_shared_budget() {
+        use std::io::ErrorKind;
+        struct Reader {
+            steps: std::collections::VecDeque<Result<&'static [u8], ErrorKind>>,
+            calls: usize,
+            cancel: Option<Arc<AtomicBool>>,
+        }
+        impl Read for Reader {
+            fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+                self.calls += 1;
+                if let Some(cancel) = &self.cancel {
+                    cancel.store(true, Ordering::Release);
+                }
+                match self.steps.pop_front().unwrap_or(Ok(b"")) {
+                    Ok(data) => {
+                        bytes[..data.len()].copy_from_slice(data);
+                        Ok(data.len())
+                    }
+                    Err(kind) => Err(std::io::Error::from(kind)),
+                }
+            }
+        }
+        let mut reader = Reader {
+            steps: [
+                Err(ErrorKind::Interrupted),
+                Ok(b"body" as &[u8]),
+                Err(ErrorKind::WouldBlock),
+                Ok(b""),
+            ]
+            .into(),
+            calls: 0,
+            cancel: None,
+        };
+        let mut budget = Budget {
+            deadline: Instant::now() + Duration::from_secs(1),
+            remaining: 4,
+        };
+        let mut output = Vec::new();
+        assert!(!budget.drain_pipe(&mut reader, &mut output, None).unwrap());
+        assert_eq!(output, b"body");
+        assert_eq!(budget.remaining, 0);
+        assert_eq!(reader.calls, 3);
+        assert!(budget.drain_pipe(&mut reader, &mut output, None).unwrap());
+        let flag = Arc::new(AtomicBool::new(false));
+        reader.steps = [
+            Err(ErrorKind::Interrupted),
+            Ok(b"must not publish" as &[u8]),
+        ]
+        .into();
+        reader.cancel = Some(flag.clone());
+        let before = reader.calls;
+        assert_eq!(
+            budget
+                .drain_pipe(&mut reader, &mut output, Some(&flag))
+                .unwrap_err(),
+            "git_cancelled"
+        );
+        assert_eq!(reader.calls, before + 1);
+        assert_eq!(output, b"body");
+        reader.cancel = None;
+        reader.steps = [Ok(b"x" as &[u8])].into();
+        assert_eq!(
+            budget
+                .drain_pipe(&mut reader, &mut output, None)
+                .unwrap_err(),
+            "git_output_limit"
+        );
+        assert_eq!(output, b"body");
+        reader.steps = [Err(ErrorKind::Other)].into();
+        assert_eq!(
+            budget
+                .drain_pipe(&mut reader, &mut output, None)
+                .unwrap_err(),
+            "git_query_failed"
+        );
+        budget.deadline = Instant::now();
+        let before = reader.calls;
+        assert_eq!(
+            budget
+                .drain_pipe(&mut reader, &mut output, None)
+                .unwrap_err(),
+            "git_timeout"
+        );
+        assert_eq!(reader.calls, before);
+        struct DeadlineReader(usize);
+        impl Read for DeadlineReader {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                self.0 += 1;
+                assert_eq!(self.0, 1, "expired deadline prevents the next pipe read");
+                std::thread::sleep(Duration::from_millis(10));
+                Err(std::io::Error::from(ErrorKind::Interrupted))
+            }
+        }
+        budget.deadline = Instant::now() + Duration::from_millis(2);
+        assert_eq!(
+            budget
+                .drain_pipe(&mut DeadlineReader(0), &mut output, None)
+                .unwrap_err(),
+            "git_timeout"
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn closure_t09_actual_admitted_query_cancel_reaps_only_its_owned_child() {
+        use std::os::unix::fs::PermissionsExt;
+        let _serial = serial_query_test();
+        let repo = Repo::new();
+        repo.commit();
+        let marker = repo.0.join("query-child.pid");
+        let executable = repo.0.join("owned-git-fixture");
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nprintf '%s' $$ > '{}'\nexec /bin/sleep 30\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let path = repo.0.clone();
+        let token = "b2345678-1234-4234-8234-123456789abc";
+        let mut sentinel = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let worker = std::thread::spawn(move || {
+            F3_TEST_GIT.with(|value| *value.borrow_mut() = Some(executable));
+            let result = query_changes(&path, "closure-t09", "owned-client", token, None);
+            F3_TEST_GIT.with(|value| *value.borrow_mut() = None);
+            result
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let pid = loop {
+            if let Ok(text) = fs::read_to_string(&marker) {
+                if let Ok(pid) = text.parse::<i32>() {
+                    break Some(pid);
+                }
+            }
+            if Instant::now() >= deadline {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        let cancel_start = Instant::now();
+        let cancelled = cancel_changes("closure-t09", "owned-client", token);
+        let result = worker.join();
+        let sentinel_alive = sentinel.try_wait().unwrap().is_none();
+        let _ = sentinel.kill();
+        let _ = sentinel.wait();
+        cancelled.unwrap();
+        assert_eq!(result.unwrap().unwrap_err(), "git_cancelled");
+        assert!(cancel_start.elapsed() < Duration::from_secs(1));
+        let pid = pid.expect("owned executable must actually start before cancellation");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while unsafe { libc::kill(pid, 0) } == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            -1,
+            "only the owned query child must be reaped"
+        );
+        assert!(
+            sentinel_alive,
+            "another owned process is not in the query's process group"
+        );
+        assert!(CHANGE_REGISTRY.lock().unwrap().active.is_none());
+        assert!(
+            query_changes(&repo.0, "closure-t09", "owned-client", token, None).is_ok(),
+            "same token is reusable after admitted query cleanup"
         );
     }
     #[test]

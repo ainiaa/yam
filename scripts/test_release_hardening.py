@@ -8,7 +8,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 TAURI = ROOT / "apps/desktop/src-tauri"
-PERMISSIONS = {"core:event:allow-listen", "core:event:allow-unlisten", "dialog:allow-open"}
+PERMISSIONS = {"core:event:allow-listen", "core:event:allow-unlisten", "dialog:allow-open", "dialog:allow-message"}
 PRODUCTION = {
     "default-src": {"'self'"},
     "base-uri": {"'none'"},
@@ -16,7 +16,7 @@ PRODUCTION = {
     "frame-src": {"'none'"},
     "script-src": {"'self'"},
     "style-src": {"'self'", "'unsafe-inline'"},
-    "img-src": {"'self'"},
+    "img-src": {"'self'", "blob:"},
     "font-src": {"'self'"},
     "connect-src": {"ipc:", "http://ipc.localhost"},
     "form-action": {"'none'"},
@@ -73,12 +73,16 @@ class ReleaseHardeningTests(unittest.TestCase):
 
     def test_main_permission_set_matches_only_frontend_consumers(self):
         permissions = self.capability["permissions"]
-        self.assertEqual(set(permissions), PERMISSIONS)
-        self.assertEqual(len(permissions), len(PERMISSIONS))
+        self.assertEqual({value for value in permissions if isinstance(value, str)}, PERMISSIONS)
+        self.assertEqual(len(permissions), len(PERMISSIONS) + 1)
+        self.assertEqual([value for value in permissions if isinstance(value, dict)], [{
+            "identifier": "opener:allow-open-url",
+            "allow": [{"url": "http://*"}, {"url": "https://*"}],
+        }])
 
-    def test_capability_cannot_expand_to_other_windows_or_remote_origins(self):
-        self.assertEqual(self.capability["windows"], ["main"])
-        self.assertNotIn("webviews", self.capability)
+    def test_capability_is_limited_to_two_fixed_webviews_and_no_remote_origins(self):
+        self.assertEqual(self.capability["webviews"], ["main", "terminal-secondary"])
+        self.assertNotIn("windows", self.capability)
         self.assertNotIn("remote", self.capability)
         self.assertTrue(self.capability.get("local", True))
 
@@ -89,12 +93,13 @@ class ReleaseHardeningTests(unittest.TestCase):
         self.assertNotEqual(package["description"], "A Tauri App")
 
     def test_sdk_version_and_deep_link_configuration_remain_unchanged(self):
-        self.assertEqual(self.manifest["package"]["version"], "0.1.0")
+        self.assertEqual(self.manifest["package"]["version"], self.config["version"])
         self.assertNotIn("license", self.manifest["package"])
         target = 'cfg(any(target_os = "macos", windows, target_os = "linux"))'
         self.assertEqual(self.manifest["target"][target]["dependencies"]["tauri-plugin-updater"], "2")
         self.assertEqual(self.config["plugins"]["deep-link"]["desktop"]["schemes"], ["yam"])
-        self.assertNotIn("updater", self.config["plugins"])
+        self.assertTrue(self.config["plugins"]["updater"]["requireSignedVersion"])
+        self.assertFalse(self.config["plugins"]["updater"]["allowDowngrades"])
 
     def test_policy_oracle_rejects_missing_duplicate_wildcard_and_script_relaxation(self):
         valid = serialized_policy(PRODUCTION)

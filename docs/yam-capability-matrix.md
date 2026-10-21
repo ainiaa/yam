@@ -1,6 +1,123 @@
 # YAM 当前能力清单
 
-作者：Jeff.Liu。更新：2026-10-04。当前源码基线：`6b00a7dcad249c4fca90efbcdafdbc4a836ea8ec`（`6b00a7d`），应用版本 0.1.0。本文统一当前声明；历史报告保留当时的提交、事实和缺口。后续任务取得新证据后再更新对应能力。
+## 2026-10-18 生产加固增量：CLI 事实与隔离负载验证
+
+作者：Jeff.Liu。以下是候选源码的本轮增量；固定 `YAM.app` 与原有任务保持，新增行为尚未应用到运行包。下文各轮记录为历史快照，不能作为本轮候选的原生验收。
+
+- 后台在启动准备时采集有界 CLI 版本输出，复用启动时已解析的可执行路径；版本与平台随会话代际持久化，旧记录显示 Unknown。连接详情读取当前会话 Agent 状态；Codex 失败回执的格式能力仅对 macOS / 0.162.1 显示支持，连接未建立、版本或平台未知时明确未验证。兼容性信息不证明某条回执已送达。
+- Claude 原生 Esc 取消继续保留外部回执不可靠的提示；没有新增 SDK、输入拦截或真实厂商请求。版本查询关闭 CLI 自动更新与非必要遥测；查询失败仍沿用现有集成不可用或未知版本的边界。
+- 长日志观察器保留逐条描述符的大小、所有者及链接检查；路径检查按消耗字节批量执行，提交终态前再次核对路径身份与大小。实际回归覆盖缓冲中的截断后恢复，避免错误接受旧缓存终态。128 MiB 文件、2 MiB 单行、最长一小时及 macOS / Codex 0.162.1 的原有限制不变。
+- 合成长日志 **8 × 16 MiB** 基线全部在 **15 秒**期限内未完成；最终保留逐条描述符保护的实现实测最慢 **0.7535 秒**，连续三轮通过。只计文件观察器；夹具 `alive() == true`，不含原生进程查询、TUI、网络或真实厂商耗时。
+- 隔离 `HistoryStore` **8 × 32 轮 / 256 回执**，经过真实共享锁及持久化路径。独立按输入核对每条 ID / turn / kind / revision、全局唯一性、旧代际拒绝、重复与迟到事件、通知确认与已读状态、重载保真；连续三轮通过。一次精确断言采样约 **15.51 秒**，完整轮次 P95 **1.003 秒**；该指标含一轮全部读写及落盘，不能称 RPC P95 或桌面响应时间。持久化语义未改变。
+
+### 本轮证据与仍需满足的门禁
+
+本轮每条验证要求完整 argv 与冻结计划精确匹配；最终结果只以同源 Evidence Receipt v2 与 `plan_check.py audit --require-complete` 为准。旧一轮的 argv 不匹配回执保留为不完整历史，不补造或重写。本轮计划、保护检查和最终交付清单见[生产加固计划](superpowers/plans/2026-10-18-yam-production-hardening.md)。
+
+Converge 原生完整门禁仍未满足：官方状态校验将运行开始前已有的脏路径计为 scope drift（本轮实际拒绝 `AGENTS.md`），不能靠扩大授权范围绕过。现有 Node 测试/覆盖率没有该 Suite 的原生 TDD 适配器；本机没有 cargo-llvm-cov / cargo-tarpaulin，Apple LLVM 15 实际拒绝合并当前 Rust LLVM 22 的 profile（raw 10 / expected 8）。因此不新增无效 coverage 配置、不冒充 Rust 覆盖率，不宣称受管 Single State 或原生 TDD complete。
+
+候选固定包 GUI / 原生 TUI / IME / 通知和真实厂商仍未验收；本轮不替换、重启或控制既有应用及任务。源码自动化通过与生产启用分别记录。
+
+## 2026-10-18 Claude / Codex 主要场景：候选源码已验证，固定包待安全启用
+
+作者：Jeff.Liu。当前固定 `YAM.app`、后台 owner 和原有任务未变；本节新增行为尚未在运行包生效，下方原生记录保留为历史快照。
+
+- 新增明确的 Claude + DeepSeek 选择，旧 DeepSeek 仍为 Codex；Claude 的主模型、别名和子代理统一到所选 DeepSeek 模型。模板、项目配置及历史结构保持。
+- 缺失凭据指出后台需要的环境变量名；界面说明 Responses / Anthropic Messages 及后台环境刷新条件。旧 Claude 提交事件不能再覆盖后续回合的就绪、失败或权限状态。
+- 已结束 Claude / Codex 标签及布局恢复改为只读历史，执行通过显式 Continue / Run again；活动 Agent 与普通 Shell 保留原流程。
+- 全量前端 **1563 passed**，Rust **755 passed / 13 ignored**；其中 **9 个本机 CLI loopback 测试另行通过**。TypeScript / Web build 与现有 Node 覆盖率门槛通过；分项及组合静态复核通过。
+- **仍为部分验收**：候选固定包 GUI / TUI / IME 和真实厂商未验；Claude Escape 回执、Codex macOS / 0.162.1 边界保留。严格 Converge argv / 状态 / 原生覆盖率绑定缺项，不声称 Suite 全通过。
+
+详细六路径矩阵、步骤结果和启用条件见[主要场景实施结果](superpowers/plans/2026-10-18-yam-primary-agents-reliability.md#12-已批准方案的实施结果与启用边界)。
+
+## 2026-10-18 Codex API 失败后续收口；Claude TUI 中断回执为已知限制
+
+作者：Jeff.Liu。此节更新下方较早的部分验收结果。
+
+- **Codex 0.162.1 / macOS API 失败已修复并实测**：现有 hook helper 启动有界观察进程，只读取当前 `CODEX_HOME/sessions` 下无符号链接、当前用户所有的普通日志文件。核实原生 session / cwd / turn 和已测版本后，将精确回合的 `task_complete.error` 映射为现有鉴权 Wire v1 的 `TurnFailed`；错误正文不进入回执。成功和 `turn_aborted` 不补发失败事件。
+- 观察进程复核设备号 / inode / 链接数，拒绝替换、截断、过大文件及未知格式；单行 2 MiB、日志 128 MiB、初始化请求 64 KiB、最长一小时。非阻塞初始化不会卡住 hook；原始 CLI 的 PID / 启动时间不再匹配时退出，保留原进程组以便后台停止会话时一并清理。当前只启用 macOS，其他系统和其他 Codex 日志版本不计入覆盖。
+- 最终固定 `YAM.app` 正常重开后，原生 API 失败 → 未读失败回执、成功恢复、Escape 中断、再次成功恢复均通过；最终 GUI 的历史失败 Inbox 导航保留 kind / read。候选构建实测当前失败导航只确认对应回执；前端未变，最终包未重测这条 ACK 操作。原 owner 17717 保留；本轮两条 Codex 测试会话均已停止；清理时恢复旧测试标签额外产生的一条空白 shell 已核实来源并停止，未发送输入。首次覆盖应用包后直接执行 hook 曾在 `_dyld_start` 超过旧 owner 配置的 2 秒时限，程序尚未进入 hook；正常重开同一个 GUI 后再验收通过，未重启 owner，也未把先前超时样本算为通过。
+- **Claude 2.1.302 原生 TUI 中断回执为已知限制**：CLI 本身支持 Escape 取消，但没有向 YAM 提供覆盖首字节前取消的可靠终态。已核实 hooks、SDK、TUI、受鉴权本地 socket 及 transcript 分支；SDK 的 `cancelled` 同时可能表示 API 硬失败，必须结合匹配请求的 `result.terminal_reason`。用户已于 2026-10-18 决定保留原生 TUI、不新增 SDK 模式；中断回执暂作为已知限制，不计为已修复或已通过原生验收。本次决定仅更新文档，现有 YAM.app、后台和正在运行的任务保持不变。
+
+测试：新增 Codex 回归 **12 passed**，含失败 / 成功 / 中断分类、身份与格式拒绝、部分行、文件替换 / 截断 / 越界 / 超限、进程退出 / PID 复用、初始化背压；先红后绿，并独立复审两项发现。前端 **1547 passed**；Rust library **749 passed / 7 ignored**。未验证真实第三方模型、macOS 通知横幅 / 点击、Windows / Linux 和其他 Codex 版本。Claude 的 8 项分类器契约测试与 7 项静态契约检查通过，不冒充原生中断验收。
+
+## 2026-10-18 Agent 失败 / 中断原生验收（部分通过）
+
+作者：Jeff.Liu。复用固定 `YAM.app` / `com.yam.desktop`，GUI 56836、后台 owner 17717 均保留。仅操作本轮创建的测试会话；模型请求使用本机非转发夹具。原有 3 条运行任务的启动配置、启动时间、原生会话与 generation 哈希一致，41 条原会话均保留。
+
+| 原生分支 | 结果 | 实测现象 |
+| --- | --- | --- |
+| Codex API 失败 | **阻塞，未闭环** | CLI 已失败，结构化 JSONL 含精确 turn 的 `task_complete.error`；YAM 仍为 `working`，无失败回执 |
+| Codex Escape 中断 | 通过 | `interrupted`，精确 turn 的未读回执；CLI 进程继续运行 |
+| Claude API 失败 | 通过 | 原生 `StopFailure` → `failed`，保留未读失败回执 |
+| Claude Escape 中断 | **阻塞，未闭环** | 请求已取消、CLI 回到输入状态；YAM 仍为 `working`，无中断回执 |
+| OpenCode API 失败 | 通过 | 原生错误 → `failed`，保留未读失败回执 |
+| OpenCode 双 Escape 中断 | 通过 | 原生取消 → `interrupted`；单 Escape 的超时成功样本不计入中断通过 |
+
+三种 CLI 均实测后续轮次恢复，早先回执的 kind / read 保持。Codex 当前中断、OpenCode 当前失败的 Inbox 导航打开对应 Terminal，且各只 ACK 一条当前回执；三种 CLI 的历史失败 / 中断导航均不 ACK。Claude 正常响应仅计为 `needs_attention`，不等同任务完成。重复 / 晚到事件保护由现有自动化覆盖，不冒充本轮原生事件重放。
+
+**修复边界**：本轮未修改产品运行时代码。当前 Codex hook 契约没有 API 失败事件，需要新增有界、精确身份校验的结构化状态采集；仅重建 GUI 不能验证 owner 内的采集修复。实测 Claude 2.1.300 hook 契约没有 Escape 中断事件，取消后的 transcript 也无可靠终态，需要上游事件或另行设计结构化控制通道。独立只读复核确认这两个采集缺口；按保留运行中 owner / 任务的约束，本轮不宣称闭环。
+
+本轮验收脚本 **14 passed / 2 failed**（以上两项，退出码 1）；前端 **1545 passed / 0 failed / 0 skipped**；Rust library **737 passed / 0 failed / 7 ignored**。无新产品修复，因此无新产品代码红绿记录，也未重新构建应用、重启 GUI / owner。未验证 macOS 通知横幅 / 点击、Windows / Linux 和真实第三方模型。CLI 自更新副作用：测试中的 Claude 2.1.300 自行安装了 2.1.302；已在本轮专属配置中禁用后续自更新，未回滚全局 CLI。
+
+清理：停止本轮 3 条存活测试会话与本机 API 夹具，保留 1 条启动失败记录及全部测试历史；最终 owner 仍为 17717、仅原有 3 条任务运行。详情见[本轮完整回执](/Users/liuwenyuan/.codex/visualizations/2026/10/16/01a143d9-337c-73b3-a49b-9c3cb6457139/yam-desktop-optimization/agent-failure-interruption-20261018/acceptance-report.md)。以下旧结论保留为当次快照。
+
+## 2026-10-18 P0 / P1 原生收口
+
+作者：Jeff.Liu。复用固定 YAM.app / com.yam.desktop，已载入最新 GUI；后台 owner 17717 与原有 3 条运行任务身份保持，原有 37 条会话保留。P0 的隐藏身份刷新、别名文件预览和历史分页原生回归通过；最终分页 50→61 条，真实阅读锚点偏移 0 px，无模型请求。
+
+P1 补测并修复 Terminal 热切换的旧 Agent 状态，以及 Inbox 未切到 Terminal 的导航问题；历史卡只读、不恢复已结束进程，等待期间的新输入焦点和终端结束边界均有失败回归及修复。真实 Codex hook 完成/权限回执、Inbox 当前/历史/已结束导航、搜狗拼音“你好”、复制、保日志清屏、单会话停止、全局停止确认与取消已验。最终前端 **1545 passed / 0 failed / 0 skipped**，Rust library **737 passed / 0 failed / 7 ignored**，固定 debug app 构建与 diff check 通过，独立只读定向复审无剩余发现。
+
+**仍未验证**：macOS 通知横幅/点击（权限明确拒绝）、Agent failed/interrupted hook 的完整原生路径、全局停止确认/托盘停止、强制断线重连、真实第三方模型与完整 Suite/发布门禁。原 owner 承载运行任务，未为验收重启或断开；本次测试进程已清理，测试历史保留。[本次完整回执](/Users/liuwenyuan/.codex/visualizations/2026/10/16/01a143d9-337c-73b3-a49b-9c3cb6457139/yam-desktop-optimization/p0-p1-closure-20261018/acceptance-report.md)。以下旧结论保留为当次快照。
+
+
+## 2026-10-18 第二轮补充复核
+
+GPT-6.1-sol / GPT-6-astra 对第二轮全部改动独立复核，闭环三类问题：目录别名导致预览响应误拒绝、后台会话身份/回合版本陈旧（含异步 claim 覆盖竞态）、加载较早消息时阅读位置偏移。历史与注意事项相关测试夹具同时补齐真实 helper 和无隐藏错误断言。
+
+当前源码验证：前端 **1535 passed / 0 failed / 0 skip**，覆盖率 **99.74% / 94.52% / 96.60%**；Rust 默认并发与双线程各 **737 passed / 0 failed / 7 ignored**，doctest 通过。Web、原生与 Tauri `--no-bundle` 构建通过，最终两模型复核无遗留发现。[完整回执](/Users/liuwenyuan/.codex/visualizations/2026/10/16/01a143d9-337c-73b3-a49b-9c3cb6457139/yam-desktop-optimization/second-round-plan-20261017/implementation-report.md)。
+
+本次未替换运行中的应用包、未重启 GUI/owner、未向任务发送输入或停止请求。原有 3 条任务的身份/配置哈希与全部 37 条会话 ID 保持；当前运行实例仍使用补充修复前版本，新修复的原生 GUI 验收尚未执行。以下既有 GUI 结论和旧测试数量保留为先前交付快照。
+
+
+2026-10-09：[B01d 项目颜色与内置图标](superpowers/plans/2026-10-09-yam-cmux-b01d.md)源码与独立审核通过：main 已保存项目的唯一 Edit project… 入口同时编辑名称、六种固定颜色与 folder/terminal/play 三种内置图标；保旧改名、只读目录与200 Unicode字符限制。Default删除own字段，Reset仅改草稿；视觉字段陈旧拒绝保存，Pin/重排保最新metadata，Add-await保外观且使用显式新名称，secondary零echo。49定向/1312全前端/build/diff精确184绑定，独立49与3actual probe分组。不是任意emoji/图片/图标、完整B01或GUI/ReactDOM验收；未跑Rust/cov/Suite，updater暂停。
+
+2026-10-09：[B01c 项目置顶](superpowers/plans/2026-10-09-yam-cmux-b01c.md)源码与独立审核通过：main 已保存项目可 Pin／Unpin，旧记录 absent pinned 视为 false；稳定置顶组在前，Pin 加入组末，Unpin 不记旧位，↑/↓ 仅同组相邻移动。先写后生效，失败保原数据，Add-await 保最新 metadata 与显式新名称，改名保标记，secondary 刷新零 echo。65定向/1305全前端/build/diff精确184绑定，独立65与3actual probe分组；未跑Rust/cov/GUI/ReactDOM/fullB01/Suite，updater暂停。
+
+2026-10-09：[A02c2 v5 布局成员外观恢复](superpowers/plans/2026-10-09-yam-cmux-a02c2.md)源码与独立审核通过：仅已核实当前owner的新renderer恢复成员字体/字号/symbolic theme，cached保实际外观，pending注释保留；旧v1–v4形状及成功恢复autosave保持，App保存v5≤16成员/core4KiB/full32KiB。现有Apply/zoom/secondary触发own布局保存，失败raw保留/current外观不假回滚；无效整体拒绝沿既有gate。350定向/1296全前端/build/diff精确184绑定，独立350与2probe分组；未跑Rust/cov/GUI/ReactDOM/fullA02/Suite，updater暂停。
+
+2026-10-09：[A02c2a 无效布局原始数据保留](superpowers/plans/2026-10-09-yam-cmux-a02c2a.md)源码与独立审核通过：损坏/读取失败警告后保原raw，自动保存与外观Apply不覆盖；无效布局Retry不可用，显式新建终端沿原路径解除保留。正常有效恢复/owner失败Retry/global16不变；实际覆盖RED→一行既有gate修复，optional appearance fixture 六ReferenceError历史保留。266定向/1280全前端/build/diff精确184绑定，独立266与2callback分组；未跑Rust/cov/GUI/ReactDOM/v5/fullA02/Suite，updater暂停。
+
+2026-10-09：[B01b 项目上移／下移](superpowers/plans/2026-10-09-yam-cmux-b01b.md)源码与独立审核通过：main 侧栏已保存唯一目录项目 ↑/↓ 相邻移动，边界禁用，derived/secondary 无入口；保目录/名称/当前项目/折叠/会话/进程，最新集合先写后生效，Add-await 保重排，secondary 零 echo。68定向/1274全前端/build/diff精确184绑定，独立68与3callback分组；UI语义RED、missing helper scaffold和夹具失败分列。未跑Rust/cov/GUI/ReactDOM/fullB01/Suite，updater暂停。
+
+2026-10-09：[B01a 项目直接改名](superpowers/plans/2026-10-09-yam-cmux-b01a.md)源码与独立审核通过：main 侧栏手动项目 Rename project…，只读目录、1–200 Unicode code point 显示名；保目录/顺序/折叠/当前项目/进程，derived-only 与 secondary 无入口。先写后生效，Add 异步验证后保最新集合；57定向/1263全前端/build/diff精确184绑定，独立57及3callback分组。真实入口/写失败RED与夹具失败分列；未重跑Rust/cov、无GUI/ReactDOM/fullB01/Suite，updater暂停。
+
+2026-10-09：[A11 R9 current-at-run隔离实测](superpowers/plans/2026-10-09-yam-cmux-a11-r9.md)一次300/300，提交→parser P95 25.780542ms、3693844bytes exact drain；high630441.974B/s（nominal60.1236%）、4932.079ms stall，非1MiB达标。echo STOP ACK/flood server-rejected未知原因原stop_failed保留，shutdown在parser signal后ACK，fallback=true/graceful=false；root四PID None/私有namespace移除。513product/183selected及独立F7/bundle/gate审核通过，保留唯一R9app但无GUI/no-hang/cmux/fullA11/Suite结论。empty[] plist历史澄清与失败断言保留；本次docs更新使旧current-source gate过期，updater暂停。
+
+2026-10-09：[B04b Clear入口](superpowers/plans/2026-10-09-yam-cmux-b04b.md)源码/独立审核闭环：palette及第九可编辑快捷键，fresh mac Command+K/其他Ctrl+Shift+L；旧8/4与损坏/读取失败保持Clear=null，Save先写后生效。焦点/完整守卫先于键盘拦截；面板关闭提交后consume-first effect按身份/版本执行一次，closed forged/新modal/stale为0RPC，Reopen第五参数保留。79target/1247full/build/diff精确183绑定，独立58+21及5App分组不重复加总；无Rust/cov/GUI/IME/ReactDOM/fullB04/Suite，updater暂停。R9新隔离包仅计划。
+
+2026-10-09：[B05c 重新打开隐藏标签](superpowers/plans/2026-10-09-yam-cmux-b05c.md)源码/独立审核闭环：工具栏与palette、最后空tab仍可达；每window一个memory-only cached记录，同renderer原pane/当前focused fallback，零输入/历史重放/进程启动/控制权获取。live→ended失效，已ended同cached可readonly；不是关闭进程或持久undo/fullB05。166target/1236full/build/diff精确182绑定，独立166+5App分组不加总；无Rust/cov/GUI/ReactDOM/TUI/Suite，updater暂停。当时下一Clear入口仅候选（现B04b已源码交付）。
+
+2026-10-09：[权威 Clear terminal display](superpowers/plans/2026-10-09-yam-terminal-authoritative-clear.md)源码/独立审核闭环：运行中 normal buffer 保留当前行，旧显示不被权威scene恢复，日志不删除/零输入/不重启；普通、Agent、command、SSH均适用，saved/alternate/old-cap不可用。pending手动意图0viewport RPC，完成后正常poll刷新；公开clear+bottom/marker ring。fresh1225full/build精确181绑定闭合旧pretrim证据缺口，fmt/clippy/diff通过；无fullRust/cov/GUI/ReactDOM/真实owner/fullparity/Suite，updater暂停。NEXT B05仅计划。
+
+2026-10-09：[A08d 独立终端行高](superpowers/plans/2026-10-09-yam-cmux-a08d.md)源码与独立审核闭环：默认1.35，1–2最多两位小数，独立输入/预设/Save，当前及未来视图共享全局设置，不改变Profile或移动schema。同值Save仅重试仍有效的未完成fit，P2真实RED已闭环；52定向/1213全前端/build/diff通过，独立52+三个App分组及原探针通过（不加总唯一数）。本片未重跑coverage/Rust；AST非GUI，full A08/native/Suite待验，updater暂停。
+
+
+2026-10-09：[Native window identity前提](superpowers/plans/2026-10-09-yam-cmux-native-window-identity.md)源码/独立审核闭环：26个可信叶/父身份守卫保留epoch/claim/Unknown，父窗口激活与叶URL/eval查找区分；浏览器仍独立窗口，非同pane/full C01。现有SDK生产unstable必要补充、536包/lock/cap不变。640Rust/3既有ignored按仅Cargo变更的精确投影保留，最终normal check/link/fmt/clippy/diff及7JS通过；独立4identity/33window/10browser/7JS分组不加总。nativeGUI/Suite待验、updater暂停。
+
+2026-10-09：[A07c3 上报提示符位置导航](superpowers/plans/2026-10-09-yam-cmux-a07c3.md)源码/独立审核闭环：普通运行中本地终端 More actions→Previous/Next reported prompt，仅滚动有界100位置、不发送输入、不循环，不保证精确PS1；上报状态仍不可信。两项parser失败/替换导航残留P2真实RED→GREEN并独立关闭。r2 1193full/11UI/build/diff；Rust字节未变，native5/fmt/clippy与独立r1 84front+5native按投影保留，r2 11UI+两个原probe分组；无新coverage/fullRust、GUI/ReactDOM/fullA07/Suite验收，updater暂停。
+
+2026-10-09：[A07c2 可选Zsh命令状态报告](superpowers/plans/2026-10-09-yam-cmux-a07c2.md)已源码/独立审核闭环：独立默认OFF、未来普通Unix Zsh/Profile，单包装四模式自动A/C/D与0–255退出码；不修改RC、不重注入现会话、cwd偏好独立。状态是不可信Shell报告而非进程/Agent完成证明，P2帮助说明遗漏已实际RED→GREEN闭环。r1 final1179/build/diff；coverage历史r0 99.73/93.76/96.33未重跑。独立r0 109前端/8native/14cwd，r1 18UI+1外部组件probe分组保留；native GUI/owner、Ctrl-C/jobcontrol、完整A07/Suite待验；当时提示符跳转尚未实现（后续A07c3已交付），updater暂停。
+
+2026-10-09：[A07c1 Shell-reported状态接收](superpowers/plans/2026-10-09-yam-cmux-a07c1.md)有限源码与测试审核通过：普通本地终端显示有界当前phase/last exit，缺标记显示Not reported，非可信进程/Agent真值。当时自动Zsh发射器尚未实现（后续A07c2已交付）、当时提示符跳转尚未实现（后续A07c3已交付）；1152 full/cov/build/native2+cwd6与独立66项前端、2项native receiver及1个外部actualApp synthetic probe通过，GUI/fullA07/Suite未验，updater暂停。
+
+2026-10-09：[A11 r8隔离实测](superpowers/plans/2026-10-09-yam-cmux-a11-r8.md)300/300，提交→parser P95 26.165334ms，3689748bytes exact drain；两次STOP ACK，最终direct wait/PID None/cleanup complete。fallback=true、graceful=false；高档629626.241B/s（nominal的60.0458%），非1MiB达标/GUI/cmux/fullA11或跨源码性能提升。构建current-at-run，文档更新后旧receipt/gate不改；r7历史拒绝不追认根因，updater暂停。
+
+2026-10-09：[Unix process-tree lookup](superpowers/plans/2026-10-09-yam-terminal-stop-ps.md)移除PATH依赖，固定系统ps缺失明确失败。真实无PATH RED→GREEN、两隔离子probe、选择器边界与7项既有生命周期测试及独立审核通过；Windows/身份/恢复流程保持。未证明r7 stop拒绝原因，原结果保留；fresh packaged r8、GUI/Suite仍待，updater暂停。
+
+2026-10-09：[A11 r7隔离实测](superpowers/plans/2026-10-09-yam-cmux-a11-r7.md)：300/300，提交→parser P95 30.454875ms，非UI延迟；3408148bytes exact drain。高档仅577438B/s（offered的55.07%）。两次stop拒绝后fallback清理完成、direct wait/四PID absence成立，graceful=false，拒绝原因未证实。无完整A11/cmux/原生GUI结论；本次文档更新使旧构建后续current-source gate过期，updater暂停。
+
+作者：Jeff.Liu。更新：2026-10-08。当前HEAD为`8fb2cb0`加已授权未提交的终端对齐切片，应用版本0.1.0；HEAD不等于dirty源码冻结快照。本文当前布局声明见[执行记录](superpowers/plans/2026-10-08-yam-cmux-terminal-parity-progress.md)，下方历史报告保留各自提交、事实与缺口，不混称最新原生验收。
 
 T06 当前测量另绑定已闭环 T05 的 dirty 产品源码与一次 unsigned release 隔离包；HEAD 本身不足以描述该工作区。[冻结构建与原始证据](evidence/yam-performance-t06/README.md) 区分后台 owner、原生 WebKit 中的终端模块和仍未验收的真实 App 交互。三轮 owner 短测、三轮各100次模块输入、三轮各100 warm/100 ended cold 模块切换已实测；末槽超时与逐槽持续输出缺口先红后修，新连续性短测18/18完整。16路持续输出显式30分钟实测361/361槽、全阶段379/379完整，0迟到/缺槽；后台内存中位54.146 MiB、峰值62.443 MiB，CPU中位0.070664核，实际输出约77.6kB/s。停止后约57.990 MiB，重新启动owner后25.909 MiB，明确不是GUI App重开。当前不宣称整 App 性能目标达标。空 GUI 的9个实际采样为partial，普通 Cmd+Q、真实键鼠/通知/Hook/权限流程及生产 output queue 遥测仍未验收。
 
@@ -21,13 +138,57 @@ T08 当前冻结包已完成[一次纯 owner RPC 原生验收](evidence/yam-nati
 
 ## 功能与证据
 
+### 2026-10-17 第二轮桌面优化
+
+2026-10-18 补验完成：结束 Codex 标签启动恢复与阅读历史均不新增会话；原 owner、3 条原任务和同一对话的 6 条消息保持。
+
+作者：Jeff.Liu。当前实现和有限原生验收：
+
+| 能力 | 当前状态 | 证据边界 |
+|---|---|---|
+| 本机网关与模型目录 | 显式身份检查、GET 模型目录、筛选/选择及既有模板 Apply；3 秒/1 MiB 限量与取消 | 固定 macOS 应用本机 fixture 目录→模板→启动已验证；不表示真实厂商认证、额度、计费或推理通过。 |
+| Git 变更导航与文件预览 | staged/worktree 行号和块导航；原生授权下只读 UTF-8 与静态 PNG/JPEG/WebP，查找/行定位/缩放 | GUI 正常与取消、字面 HTML、图片缩放通过；路径/替换/格式/像素/资源释放边界有回归。损坏 JPEG 原生拒绝已实测。 |
+| Codex Conversation | 核实 thread/cwd/provider/generation/store；只读分页、50/500 条预算、64 KiB 单条显示、工具折叠及未知占位；保留终端和阅读状态 | Codex 0.162.1 合成存储实际分页和 GUI 两次 Continue、重复刷新、重开后 6 条消息保持；读取无新增 fixture POST。协议边界和迟到/乱序由自动化覆盖；legacy/不支持 CLI 明确不可用。 |
+| 原任务保持 | 固定应用普通退出与重开复用原 owner/运行会话；切换恢复子控件焦点；慢网关期间有限输出继续 | macOS PID 定向 GUI 与认证后台状态证据；不代表长期稳定性、吞吐性能或跨平台验收。 |
+
+前端 1520 项和覆盖率 99.74/94.52/96.60、Web build 通过；原生最终检查、两种模型复核及完整边界见[第二轮工作流](yam-core-workflows.md#2026-10-17桌面优化第二轮-r1r3)与[执行回执](/Users/liuwenyuan/.codex/visualizations/2026/10/16/01a143d9-337c-73b3-a49b-9c3cb6457139/yam-desktop-optimization/second-round-plan-20261017/implementation-report.md)。没有真实厂商请求、无新依赖；Windows/Linux 与真实账号未验，正式 Suite coverage 绑定仍 uncovered，第一轮缺项保持，updater 暂停。
+
+### 2026-10-17 第一轮桌面优化
+
+| 能力 | 本轮状态 | 当前证据边界 |
+|---|---|---|
+| 模板损坏保护与恢复 | 读取错误保护、复制原文、确认重置和失败保留；原生父窗口 sheet 死锁已先红后绿修复 | 新包 GUI 实测取消保留、复制原文、明确重置后恢复写入；原始备份精确还原。写入失败由自动化覆盖。 |
+| 续聊名称与置顶 | 成功后即时继承，连续两次保留，沿用原连接与原生身份 | GUI Codex 连续两次本机 API fixture 续聊保持名称/置顶/UUID/上下文；修复重置后续聊代码字节未变，三 CLI fixture 再次通过。真实账号未执行。 |
+| 会话连接详情 | 保存的启动快照与脱敏端点；认证/计费/运行时模型/最终上游未验证 | 当前 GUI 缺元数据为 Unknown，受管 API 快照和未验证说明可见；组件与窗口几何回归通过。 |
+| 本机连接模板和端口检查 | 沿用可选 provider 模板；显式 loopback TCP 共用 2 秒预算，无模型请求 | GUI 保存/两次 Apply、正常/关闭/不支持/真实超时通过；超时期间 heartbeat 50→59，检查前后 POST 数均为 10。 |
+| 全局停止确认与显式重连 | GUI/托盘/macOS 菜单共用确认；原 Client/游标恢复，不自动重跑 | 当前窗口和 macOS 菜单取消保持任务，只停止自建 fixture 后原任务仍运行；普通退出重开、live 输入、Dock 激活/重复启动复用唯一 GUI 已实测。旧 owner 托盘、确认全局停止、强制断连后的显式重连未执行；退出后 Dock 重开保持原 owner/全部运行会话且唯一 GUI；临时固定已还原。 |
+
+前端 1445 项、覆盖率门槛通过；原 GUI 阶段的三项已安装 CLI 本机 fixture、35 项重置定向回归、Web build 和固定 macOS 开发包构建回执保留。后续已在同样并发条件下完整复现两项 Rust 假服务器 `read_exact` 的 `WouldBlock`：当前 macOS 的 accepted socket 继承 listener 非阻塞模式，设置读超时不会清除此模式。确定性回归先红后绿，共享测试 accept 边界显式恢复 blocking，保留三秒预算与原断言；5 项定向连续 10 轮通过，原并发条件与默认并发的完整 Rust 均为 708 项通过、6 项既有忽略。只改 `#[cfg(test)]` 模块，运行时源码及 owner/运行任务保持。完整新失败日志已保存；早先仅哈希的回执仍无法恢复原文，不把它改写成已确证的同一失败。全文件既有格式差异及其他系统运行缺口保留。
+
+用户允许按 GUI PID 定向控制后，已补验上述原生流程；整体仍为部分验收，旧 owner 托盘、确认全局停止和主动断连重连等未执行项保留。该第一轮回执未覆盖第二轮、真实厂商账号和 Windows/Linux；当前第二轮事实见上节，历史 R11—R15 保留原证据边界。详见[当前工作流验收](yam-core-workflows.md#2026-10-17桌面优化第一轮-t1t6)。
+
 | 能力 | 当前状态与边界 | 依据 / 最后记录的验证基线 |
 |---|---|---|
+| 默认终端光标（A08c） | 源码/独立审核支持block、underline、bar与blink；独立write-first Save，默认block/true，损坏raw保留；main一次发布、secondary零echo，Profile不变，程序可覆默认。native/ReactDOM/DECSCUSR视觉及inactive/fullA08待验 | [A08c记录](superpowers/plans/2026-10-09-yam-cmux-a08c.md)：94target/127fixtures/980full，coverage99.71/93.85/96.24/build/diff；Rustprefix25未变未重跑；独立66+2实际facade probes |
 | 项目/会话 | 已支持本地目录分组、并行会话、筛选、重命名、搜索、重新运行，目录取消保留原值 | [App](../apps/desktop/src/App.tsx)、[项目工具](../apps/desktop/src/workspaces.ts)、[阶段记录](yam-next-stage-execution.md)；macOS 阶段样本，当前代码 `6b00a7d` |
 | 持续后台 | 已支持独立 owner 持有 PTY/parser，GUI 退出继续，重开同一 owner 不重复启动 | [后台](../apps/desktop/src-tauri/src/background.rs)、[连续性记录](yam-session-continuity-plan.md)；`400f5ba` [三平台 CI 36938013741](https://github.com/ainiaa/yam/actions/runs/36938013741) 实际隔离包生命周期 |
 | 停止/恢复 | 已支持显式 Stop all tasks and quit 清理；无活跃任务且 60 秒无客户端请求才闲置退出；后台/parser 故障可见，遗留运行态 needs_attention，不自动重跑 | [会话管理](../apps/desktop/src-tauri/src/lib.rs)、后台与同上包证据；普通 Cmd+Q 联合流程未原生验收 |
 | 终端/输入 | 已支持后台持续解析、投影/最终场景，显式 Take control 转移输入；部分接受后不整段自动重发 | [终端服务](../apps/desktop/terminal-service.cjs)、[内核](../apps/desktop/src-tauri/src/terminal_runtime.rs)、连续性记录；`400f5ba` 三平台场景/生命周期与 Windows 管道/ConPTY 回归；原生键鼠/缩放/快速切换未验收 |
-| 终端分屏比例与面板交换 | 已支持 Side by side/Stacked 20–80% 拖动和键盘调整、重置50%；Four panes 保持固定网格并可交换焦点pane与目标pane。焦点跟随同一session，selected session及现有控制状态保留；不创建/停止任务、不接管输入 | [TerminalLayout/App](../apps/desktop/src/TerminalLayout.tsx)、[比例与布局状态](../apps/desktop/src/terminal-layout.ts)、[F2 自动化与复审证据](evidence/yam-functional-f2/README.md)；155定向/392 Node通过，native GUI、打包重开、Windows/Linux与F7未覆盖 |
+| 普通新建、默认home与Shell选择 | 已支持一动作普通终端，缺省目录由owner解析home；显式Unix Bash/Zsh/Fish interactive/login选择与Windows cmd.exe `/D`；独立保存仅影响之后普通启动，旧请求/默认偏好omit字段，旧owner显式拒绝不自动重跑。个人命名Profile支持名字、Shell/cwd、CRUD/default/selected启动及损坏存储显式恢复；环境名称引用由owner临时解析并有预算/平台保护；初始字体/字号/主题快照与逐view字号操作已支持；可信项目Profile/冷显示恢复待后续 | [A01a](superpowers/plans/2026-10-08-yam-cmux-a01a.md)、[A01b](superpowers/plans/2026-10-08-yam-cmux-a01b.md)；[A02a](superpowers/plans/2026-10-08-yam-cmux-a02a.md)、[A02b](superpowers/plans/2026-10-08-yam-cmux-a02b.md) [A02c1](superpowers/plans/2026-10-08-yam-cmux-a02c1.md) 最新827前端/独立审核通过，527串行Rust/2原有忽略继承A02b证据；完整Rust默认并行fixture资源失败仍未覆盖；原生Shell/login/Profile、真实ReactDOM与Win/Linux运行未覆盖 |
+| 固定两窗口 B05a | More actions/Palette打开main之外一个secondary；新建独占session，选择外窗活动session聚焦原slot；global16 view/pending/draining、双namespace隐藏成员owner核实恢复0spawn；失败保raw，显式Retry busy/成功解除gate。main唯一settings/notifications；secondary存在时mainclose隐藏，显式Quit原样 | [B05a回执](superpowers/plans/2026-10-08-yam-cmux-b05a.md)；9生产+23tests/32owned，941前端、coverage99.56/93.69/95.76/build，12定向/559串行Rust+2原ignored/fmt/clippy；独立360front+12Rust与r1 220+两个1probe、spec/quality通过，355成员归档。native/ReactDOM/crossGUI/三平台未验；不是move/镜像或完整B05，updater暂停 |
+| 同GUI两窗口标签移动 B05b | main↔secondary显式移动原session；源暂停/真实dispose后ACK、目标ready complete，单global16预算；Check/Continue/Open显式pending恢复，native epoch/generation隔离，无spawn/restart | [B05b回执](superpowers/plans/2026-10-09-yam-cmux-b05b.md)；4生产+6tests/140source，227target/993full、coverage99.72/93.41/96.08/build，11target/578serialRust+2原ignored/fmt/clippy/diff；独立34+193front/2probes/11Rust及spec/quality PASS。原生/ReactDOM/PID/CrossGUI/Suite未验，不含镜像/拖放/fullB05；旧debug包不含本片，updater暂停 |
+| 固定保留缓冲区对齐 A05a1 | 新view由浏览器隐式1000对齐现owner2000，唯一常量复用frame viewport上限；共享factory覆盖普通/Profile/history/move，不迁移live、不改owner/global16预算 | [A05a1回执](superpowers/plans/2026-10-09-yam-cmux-a05a1.md)；2生产+7tests/141source，50target/168bindings/998full、coverage99.72/93.41/96.08/build/diff；独立95+151及spec/quality PASS。Rust25字节不变未重跑，实际>1000 RED→GREEN。DOM/open/Fitstub、ASCII非fullcells/native/memorybench/Suite；键盘未实现，旧debug包不含本片 |
+| 未来普通终端保留行数 A05a3 | 独立保存200–2000/default2000，仅新ordinary/Profile；已有/恢复/move按recorded frame，保存0当前view改变；default请求省略，legacy frame2000，保守预算不增 | [A05a3回执](superpowers/plans/2026-10-09-yam-cmux-a05a3.md)；9生产+12tests/145source，321target/1038full、coverage99.72/93.54/96.12/build/diff，Rust7target/585serial+2原ignored/fmt/clippy；独立93+7及bundle33，overlap原证据与串行纠正保留。native/ReactDOM/fullA05/memory/OS/Suite未验，旧debug138不含，updater暂停 |
+| Shared方向键未知值边界修复 | 只接受四精确Arrow，原两平台方向组合保持；synthetic原型名称拒绝且不throw/consume/action，无App/key policy变化 | [有限修复回执](superpowers/plans/2026-10-09-yam-cmux-shortcut-boundary.md)；1生产+2tests/145source，12独立RED→GREEN，101target/1052full、coverage99.72/93.50/96.12/build/diff；Rust25未变，独立82+1/spec/quality PASS。native物理键/ReactDOM/OS/TUI/Suite仍未验 |
+| 固定键盘viewport A05a2 | mac Command、其他Ctrl+Shift的PageUp/PageDown/End；current focused ready normal/mouse-none守卫，先consume再publicpage一次，onScroll单RPC/livebottom权威确认/retainedlocal；排除保底库行为 | [A05a2回执](superpowers/plans/2026-10-09-yam-cmux-a05a2.md)；2生产+2tests/142source，55target/1019full、coverage99.72/93.45/96.08/build/diff，Rust25未变未重跑；独立91+12+1及r1spec/quality PASS，原prototype P2关闭、r0保留。nativeDOM/TUI/OS/fullA05/Suite未验，旧debug包不含本片 |
+| 可选Zsh目录报告 A07b1/A07b2 | 默认OFF独立偏好，Save仅未来Unix ordinary/Profile；明确Zsh和Current/System default可请求，owner原始argv0绝对basename zsh才注入，最终SHELL不改变判断。unsupported默认原builder一次/0assets/warning；legacy[-l]/System[-i/login]不变，现会话不变。私有raw ZDOTDIR/trampoline/4096-byte OSC7、256资产与原失败清理保持 | [A07b1回执](superpowers/plans/2026-10-08-yam-cmux-a07b1.md)历史证据保持；[A07b2回执](superpowers/plans/2026-10-09-yam-cmux-a07b2.md)：4生产+4tests/8owned、145source，53/1062前端、coverage99.72/93.51/96.12/build，18target/589serialRust+2原ignored/fmt/clippy/diff，独立57+18通过。真实私有legacy-l PTY baseline/integrated验证RC顺序/首提示/status；首canonical期望fixture失败与业务前GREEN如实。非Unicode命名RC/任意host RC/崩溃残留/native ownerGUI/ReactDOM/defaultShell安装选择/跨平台/完整A07/Suite待验；旧debug138不含，updater暂停 |
+| OSC7目录报告 A07a | receiver-only；当前可见view纯文本Terminal-reported directory是不可信stdout声明，launch/New/Git/trust/resume cwd不变。仅local file URI/当前平台绝对路径、URI/path各4096 UTF8 bytes；坏/缺最新metadata只清报告，live serde/proxy保字段，历史outer+raw剥离，watermark/缓存/失效守卫，不额外同path重绘 | [A07a回执](superpowers/plans/2026-10-08-yam-cmux-a07a.md)；5生产+8测试/13owned，83定向/897全量前端，533串行Rust/2原有ignored、fmt/clippy/diff；895-era coverage99.70/94.12/96.79/build绑定相同final前端business。独立294+6及actual probe与spec/quality通过，122源码/23raw/9checks匹配、207成员归档。receiver不注入hooks/自动cd；DirectoryValidation旧122源码debug构建与root/review packaged parser各6checks/14requests已通过、21成员归档，非owner/GUI/Shell证明。真实native/ReactDOM/跨平台、整套默认并行Rust/完整A07待验；既有PTY日志可能已含OSC |
+| 应用快捷键 B04a | 八项动作可编辑或null禁用；Command/Ctrl精确平台路由，非macOS除Ctrl+N都Shift；逻辑字母/括号和有限reserved冲突；window capture单执行，draft校验/写成功才应用，旧key缺新key才内存迁移 | [B04a回执](superpowers/plans/2026-10-08-yam-cmux-b04a.md)；4生产+9测试，writer108/全量865/coverage/build、独立138及160handler probe与spec/quality通过；117源码和16回执匹配。真实ReactDOM/WebView/xterm/布局/IME/AltGr/OS/Windows/Linux待验，不称完整B04或OS全局 |
+| 粘贴预览 A04a | 原生textarea text/plain捕获；默认换行/非tab控制字符预览，独立risky/always/never；全模式128 KiB UTF-8/Unicode预算，4096 code point显示但确认完整原串；单pending、绑定原view/版本/焦点，观测失效零发送。沿普通write_session claim，不接管、不保证新增严格lease原子性 | [A04a回执](superpowers/plans/2026-10-08-yam-cmux-a04a.md)；源码全量849/coverage/build、独立262与17 fixture probe、spec/quality通过；真实ReactDOM/当前包剪贴板/GUI焦点/IME/TUI/ownerPTY及Windows/Linux未原生验收，完整A04仍待后续 |
+| System终端配色 A08b | global/Profile Theme可选System，symbolic存储/提交、三字段/v3/defaultdark不变；每窗口本地深浅色，仅current own system views改palette，不fit/resize/write/广播/焦点，显式主题不动，字体ready fit不丢 | [A08b回执](superpowers/plans/2026-10-09-yam-cmux-a08b.md)；4生产+8测试/12owned，120target/967full、coverage99.56/93.75/95.78/build/diff；独立120+2actual probes PASS/135hash匹配。Rust未变未重跑；49fixturefail修绑定保原断言，latestpostinstall实际RED。nativeOS/ReactDOM/chrome/cursor/fullA08/Suite未验，updater暂停 |
+| macOS选中文件 A04b2 | More actions → Show selected file in Finder…；精确绝对选区→本机原始/canonical路径预览→显式Finder显示，regular-only/4096bytes/身份与nativeepoch复核，每窗口一个真实job；取消不早释放，不读内容、不执行/defaultopen、不写PTY或存储 | [A04b2回执](superpowers/plans/2026-10-09-yam-cmux-a04b2.md)；7生产+3测试/135source，952front/8target/567serialRust+2ignored、coverage99.56/93.65/95.77/build/fmt/clippy/diff；独立30+29front/8Rust+2actualprobes PASS。Rustfull仅test初始化旧字节，finaltarget现字节；Finder/ReactDOM/OS/Suite/真实非UTF8filesystem EILSEQ/TOCTOU未验，不称editor/OSC8或完整A04，updater暂停 |
+| 可见HTTP(S)链接 A04b1 | 仅literal URL、精确Cmd/Ctrl主键、4px抖动；选择/拖动/TUI/modal拒绝，当前view/cell signature复核；raw/canonical各4096 bytes，16行/8192units/32候选超预算全拒。main窄scope默认HTTP(S) opener，不write/take。OSC8 no-op且可能shadow，路径/editor另片 | [A04b1回执](superpowers/plans/2026-10-08-yam-cmux-a04b1.md)；3生产+4测试，writer124/885、coverage99.70/94.07/96.79/build/diff、独立94+actual probes、spec/quality通过；当前LinksValidation隔离包build0/hash一致但未原生运行，GUI/OS browser权限/TUI/ReactDOM/WindowsLinux、OSC8/完整A04待验 |
+| 嵌套布局、标签与焦点 | 已支持16叶/深度16内局部分屏，每pane多标签、菜单移动、内部拖动排序/跨pane/四边缘原子拆分；每split20–80%受实际最小尺寸约束的拖动/键盘调整与重置；实际几何方向焦点、临时最大化/还原。v4迁移v1/2/3并向owner核实包括隐藏成员；不创建/停止原会话、不自动接管。固定两窗口B05a源码已交付；同GUI显式跨窗口move源码见B05b；镜像与原生验收待实现/验证 | [TerminalLayout](../apps/desktop/src/TerminalLayout.tsx)、[状态](../apps/desktop/src/terminal-layout.ts)、[最新执行记录](superpowers/plans/2026-10-08-yam-cmux-terminal-parity-progress.md)；755前端测试及逐切片独立审核通过，覆盖率仅TS，realReactDOM/native当前布局、重开和三平台未覆盖；旧F2记录仅历史 |
 | 历史 | 已支持 JSON 原子保存/备份恢复、结束场景只读；旧记录无场景降级日志回放；存储/容量错误可见，不静默丢弃未读回执 | [HistoryStore](../apps/desktop/src-tauri/src/history.rs)、[回执](../apps/desktop/src-tauri/src/agent_events.rs)，当前 `6b00a7d` 及连续性记录 |
 | 历史摘要分页与容量管理 | 当前工作区新增默认100/上限200的摘要页、按ID详情、全局活动/未读/关注查询、独立有界收件箱和通知重试；游标绑定store instance/revision与查询上下文，过期重载；容量面板区分元数据/日志/场景/备份/归档，24 MiB提醒；归档/还原操作见下列T04工作区实现 | [历史](../apps/desktop/src-tauri/src/history.rs)、[前端](../apps/desktop/src/history.ts)、[分页回归](../apps/desktop/tests/history.test.mjs)；2026-10-03 T03工作区自动化，当前页外日志命中/通知按ID读取；原生桌面分页操作未实机验收 |
 | 历史归档/还原 | 当前工作区已支持显式按ID归档完成/失败/停止的记录；无未读、待发/失败通知、原生续聊claim或仍持有最终场景的Session时才允许。自动归档默认关闭，T05可显式启用30天规则；日志/frame保持原路径。分片、事务、hot、manifest、可恢复bak同步后完成，重启先恢复再暴露历史；还原超过32 MiB明确拒绝。归档页独立revision和来源上下文，详情/场景/原生续聊按ID可读档案 | [HistoryStore](../apps/desktop/src-tauri/src/history.rs)、[归档入口](../apps/desktop/src/HistoryArchive.tsx)、[原生管理](../apps/desktop/src-tauri/src/lib.rs)、[UI回归](../apps/desktop/tests/history-archive.test.mjs)；2026-10-03 T04/T05工作区自动化，三平台实际桌面归档/恢复/原生续聊联合操作未原生验收；后台协议v2，活跃v1 owner保留任务并提示升级 |
@@ -36,8 +197,8 @@ T08 当前冻结包已完成[一次纯 owner RPC 原生验收](evidence/yam-nati
 | 收件箱/通知 | 已支持逐轮权限/回复/中断/失败回执、重试/暂停/前台抑制；打开指定收件箱项才已读，OS 接受不清未读；送达/持久化间崩溃可能重复 | [Agent 状态](../apps/desktop/src-tauri/src/agent_events.rs)、[通知历史](notification-acceptance.md)，macOS 2026-10-01 样本及 `3c181db` 阶段 CI；当前架构通知联合桌面流程未原生验收 |
 | 实时内存 | 已支持每 5 秒、单在途采样，隐藏时停止；应用含 GUI/WebKit/owner/parser，任务单列；归属不完整/过期/失败显示不可用 | [采样](../apps/desktop/src-tauri/src/memory.rs)、[轮询](../apps/desktop/src/memory.ts)、[live-memory](superpowers/plans/2026-10-02-live-memory.md)，`585edb3` CI、`ca396c4` WebKit receiver 修复与后续自采样/真实前端 IPC；当前 `6b00a7d`，可见 UI 读取超时仍未验收 |
 | 可信项目启动配置 | 当前工作区已实现可选version1 yam.json、预览与独立显式信任、用户单独启动、命名模板和应用私有默认；本次明确UI编辑>信任项目/模板>global，空串覆盖有效。owner启动前重读精确有界source并绑定canonical路径/物理根，变更或同名不同根不继承信任。env只引用owner已有变量，源/目标YAM_大小写均拒绝，值仅builder.env，不读.env/持久化/回传，不插值custom shell文本 | [项目配置](../apps/desktop/src-tauri/src/project_config.rs)、[实际App路径](../apps/desktop/src/App.tsx)、[预览](../apps/desktop/src/ProjectConfigPreview.tsx)、[T09测试证据](evidence/yam-project-config-t09/README.md)；正常/边界/异常、TOCTOU、取消旧回包、字面argv和owner分配前拒绝自动化；真实GUI/CLI/Hook/权限及Windows/Linux未原生验收 |
-| 个人启动模板 | 已支持最多32个本机个人模板，显式保存/更新/复制/删除；名称1–80个Unicode code point；仅保存adapter、mode、extra_args、prompt、command。应用模板只填充启动表单，不启动任务、不信任项目、不接管终端，且保留cwd、项目预览/信任和设置。localStorage明文保存，prompt/custom command/参数未加密，不应保存secret；不持久化env、cwd、模板名运行时信息或task state | [F4实现与测试](../apps/desktop/src/launch-templates.ts)、[F4证据](evidence/yam-functional-f4/README.md)；生产模块、组件和App initializer/回调自动化通过；实际GUI、Windows/Linux及F7 provider/native联合验收未覆盖 |
-| 隐藏视图释放 | 已支持最新选择成功后释放已结束且保存确认的隐藏完整视图；live、旧日志、保存失败及旧 owner 缺 persisted 时保留 | [缓存](../apps/desktop/src/terminal-views.ts)、App、[renderer-memory](superpowers/plans/2026-10-02-renderer-memory.md)，当前 `6b00a7d` 测试及固定原生 WebKit 夹具，非真实用户百分比收益 |
+| 个人启动模板 | 已支持最多32个本机个人模板，显式保存/更新/复制/删除；名称1–80个Unicode code point；仅保存adapter、mode、extra_args、prompt、command和可选provider连接快照（密钥仅环境变量名）。读取失败保留原始数据并保护所有写操作，明确确认重置成功后才恢复写入。应用模板只填充启动表单，不启动任务、不信任项目、不接管终端，且保留cwd、项目预览/信任和设置。localStorage明文保存，prompt/custom command/参数未加密，不应保存secret；不持久化env、cwd、模板名运行时信息或task state | [F4实现与测试](../apps/desktop/src/launch-templates.ts)、[F4证据](evidence/yam-functional-f4/README.md)；生产模块、组件和 App 回调自动化通过；本轮 GUI 模板保存/Apply 两次及损坏后取消/复制/重置已实测；Windows/Linux 和真实厂商账户联合验收未覆盖 |
+| 隐藏视图释放 | 当前布局全部成员（包括隐藏结束标签）受16视图预算保护；非成员的已结束且保存确认缓存可按既有策略释放，live、旧日志、保存失败或旧owner缺persisted时保留 | [缓存](../apps/desktop/src/terminal-views.ts)、[当前布局记录](superpowers/plans/2026-10-08-yam-cmux-b02b.md)；旧[renderer-memory](superpowers/plans/2026-10-02-renderer-memory.md)测量保留历史边界，不代表新GUI收益 |
 | 脱敏诊断导出 | 已支持无选中会话时从状态栏导出 JSON；固定版本/平台/协议信息、健康枚举及会话/回执/集成计数，不含输入、终端文本、argv/env、凭据、身份、路径或原始错误；取消不写入，私有临时文件完整发布且禁止覆盖 | [诊断](../apps/desktop/src-tauri/src/diagnostics.rs)、[RPC](../apps/desktop/src-tauri/src/background.rs)、[前端测试](../apps/desktop/tests/diagnostics.test.mjs)；2026-10-03 T02 工作区自动化，原生目的地对话框三平台实机操作未验收 |
 
 ## Agent 与原生版本样本
@@ -83,7 +244,7 @@ T08 当前冻结包已完成[一次纯 owner RPC 原生验收](evidence/yam-nati
 
 [连续性测量](yam-memory-continuity.md) 的 `400f5ba` 生产实现：16 会话/2000 行/30 分钟 343 完整样本，中位 340.28 MiB、范围 323.12–592.43 MiB；独立重开短测中位 587.06 MiB。保留构建/尺寸/编译干扰和峰值，后续 live-memory/renderer 修改不自动继承结果。[已结束视图 WebKit 夹具](superpowers/plans/2026-10-02-renderer-memory.md) 约省 13 MiB、返回约 5 ms / 1003 ms，是机制证据，非整个 App/当前单会话降幅；旧 owner 缺 persisted 时保守保留视图。
 
-T10当前工作区已提供终端字体/10–24整数字号/dark-light-solarized主题的显式保存与取消，损坏偏好回退提示；沿xterm options更新已有实例、fit并对已确认可写的live/ready view单飞合并最新尺寸，backend输入lease仍权威，偏好不自动take control。有限命令面板复用已有动作，普通输入/IME/dialog不抢键，终端焦点可唤起；已配P快捷键优先并提示按钮入口。最多100个本地pin仅导航排序，永久清理回执同步移除对应pin；关闭verified/persisted ended idle视图不删历史或停止任务。Run again/Continue文案与原动作分开。详情与宿主自动化范围见[T10证据](evidence/yam-terminal-settings-t10/README.md)；没有新native包或真实GUI/Windows/Linux验收，T08旧包不冒领T10。
+T10当前工作区已提供终端字体/10–24整数字号/dark-light-solarized主题的显式保存与取消，损坏偏好回退提示；沿xterm options更新已有实例、fit并对已确认可写的live/ready view单飞合并最新尺寸，backend输入lease仍权威，偏好不自动take control。有限命令面板复用已有动作，普通输入/IME/dialog不抢键，终端焦点可唤起；B04a已用统一八项注册表替换旧P冲突优先策略；已知冲突拒绝保存，禁用palette热键仍保留按钮入口，参见B04a回执。最多100个本地pin仅导航排序，永久清理回执同步移除对应pin；关闭verified/persisted ended idle视图不删历史或停止任务。Run again/Continue文案与原动作分开。详情与宿主自动化范围见[T10证据](evidence/yam-terminal-settings-t10/README.md)；没有新native包或真实GUI/Windows/Linux验收，T08旧包不冒领T10。
 
 ## 已交付代码与待验收入口
 
@@ -237,11 +398,11 @@ Author: Jeff.Liu. 当前普通窗口已接入 Updates，GUI-only严格配置门�
 
 ### T18 full notice source pipeline
 
-Source code now binds the complete 535 Cargo/12 production npm inventory and independent accepted body qualifications, renders cache-free original bytes, and enforces an explicit formal-release gate before runtime/SEA and native release tools. Qualified material covers 39 Cargo/8 npm; 500 explicit gaps remain (27 known Cargo, 469 unreviewed archive candidates, 2 npm declaration-only, 2 headless/serializer applicability). Node aggregate LICENSE is additional. Developer output is incomplete and never release-eligible. This does not complete project license choice, compatibility review, full-text gap resolution, native packaged notices, signing, or publication. Details: [notice integrity](THIRD_PARTY_NOTICES.md).
+Source code now binds the complete 535 Cargo/13 production npm inventory and independent accepted body qualifications, renders cache-free original bytes, and enforces an explicit formal-release gate before runtime/SEA and native release tools. Qualified material covers 39 Cargo/9 npm; 500 explicit gaps remain (27 known Cargo, 469 unreviewed archive candidates, 2 npm declaration-only, 2 headless/serializer applicability). Node aggregate LICENSE is additional. Developer output is incomplete and never release-eligible. This does not complete project license choice, compatibility review, full-text gap resolution, native packaged notices, signing, or publication. Details: [notice integrity](THIRD_PARTY_NOTICES.md).
 
-Current material batch01 passed independent Root and Astra source reviews. The R2 mechanism remains: a fixed, independently approved canonical manifest digest binds all 547 identities, supplemental bodies, declarations, provenance, gap classifications and additional Node material. Collection produces candidates without granting readiness and rejects unapproved candidates before accepted return/publication; the public approval check, both render modes and packaged validation reject mapping changes before validator body reads. Future material changes require separate review and approval-anchor updates; no flag or environment bypass is provided.
+Material batch01 passed independent Root and Astra source reviews; the subsequent addon-search 0.16.0 exact source and full 548-identity candidate received independent mechanical review and root approval. The R2 mechanism remains: a fixed, independently approved canonical manifest digest binds all 548 identities, supplemental bodies, declarations, provenance, gap classifications and additional Node material. Collection produces candidates without granting readiness and rejects unapproved candidates before accepted return/publication; the public approval check, both render modes and packaged validation reject mapping changes before validator body reads. Future material changes require separate review and approval-anchor updates; no flag or environment bypass is provided.
 
-[Material batch01 evidence](evidence/yam-full-notices-t18/material-batch01/README.md) preserves 15 exact-source qualifications, the Android Apache-text gap, retained atomic-waker third-party text, actual RED/GREEN and five fresh checks. Current coverage is 47 identities (39 Cargo and 8 npm), with 500 gaps: 31 known and 469 awaiting classification. Node aggregate attribution is additional. Developer output is deterministic at 4,773,378 bytes and remains non-release-eligible. [Historical R2 evidence](evidence/yam-full-notices-t18/r2/README.md) retains the preceding 32/515 state; older R1/R2 files remain unchanged. The collector/render/release-gate source slice is complete; full notice material, legal, native signed release and formal provider acceptance remain incomplete.
+[Material batch01 evidence](evidence/yam-full-notices-t18/material-batch01/README.md) preserves 15 exact-source qualifications, the Android Apache-text gap, retained atomic-waker third-party text, actual RED/GREEN and five fresh checks. Current coverage is 48 identities (39 Cargo and 9 npm), with 500 gaps: 31 known and 469 awaiting classification. Node aggregate attribution is additional. Developer output is deterministic at 4,774,510 bytes and remains non-release-eligible. [Historical R2 evidence](evidence/yam-full-notices-t18/r2/README.md) retains the preceding 32/515 state; older R1/R2 files remain unchanged. The collector/render/release-gate source slice is complete; full notice material, legal, native signed release and formal provider acceptance remain incomplete.
 
 ## 2026-10-04 功能优化优先级
 
@@ -284,3 +445,33 @@ F1–F6源码与有限smoke helper已通过独立源码复审。当前实际检�
 新唯一编译标识macOS developer应用实际77.329秒synthetic PTY流程通过：SIGTERM方式GUI退出重开保留owner/task身份、后台终端query回复与Unicode alternate scene、显式输入接管、stop-all shutdown、65秒连接idle及owner重启后的冻结scene；精确唯一包进程无残留。CUA路径timeout及ID Invalid app，未成功读取或操作UI，不能推断产品deadlock，也不代表六项交互UI/点关闭/真实Agent续聊或通知delivery/WindowsLinux原生验收。developer notices incomplete、非release/legal；updater后续与license batch02暂停，原生Agent续聊差异留研究。
 
 [F7当前证据](evidence/yam-functional-f7/README.md)区分first candidate/R1、真实RED/harness、构建及原生阶段输入、最终自动检查和未覆盖边界；formal provider coverage仍uncovered。
+
+| 独立浏览器窗口 C01a | main More actions → Browser，HTTP(S)URL与Show/Reload/Close；固定单独窗口，native identity gate和exact WebView plugin scope，generation/Destroyed保留不确定关闭状态 | [C01a回执](superpowers/plans/2026-10-09-yam-cmux-c01a.md)；60/1073front、599Rust+2原ignored/10target，独立60+10 PASS。124-file frontend/security投影绑定；native iframe/plugin/render/ReactDOM/跨平台/full C01/Suite未验，旧debug138未含，updater暂停 |
+
+| A11有限owner/parser测量 | 隔离F7实跑r6完成：300/300 submission→parser P95 30.329208ms，writeRPC P95 15.197292ms，3251476bytes exact drain；cleanup真实wait/absent | [回执](superpowers/plans/2026-10-09-yam-cmux-a11-fixture.md)：高档1MiB/s offered仅544755.82B/s、stall4.938s；134 helper/独立sol，原失败和清理recoverable错误保留。非paint/ACK起点；nativeGUI/ReactDOM/cmux/RSS/full A11/Suite仍open，updater暂停 |
+
+| D03a 显式SSH终端 | main More→Connect SSH；mac固定系统SSH/原生配置，typed历史与显式Reconnect；全局click snapshot；Unknown当前窗口暂停新启动、保已有会话，无自动解除 | [有限回执](superpowers/plans/2026-10-09-yam-cmux-d03a.md)：1084front/616Rust+2原ignored、独立140+17+probe，两P2已闭环。实际SSH/认证/GUI/ReactDOM/host/IPv6/CLI扩展/fullD03/Suite未验；旧debug未含，updater暂停 |
+
+### A09a 单文件拖放路径（2026-10-09）
+
+当前活动终端可确认单个普通文件的完整引用路径并插入一次，不附 Enter、不读取/上传内容。源码及1126前端、独立154审核通过；[有限收据](superpowers/plans/2026-10-09-yam-cmux-a09a.md)。目录、多文件、真实GUI/file RPC、图像上传协议和完整A09仍待验。
+
+### A11b1 测量工具诊断（2026-10-09）
+
+现有fixture增加有界清理请求分类/实际预算与阶段实际数据、marker、stall记录；源码及128 Python tests、独立审核通过。[收据](superpowers/plans/2026-10-09-yam-cmux-a11b1.md)。本片未运行新实际性能负载，不证明新吞吐或根因；完整A11/GUI/Suite待验，未来须fresh artifact binding。
+
+### D03b IPv6 字面地址（2026-10-09）
+
+Connect SSH 接受 bare 或 UI 一对[] IPv6，独立端口字段；保原拼写与系统配置，标题[]仅展示。源码/1138前端/20Rust定向及独立33离线对照通过。[有限收据](superpowers/plans/2026-10-09-yam-cmux-d03b.md)。zone/CIDR/URI/bracketport不支持；真实主机、GUI、降级兼容及完整D03待验。
+
+2026-10-09：[STOP安全拒绝诊断](superpowers/plans/2026-10-09-yam-terminal-stop-rejection-diagnostics.md)有限工具切片通过：新 diagnostics v2 严格保留三固定枚举，仅匹配请求/完整原生字符串分类，其他 outcome 为 null；不保留原始错误。6定向 RED→GREEN、134 helper 与独立 GPT-6.1-sol 134/spec/quality PASS（不重复加总），STOP顺序/预算/身份屏障/fallback/stop_failed保持。184源码map仅exact4变化；R9 v1及未知原因不变，无新native修复/性能结论/owner/GUI/build/全前端/fullA11/Suite验收，updater暂停。
+
+2026-10-09：[Native输出阶段诊断](superpowers/plans/2026-10-09-yam-native-output-stage-diagnostics.md)有限源码切片及独立Sol复审通过：dev/debug background owner显式1开启，普通app默认关闭，专用fixture固定设置1主动开启（无额外CLI开关）；worker记录原始读长四桶及真实锁/serial/reply/append/emit阶段，嵌套区间不相加，reply非纯parser、GUI未测。Rust定向12/Python9、library656通过+3既有忽略、helpers143及fmt/diff通过；Sol12/9与false-complete回归通过，root核对修复冻结。仅两条匿名观测，不推断身份；stderr写入时间无界、可能丢失摘要且有观测开销。无新artifact实际run、无16KiB优化，不构成R9根因/修复、native性能、完整A11/Suite结论；updater暂停。
+
+
+2026-10-09（作者：Jeff.Liu）：R10 隔离后台 owner/parser 实跑在当次冻结输入上通过有限结果审核：300/300 submission→parser projection marker，P95 26.164292ms；高档实际 622097.65B/s，不是 1MiB/s 达标。两条匿名阶段诊断不映射会话、不归因性能改善；两个 STOP 请求均 ACK，但 parser signal 先于 acknowledged owner shutdown，使用 fallback，不能称 graceful shutdown。Root 实查五个 PID 与 run root absent，Sol 独立结果审核通过。持久证据包位于 `~/.local/share/yam/development-archives/20261009-terminal-r10-stages/evidence.tar.gz`，SHA-256 `b8a296eee5ca7a33ee6c5188e5ce987d3f05aef1d1f258ad725df2c6137b1a98`；35成员为34列举证据加自排除的内部manifest。该结论仅为 current-at-run；后续源码及本次文档变化使旧R10 current gate不适用于当前工作树，原始receipt/gate保持不变。未验证 GUI paint/native GUI、cmux对齐或完整A11/Suite，也未交付性能修复；updater继续暂停。
+
+2026-10-09（作者：Jeff.Liu）：启动/停止反馈有限修复已通过独立Sol源码与47项定向审核。启动失败与unknown仅保留既有UI错误及未知结果暂停指引，不向任何已有终端写入合成提示；admission释放、启动标志、成功history/refresh与未知结果禁止再次创建保持。停止RPC始终发送调用时捕获的ID；迟到失败仅在仍mounted、detailVersion及ID均未变时显示，覆盖A→B及A→B→A，双pending不重试。未承诺同一detail中新旧错误排序或重复stop串行化。实际callback/deferred RED后定向47/47、全前端1326/1326、标准build及diff check通过；只是Node依赖替身下的真实回调验证，非ReactDOM/native GUI/PTY验收。184源码集合仅App.tsx与terminal-launch.test.mjs变化，其余182完全一致；修复后聚合SHA-256 `ef87a1fd9b30c9fa19d5229e3f7c7c439d248f440bed2ca1271c4769824b116d`。固定证据归档见 `~/.local/share/yam/development-archives/20261009-session-operation-feedback/evidence.tar.gz`；历史阶段结论和未验范围不因此升级。
+
+
+2026-10-09（作者：Jeff.Liu）：B01项目侧栏有限拖拽排序通过Sol独立源码/规格/质量审核。主窗口已保存且身份唯一的项目提供独立原生拖拽手柄，保留↑↓键盘操作；新纯函数仅在同一Pin组内移动到目标位置，保留其他组的槽位与项目对象。常量MIME标记不携带路径，授权来自同一renderer内存intent；任意成功列表替换使旧拖拽失效，drop再核对最新唯一ID、字面路径及Pin组，外部/File拖拽不消费intent。继续先保存再更新ref/state、成功发布一次，保存失败保持原状态。实际feature缺失RED后定向65/65、全前端1342/1342、标准build/diff check及Sol独立65项通过；184源码仅App.tsx、workspaces.ts及对应两测试变化，其余180一致，聚合SHA-256 `1532a58f4b8b1b7972a5d82b7f1d244024f7f5422637a5f6e2a693a0b72437a8`。证据归档：`~/.local/share/yam/development-archives/20261009-project-drag/evidence.tar.gz`。验证限于纯函数和Node实际回调/JSX替身，未验证ReactDOM/native GUI拖拽，不代表完整B01、项目层级或cmux全部对齐；updater继续暂停。

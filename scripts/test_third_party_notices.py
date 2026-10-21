@@ -33,10 +33,20 @@ class NoticeTests(unittest.TestCase):
         factory = mock.patch.object(notices, "make_manifest", side_effect=assemble_private_fixture)
         factory.start(); self.addCleanup(factory.stop)
 
+    def test_local_package_version_bump_requires_matching_manifest_without_new_notice_identities(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=pathlib.Path(directory);self.fixture(root)
+            lock=root/"apps/desktop/src-tauri/Cargo.lock";manifest=root/"apps/desktop/src-tauri/Cargo.toml"
+            before=notices.cargo_expected(root);lock.write_text(lock.read_text().replace('version="0.1.0"','version="0.1.1"',1))
+            with self.assertRaises(ValueError):notices.cargo_expected(root)
+            manifest.write_text(manifest.read_text().replace('version="0.1.0"','version="0.1.1"'))
+            self.assertEqual(notices.cargo_expected(root),before)
+
     def fixture(self, root):
         desktop = root / "apps/desktop"
         (desktop / "src-tauri").mkdir(parents=True)
         (desktop / "src-tauri/Cargo.lock").write_text('version = 4\n[[package]]\nname="yam-desktop"\nversion="0.1.0"\n[[package]]\nname="example"\nversion="1.0.0"\nsource="registry+https://github.com/rust-lang/crates.io-index"\nchecksum="' + 'a' * 64 + '"\n')
+        (desktop / "src-tauri/Cargo.toml").write_text('[package]\nname="yam-desktop"\nversion="0.1.0"\n')
         (desktop / "pnpm-lock.yaml").write_text("fixture lock bytes\n")
         (desktop / "package.json").write_text(json.dumps({"dependencies": {"sample": "1.0.0"}}))
         patch = mock.patch.object(notices, "NPM_INPUTS", {key: value for key, value in notices.inputs(root).items() if key != "cargo_lock"})
@@ -218,6 +228,21 @@ class NoticeTests(unittest.TestCase):
             self.assertEqual(record["bodies"], [body])
             with self.assertRaises(ValueError): notices.npm_archive_record(path, {**entry, "checksum":"sha512-wrong"})
             with self.assertRaises(ValueError): notices.npm_archive_record(path, {**entry, "version":"2.0.0"})
+
+    def test_npm_archive_preserves_typescript_third_party_notice(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "sample.tgz"
+            license_body = b"Permission is hereby granted\nOriginal license\n"
+            notice = b"Third party attributions\r\nOriginal Unicode and W3C notices\r\n"
+            with tarfile.open(path, "w:gz") as tar:
+                for name, data in [("package/package.json", b'{"name":"sample","version":"1.0.0","license":"MIT"}'), ("package/LICENSE", license_body), ("package/ThirdPartyNoticeText.txt", notice)]:
+                    member = tarfile.TarInfo(name); member.size = len(data); tar.addfile(member, io.BytesIO(data))
+            import base64
+            sri = "sha512-" + base64.b64encode(hashlib.sha512(path.read_bytes()).digest()).decode()
+            record = notices.npm_archive_record(path, {"name":"sample", "version":"1.0.0", "source":"https://registry.npmjs.org/sample.tgz", "checksum":sri})
+            self.assertEqual(record["bodies"], [license_body])
+            self.assertEqual(record["supplemental"], [notice])
+            self.assertEqual(record["provenance"]["supplemental"][0]["member"], "package/ThirdPartyNoticeText.txt")
 
     def test_actual_collection_requires_exact_independent_installed_graph(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -501,27 +526,140 @@ class NoticeTests(unittest.TestCase):
     def test_real_locked_inputs_are_bound_to_reviewed_npm_seed(self):
         root = pathlib.Path(__file__).resolve().parents[1]
         found = notices.inputs(root)
-        self.assertEqual(found["pnpm_lock"], "e17abb847e2c95b7ad8965ee8d08daa26338a74d0774369385a5498961b6b48a")
-        self.assertEqual(found["declarations"], "97a26697e985746ddbfafef6c2229b71263aeddb2b622633fa6a1464f761faeb")
+        self.assertEqual(found["pnpm_lock"], "01b56b4dc19d6c001665e6190bc3d1f40d68e85c8c00e12407b68d61fa86b4f1")
+        self.assertEqual(found["declarations"], "f101de8351b12ab5d85c06559afee28dc987971814f44a3177750bc5f6c2acb4")
 
 
 class ApprovedInventoryTests(unittest.TestCase):
-    def test_r2_real_547_manifest_material_binding_includes_unqualified_cohort(self):
+    def test_current_real_554_manifest_material_binding_includes_closed_cohort(self):
         root = pathlib.Path(__file__).resolve().parents[1]
         trusted = notices.read_json(root/"scripts/third-party-notices/manifest.json")
-        approved = "5ac6bbac9a05d4ae000487e98abf9f5f7db1ef42f58e1bd6d481615e688b654e"
+        approved = "f9a7ded31a5287ff792373a9942211dd0908a0f3dbe3aaf465ca2311e837344c"
         self.assertEqual(notices.digest(notices.canonical(trusted)),approved)
         with mock.patch.object(notices,"APPROVED_MANIFEST_SHA256",approved,create=True):
             content, report = notices.render(root,trusted,mode="developer")
-            self.assertEqual((report["selected"],report["covered"],len(report["gaps"])),(547,47,500))
-            self.assertEqual(len(content),4773378)
-            for cohort in ["qualified", "unqualified"]:
+            self.assertEqual((report["selected"],report["covered"],len(report["gaps"])),(554,554,0))
+            self.assertEqual(len(content),5072566)
+            for name in ["anyhow", "adler2"]:
                 changed = json.loads(json.dumps(trusted))
-                record = next(row for row in changed["records"] if bool(row["gap"]) == (cohort=="unqualified") and row["supplemental"])
-                record["supplemental"].pop()
-                with self.subTest(cohort=cohort):
+                record = next(row for row in changed["records"] if row["name"] == name)
+                record["bodies"].pop()
+                with self.subTest(name=name):
                     with self.assertRaises(ValueError):notices.render(root,changed,mode="developer")
 
+
+
+class ReleaseClosureTests(unittest.TestCase):
+    def test_windows_developer_resources_include_bound_report(self):
+        root = pathlib.Path(__file__).resolve().parents[1]
+        config = notices.read_json(root / "apps/desktop/src-tauri/tauri.windows.conf.json")
+        self.assertIn("target/terminal-runtime/DEVELOPER-INCOMPLETE-NOTICES.report.json", config["bundle"]["resources"])
+
+    def test_runtime_node_source_accepts_both_reviewed_platform_bodies(self):
+        root = pathlib.Path(__file__).resolve().parents[1]
+        manifest = notices.read_json(root / "scripts/third-party-notices/manifest.json")
+        for name in ("Node", "Node Windows x64"):
+            row = next(row for row in manifest["additional"] if row["name"] == name)
+            body = notices.read_regular(notices.body_path(root, row["body"]["sha256"]), notices.BODY_LIMIT)
+            with self.subTest(platform=name):
+                notices.verify_additional_source(root, body)
+                with self.assertRaises(ValueError):
+                    notices.verify_additional_source(root, body + b"changed")
+        windows = next(row for row in manifest["additional"] if row["name"] == "Node Windows x64")
+        body = notices.read_regular(notices.body_path(root, windows["body"]["sha256"]), notices.BODY_LIMIT)
+        for field, value in (("name", "unreviewed Node"), ("version", "99.0.0")):
+            wrong = json.loads(json.dumps(manifest))
+            next(row for row in wrong["additional"] if row["name"] == "Node Windows x64")[field] = value
+            with self.subTest(field=field), mock.patch.object(notices, "read_json", return_value=wrong), self.assertRaises(ValueError):
+                notices.verify_additional_source(root, body)
+        vscode = next(row for row in manifest["additional"] if row["name"] == "VS Code portions in xterm")
+        with self.assertRaises(ValueError):
+            notices.verify_additional_source(root, notices.read_regular(notices.body_path(root, vscode["body"]["sha256"]), notices.BODY_LIMIT))
+
+    def test_windows_developer_resources_match_the_default_builder(self):
+        root = pathlib.Path(__file__).resolve().parents[1]
+        config = notices.read_json(root / "apps/desktop/src-tauri/tauri.windows.conf.json")
+        self.assertEqual(config["bundle"]["resources"], [
+            "target/terminal-runtime/yam-terminal.exe",
+            "target/terminal-runtime/DEVELOPER-INCOMPLETE-NOTICES.txt",
+            "target/terminal-runtime/DEVELOPER-INCOMPLETE-NOTICES.report.json",
+        ])
+
+    def test_release_entry_selects_target_resources_and_preserves_cli_arguments(self):
+        import importlib.util
+        root = pathlib.Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location("yam_release_entry", root / "scripts/build-release.py")
+        entry = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(entry)
+        for target, system, suffix in ((None, "Windows", ".exe"), (None, "Darwin", ""), (None, "Linux", ""), ("x86_64-pc-windows-msvc", "Darwin", ".exe"), ("x86_64-unknown-linux-gnu", "Windows", "")):
+            extra = ["--ci", "--no-bundle"] + (["--target", target] if target else [])
+            captured=[]
+            def execute_config(argv):
+                captured.append(json.loads(pathlib.Path(argv[4]).read_text()))
+                return 7
+            with self.subTest(target=target, system=system), mock.patch.object(entry.platform, "system", return_value=system), mock.patch.object(entry.shutil, "which", return_value="pnpm"), mock.patch.object(entry.subprocess, "call", side_effect=execute_config) as execute:
+                code = entry.main([str(root / "apps/desktop/src-tauri/tauri.release.conf.json"), "--preview", *extra])
+                argv = execute.call_args.args[0]
+                self.assertEqual(code, 7)
+                self.assertEqual(argv[:4], ["pnpm", "tauri", "build", "--config"])
+                config = captured[0]
+                self.assertEqual(config["bundle"]["resources"], ["target/terminal-runtime/yam-terminal" + suffix, "target/terminal-runtime/THIRD-PARTY-NOTICES.txt", "target/terminal-runtime/THIRD-PARTY-NOTICES.report.json"])
+                self.assertIn("--notice-mode release", config["build"]["beforeBuildCommand"])
+                self.assertEqual(argv[5:], extra)
+
+    def test_release_entry_resolves_windows_pnpm_command(self):
+        import importlib.util
+        root = pathlib.Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location("yam_release_entry", root / "scripts/build-release.py")
+        entry = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(entry)
+        with mock.patch.object(entry.shutil, "which", return_value="C:/tools/pnpm.cmd"), mock.patch.object(entry.subprocess, "call", return_value=0) as execute:
+            self.assertEqual(entry.main([str(root / "apps/desktop/src-tauri/tauri.release.conf.json"), "--preview"]), 0)
+            self.assertEqual(execute.call_args.args[0][0], "C:/tools/pnpm.cmd")
+
+    def test_locked_inventory_has_complete_release_material(self):
+        root = pathlib.Path(__file__).resolve().parents[1]
+        content, report = notices.prepare(root, "release")
+        self.assertEqual((report["selected"], report["covered"], report["gaps"]), (554, 554, []))
+        self.assertTrue(report["release_eligible"])
+        self.assertNotIn(b"DEVELOPER-INCOMPLETE", content)
+
+    def test_windows_node_original_license_is_in_release_output(self):
+        root = pathlib.Path(__file__).resolve().parents[1]
+        manifest = notices.read_json(root / "scripts/third-party-notices/manifest.json")
+        nodes = [row for row in manifest["additional"] if row["name"] == "Node Windows x64"]
+        self.assertEqual(len(nodes), 1)
+        node = nodes[0]
+        self.assertEqual(node["version"], "26.10.0")
+        self.assertEqual(node["body"]["provenance"]["archive_sha256"], "9fef7eca6743a6b910989cd8e78712376b394fcb9b6e1e9c44a0799a287f90c5")
+        content, _ = notices.prepare(root, "release")
+        self.assertIn(notices.read_regular(notices.body_path(root, node["body"]["sha256"]), notices.BODY_LIMIT), content)
+
+    def test_release_inventory_rejects_missing_or_wrong_identity_material(self):
+        root = pathlib.Path(__file__).resolve().parents[1]
+        original = notices.read_json(root / "scripts/third-party-notices/manifest.json")
+        for change in ("body", "checksum", "windows_node"):
+            candidate = json.loads(json.dumps(original))
+            if change == "body":
+                next(row for row in candidate["records"] if row["bodies"])["bodies"].pop()
+            elif change == "checksum":
+                candidate["records"][0]["checksum"] = "0" * 64
+            else:
+                candidate["additional"] = [row for row in candidate["additional"] if row["name"] != "Node Windows x64"]
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                notices.render(root, candidate, mode="release")
+
+    def test_vendored_vscode_license_and_source_binding_are_retained(self):
+        root = pathlib.Path(__file__).resolve().parents[1]
+        manifest = notices.read_json(root / "scripts/third-party-notices/manifest.json")
+        rows = [row for row in manifest["additional"] if row["name"] == "VS Code portions in xterm"]
+        self.assertEqual(len(rows), 1)
+        source = rows[0]["body"]["provenance"]
+        self.assertEqual(source["xterm_revision"], "f447274f430fd22513f6adbf9862d19524471c04")
+        body = notices.read_regular(notices.body_path(root, rows[0]["body"]["sha256"]), notices.BODY_LIMIT)
+        self.assertIn(b"Microsoft Corporation", body)
+        content, _ = notices.prepare(root, "release")
+        self.assertIn(body, content)
 
 
 class ActualEntryTests(unittest.TestCase):
@@ -689,10 +827,11 @@ class ActualEntryTests(unittest.TestCase):
         overlay = json.loads((root / "apps/desktop/src-tauri/tauri.release.conf.json").read_text())
         self.assertEqual(set(overlay) - {"$schema"}, {"build", "bundle"})
         self.assertEqual(set(overlay["build"]), {"beforeBuildCommand"})
-        self.assertEqual(set(overlay["bundle"]), {"resources"})
+        self.assertEqual(set(overlay["bundle"]), {"resources","createUpdaterArtifacts"})
         self.assertIn("--notice-mode release", overlay["build"]["beforeBuildCommand"])
         package = json.loads((root / "apps/desktop/package.json").read_text())
         self.assertIn("tauri.release.conf.json", package["scripts"]["build:release"])
+        self.assertIn("../../scripts/build-release.py", package["scripts"]["build:release"])
 
 
 # Author: Jeff.Liu — append only after ContractReady and writer lease grant.
@@ -787,7 +926,7 @@ class MaterialBatch01Tests(unittest.TestCase):
       'main': ['a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2',
                'fea1d5bf3dd71605ce5d7d2ff695c1837e914c77195e523a86b5391716477960'],
       'supp': []}]
-    APPROVED = '5ac6bbac9a05d4ae000487e98abf9f5f7db1ef42f58e1bd6d481615e688b654e'
+    APPROVED = 'f9a7ded31a5287ff792373a9942211dd0908a0f3dbe3aaf465ca2311e837344c'
 
     def _current(self):
         root = pathlib.Path(__file__).resolve().parents[1]
@@ -815,17 +954,17 @@ class MaterialBatch01Tests(unittest.TestCase):
                 if item['name']=='atomic-waker':
                     self.assertEqual(len(record['supplemental'][0]),1849)
 
-    def test_material_batch01_android_retains_both_branch_material_and_explicit_gap(self):
+    def test_android_mit_option_is_complete_and_apache_notice_retained(self):
         root, trusted = self._current()
         key = ('cargo', 'android_system_properties', '0.1.6', 'ae221649c9976a6f6c56ae1facf410f3ddb33cc661c4b7b61020a912d4237fbc')
-        self.assertIn(key,notices.KNOWN_SOURCE_GAPS)
-        self.assertNotIn(key,notices.QUALIFIED_BODIES)
+        self.assertNotIn(key, notices.KNOWN_SOURCE_GAPS)
+        self.assertEqual(notices.QUALIFIED_BODIES[key], {'80f275e90d799911ed3830a7f242a2ef5a4ade2092fe0aa07bfb2d2cf2f2b95e'})
         row = next(r for r in trusted['records'] if r['name']=='android_system_properties' and r['version']=='0.1.6')
-        self.assertEqual(row['gap'],'known_exact_source_or_full_text_gap')
-        self.assertEqual(row['bodies'],[])
-        self.assertEqual({(d['sha256'],d['bytes']) for d in row['supplemental']},
-            {('216486f29671a4262efe32af6d84a75bef398127f8c5f369b5c8305983887a06',554),
-             ('80f275e90d799911ed3830a7f242a2ef5a4ade2092fe0aa07bfb2d2cf2f2b95e',1080)})
+        self.assertIsNone(row['gap'])
+        self.assertEqual({(d['sha256'], d['bytes']) for d in row['bodies']},
+            {('80f275e90d799911ed3830a7f242a2ef5a4ade2092fe0aa07bfb2d2cf2f2b95e', 1080)})
+        self.assertEqual({(d['sha256'], d['bytes']) for d in row['supplemental']},
+            {('216486f29671a4262efe32af6d84a75bef398127f8c5f369b5c8305983887a06', 554)})
 
     def test_material_batch01_public_approved_inventory_and_deterministic_developer(self):
         root, trusted = self._current()
@@ -835,12 +974,12 @@ class MaterialBatch01Tests(unittest.TestCase):
         second, again = notices.render(root,trusted,mode='developer')
         self.assertEqual(first,second)
         self.assertEqual(report,again)
-        self.assertEqual((report['selected'],report['covered'],len(report['gaps'])),(547,47,500))
-        self.assertEqual(sum(r['gap']=='archive_body_classification_unreviewed' for r in trusted['records']),469)
-        self.assertEqual(sum(r['gap'] not in [None,'archive_body_classification_unreviewed'] for r in trusted['records']),31)
-        self.assertEqual(len(trusted['additional']),1)
+        self.assertEqual((report['selected'],report['covered'],len(report['gaps'])),(554,554,0))
+        self.assertEqual(sum(r['gap']=='archive_body_classification_unreviewed' for r in trusted['records']),0)
+        self.assertEqual(sum(r['gap'] not in [None,'archive_body_classification_unreviewed'] for r in trusted['records']),0)
+        self.assertEqual(len(trusted['additional']),3)
         self.assertFalse(report['release_eligible'])
-        with self.assertRaises(ValueError): notices.render(root,trusted,mode='release')
+        self.assertTrue(notices.render(root, trusted, mode='release')[1]['release_eligible'])
 
     def test_material_batch01_wrong_identity_cannot_qualify(self):
         root, trusted = self._current()

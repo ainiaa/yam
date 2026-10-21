@@ -6,7 +6,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -456,7 +456,7 @@ impl Server {
                                     &descriptor.token,
                                     &descriptor.instance,
                                 )?;
-                                let shutdown = request.command == "shutdown";
+                                let shutdown = matches!(request.command.as_str(), "shutdown" | "prepare_update" | "finish_update");
                                 let client = request.client.clone();
                                 let id = request.id;
                                 let result = if request.command == "ping"
@@ -572,6 +572,8 @@ pub(crate) fn validate_command(command: &str, args: &serde_json::Value) -> Resul
         | "scan_history_capacity"
         | "cancel_history_capacity"
         | "shutdown"
+        | "prepare_update"
+        | "finish_update"
         | "background_status"
         | "memory_processes"
         | "diagnostics_report"
@@ -612,6 +614,7 @@ pub(crate) fn validate_command(command: &str, args: &serde_json::Value) -> Resul
             &["paused", "expected_revision", "expected_owner_instance"],
             &["paused", "expected_revision", "expected_owner_instance"],
         ),
+        "set_notification_locale" => (&["locale"], &["locale"]),
         "set_agent_notification_context" => {
             (&["selected", "paused", "pause_revision"], &["selected"])
         }
@@ -620,7 +623,15 @@ pub(crate) fn validate_command(command: &str, args: &serde_json::Value) -> Resul
             &["session_id", "receipt", "revision"],
         ),
         "search_session_logs" => (&["session_id", "request"], &["session_id", "request"]),
-        "set_terminal_viewport" => (&["session_id", "line"], &["session_id", "line"]),
+        "clear_terminal_display" => (
+            &["session_id", "expected_instance"],
+            &["session_id", "expected_instance"],
+        ),
+        "navigate_reported_prompt" => (
+            &["session_id", "direction", "expected_instance"],
+            &["session_id", "direction", "expected_instance"],
+        ),
+        "set_terminal_viewport" => (&["session_id", "line", "bottom"], &["session_id", "line"]),
         "read_log_excerpt" => (
             &["session_id", "offset", "column"],
             &["session_id", "offset", "column"],
@@ -643,8 +654,24 @@ pub(crate) fn validate_command(command: &str, args: &serde_json::Value) -> Resul
                 "resume_from",
                 "project_config",
                 "worktree_attempt",
+                "provider_protocol",
+                "shell",
+                "env_refs",
+                "directory_reporting",
+                "command_reporting",
+                "retained_lines",
+                "ssh",
             ],
             &[],
+        ),
+        "release_terminal_control" => (&["session_id"], &["session_id"]),
+        "open_terminal_stream" => (
+            &["session_id", "cols", "rows"],
+            &["session_id", "cols", "rows"],
+        ),
+        "read_terminal_delta" => (
+            &["session_id", "expected_instance", "offset"],
+            &["session_id", "expected_instance", "offset"],
         ),
         "take_terminal_control"
         | "stop_session"
@@ -665,6 +692,49 @@ pub(crate) fn validate_command(command: &str, args: &serde_json::Value) -> Resul
         || required.iter().any(|key| !args.contains_key(*key))
     {
         return Err("Invalid background command arguments".into());
+    }
+    if command == "open_terminal_stream"
+        && (args["cols"]
+            .as_u64()
+            .is_none_or(|v| !(2..=500).contains(&v))
+            || args["rows"]
+                .as_u64()
+                .is_none_or(|v| !(2..=200).contains(&v)))
+    {
+        return Err("Invalid terminal stream dimensions".into());
+    }
+    if command == "read_terminal_delta"
+        && (args["offset"].as_u64().is_none()
+            || !args["expected_instance"]
+                .as_str()
+                .is_some_and(super::clear_display_instance))
+    {
+        return Err("Invalid terminal stream cursor".into());
+    }
+    if command == "clear_terminal_display"
+        && !args["expected_instance"]
+            .as_str()
+            .is_some_and(super::clear_display_instance)
+    {
+        return Err("Invalid terminal clear".into());
+    }
+    if command == "navigate_reported_prompt"
+        && !args["direction"]
+            .as_str()
+            .zip(args["expected_instance"].as_str())
+            .is_some_and(|(direction, instance)| {
+                super::shell_command_report::navigation_arguments(direction, instance)
+            })
+    {
+        return Err("Invalid reported prompt navigation".into());
+    }
+    if command == "set_terminal_viewport"
+        && (args["line"]
+            .as_u64()
+            .is_none_or(|line| line > u32::MAX as u64)
+            || args.get("bottom").is_some_and(|value| !value.is_boolean()))
+    {
+        return Err("Invalid terminal viewport".into());
     }
     if command == "set_global_shortcut"
         && (!args["enabled"].is_boolean()
@@ -690,6 +760,7 @@ pub(crate) fn validate_command(command: &str, args: &serde_json::Value) -> Resul
     {
         return Err("system_entry_invalid".into());
     }
+    if command == "set_notification_locale" && !matches!(args["locale"].as_str(),Some("en"|"zh-CN")) { return Err("system_entry_invalid".into()); }
     if command == "set_agent_notification_context"
         && (args.get("paused").is_some_and(|value| !value.is_boolean())
             || args
@@ -799,6 +870,126 @@ pub(crate) fn validate_command(command: &str, args: &serde_json::Value) -> Resul
                 .map_err(|_| "Invalid launch defaults")?;
     }
     if command == "create_session" {
+        let provider_required = args.get("launch").is_some_and(|launch| {
+            launch.get("provider").is_some_and(|value| !value.is_null())
+                || launch
+                    .get("env_refs")
+                    .is_some_and(|value| value.as_object().is_none_or(|refs| !refs.is_empty()))
+        }) || args
+            .get("resume_from")
+            .is_some_and(|value| !value.is_null())
+            || args
+                .get("project_config")
+                .is_some_and(|value| !value.is_null());
+        if (provider_required || args.contains_key("provider_protocol"))
+            && args
+                .get("provider_protocol")
+                .and_then(serde_json::Value::as_u64)
+                != Some(u64::from(crate::provider_launch::PROTOCOL_VERSION))
+        {
+            return Err("Provider isolation requires an updated background owner; fully quit and reopen YAM".into());
+        }
+        let reporting: Option<bool> = argument(
+            &serde_json::Value::Object(args.clone()),
+            "directory_reporting",
+        )
+        .map_err(|_| "directory_reporting_invalid_combination")?;
+        let command_reporting: Option<bool> = argument(
+            &serde_json::Value::Object(args.clone()),
+            "command_reporting",
+        )
+        .map_err(|_| "command_reporting_invalid_combination")?;
+        let ssh: Option<super::ssh_launch::SshLaunch> =
+            argument(&serde_json::Value::Object(args.clone()), "ssh").map_err(|_| "ssh_invalid")?;
+        let standalone_ssh = super::ssh_launch::standalone(
+            ssh.as_ref(),
+            [
+                "command",
+                "launch",
+                "resume_from",
+                "project_config",
+                "worktree_attempt",
+                "shell",
+            ]
+            .iter()
+            .any(|key| args.get(*key).is_some_and(|v| !v.is_null()))
+                || args
+                    .get("env_refs")
+                    .is_some_and(|v| v.as_object().is_none_or(|v| !v.is_empty()))
+                || reporting == Some(true)
+                || command_reporting == Some(true),
+        )?;
+        let ordinary = ssh.is_none()
+            && [
+                "command",
+                "launch",
+                "resume_from",
+                "project_config",
+                "worktree_attempt",
+            ]
+            .iter()
+            .all(|key| args.get(*key).is_none_or(|v| v.is_null()));
+        let retained: Option<u16> =
+            argument(&serde_json::Value::Object(args.clone()), "retained_lines")
+                .map_err(|_| "terminal_retention_invalid")?;
+        super::terminal_retained_lines(retained, ordinary || standalone_ssh)?;
+        let reporting_shell: Option<super::ShellLaunch> =
+            argument(&serde_json::Value::Object(args.clone()), "shell")
+                .map_err(|_| "shell_invalid")?;
+        super::zsh_directory_reporting::validate(
+            reporting.unwrap_or(false),
+            ordinary,
+            reporting_shell.as_ref(),
+            cfg!(windows),
+        )?;
+
+        super::zsh_directory_reporting::validate(
+            command_reporting.unwrap_or(false),
+            ordinary,
+            reporting_shell.as_ref(),
+            cfg!(windows),
+        )
+        .map_err(|_| "command_reporting_invalid_combination")?;
+
+        if let Some(value) = args.get("env_refs").filter(|v| !v.is_null()) {
+            let refs: std::collections::BTreeMap<String, String> =
+                serde_json::from_value(value.clone()).map_err(|_| "profile_env_invalid")?;
+            if !refs.is_empty() {
+                if args.get("shell").is_none_or(|v| v.is_null()) {
+                    return Err("profile_env_shell_required".into());
+                }
+                if [
+                    "command",
+                    "launch",
+                    "resume_from",
+                    "project_config",
+                    "worktree_attempt",
+                ]
+                .iter()
+                .any(|key| args.get(*key).is_some_and(|v| !v.is_null()))
+                {
+                    return Err("profile_env_invalid_combination".into());
+                }
+                super::validate_profile_env_refs(&refs, cfg!(windows))?;
+            }
+        }
+        if let Some(value) = args.get("shell").filter(|value| !value.is_null()) {
+            let shell: super::ShellLaunch =
+                serde_json::from_value(value.clone()).map_err(|_| "shell_invalid")?;
+            super::validate_shell_launch(&shell)?;
+            if [
+                "command",
+                "launch",
+                "resume_from",
+                "project_config",
+                "worktree_attempt",
+            ]
+            .iter()
+            .any(|key| args.get(*key).is_some_and(|value| !value.is_null()))
+            {
+                return Err("shell_invalid_combination".into());
+            }
+        }
         if let Some(project) = args.get("project_config").filter(|value| !value.is_null()) {
             let _: super::project_config::ProjectStart = serde_json::from_value(project.clone())
                 .map_err(|_| "Invalid project configuration launch")?;
@@ -813,14 +1004,27 @@ pub(crate) fn validate_command(command: &str, args: &serde_json::Value) -> Resul
         }
         if let Some(launch) = args.get("launch").filter(|launch| !launch.is_null()) {
             let fields = launch.as_object().ok_or("Invalid background launch")?;
-            if fields
-                .keys()
-                .any(|key| !["adapter", "mode", "extra_args", "prompt"].contains(&key.as_str()))
-            {
+            if fields.keys().any(|key| {
+                ![
+                    "adapter",
+                    "mode",
+                    "extra_args",
+                    "prompt",
+                    "provider",
+                    "env_refs",
+                    "codex",
+                ]
+                .contains(&key.as_str())
+            }) {
                 return Err("Invalid background launch fields".into());
             }
-            let _: super::AgentLaunch =
+            let launch: super::AgentLaunch =
                 serde_json::from_value(launch.clone()).map_err(|_| "Invalid background launch")?;
+            super::codex_context::validate(&launch)?;
+            super::project_config::validate_env_refs(&launch.env_refs)?;
+            if let Some(provider) = &launch.provider {
+                provider.validate(&launch.adapter, &launch.extra_args)?;
+            }
         }
     }
     if command.starts_with("cli_") {
@@ -883,13 +1087,294 @@ fn argument<T: serde::de::DeserializeOwned>(
 }
 fn dispatch(app: &tauri::AppHandle, request: Request) -> Result<serde_json::Value, String> {
     use tauri::Manager;
+    dispatch_with(
+        request,
+        || app.state(),
+        |manager, request| {
+            if let Some(result) = dispatch_session_read(app, manager.clone(), &request) {
+                return result;
+            }
+            let args = &request.args;
+            if request.command == "set_global_shortcut" {
+                return super::system_entry::set_shortcut_native(
+                    app,
+                    argument(args, "enabled")?,
+                    &argument::<String>(args, "expected_owner_instance")?,
+                );
+            }
+            if request.command == "cli_start" {
+                let private = app.path().app_data_dir().map_err(|_| "cli_unavailable")?;
+                let session =
+                    super::cli::owner_start(Some(app.clone()), &manager, &private, &args["start"])?;
+                return Ok(serde_json::json!({"session_id":session.session_id,"status":"started"}));
+            }
+            let result = match request.command.as_str() {
+                "get_history_policy" => {
+                    serde_json::to_value(super::get_history_policy(app.clone(), manager)?)
+                }
+                "set_history_policy" => serde_json::to_value(super::set_history_policy(
+                    app.clone(),
+                    manager,
+                    argument(args, "auto_archive_30_days")?,
+                )?),
+                "preview_archive_deletion" => {
+                    serde_json::to_value(super::preview_archive_deletion(
+                        app.clone(),
+                        manager,
+                        argument(args, "session_ids")?,
+                    )?)
+                }
+                "cancel_archive_deletion_preview" => {
+                    serde_json::to_value(super::cancel_archive_deletion_preview(
+                        app.clone(),
+                        manager,
+                        argument(args, "preview_id")?,
+                    )?)
+                }
+                "confirm_archive_deletion" => {
+                    serde_json::to_value(super::confirm_archive_deletion(
+                        app.clone(),
+                        manager,
+                        argument(args, "preview_id")?,
+                    )?)
+                }
+                "archive_session" => serde_json::to_value(super::archive_session(
+                    app.clone(),
+                    manager,
+                    argument(args, "session_id")?,
+                )?),
+                "restore_archive" => serde_json::to_value(super::restore_archive(
+                    app.clone(),
+                    manager,
+                    argument(args, "session_id")?,
+                )?),
+                "list_archived_sessions" => serde_json::to_value(super::list_archived_sessions(
+                    app.clone(),
+                    manager,
+                    argument(args, "request")?,
+                )?),
+                "list_session_summaries" => serde_json::to_value(super::list_session_summaries(
+                    app.clone(),
+                    manager,
+                    argument(args, "request")?,
+                )?),
+                "preview_worktree_create" => serde_json::to_value(super::preview_worktree_create(
+                    app.clone(),
+                    manager,
+                    argument(args, "root")?,
+                    argument(args, "target")?,
+                    argument(args, "reference")?,
+                    argument(args, "branch")?,
+                )?),
+                "create_worktree" => serde_json::to_value(super::create_worktree(
+                    app.clone(),
+                    manager,
+                    argument(args, "attempt")?,
+                )?),
+                "list_managed_worktrees" => {
+                    serde_json::to_value(super::list_managed_worktrees(app.clone(), manager)?)
+                }
+                "preview_worktree_cleanup" => {
+                    serde_json::to_value(super::preview_worktree_cleanup(
+                        app.clone(),
+                        manager,
+                        argument(args, "attempt")?,
+                    )?)
+                }
+                "cleanup_worktree" => serde_json::to_value(super::cleanup_worktree(
+                    app.clone(),
+                    manager,
+                    argument(args, "attempt")?,
+                    argument(args, "preview")?,
+                )?),
+                "get_launch_defaults" => {
+                    serde_json::to_value(super::get_launch_defaults(app.clone(), manager)?)
+                }
+                "set_launch_defaults" => serde_json::to_value(super::set_launch_defaults(
+                    app.clone(),
+                    manager,
+                    argument(args, "defaults")?,
+                )?),
+                "preview_project_config" => serde_json::to_value(super::preview_project_config(
+                    app.clone(),
+                    manager,
+                    argument(args, "cwd")?,
+                )?),
+                "trust_project_config" => serde_json::to_value(super::trust_project_config(
+                    app.clone(),
+                    manager,
+                    argument(args, "cwd")?,
+                    argument(args, "preview")?,
+                )?),
+                "list_unread_receipts" => serde_json::to_value(super::list_unread_receipts(
+                    app.clone(),
+                    manager,
+                    argument(args, "request")?,
+                )?),
+                "next_attention" => serde_json::to_value(super::next_attention(
+                    app.clone(),
+                    manager,
+                    argument(args, "current_session_id")?,
+                )?),
+                "list_pending_notifications" => {
+                    serde_json::to_value(super::list_pending_notifications(
+                        app.clone(),
+                        manager,
+                        argument(args, "limit")?,
+                        argument(args, "after_key")?,
+                    )?)
+                }
+                "scan_history_capacity" => serde_json::to_value(tauri::async_runtime::block_on(
+                    super::scan_history_capacity(app.clone(), manager),
+                )?),
+                "create_session" => serde_json::to_value(super::create_session(
+                    app.clone(),
+                    manager,
+                    argument(args, "cwd")?,
+                    argument(args, "command")?,
+                    argument(args, "launch")?,
+                    argument(args, "resume_from")?,
+                    argument(args, "project_config")?,
+                    argument(args, "worktree_attempt")?,
+                    argument(args, "shell")?,
+                    argument(args, "env_refs")?,
+                    argument(args, "directory_reporting")?,
+                    argument(args, "retained_lines")?,
+                    argument(args, "ssh")?,
+                    argument(args, "command_reporting")?,
+                )?),
+                "read_session_log" => serde_json::to_value(super::read_session_log(
+                    app.clone(),
+                    manager,
+                    argument(args, "session_id")?,
+                )?),
+                "acknowledge_notification" => {
+                    serde_json::to_value(super::acknowledge_notification(
+                        app.clone(),
+                        manager,
+                        argument(args, "session_id")?,
+                        argument(args, "expected_status")?,
+                    )?)
+                }
+                "notify_session" => {
+                    serde_json::to_value(tauri::async_runtime::block_on(super::notify_session(
+                        app.clone(),
+                        manager,
+                        argument(args, "session_id")?,
+                        argument(args, "title")?,
+                        argument(args, "expected_status")?,
+                    ))?)
+                }
+                "set_notification_locale" => {super::set_notification_locale(manager,argument(args,"locale")?)?;super::system_entry::refresh_native(&app);serde_json::to_value(())},
+                "set_agent_notification_context" => {
+                    serde_json::to_value(super::set_agent_notification_context(
+                        app.clone(),
+                        manager,
+                        argument(args, "selected")?,
+                        argument(args, "paused")?,
+                        argument(args, "pause_revision")?,
+                    )?)
+                }
+                "read_agent_receipt" => serde_json::to_value(super::read_agent_receipt(
+                    app.clone(),
+                    manager,
+                    argument(args, "session_id")?,
+                    argument(args, "receipt")?,
+                    argument(args, "revision")?,
+                )?),
+                "search_session_logs" => serde_json::to_value(tauri::async_runtime::block_on(
+                    super::search_session_logs(
+                        app.clone(),
+                        manager,
+                        argument(args, "session_id")?,
+                        argument(args, "request")?,
+                    ),
+                )?),
+                "read_log_excerpt" => {
+                    serde_json::to_value(tauri::async_runtime::block_on(super::read_log_excerpt(
+                        app.clone(),
+                        manager,
+                        argument(args, "session_id")?,
+                        argument(args, "offset")?,
+                        argument(args, "column")?,
+                    ))?)
+                }
+                _ => return Err("Unsupported background command".into()),
+            };
+            result.map_err(|_| "Cannot encode background command result".into())
+        },
+        |manager| manager.shutdown_for(app, notify_lifecycle),
+    )
+}
+
+fn dispatch_session_read<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    manager: tauri::State<'_, super::SessionManager>,
+    request: &Request,
+) -> Option<Result<serde_json::Value, String>> {
+    if !matches!(
+        request.command.as_str(),
+        "list_sessions"
+            | "get_session"
+            | "history_overview"
+            | "read_session_snapshot"
+            | "read_terminal_frame"
+    ) {
+        return None;
+    }
+    Some((|| {
+        let args = &request.args;
+        let result = match request.command.as_str() {
+            "list_sessions" => serde_json::to_value(manager.history(app)?.list()?),
+            "get_session" => serde_json::to_value(super::get_session(
+                app.clone(),
+                manager,
+                argument(args, "session_id")?,
+            )?),
+            "read_session_snapshot" => serde_json::to_value(super::read_session_snapshot(
+                app.clone(),
+                manager,
+                argument(args, "session_id")?,
+            )?),
+            "read_terminal_frame" => serde_json::to_value(super::read_terminal_frame(
+                app.clone(),
+                manager,
+                argument(args, "session_id")?,
+            )?),
+            "history_overview" => {
+                serde_json::to_value(super::history_overview(app.clone(), manager)?)
+            }
+            _ => unreachable!(),
+        };
+        result.map_err(|_| "Cannot encode background command result".into())
+    })())
+}
+
+fn dispatch_with<'a>(
+    request: Request,
+    manager: impl FnOnce() -> tauri::State<'a, super::SessionManager>,
+    app_dispatch: impl FnOnce(
+        tauri::State<'a, super::SessionManager>,
+        Request,
+    ) -> Result<serde_json::Value, String>,
+    shutdown: impl FnOnce(tauri::State<'a, super::SessionManager>) -> Result<(), String>,
+) -> Result<serde_json::Value, String> {
     validate_command(&request.command, &request.args)?;
     // Authenticated transport has already decoded owner/client identity. Git cancellation
     // must remain reachable without session admission or any heartbeat/lease mutation.
     if let Some(result) = dispatch_git_changes(&request) {
         return result;
     }
-    let manager = app.state::<super::SessionManager>();
+    let manager = manager();
+    if request.command == "finish_update" {
+        return if manager.shutting_down.load(Ordering::Acquire)
+            && manager.shutdown_complete.load(Ordering::Acquire)
+        {
+            Ok(serde_json::Value::Null)
+        } else {
+            Err("Update was not prepared".into())
+        };
+    }
     let args = &request.args;
     let now = manager.started.elapsed().as_millis().min(u64::MAX as u128) as u64;
     {
@@ -902,6 +1387,17 @@ fn dispatch(app: &tauri::AppHandle, request: Request) -> Result<serde_json::Valu
             return Err("Background is shutting down; reconnect".into());
         }
         manager.last_request.store(now, Ordering::Release);
+    }
+    if request.command == "clear_terminal_display" {
+        let id: String = argument(args, "session_id")?;
+        if !manager
+            .input_leases
+            .lock()
+            .map_err(|_| "Input ownership lock poisoned")?
+            .available(&id, &request.client, now)
+        {
+            return Ok(serde_json::json!({"status":"unavailable"}));
+        }
     }
     if matches!(request.command.as_str(), "write_session" | "resize_session") {
         let id: String = argument(args, "session_id")?;
@@ -948,13 +1444,6 @@ fn dispatch(app: &tauri::AppHandle, request: Request) -> Result<serde_json::Valu
     if request.command == "get_system_entry_status" {
         return super::system_entry::status(&manager);
     }
-    if request.command == "set_global_shortcut" {
-        return super::system_entry::set_shortcut_native(
-            app,
-            argument(args, "enabled")?,
-            &argument::<String>(args, "expected_owner_instance")?,
-        );
-    }
     if request.command == "cli_events" {
         return cli_event_page(&manager, argument(args, "cursor")?);
     }
@@ -969,150 +1458,44 @@ fn dispatch(app: &tauri::AppHandle, request: Request) -> Result<serde_json::Valu
         let id: String = argument(args, "session_id")?;
         return cli_focus_owner(&manager, &id);
     }
-    if request.command == "cli_start" {
-        let private = app.path().app_data_dir().map_err(|_| "cli_unavailable")?;
-        let session =
-            super::cli::owner_start(Some(app.clone()), &manager, &private, &args["start"])?;
-        return Ok(serde_json::json!({"session_id":session.session_id,"status":"started"}));
-    }
     if request.command == "cli_stop" {
         let id: String = argument(args, "session_id")?;
         super::stop_session(manager, id.clone())?;
         return Ok(serde_json::json!({"session_id":id,"status":"stop_requested"}));
     }
     let result = match request.command.as_str() {
-        "get_history_policy" => {
-            serde_json::to_value(super::get_history_policy(app.clone(), manager)?)
-        }
-        "set_history_policy" => serde_json::to_value(super::set_history_policy(
-            app.clone(),
-            manager,
-            argument(args, "auto_archive_30_days")?,
-        )?),
-        "preview_archive_deletion" => serde_json::to_value(super::preview_archive_deletion(
-            app.clone(),
-            manager,
-            argument(args, "session_ids")?,
-        )?),
-        "cancel_archive_deletion_preview" => {
-            serde_json::to_value(super::cancel_archive_deletion_preview(
-                app.clone(),
-                manager,
-                argument(args, "preview_id")?,
-            )?)
-        }
-        "confirm_archive_deletion" => serde_json::to_value(super::confirm_archive_deletion(
-            app.clone(),
-            manager,
-            argument(args, "preview_id")?,
-        )?),
-        "archive_session" => serde_json::to_value(super::archive_session(
-            app.clone(),
-            manager,
-            argument(args, "session_id")?,
-        )?),
-        "restore_archive" => serde_json::to_value(super::restore_archive(
-            app.clone(),
-            manager,
-            argument(args, "session_id")?,
-        )?),
-        "list_archived_sessions" => serde_json::to_value(super::list_archived_sessions(
-            app.clone(),
-            manager,
-            argument(args, "request")?,
-        )?),
         "diagnostics_report" => serde_json::to_value(super::diagnostics::collect_owner(&manager)),
-        "list_session_summaries" => serde_json::to_value(super::list_session_summaries(
-            app.clone(),
-            manager,
-            argument(args, "request")?,
-        )?),
-        "get_session" => serde_json::to_value(super::get_session(
-            app.clone(),
-            manager,
-            argument(args, "session_id")?,
-        )?),
-        "preview_worktree_create" => serde_json::to_value(super::preview_worktree_create(
-            app.clone(),
-            manager,
-            argument(args, "root")?,
-            argument(args, "target")?,
-            argument(args, "reference")?,
-            argument(args, "branch")?,
-        )?),
-        "create_worktree" => serde_json::to_value(super::create_worktree(
-            app.clone(),
-            manager,
-            argument(args, "attempt")?,
-        )?),
-        "list_managed_worktrees" => {
-            serde_json::to_value(super::list_managed_worktrees(app.clone(), manager)?)
-        }
-        "preview_worktree_cleanup" => serde_json::to_value(super::preview_worktree_cleanup(
-            app.clone(),
-            manager,
-            argument(args, "attempt")?,
-        )?),
-        "cleanup_worktree" => serde_json::to_value(super::cleanup_worktree(
-            app.clone(),
-            manager,
-            argument(args, "attempt")?,
-            argument(args, "preview")?,
-        )?),
         "get_git_context" => serde_json::to_value(super::git_context::query(
             std::path::Path::new(&argument::<String>(args, "path")?),
         )?),
-        "get_launch_defaults" => {
-            serde_json::to_value(super::get_launch_defaults(app.clone(), manager)?)
-        }
-        "set_launch_defaults" => serde_json::to_value(super::set_launch_defaults(
-            app.clone(),
-            manager,
-            argument(args, "defaults")?,
-        )?),
-        "preview_project_config" => serde_json::to_value(super::preview_project_config(
-            app.clone(),
-            manager,
-            argument(args, "cwd")?,
-        )?),
-        "trust_project_config" => serde_json::to_value(super::trust_project_config(
-            app.clone(),
-            manager,
-            argument(args, "cwd")?,
-            argument(args, "preview")?,
-        )?),
-        "list_sessions" => serde_json::to_value(manager.history(app)?.list()?),
-        "history_overview" => serde_json::to_value(super::history_overview(app.clone(), manager)?),
-        "list_unread_receipts" => serde_json::to_value(super::list_unread_receipts(
-            app.clone(),
-            manager,
-            argument(args, "request")?,
-        )?),
-        "next_attention" => serde_json::to_value(super::next_attention(
-            app.clone(),
-            manager,
-            argument(args, "current_session_id")?,
-        )?),
-        "list_pending_notifications" => serde_json::to_value(super::list_pending_notifications(
-            app.clone(),
-            manager,
-            argument(args, "limit")?,
-            argument(args, "after_key")?,
-        )?),
-        "scan_history_capacity" => serde_json::to_value(tauri::async_runtime::block_on(
-            super::scan_history_capacity(app.clone(), manager),
-        )?),
         "cancel_history_capacity" => serde_json::to_value(super::cancel_history_capacity(manager)?),
-        "create_session" => serde_json::to_value(super::create_session(
-            app.clone(),
-            manager,
-            argument(args, "cwd")?,
-            argument(args, "command")?,
-            argument(args, "launch")?,
-            argument(args, "resume_from")?,
-            argument(args, "project_config")?,
-            argument(args, "worktree_attempt")?,
-        )?),
+        "open_terminal_stream" => {
+            return super::external_terminal::open_stream(
+                manager,
+                &argument::<String>(args, "session_id")?,
+                &request.client,
+                argument(args, "cols")?,
+                argument(args, "rows")?,
+            )
+        }
+        "read_terminal_delta" => {
+            return super::external_terminal::delta(
+                &manager,
+                &argument::<String>(args, "session_id")?,
+                &argument::<String>(args, "expected_instance")?,
+                argument(args, "offset")?,
+                &request.client,
+                now,
+            )
+        }
+        "release_terminal_control" => {
+            manager
+                .input_leases
+                .lock()
+                .map_err(|_| "Input ownership lock poisoned")?
+                .release(&argument::<String>(args, "session_id")?, &request.client);
+            return Ok(serde_json::Value::Null);
+        }
         "take_terminal_control" => {
             let id: String = argument(args, "session_id")?;
             let sessions = manager
@@ -1150,24 +1533,30 @@ fn dispatch(app: &tauri::AppHandle, request: Request) -> Result<serde_json::Valu
             argument(args, "cols")?,
             argument(args, "rows")?,
         )?),
-        "read_session_snapshot" => serde_json::to_value(super::read_session_snapshot(
-            app.clone(),
+        "clear_terminal_display" => serde_json::to_value(super::clear_terminal_display(
             manager,
             argument(args, "session_id")?,
+            argument(args, "expected_instance")?,
         )?),
-        "read_terminal_frame" => serde_json::to_value(super::read_terminal_frame(
-            app.clone(),
+        "navigate_reported_prompt" => serde_json::to_value(super::navigate_reported_prompt(
             manager,
             argument(args, "session_id")?,
+            argument(args, "direction")?,
+            argument(args, "expected_instance")?,
         )?),
         "set_terminal_viewport" => serde_json::to_value(super::set_terminal_viewport(
             manager,
             argument(args, "session_id")?,
             argument(args, "line")?,
+            args.get("bottom").and_then(serde_json::Value::as_bool),
         )?),
         "memory_processes" => serde_json::to_value(super::memory_processes(&manager)?),
         "background_status" => Ok(serde_json::json!({"pid":std::process::id(),
             "desktop_connected":manager.desktop_connected.load(Ordering::Acquire) && manager.desktop_focus.lock().map_err(|_|"Desktop focus lock poisoned")?.0.elapsed() < Duration::from_secs(3),
+            "ssh_launch_v1":true,
+            "zsh_command_reporting_v1":true,
+            "updater_idle_install_v1":true,
+            "updater_idle_install_v2":true,
             "active_sessions":manager.sessions.lock().map_err(|_|"Session manager lock poisoned")?.len()})),
         "poll_events" => serde_json::to_value(
             manager
@@ -1176,76 +1565,63 @@ fn dispatch(app: &tauri::AppHandle, request: Request) -> Result<serde_json::Valu
                 .map_err(|_| "Event relay lock poisoned")?
                 .poll(argument(args, "cursor")?),
         ),
-        "read_session_log" => serde_json::to_value(super::read_session_log(
-            app.clone(),
-            manager,
-            argument(args, "session_id")?,
-        )?),
-        "acknowledge_notification" => serde_json::to_value(super::acknowledge_notification(
-            app.clone(),
-            manager,
-            argument(args, "session_id")?,
-            argument(args, "expected_status")?,
-        )?),
-        "notify_session" => {
-            serde_json::to_value(tauri::async_runtime::block_on(super::notify_session(
-                app.clone(),
-                manager,
-                argument(args, "session_id")?,
-                argument(args, "title")?,
-                argument(args, "expected_status")?,
-            ))?)
-        }
-        "set_agent_notification_context" => {
-            serde_json::to_value(super::set_agent_notification_context(
-                app.clone(),
-                manager,
-                argument(args, "selected")?,
-                argument(args, "paused")?,
-                argument(args, "pause_revision")?,
-            )?)
-        }
         "retry_agent_notifications" => {
             serde_json::to_value(super::retry_agent_notifications(manager)?)
-        }
-        "read_agent_receipt" => serde_json::to_value(super::read_agent_receipt(
-            app.clone(),
-            manager,
-            argument(args, "session_id")?,
-            argument(args, "receipt")?,
-            argument(args, "revision")?,
-        )?),
-        "search_session_logs" => {
-            serde_json::to_value(tauri::async_runtime::block_on(super::search_session_logs(
-                app.clone(),
-                manager,
-                argument(args, "session_id")?,
-                argument(args, "request")?,
-            ))?)
-        }
-        "read_log_excerpt" => {
-            serde_json::to_value(tauri::async_runtime::block_on(super::read_log_excerpt(
-                app.clone(),
-                manager,
-                argument(args, "session_id")?,
-                argument(args, "offset")?,
-                argument(args, "column")?,
-            ))?)
         }
         "cancel_log_search" => serde_json::to_value(tauri::async_runtime::block_on(
             super::cancel_log_search(manager),
         )?),
-        "shutdown" => {
-            manager.shutting_down.store(true, Ordering::Release);
-            if let Err(error) = manager.shutdown() {
+        "prepare_update" => {
+            claim_idle_update(&manager.sessions, &manager.shutting_down)?;
+            if let Err(error) = shutdown(manager.clone()) {
                 manager.shutting_down.store(false, Ordering::Release);
                 return Err(error);
             }
             Ok(serde_json::Value::Null)
         }
-        _ => return Err("Unsupported background command".into()),
+        "shutdown" => {
+            manager.shutting_down.store(true, Ordering::Release);
+            if let Err(error) = shutdown(manager.clone()) {
+                manager.shutting_down.store(false, Ordering::Release);
+                return Err(error);
+            }
+            Ok(serde_json::Value::Null)
+        }
+        _ => return app_dispatch(manager, request),
     };
     result.map_err(|_| "Cannot encode background command result".into())
+}
+
+// Start rechecks the same closing flag while holding this exact session lock before spawning.
+fn claim_idle_update<T>(
+    sessions: &Mutex<std::collections::HashMap<String, T>>,
+    closing: &AtomicBool,
+) -> Result<(), String> {
+    let active = sessions
+        .lock()
+        .map_err(|_| "Session manager lock poisoned")?;
+    if !active.is_empty() {
+        return Err("running_tasks".into());
+    }
+    if closing.swap(true, Ordering::AcqRel) {
+        return Err("Background is closing".into());
+    }
+    Ok(())
+}
+
+fn dispatch_session_start(
+    starts: &std::sync::Mutex<StartRequests>,
+    request: Request,
+    dispatch: impl FnOnce(Request) -> Result<serde_json::Value, String>,
+) -> Result<serde_json::Value, String> {
+    validate_command(&request.command, &request.args)?;
+    let client = request.client.clone();
+    let id = request.id;
+    let args = request.args.clone();
+    starts
+        .lock()
+        .map_err(|_| "Start receipt lock poisoned")?
+        .run(&client, id, args, || dispatch(request))
 }
 
 #[derive(Default)]
@@ -1289,8 +1665,15 @@ impl StartRequests {
 #[derive(Default)]
 pub(super) struct InputLeases {
     owners: std::collections::HashMap<String, (String, u64)>,
+    external: std::collections::HashSet<String>,
 }
 impl InputLeases {
+    fn available(&self, session: &str, client: &str, now: u64) -> bool {
+        !self
+            .owners
+            .get(session)
+            .is_some_and(|(owner, last)| owner != client && now.saturating_sub(*last) <= 3000)
+    }
     #[cfg(test)]
     pub(super) fn t11_owner_count(&self) -> usize {
         self.owners.len()
@@ -1303,13 +1686,49 @@ impl InputLeases {
         {
             return Err("Another desktop currently controls this terminal".into());
         }
+        if self
+            .owners
+            .get(session)
+            .is_none_or(|(owner, last)| owner != client || now.saturating_sub(*last) > 3000)
+        {
+            self.external.remove(session);
+        }
         self.owners.insert(session.into(), (client.into(), now));
         Ok(())
     }
-    fn take_control(&mut self, session: &str, client: &str, now: u64) {
+    pub(super) fn take_control(&mut self, session: &str, client: &str, now: u64) {
+        self.external.remove(session);
         self.owners.insert(session.into(), (client.into(), now));
     }
-    fn heartbeat(&mut self, client: &str, now: u64) {
+    pub(super) fn take_external(&mut self, session: &str, client: &str, now: u64) {
+        self.take_control(session, client, now);
+        self.external.insert(session.into());
+    }
+    pub(super) fn release(&mut self, session: &str, client: &str) {
+        if self
+            .owners
+            .get(session)
+            .is_some_and(|(owner, _)| owner == client)
+        {
+            self.owners.remove(session);
+            self.external.remove(session);
+        }
+    }
+    pub(super) fn external_owner(&self, session: &str, client: &str, now: u64) -> bool {
+        self.external.contains(session)
+            && self
+                .owners
+                .get(session)
+                .is_some_and(|(owner, last)| owner == client && now.saturating_sub(*last) <= 3000)
+    }
+    pub(super) fn headless_queries(&self, session: &str, now: u64) -> bool {
+        !self.external.contains(session)
+            || self
+                .owners
+                .get(session)
+                .is_none_or(|(_, last)| now.saturating_sub(*last) > 3000)
+    }
+    pub(super) fn heartbeat(&mut self, client: &str, now: u64) {
         for (owner, last) in self.owners.values_mut() {
             if owner == client {
                 *last = now;
@@ -1402,8 +1821,15 @@ pub(super) fn connect_or_start(
         thread::sleep(Duration::from_millis(50));
     }
 }
+fn reap_background(
+    mut child: std::process::Child,
+) -> thread::JoinHandle<std::io::Result<std::process::ExitStatus>> {
+    // Detaching the waiter lets the owner outlive the GUI while reaping any exit during its lifetime.
+    thread::spawn(move || child.wait())
+}
+
 pub(super) fn attach(app: &tauri::AppHandle) -> Result<(), String> {
-    use tauri::{Emitter, Manager};
+    use tauri::Manager;
     let root = app
         .path()
         .app_data_dir()
@@ -1411,22 +1837,49 @@ pub(super) fn attach(app: &tauri::AppHandle) -> Result<(), String> {
         .join("background");
     let client = Arc::new(connect_or_start(&root, || {
         let executable = std::env::current_exe().map_err(|e| e.to_string())?;
-        super::terminal_runtime::service_command(&executable)
+        let child = super::terminal_runtime::service_command(&executable)
             .arg("--yam-background")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
             .map_err(|e| format!("Cannot start background: {e}"))?;
+        reap_background(child);
         Ok(())
     })?);
     *app.state::<super::SessionManager>()
         .background_client
         .lock()
         .map_err(|_| "Background client lock poisoned")? = Some(client.clone());
+    start_event_poll(app, client)
+}
+
+#[derive(Default)]
+pub(super) struct EventPoll {
+    running: bool,
+    cursor: u64,
+}
+impl EventPoll {
+    pub(super) fn is_running(&self) -> bool {
+        self.running
+    }
+}
+
+fn start_event_poll(app: &tauri::AppHandle, client: Arc<Client>) -> Result<(), String> {
+    use tauri::{Emitter, Manager};
+    let manager = app.state::<super::SessionManager>();
+    let mut poll = manager
+        .background_events
+        .lock()
+        .map_err(|_| "background_reconnect_unavailable")?;
+    if poll.running {
+        return Ok(());
+    }
+    poll.running = true;
+    let mut cursor = poll.cursor;
+    drop(poll);
     let app = app.clone();
     thread::spawn(move || {
-        let mut cursor = 0;
         while !app
             .state::<super::SessionManager>()
             .shutting_down
@@ -1447,6 +1900,13 @@ pub(super) fn attach(app: &tauri::AppHandle) -> Result<(), String> {
                         );
                     }
                     cursor = page.cursor;
+                    if let Ok(mut poll) = app
+                        .state::<super::SessionManager>()
+                        .background_events
+                        .lock()
+                    {
+                        poll.cursor = cursor;
+                    }
                     for event in page.events {
                         if let Ok(payload) =
                             serde_json::from_str::<serde_json::Value>(&event.payload)
@@ -1463,23 +1923,76 @@ pub(super) fn attach(app: &tauri::AppHandle) -> Result<(), String> {
                                     super::route_notification_session(&app, id)
                                 });
                             } else {
+                                if event.name == "session-state" {
+                                    if let (Some(id), Some(status)) =
+                                        (payload["session_id"].as_str(), payload["status"].as_str())
+                                    {
+                                        let manager = app.state::<super::SessionManager>();
+                                        if let Ok(mut table) = manager.desktop_windows.lock() {
+                                            table.note_status(id, status);
+                                        };
+                                    }
+                                }
                                 let _ = app.emit(&event.name, payload);
                             }
                         }
                     }
                 }
                 Err(error) => {
+                    if let Ok(mut poll) = app
+                        .state::<super::SessionManager>()
+                        .background_events
+                        .lock()
+                    {
+                        poll.running = false;
+                    }
                     let _ = app.emit(
                         "session-error",
                         serde_json::json!({"session_id":"","data":error}),
                     );
-                    break; // Never silently restart an owner or rerun its tasks after a crash.
+                    return; // Never silently restart an owner or rerun its tasks after a crash.
                 }
             }
             thread::sleep(Duration::from_millis(40));
         }
+        if let Ok(mut poll) = app
+            .state::<super::SessionManager>()
+            .background_events
+            .lock()
+        {
+            poll.running = false;
+        }
     });
     Ok(())
+}
+
+fn reconnect_existing(
+    manager: &super::SessionManager,
+    start: impl FnOnce(Arc<Client>) -> Result<(), String>,
+) -> Result<(), String> {
+    if manager.background_owner || manager.shutting_down.load(Ordering::Acquire) {
+        return Err("background_reconnect_unavailable".into());
+    }
+    let client = manager
+        .background_client
+        .lock()
+        .map_err(|_| "background_reconnect_unavailable")?
+        .clone()
+        .ok_or("background_reconnect_unavailable")?;
+    client.call("history_overview", serde_json::json!({}))?;
+    start(client)
+}
+
+#[tauri::command]
+pub(super) async fn reconnect_background(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    tauri::async_runtime::spawn_blocking(move || {
+        reconnect_existing(&app.state::<super::SessionManager>(), |client| {
+            start_event_poll(&app, client)
+        })
+    })
+    .await
+    .map_err(|_| "background_reconnect_unavailable")?
 }
 
 fn poll_events_with_reconnect(
@@ -1539,6 +2052,7 @@ pub(super) fn notify_lifecycle(app: &tauri::AppHandle, session: &str, status: &s
     let app = app.clone();
     let session = session.to_string();
     let status = status.to_string();
+    let chinese=super::system_entry::notification_chinese(&app);
     thread::spawn(move || {
         if let Err(error) = history.native_delivery(
             &session,
@@ -1547,7 +2061,7 @@ pub(super) fn notify_lifecycle(app: &tauri::AppHandle, session: &str, status: &s
                 super::send_native_notification(
                     app.clone(),
                     session.clone(),
-                    format!("Session {}", record.status),
+                    super::system_entry::notification_status(&record.status,chinese),
                     record
                         .reason
                         .clone()
@@ -1589,6 +2103,7 @@ pub(super) fn run() -> Result<(), String> {
     let setup_owner = owner.clone();
     eprintln!("[YAM] Creating background event loop");
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(super::SessionManager {
             background_owner: true,
             ..Default::default()
@@ -1630,9 +2145,21 @@ pub(super) fn run() -> Result<(), String> {
                 tauri::path::BaseDirectory::Resource,
             )?;
             let (send, receive) = std::sync::mpsc::sync_channel::<(String, String)>(64);
+            let query_handle = app.handle().clone();
             let parser = Arc::new(super::terminal_runtime::Runtime::start(
                 &executable,
                 move |id, data| {
+                    let manager = query_handle.state::<super::SessionManager>();
+                    let now = manager.started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                    // Decide when the query is parsed. Pre-handoff replies still drain once.
+                    if !manager
+                        .input_leases
+                        .lock()
+                        .map_err(|_| "Input ownership lock poisoned")?
+                        .headless_queries(&id, now)
+                    {
+                        return Ok(());
+                    }
                     send.try_send((id, data))
                         .map_err(|_| "Terminal query queue exceeded its budget".into())
                 },
@@ -1674,13 +2201,9 @@ pub(super) fn run() -> Result<(), String> {
                 move |request| {
                     validate_command(&request.command, &request.args)?;
                     if request.command == "create_session" {
-                        let client = request.client.clone();
-                        let id = request.id;
-                        let args = request.args.clone();
-                        starts
-                            .lock()
-                            .map_err(|_| "Start receipt lock poisoned")?
-                            .run(&client, id, args, || dispatch(&handle, request))
+                        dispatch_session_start(&starts, request, |request| {
+                            dispatch(&handle, request)
+                        })
                     } else if request.command == "cli_start" {
                         let duplicate = Request {
                             version: request.version,
@@ -1777,7 +2300,7 @@ pub(super) fn run() -> Result<(), String> {
                     }
                     manager.shutting_down.store(true, Ordering::Release);
                     drop(active); // Start checks this flag again under the same session lock.
-                    match manager.shutdown() {
+                    match manager.shutdown_for(&handle, notify_lifecycle) {
                         Ok(()) => {
                             handle.exit(0);
                             break;
@@ -1859,6 +2382,19 @@ impl Drop for Server {
     }
 }
 
+pub(super) enum CallOutcome {
+    NotDispatched(String),
+    Completed(Result<serde_json::Value, String>),
+    Unknown(String),
+}
+impl CallOutcome {
+    fn into_result(self) -> Result<serde_json::Value, String> {
+        match self {
+            Self::Completed(result) => result,
+            Self::NotDispatched(error) | Self::Unknown(error) => Err(error),
+        }
+    }
+}
 pub(super) struct Client {
     descriptor: Descriptor,
     identity: String,
@@ -1878,38 +2414,224 @@ impl Client {
         command: &str,
         args: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        let (id, bytes) = self.encode_request(command, args)?;
-        let exchange = || -> Result<Vec<u8>, String> {
-            let mut stream =
-                TcpStream::connect_timeout(&self.descriptor.validate()?, Duration::from_secs(2))
-                    .map_err(|_| "Background instance is unavailable")?;
+        self.call_outcome(command, args).into_result()
+    }
+    pub(super) fn call_outcome(&self, command: &str, args: serde_json::Value) -> CallOutcome {
+        let (id, bytes) = match self.encode_request(command, args) {
+            Ok(value) => value,
+            Err(error) => return CallOutcome::NotDispatched(error),
+        };
+        let exchange = || -> Result<Vec<u8>, (bool, String)> {
+            let address = self.descriptor.validate().map_err(|error| (false, error))?;
+            let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))
+                .map_err(|_| (false, "Background instance is unavailable".into()))?;
             stream
                 .set_write_timeout(Some(Duration::from_secs(3)))
-                .map_err(|_| "Cannot bound background request")?;
-            write_frame(&mut stream, &bytes, MAX_REQUEST)?;
+                .map_err(|_| (false, "Cannot bound background request".into()))?;
+            // Any write attempt can have reached the authenticated owner, including a partial write.
+            write_frame(&mut stream, &bytes, MAX_REQUEST).map_err(|error| (true, error))?;
             let (limit, deadline) = if command == "diagnostics_report" {
                 (1024 * 1024, Duration::from_secs(3))
             } else {
                 (MAX_RESPONSE, Duration::from_secs(35))
             };
-            read_frame_with_budget(&mut stream, limit, deadline)
+            read_frame_with_budget(&mut stream, limit, deadline).map_err(|error| (true, error))
         };
-        // Only start requests have retained receipts. Reuse the exact wire identity once after transport loss.
-        let reply = exchange()
-            .or_else(|error| {
+        let reply = match exchange() {
+            Ok(reply) => reply,
+            Err((attempted, error)) => {
                 if command == "create_session" {
-                    exchange()
+                    match exchange() {
+                        Ok(reply) => reply,
+                        Err((retry_attempted, error)) => {
+                            return if attempted || retry_attempted {
+                                CallOutcome::Unknown(format!("Background {command}: {error}"))
+                            } else {
+                                CallOutcome::NotDispatched(format!("Background {command}: {error}"))
+                            }
+                        }
+                    }
                 } else {
-                    Err(error)
+                    return if attempted {
+                        CallOutcome::Unknown(format!("Background {command}: {error}"))
+                    } else {
+                        CallOutcome::NotDispatched(format!("Background {command}: {error}"))
+                    };
                 }
-            })
-            .map_err(|error| format!("Background {command}: {error}"))?;
-        self.decode_response(&reply, id)?.result
+            }
+        };
+        match self.decode_response(&reply, id) {
+            Ok(response) => CallOutcome::Completed(response.result),
+            Err(error) => CallOutcome::Unknown(error),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn background_waiter_preserves_live_child_and_reaps_normal_exit() {
+        let mut child = std::process::Command::new("/bin/cat")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        let input = child.stdin.take().unwrap();
+        let waiter = super::reap_background(child);
+        assert_eq!(unsafe { libc::kill(pid, 0) }, 0);
+        assert!(!waiter.is_finished());
+        drop(input);
+        assert!(waiter.join().unwrap().unwrap().success());
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+    }
+
+    #[cfg(unix)]
+    include!("coverage_background_tests.rs");
+    #[test]
+    fn a07c3_prompt_navigation_strict_arguments() {
+        let valid = serde_json::json!({"session_id":"s","direction":"previous","expected_instance":"a".repeat(64)});
+        assert!(super::validate_command("navigate_reported_prompt", &valid).is_ok());
+        for field in ["direction", "expected_instance"] {
+            let mut bad = valid.clone();
+            bad[field] = serde_json::json!("bad");
+            assert!(super::validate_command("navigate_reported_prompt", &bad).is_err());
+        }
+        let mut extra = valid.clone();
+        extra["line"] = serde_json::json!(1);
+        assert!(super::validate_command("navigate_reported_prompt", &extra).is_err());
+    }
+
+    #[test]
+    fn a05a3_strict_retention_create_is_validated_before_dispatch() {
+        for lines in [200, 500, 2000] {
+            assert!(super::validate_command(
+                "create_session",
+                &serde_json::json!({"retained_lines":lines})
+            )
+            .is_ok());
+        }
+        assert!(super::validate_command(
+            "create_session",
+            &serde_json::json!({"retained_lines":null})
+        )
+        .is_ok());
+        for lines in [
+            serde_json::json!(199),
+            serde_json::json!(2001),
+            serde_json::json!(1.5),
+            serde_json::json!("500"),
+            serde_json::json!(true),
+        ] {
+            assert!(super::validate_command(
+                "create_session",
+                &serde_json::json!({"retained_lines":lines})
+            )
+            .is_err());
+        }
+        for field in [
+            "command",
+            "launch",
+            "resume_from",
+            "project_config",
+            "worktree_attempt",
+        ] {
+            let mut args = serde_json::json!({"retained_lines":500});
+            args[field] = serde_json::json!("");
+            assert!(super::validate_command("create_session", &args).is_err());
+        }
+    }
+    #[test]
+    fn a07c2_strict_command_defaults_and_nonordinary_shapes_are_guarded() {
+        for shell in [
+            serde_json::Value::Null,
+            serde_json::json!({"program":null,"login":true}),
+            serde_json::json!({"program":null,"login":false}),
+        ] {
+            let args = serde_json::json!({"command_reporting":true,"shell":shell});
+            assert!(super::validate_command("create_session", &args).is_ok());
+            for field in [
+                "command",
+                "launch",
+                "resume_from",
+                "project_config",
+                "worktree_attempt",
+            ] {
+                let mut bad = args.clone();
+                bad[field] = serde_json::json!("");
+                assert!(super::validate_command("create_session", &bad).is_err());
+            }
+        }
+    }
+    #[test]
+    fn a07c2_invalid_command_reporting_requests_fail_before_dispatch() {
+        for args in [
+            serde_json::json!({"command_reporting":true,"command":""}),
+            serde_json::json!({"command_reporting":"true"}),
+            serde_json::json!({"command_reporting":true,"shell":{"program":"/bin/fish","login":true}}),
+        ] {
+            assert!(
+                super::validate_command("create_session", &args).is_err(),
+                "{args}"
+            );
+        }
+        for flag in [serde_json::Value::Null, serde_json::json!(false)] {
+            assert!(super::validate_command(
+                "create_session",
+                &serde_json::json!({"command_reporting":flag})
+            )
+            .is_ok());
+        }
+    }
+
+    #[test]
+    fn a07b2_strict_defaults_and_nonordinary_shapes_are_guarded() {
+        for shell in [
+            serde_json::Value::Null,
+            serde_json::json!({"program":null,"login":true}),
+            serde_json::json!({"program":null,"login":false}),
+        ] {
+            let args = serde_json::json!({"directory_reporting":true,"shell":shell});
+            assert!(super::validate_command("create_session", &args).is_ok());
+            for field in [
+                "command",
+                "launch",
+                "resume_from",
+                "project_config",
+                "worktree_attempt",
+            ] {
+                let mut bad = args.clone();
+                bad[field] = serde_json::json!("");
+                assert!(super::validate_command("create_session", &bad).is_err());
+            }
+        }
+    }
+    #[test]
+    fn a07b1_invalid_reporting_requests_fail_before_dispatch() {
+        for args in [
+            serde_json::json!({"directory_reporting":true,"command":""}),
+            serde_json::json!({"directory_reporting":"true"}),
+            serde_json::json!({"directory_reporting":true,"shell":{"program":"/bin/fish","login":true}}),
+        ] {
+            assert!(
+                super::validate_command("create_session", &args).is_err(),
+                "{args}"
+            );
+        }
+        for flag in [serde_json::Value::Null, serde_json::json!(false)] {
+            assert!(super::validate_command(
+                "create_session",
+                &serde_json::json!({"directory_reporting":flag})
+            )
+            .is_ok());
+        }
+    }
+
     #[test]
     fn inherited_nonblocking_connections_wait_for_fragmented_request_bytes() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1961,6 +2683,26 @@ mod tests {
         )
         .is_err());
     }
+    #[test]
+    fn viewport_bottom_intent_is_optional_boolean_and_keeps_line_validation() {
+        for args in [
+            serde_json::json!({"session_id":"s-one","line":0,"bottom":true}),
+            serde_json::json!({"session_id":"s-one","line":2,"bottom":false}),
+            serde_json::json!({"session_id":"s-one","line":2}),
+        ] {
+            assert!(validate_command("set_terminal_viewport", &args).is_ok());
+        }
+        for args in [
+            serde_json::json!({"session_id":"s-one","line":0,"bottom":"true"}),
+            serde_json::json!({"session_id":"s-one","line":0,"bottom":null}),
+            serde_json::json!({"session_id":"s-one","line":-1,"bottom":true}),
+            serde_json::json!({"session_id":"s-one","line":4294967296u64}),
+            serde_json::json!({"session_id":"s-one","bottom":true}),
+            serde_json::json!({"session_id":"s-one","line":0,"bottom":true,"data":"input"}),
+        ] {
+            assert!(validate_command("set_terminal_viewport", &args).is_err());
+        }
+    }
     #[cfg(unix)]
     #[test]
     fn dropping_owner_explicitly_unlocks_even_while_a_forked_child_retains_the_file() {
@@ -2009,6 +2751,71 @@ mod tests {
         assert!(!idle_due(70_000, 20_000, 0));
         assert!(!idle_due(70_000, 0, 1));
     }
+    #[test]
+    fn a01b_rpc_shape_and_combination_are_strict() {
+        let valid = serde_json::json!({"program":null,"login":if cfg!(windows){serde_json::Value::Null}else{serde_json::json!(true)}});
+        assert!(validate_command("create_session", &serde_json::json!({})).is_ok());
+        assert!(validate_command(
+            "create_session",
+            &serde_json::json!({"shell":null,"command":"literal"})
+        )
+        .is_ok());
+        for shell in [
+            serde_json::json!({}),
+            serde_json::json!([]),
+            serde_json::json!({"program":null}),
+            serde_json::json!({"login":true}),
+            serde_json::json!({"program":null,"login":false,"argv":[]}),
+            serde_json::json!({"program":null,"login":"false"}),
+        ] {
+            assert!(
+                validate_command("create_session", &serde_json::json!({"shell":shell})).is_err()
+            );
+        }
+        for (key, value) in [
+            ("command", serde_json::json!("")),
+            (
+                "launch",
+                serde_json::json!({"adapter":"codex","mode":"interactive","extra_args":"","prompt":null}),
+            ),
+            ("resume_from", serde_json::json!("stored")),
+            (
+                "project_config",
+                serde_json::json!({"root":"/fixture","template":null,"overrides":{}}),
+            ),
+            ("worktree_attempt", serde_json::json!("a".repeat(64))),
+        ] {
+            let mut args = serde_json::json!({"shell":valid});
+            if matches!(key, "resume_from" | "project_config") {
+                args["provider_protocol"] =
+                    serde_json::json!(crate::provider_launch::PROTOCOL_VERSION);
+            }
+            args[key] = value;
+            assert_eq!(
+                validate_command("create_session", &args).unwrap_err(),
+                "shell_invalid_combination"
+            );
+        }
+        assert!(validate_command(
+            "create_session",
+            &serde_json::json!({"shell":valid,"session_id":"forged"})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn a01b_rpc_accepts_explicit_ordinary_shell() {
+        #[cfg(unix)]
+        let shell = serde_json::json!({"program":"/bin/bash","login":false});
+        #[cfg(windows)]
+        let shell = serde_json::json!({"program":null,"login":null});
+        assert!(validate_command(
+            "create_session",
+            &serde_json::json!({"cwd":null,"command":null,"launch":null,"shell":shell})
+        )
+        .is_ok());
+    }
+
     #[test]
     fn t13_worktree_rpc_accepts_only_semantic_bounded_arguments() {
         for (name, value) in [
@@ -2131,6 +2938,70 @@ mod tests {
             &serde_json::json!({"session_id":"s-one","client":"b"})
         )
         .is_err());
+    }
+    #[test]
+    fn native_query_responder_follows_only_its_live_lease_and_explicit_release() {
+        let mut leases = InputLeases::default();
+        assert!(leases.headless_queries("s-one", 0));
+        leases.take_external("s-one", "external", 100);
+        assert!(!leases.headless_queries("s-one", 101));
+        leases.claim("s-one", "external", 1000).unwrap();
+        leases.release("s-one", "other");
+        assert!(!leases.headless_queries("s-one", 1001));
+        assert!(leases.headless_queries("s-other", 1001));
+        assert!(leases.headless_queries("s-one", 4001));
+        leases.claim("s-one", "desktop", 4001).unwrap();
+        assert!(leases.headless_queries("s-one", 4001));
+        leases.take_external("s-one", "external", 5000);
+        leases.take_control("s-one", "desktop", 5001);
+        leases.release("s-one", "external");
+        assert!(leases.headless_queries("s-one", 5001));
+        assert!(leases.claim("s-one", "other", 5002).is_err());
+        leases.take_external("s-one", "external", 6000);
+        leases.release("s-one", "external");
+        assert!(leases.headless_queries("s-one", 6001));
+        assert!(leases.claim("s-one", "desktop", 6001).is_ok());
+    }
+    #[test]
+    fn stream_requests_are_strict_and_cannot_inject_paths_clients_or_unbounded_reads() {
+        let args = serde_json::json!({"session_id":"s-one","expected_instance":"a".repeat(64),"offset":42});
+        assert!(validate_command("read_terminal_delta", &args).is_ok());
+        for (key, value) in [
+            ("offset", serde_json::json!(-1)),
+            ("offset", serde_json::json!(1.5)),
+            ("expected_instance", serde_json::json!("bad")),
+            ("path", serde_json::json!("/etc/passwd")),
+            ("limit", serde_json::json!(u64::MAX)),
+            ("client", serde_json::json!("other")),
+        ] {
+            let mut invalid = args.clone();
+            invalid[key] = value;
+            assert!(
+                validate_command("read_terminal_delta", &invalid).is_err(),
+                "{key}"
+            );
+        }
+        assert!(validate_command(
+            "open_terminal_stream",
+            &serde_json::json!({"session_id":"s-one","cols":80,"rows":24})
+        )
+        .is_ok());
+        for (cols, rows) in [(1, 24), (501, 24), (80, 1), (80, 201)] {
+            assert!(validate_command(
+                "open_terminal_stream",
+                &serde_json::json!({"session_id":"s-one","cols":cols,"rows":rows})
+            )
+            .is_err());
+        }
+        {
+            let op = "release_terminal_control";
+            assert!(validate_command(op, &serde_json::json!({"session_id":"s-one"})).is_ok());
+            assert!(validate_command(
+                op,
+                &serde_json::json!({"session_id":"s-one","client":"forged"})
+            )
+            .is_err());
+        }
     }
     #[test]
     fn relay_is_bounded_and_reports_a_gap_without_consuming_another_clients_cursor() {
@@ -2384,6 +3255,27 @@ mod tests {
         .is_err());
     }
     #[test]
+    fn clear_arguments_and_read_only_lease_admission() {
+        let valid = serde_json::json!({"session_id":"s","expected_instance":"a".repeat(64)});
+        assert!(super::validate_command("clear_terminal_display", &valid).is_ok());
+        for bad in [
+            serde_json::json!({"session_id":"s"}),
+            serde_json::json!({"session_id":"s","expected_instance":"A".repeat(64)}),
+            serde_json::json!({"session_id":"s","expected_instance":"a".repeat(64),"mode":"all"}),
+        ] {
+            assert!(super::validate_command("clear_terminal_display", &bad).is_err());
+        }
+        let mut leases = super::InputLeases::default();
+        assert!(leases.available("s", "one", 1));
+        assert!(leases.owners.is_empty());
+        leases.claim("s", "one", 100).unwrap();
+        let original = leases.owners.clone();
+        assert!(leases.available("s", "one", 101));
+        assert!(!leases.available("s", "two", 3100));
+        assert!(leases.available("s", "two", 3101));
+        assert_eq!(leases.owners, original);
+    }
+    #[test]
     fn dispatcher_accepts_only_known_commands_and_their_exact_argument_shape() {
         assert!(validate_command("history_overview", &serde_json::json!({})).is_ok());
         assert!(
@@ -2558,109 +3450,115 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn accepted_shutdown_still_exits_if_the_requesting_peer_disconnects() {
-        use std::os::fd::AsRawFd;
-        let root = std::env::temp_dir().join(format!(
-            "yam-shutdown-lost-{}",
-            super::super::next_session_id()
-        ));
-        let (started, ready) = std::sync::mpsc::channel();
-        let (exited, done) = std::sync::mpsc::channel();
-        let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
-        let worker_gate = gate.clone();
-        let server = Server::start_owned(
-            &root,
-            OwnerLock::acquire(&root).unwrap(),
-            move |_| {
-                started.send(()).unwrap();
-                let (lock, condition) = &*worker_gate;
-                drop(
-                    condition
-                        .wait_while(lock.lock().unwrap(), |open| !*open)
-                        .unwrap(),
-                );
-                Ok(serde_json::Value::Null)
-            },
-            move || {
-                exited.send(()).unwrap();
-            },
-            "d".repeat(32),
-        )
-        .unwrap();
-        let descriptor = Descriptor::read(&root).unwrap();
-        let mut socket = TcpStream::connect(descriptor.validate().unwrap()).unwrap();
-        let request = Request {
-            version: PROTOCOL_VERSION,
-            token: descriptor.token,
-            instance: descriptor.instance,
-            client: "a".repeat(64),
-            id: 1,
-            command: "shutdown".into(),
-            args: serde_json::json!({}),
-        };
-        write_frame(
-            &mut socket,
-            &serde_json::to_vec(&request).unwrap(),
-            MAX_REQUEST,
-        )
-        .unwrap();
-        ready.recv_timeout(Duration::from_secs(2)).unwrap();
-        let linger = libc::linger {
-            l_onoff: 1,
-            l_linger: 0,
-        };
-        assert_eq!(
-            unsafe {
-                libc::setsockopt(
-                    socket.as_raw_fd(),
-                    libc::SOL_SOCKET,
-                    libc::SO_LINGER,
-                    (&linger as *const libc::linger).cast(),
-                    std::mem::size_of_val(&linger) as libc::socklen_t,
-                )
-            },
-            0
-        );
-        drop(socket);
-        *gate.0.lock().unwrap() = true;
-        gate.1.notify_all();
-        let result = done.recv_timeout(Duration::from_secs(1));
-        drop(server);
-        std::fs::remove_dir_all(root).unwrap();
-        result.expect("Accepted stop-all must not retain a closed owner after the peer disappears");
+        for command in ["shutdown", "prepare_update"] {
+            use std::os::fd::AsRawFd;
+            let root = std::env::temp_dir().join(format!(
+                "yam-shutdown-lost-{}",
+                super::super::next_session_id()
+            ));
+            let (started, ready) = std::sync::mpsc::channel();
+            let (exited, done) = std::sync::mpsc::channel();
+            let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+            let worker_gate = gate.clone();
+            let server = Server::start_owned(
+                &root,
+                OwnerLock::acquire(&root).unwrap(),
+                move |_| {
+                    started.send(()).unwrap();
+                    let (lock, condition) = &*worker_gate;
+                    drop(
+                        condition
+                            .wait_while(lock.lock().unwrap(), |open| !*open)
+                            .unwrap(),
+                    );
+                    Ok(serde_json::Value::Null)
+                },
+                move || {
+                    exited.send(()).unwrap();
+                },
+                "d".repeat(32),
+            )
+            .unwrap();
+            let descriptor = Descriptor::read(&root).unwrap();
+            let mut socket = TcpStream::connect(descriptor.validate().unwrap()).unwrap();
+            let request = Request {
+                version: PROTOCOL_VERSION,
+                token: descriptor.token,
+                instance: descriptor.instance,
+                client: "a".repeat(64),
+                id: 1,
+                command: command.into(),
+                args: serde_json::json!({}),
+            };
+            write_frame(
+                &mut socket,
+                &serde_json::to_vec(&request).unwrap(),
+                MAX_REQUEST,
+            )
+            .unwrap();
+            ready.recv_timeout(Duration::from_secs(2)).unwrap();
+            let linger = libc::linger {
+                l_onoff: 1,
+                l_linger: 0,
+            };
+            assert_eq!(
+                unsafe {
+                    libc::setsockopt(
+                        socket.as_raw_fd(),
+                        libc::SOL_SOCKET,
+                        libc::SO_LINGER,
+                        (&linger as *const libc::linger).cast(),
+                        std::mem::size_of_val(&linger) as libc::socklen_t,
+                    )
+                },
+                0
+            );
+            drop(socket);
+            *gate.0.lock().unwrap() = true;
+            gate.1.notify_all();
+            let result = done.recv_timeout(Duration::from_secs(1));
+            drop(server);
+            std::fs::remove_dir_all(root).unwrap();
+            result.expect(
+                "Accepted stop-all must not retain a closed owner after the peer disappears",
+            );
+        }
     }
     #[test]
     fn shutdown_exit_runs_only_after_successful_reply() {
-        let root =
-            std::env::temp_dir().join(format!("yam-shutdown-{}", super::super::next_session_id()));
-        let (sent, received) = std::sync::mpsc::channel();
-        let server = Server::start_owned(
-            &root,
-            OwnerLock::acquire(&root).unwrap(),
-            |request| {
-                if request.args == serde_json::json!({}) {
-                    Ok(serde_json::Value::Null)
-                } else {
-                    Err("shutdown failed".into())
-                }
-            },
-            move || {
-                sent.send(()).unwrap();
-            },
-            "d".repeat(32),
-        )
-        .unwrap();
-        let client = Client::new(Descriptor::read(&root).unwrap()).unwrap();
-        assert!(client
-            .call("shutdown", serde_json::json!({"invalid":true}))
-            .is_err());
-        assert!(received.try_recv().is_err());
-        assert_eq!(
-            client.call("shutdown", serde_json::json!({})).unwrap(),
-            serde_json::Value::Null
-        );
-        received.recv_timeout(Duration::from_secs(1)).unwrap();
-        drop(server);
-        std::fs::remove_dir_all(root).unwrap();
+        for command in ["shutdown", "prepare_update"] {
+            let root = std::env::temp_dir()
+                .join(format!("yam-shutdown-{}", super::super::next_session_id()));
+            let (sent, received) = std::sync::mpsc::channel();
+            let server = Server::start_owned(
+                &root,
+                OwnerLock::acquire(&root).unwrap(),
+                |request| {
+                    if request.args == serde_json::json!({}) {
+                        Ok(serde_json::Value::Null)
+                    } else {
+                        Err("shutdown failed".into())
+                    }
+                },
+                move || {
+                    sent.send(()).unwrap();
+                },
+                "d".repeat(32),
+            )
+            .unwrap();
+            let client = Client::new(Descriptor::read(&root).unwrap()).unwrap();
+            assert!(client
+                .call(command, serde_json::json!({"invalid":true}))
+                .is_err());
+            assert!(received.try_recv().is_err());
+            assert_eq!(
+                client.call(command, serde_json::json!({})).unwrap(),
+                serde_json::Value::Null
+            );
+            received.recv_timeout(Duration::from_secs(1)).unwrap();
+            drop(server);
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
     #[test]
     fn transport_authenticates_before_dispatch_and_binds_reply_identity() {
@@ -2999,7 +3897,7 @@ mod t09_project_rpc_tests {
             ),
             (
                 "create_session",
-                serde_json::json!({"project_config":{"root":"/fixture","template":null,"overrides":{}}}),
+                serde_json::json!({"provider_protocol":crate::provider_launch::PROTOCOL_VERSION,"project_config":{"root":"/fixture","template":null,"overrides":{}}}),
             ),
         ] {
             assert!(validate_command(command, &args).is_ok(), "{command}");
@@ -3022,7 +3920,7 @@ mod t09_project_rpc_tests {
         .is_ok());
         assert!(validate_command(
             "create_session",
-            &serde_json::json!({"resume_from":"s-fixture"})
+            &serde_json::json!({"provider_protocol":crate::provider_launch::PROTOCOL_VERSION,"resume_from":"s-fixture"})
         )
         .is_ok());
     }
@@ -3373,6 +4271,75 @@ mod cli_wire_tests {
         })
         .unwrap();
         assert_eq!(client.call_cli("cli_start",json!({"request_key":"d".repeat(64),"start":{"cwd":"/fixture","adapter":"codex","mode":"task","prompt":"SECRET"}})),Err(ErrorClass::Connection));
+    }
+    #[test]
+    fn closure_t01_lost_success_reply_replays_cached_receipt_without_second_allocation() {
+        let root = std::env::temp_dir().join(format!(
+            "yam-closure-start-{}",
+            super::super::next_session_id()
+        ));
+        let starts = Arc::new(Mutex::new(StartRequests::default()));
+        let count = Arc::new(AtomicU64::new(0));
+        let allocations = count.clone();
+        let server = Server::start(&root, move |request| {
+            starts.lock().unwrap().run_cli(&request, || {
+                allocations.fetch_add(1, Ordering::Relaxed);
+                Ok(json!({"session_id":"s-1-2"}))
+            })
+        })
+        .unwrap();
+        let descriptor = Descriptor::read(&root).unwrap();
+        let direct = Client::new(descriptor.clone()).unwrap();
+        let args = json!({"request_key":format!("{}{}",direct.cli_context().unwrap(),"d".repeat(32)),"start":{"cwd":"/fixture","adapter":"codex","mode":"task","prompt":"owned fixture"}});
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut proxy = descriptor.clone();
+        proxy.address = listener.local_addr().unwrap().to_string();
+        let client = Client::new(proxy).unwrap();
+        let worker = thread::spawn(move || {
+            let end = Instant::now() + Duration::from_secs(3);
+            let (mut incoming, _) = loop {
+                match listener.accept() {
+                    Ok(stream) => break stream,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < end, "owned proxy timed out");
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(e) => panic!("owned proxy failed: {e}"),
+                }
+            };
+            let bytes =
+                read_frame_with_budget(&mut incoming, MAX_REQUEST, Duration::from_secs(2)).unwrap();
+            let mut outgoing = TcpStream::connect_timeout(
+                &descriptor.address.parse().unwrap(),
+                Duration::from_secs(2),
+            )
+            .unwrap();
+            outgoing
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            write_frame(&mut outgoing, &bytes, MAX_REQUEST).unwrap();
+            let reply = read_frame_with_budget(&mut outgoing, MAX_RESPONSE, Duration::from_secs(2))
+                .unwrap();
+            let reply: Response = serde_json::from_slice(&reply).unwrap();
+            assert_eq!(reply.result.unwrap(), json!({"session_id":"s-1-2"}));
+            // The owner completed; losing only this reply must not start another process.
+        });
+        assert_eq!(
+            client.call_cli("cli_start", args.clone()),
+            Err(ErrorClass::OutcomeUnknown)
+        );
+        worker.join().unwrap();
+        assert_eq!(count.load(Ordering::Relaxed), 1);
+        let retry = Client::new(Descriptor::read(&root).unwrap()).unwrap();
+        assert_ne!(retry.identity, client.identity);
+        assert_eq!(
+            retry.call_cli("cli_start", args).unwrap(),
+            json!({"session_id":"s-1-2"})
+        );
+        assert_eq!(count.load(Ordering::Relaxed), 1);
+        drop(server);
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn t16_wire_two_actual_fresh_clients_share_one_owner_receipt() {
@@ -4198,6 +5165,9 @@ mod cli_event_tests {
         {
             let mut records = history.records.lock().unwrap();
             records[0].summary.launch = Some(super::super::AgentLaunch {
+                codex: None,
+                provider: None,
+                env_refs: Default::default(),
                 adapter: "codex".into(),
                 mode: "task".into(),
                 prompt: Some("SECRET_PROMPT".into()),
@@ -4808,7 +5778,8 @@ mod git_changes_contract_tests {
                 json!({"path":directory,"query_token":token}),
             )
         });
-        let deadline = Instant::now() + Duration::from_secs(1);
+        // Setup includes Git probes; cancellation latency is timed separately below.
+        let deadline = Instant::now() + Duration::from_secs(2);
         while !marker.exists() && !query.is_finished() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(2));
         }
@@ -4921,5 +5892,488 @@ mod f6_log_compatibility_tests {
         assert!(snapshot.range.is_none());
         let page: super::super::session_logs::SearchPage=serde_json::from_value(serde_json::json!({"hits":[],"has_more":false,"complete":true,"issues":[],"next_cursor":null,"current_cursor":null})).unwrap();
         assert!(page.scanned_ranges.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod a02b_tests {
+    #[test]
+    fn a02b_background_accepts_only_narrow_ordinary_env_refs() {
+        let valid = serde_json::json!({"shell":{"program":null,"login":if cfg!(windows){serde_json::Value::Null}else{serde_json::json!(true)}},"env_refs":{"TARGET":"SOURCE"}});
+        assert_eq!(super::validate_command("create_session", &valid), Ok(()));
+        for refs in [
+            serde_json::json!([]),
+            serde_json::json!({"A":1}),
+            serde_json::json!({"Path":"A","PATH":"B"}),
+            serde_json::json!({"YAM_A":"B"}),
+        ] {
+            let mut args = valid.clone();
+            args["env_refs"] = refs;
+            assert!(super::validate_command("create_session", &args).is_err());
+        }
+        for field in [
+            "command",
+            "launch",
+            "resume_from",
+            "project_config",
+            "worktree_attempt",
+        ] {
+            let mut args = valid.clone();
+            args[field] = serde_json::json!("");
+            assert!(super::validate_command("create_session", &args).is_err());
+        }
+    }
+
+    #[test]
+    fn a05a3_actual_cached_start_preserves_captured_capacity() {
+        let starts = std::sync::Mutex::new(super::StartRequests::default());
+        let calls = std::cell::Cell::new(0);
+        let request = |id| super::Request {
+            version: 1,
+            token: String::new(),
+            instance: String::new(),
+            client: "retention-fixture".into(),
+            id,
+            command: "create_session".into(),
+            args: serde_json::json!({"retained_lines":500}),
+        };
+        let first = super::dispatch_session_start(&starts, request(1), |r| {
+            calls.set(calls.get() + 1);
+            Ok(r.args)
+        });
+        assert_eq!(first.as_ref().unwrap()["retained_lines"], 500);
+        assert_eq!(
+            super::dispatch_session_start(&starts, request(1), |_| panic!(
+                "must not redispatch cached start"
+            )),
+            first
+        );
+        assert_eq!(calls.get(), 1);
+    }
+    #[test]
+    fn a07b1_actual_cached_dispatch_prepares_and_spawns_once_including_failure_warning() {
+        let _serial = crate::worktree_manager::serial_owner_test();
+        let starts = std::sync::Mutex::new(super::StartRequests::default());
+        let calls = std::cell::Cell::new(0);
+        static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::path::PathBuf::from(format!(
+            "/tmp/yam-a07b1-cache-{}-{}",
+            std::process::id(),
+            SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let request = |id| super::Request {
+            version: 1,
+            token: String::new(),
+            instance: String::new(),
+            client: "a07b1-fixture".into(),
+            id,
+            command: "create_session".into(),
+            args: serde_json::json!({"directory_reporting":true,"shell":{"program":"/bin/zsh","login":true}}),
+        };
+        for (id, failure) in [(1, false), (2, true)] {
+            let first = super::dispatch_session_start(&starts, request(id), |_| {
+                let mut b = portable_pty::CommandBuilder::new("/bin/zsh");
+                b.env_clear();
+                b.env("ZDOTDIR", if failure { "" } else { "/fixture" });
+                let (_, assets, warning, _command_warning) = crate::zsh_directory_reporting::spawn(
+                    &root,
+                    b,
+                    true,
+                    false,
+                    |_| -> Result<(), String> {
+                        calls.set(calls.get() + 1);
+                        Ok(())
+                    },
+                )?;
+                drop(assets);
+                Ok(serde_json::json!({"warning":warning}))
+            });
+            assert_eq!(
+                super::dispatch_session_start(&starts, request(id), |_| panic!(
+                    "retained request must not dispatch"
+                )),
+                first
+            );
+            assert_eq!(calls.get(), id as usize);
+        }
+        starts.lock().unwrap().reserved = 16 * 1024 * 1024;
+        assert!(
+            super::dispatch_session_start(&starts, request(3), |_| panic!(
+                "full budget must not prepare or spawn"
+            ))
+            .is_err()
+        );
+        assert_eq!(calls.get(), 2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn a02b_actual_start_dispatch_keeps_dynamic_resolution_in_retained_receipt() {
+        use std::cell::Cell;
+        use std::ffi::OsString;
+        let starts = std::sync::Mutex::new(super::StartRequests::default());
+        let calls = Cell::new(0);
+        let request = |id| super::Request {
+            version: 1,
+            token: String::new(),
+            instance: String::new(),
+            client: "synthetic-client".into(),
+            id,
+            command: "create_session".into(),
+            args: serde_json::json!({"shell":{"program":null,"login":if cfg!(windows){serde_json::Value::Null}else{serde_json::json!(true)}},"env_refs":{"TARGET":"SOURCE"}}),
+        };
+        for (id, value) in [(1, Some("literal")), (2, None), (3, Some("oversized"))] {
+            let first = super::dispatch_session_start(&starts, request(id), |req| {
+                let refs = serde_json::from_value(req.args["env_refs"].clone()).unwrap();
+                let env = crate::resolve_profile_env(&refs, &|_| {
+                    calls.set(calls.get() + 1);
+                    value.map(|v| {
+                        OsString::from(if v == "oversized" {
+                            "x".repeat(16385)
+                        } else {
+                            v.into()
+                        })
+                    })
+                })?;
+                Ok(serde_json::json!({"count":env.len()}))
+            });
+            assert_eq!(
+                super::dispatch_session_start(&starts, request(id), |_| panic!(
+                    "must not dispatch a retained request"
+                )),
+                first
+            );
+            assert_eq!(calls.get(), id as usize);
+        }
+        starts.lock().unwrap().reserved = 16 * 1024 * 1024;
+        assert!(
+            super::dispatch_session_start(&starts, request(4), |_| panic!(
+                "budget must reject before resolve"
+            ))
+            .is_err()
+        );
+        assert_eq!(calls.get(), 3);
+        assert!(
+            super::dispatch_session_start(&starts, request(1), |_| panic!("old receipt remains"))
+                .is_ok()
+        );
+        let mut changed = request(1);
+        changed.args["env_refs"] = serde_json::json!({"TARGET":"OTHER"});
+        assert!(super::dispatch_session_start(&starts, changed, |_| panic!(
+            "changed request must not resolve"
+        ))
+        .is_err());
+    }
+    #[test]
+    fn a02b_spawn_fixed_reason_is_cached_without_reformatting_or_republishing() {
+        struct Secret(std::cell::Cell<usize>);
+        impl std::fmt::Display for Secret {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                self.0.set(self.0.get() + 1);
+                write!(f, "SYNTHETIC_SECRET")
+            }
+        }
+        let secret = Secret(std::cell::Cell::new(0));
+        let records = std::cell::RefCell::new(Vec::new());
+        let events = std::cell::RefCell::new(Vec::new());
+        let starts = std::sync::Mutex::new(super::StartRequests::default());
+        let request = || super::Request {
+            version: 1,
+            token: String::new(),
+            instance: String::new(),
+            client: "synthetic".into(),
+            id: 8,
+            command: "create_session".into(),
+            args: serde_json::json!({"shell":{"program":null,"login":if cfg!(windows){serde_json::Value::Null}else{serde_json::json!(true)}},"env_refs":{"TARGET":"SOURCE"}}),
+        };
+        let first = super::dispatch_session_start(&starts, request(), |_| {
+            crate::report_spawn_failure(
+                &secret,
+                true,
+                |reason| {
+                    records.borrow_mut().push(reason.to_string());
+                    Ok(())
+                },
+                |reason| events.borrow_mut().push(reason.to_string()),
+            )
+        });
+        assert_eq!(first, Err("profile_env_start_failed".into()));
+        assert_eq!(
+            super::dispatch_session_start(&starts, request(), |_| panic!(
+                "cached spawn failure must not run"
+            )),
+            first
+        );
+        assert_eq!(*records.borrow(), vec!["profile_env_start_failed"]);
+        assert_eq!(*events.borrow(), vec!["profile_env_start_failed"]);
+        assert_eq!(secret.0.get(), 0);
+    }
+}
+
+#[cfg(test)]
+mod b05a_completion_tests {
+    use super::*;
+    fn descriptor(listener: &TcpListener) -> Descriptor {
+        Descriptor {
+            version: PROTOCOL_VERSION,
+            address: listener.local_addr().unwrap().to_string(),
+            instance: "a".repeat(64),
+            token: "b".repeat(64),
+        }
+    }
+    #[test]
+    fn b05a_matched_refusal_is_completed_and_does_not_retry_input() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = Client::new(descriptor(&listener)).unwrap();
+        let worker = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let bytes = read_frame(&mut stream, MAX_REQUEST).unwrap();
+            let request: Request = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(request.command, "write_session");
+            let response = Response {
+                version: PROTOCOL_VERSION,
+                instance: request.instance,
+                client: request.client,
+                id: request.id,
+                result: Err("lease held by another client".into()),
+            };
+            write_frame(
+                &mut stream,
+                &serde_json::to_vec(&response).unwrap(),
+                MAX_RESPONSE,
+            )
+            .unwrap();
+            listener.set_nonblocking(true).unwrap();
+            assert!(listener.accept().is_err());
+        });
+        assert!(matches!(
+            client.call_outcome(
+                "write_session",
+                serde_json::json!({"session_id":"s-1-1","data":"x"})
+            ),
+            CallOutcome::Completed(Err(_))
+        ));
+        worker.join().unwrap();
+    }
+    #[test]
+    fn b05a_after_write_transport_loss_is_unknown() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = Client::new(descriptor(&listener)).unwrap();
+        let worker = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            read_frame(&mut stream, MAX_REQUEST).unwrap();
+        });
+        assert!(matches!(
+            client.call_outcome(
+                "write_session",
+                serde_json::json!({"session_id":"s-1-1","data":"x"})
+            ),
+            CallOutcome::Unknown(_)
+        ));
+        worker.join().unwrap();
+    }
+    #[test]
+    fn b05a_bad_request_is_not_dispatched() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = Client::new(descriptor(&listener)).unwrap();
+        assert!(matches!(
+            client.call_outcome("write_session", serde_json::json!([])),
+            CallOutcome::NotDispatched(_)
+        ));
+    }
+}
+
+#[cfg(test)]
+mod d03a_tests {
+    #[test]
+    fn d03a_background_standalone_ssh_retention_three_values() {
+        for lines in [200, 500, 2000] {
+            assert!(super::validate_command("create_session",&serde_json::json!({"cwd":"/tmp","ssh":{"host":"Alias_1","user":null,"port":null},"retained_lines":lines})).is_ok());
+        }
+    }
+    #[test]
+    fn d03a_background_mixed_ssh_rejected() {
+        for (key, value) in [
+            ("command", serde_json::json!("")),
+            ("resume_from", serde_json::json!("stored")),
+            ("shell", serde_json::json!({"program":null,"login":true})),
+            ("directory_reporting", serde_json::json!(true)),
+            ("env_refs", serde_json::json!({"T":"S"})),
+        ] {
+            let mut args =
+                serde_json::json!({"cwd":"/tmp","ssh":{"host":"alias","user":null,"port":null}});
+            args[key] = value;
+            assert!(super::validate_command("create_session", &args).is_err());
+        }
+    }
+    #[test]
+    fn d03a_same_ssh_start_request_is_cached_once() {
+        let mut starts = super::StartRequests::default();
+        let args = serde_json::json!({"ssh":{"host":"Alias_1","user":null,"port":2222},"retained_lines":500});
+        let calls = std::cell::Cell::new(0);
+        let value = starts
+            .run("client", 1, args.clone(), || {
+                calls.set(calls.get() + 1);
+                Ok(serde_json::json!({"ssh":args["ssh"]}))
+            })
+            .unwrap();
+        assert_eq!(
+            starts
+                .run("client", 1, args.clone(), || panic!(
+                    "no logical second start"
+                ))
+                .unwrap(),
+            value
+        );
+        let mut changed = args;
+        changed["ssh"]["port"] = serde_json::json!(22);
+        assert!(starts
+            .run("client", 1, changed, || panic!("no replacement"))
+            .is_err());
+        assert_eq!(calls.get(), 1);
+    }
+}
+
+#[cfg(test)]
+mod provider_protocol_tests {
+    use super::*;
+    #[test]
+    fn provider_rpc_accepts_snapshot_with_required_marker_and_old_wire_fails_closed() {
+        let launch:crate::AgentLaunch=serde_json::from_value(serde_json::json!({"adapter":"codex","mode":"interactive","extra_args":"","prompt":null,"provider":{"id":"deepseek","model":"deepseek-flash","base_url":"https://api.deepseek.com","api_key_env":"DEEPSEEK_API_KEY"},"env_refs":{"DEEPSEEK_API_KEY":"OWNER_KEY"}})).unwrap();
+        let args = crate::create_session_arguments(
+            &None,
+            &None,
+            &Some(launch),
+            &None,
+            &None,
+            &None,
+            &None,
+            &None,
+            &None,
+            &None,
+            &None,
+            &None,
+        )
+        .unwrap();
+        assert_eq!(args["provider_protocol"], 1);
+        validate_command("create_session", &args).unwrap();
+        let mut no_marker = args.clone();
+        no_marker
+            .as_object_mut()
+            .unwrap()
+            .remove("provider_protocol");
+        assert!(validate_command("create_session", &no_marker).is_err());
+        let mut malformed = args.clone();
+        malformed["launch"]["provider"]["api_key_env"] = serde_json::json!("sk-plain-key");
+        assert!(validate_command("create_session", &malformed).is_err());
+        let mut unknown = args.clone();
+        unknown["launch"]["unknown"] = serde_json::json!(true);
+        assert!(validate_command("create_session", &unknown).is_err());
+        let resume = crate::create_session_arguments(
+            &None,
+            &None,
+            &None,
+            &Some("ended-session".into()),
+            &None,
+            &None,
+            &None,
+            &None,
+            &None,
+            &None,
+            &None,
+            &None,
+        )
+        .unwrap();
+        assert_eq!(resume["provider_protocol"], 1);
+        validate_command("create_session", &resume).unwrap();
+        // Protocol v2 owners reject unknown top-level fields before dispatch.
+        let legacy_allowed = [
+            "cwd",
+            "command",
+            "launch",
+            "resume_from",
+            "project_config",
+            "worktree_attempt",
+            "shell",
+            "env_refs",
+            "directory_reporting",
+            "command_reporting",
+            "retained_lines",
+            "ssh",
+        ];
+        assert!(args
+            .as_object()
+            .unwrap()
+            .keys()
+            .any(|key| !legacy_allowed.contains(&key.as_str())));
+        assert!(resume
+            .as_object()
+            .unwrap()
+            .keys()
+            .any(|key| !legacy_allowed.contains(&key.as_str())));
+    }
+}
+
+#[cfg(test)]
+mod explicit_reconnect_tests {
+    use super::*;
+    #[test]
+    fn t5_explicit_reconnect_authenticates_original_client_and_preserves_cursor() {
+        for (reply, wrong_identity, accepted) in [
+            (Ok(serde_json::json!({"active":2})), false, true),
+            (Err("owner unavailable".into()), false, false),
+            (Ok(serde_json::json!({"active":2})), true, false),
+        ] {
+            let (client, peer) = super::cli_wire_tests::peer(Some(reply), wrong_identity);
+            let manager = super::super::SessionManager::default();
+            let client = Arc::new(client);
+            *manager.background_client.lock().unwrap() = Some(client.clone());
+            manager.background_events.lock().unwrap().cursor = 99;
+            let started = std::cell::Cell::new(false);
+            let result = reconnect_existing(&manager, |selected| {
+                assert!(Arc::ptr_eq(&selected, &client));
+                let poll = manager.background_events.lock().unwrap();
+                assert_eq!(poll.cursor, 99);
+                assert!(!poll.running);
+                started.set(true);
+                Ok(())
+            });
+            assert_eq!(result.is_ok(), accepted);
+            assert_eq!(started.get(), accepted);
+            assert_eq!(peer.join().unwrap(), 1);
+        }
+    }
+    #[test]
+    fn t5_explicit_reconnect_without_original_client_never_discovers_or_starts_owner() {
+        let manager = super::super::SessionManager::default();
+        let started = std::cell::Cell::new(false);
+        assert!(reconnect_existing(&manager, |_| {
+            started.set(true);
+            Ok(())
+        })
+        .is_err());
+        assert!(!started.get());
+    }
+    #[test]
+    fn update_idle_admission_shares_the_start_lock_and_never_stops_active_tasks() {
+        let sessions = Mutex::new(std::collections::HashMap::from([(
+            "running".to_string(),
+            (),
+        )]));
+        let closing = AtomicBool::new(false);
+        assert_eq!(
+            claim_idle_update(&sessions, &closing).unwrap_err(),
+            "running_tasks"
+        );
+        assert!(!closing.load(Ordering::Acquire));
+        assert_eq!(sessions.lock().unwrap().len(), 1);
+        sessions.lock().unwrap().clear();
+        claim_idle_update(&sessions, &closing).unwrap();
+        assert!(closing.load(Ordering::Acquire));
+        assert!(claim_idle_update(&sessions, &closing).is_err());
+        for command in ["prepare_update", "finish_update"] {
+            assert!(validate_command(command, &serde_json::json!({})).is_ok());
+            assert!(validate_command(command, &serde_json::json!({"force":true})).is_err());
+        }
     }
 }

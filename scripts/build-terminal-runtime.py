@@ -37,7 +37,7 @@ def download_verified(target,digest,chunks,limit=200*1024*1024):
 
 def frontend_notices(desktop):
     licenses=[]
-    for package,version in [('react','19.3.0'),('react-dom','19.3.0'),('lucide-react','0.468.0'),('@xterm/xterm','6.0.0'),('@xterm/addon-fit','0.11.0')]:
+    for package,version in [('react','19.3.0'),('react-dom','19.3.0'),('lucide-react','0.468.0'),('@xterm/xterm','6.0.0'),('@xterm/addon-fit','0.11.0'),('@xterm/addon-search','0.16.0')]:
         module=desktop/'node_modules'/package
         try:
             metadata=notices.read_json(module/'package.json')

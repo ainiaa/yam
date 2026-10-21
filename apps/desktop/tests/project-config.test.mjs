@@ -1,3 +1,8 @@
+import {englishUiReadAsync} from './fixtures/english-ui-source.mjs';
+import './fixtures/i18n-test-init.mjs';
+import {componentFunction} from './fixtures/component-function.mjs';
+import * as windowContext from '../src/window-context.ts';
+import * as layoutOperations from '../src/terminal-layout.ts';
 import assert from "node:assert/strict";
 import {test} from "node:test";
 import {TerminalViews} from "../src/terminal-views.ts";
@@ -71,27 +76,27 @@ test("T09 cancel invalidates pending preview and trust success or failure",async
 
 test("T09 actual App start sends only explicit edits, so trusted project defaults reach owner",async()=>{
  const fs=await import("node:fs/promises"),ts=await import("typescript");
- const app=await fs.readFile(new URL("../src/App.tsx",import.meta.url),"utf8");
+ const app=await englishUiReadAsync(fs.readFile,new URL("../src/App.tsx",import.meta.url),"utf8");
  const body=app.slice(app.indexOf("  async function startSession("),app.indexOf("  async function stopSession("));
  assert.ok(body.includes("async function startSession"));
  const code=ts.default.transpile(app.slice(app.indexOf("  function cancelLayoutRestore("),app.indexOf("  function terminalPaneVisible("))+body,{target:ts.default.ScriptTarget.ES2022});
  for(const edits of [{},{extra_args:"",prompt:"explicit input"}]){
   const calls=[],preview={root:"/trusted/project",identity:"root",source:"exact",trusted:true,config:{version:1,defaults:{adapter:"claude",extra_args:"--project"},templates:[]}};
-  const values={layoutRestore:{current:{version:0,pending:false}},setLayoutRestoreReady(){},starting:false,creatingSession:{current:false},terminalViews:{current:new TerminalViews(16)},setError:()=>{},adapters:[],selectedAdapter:"shell",command:"",cwd:"/trusted/project",prompt:"",adapterArgs:"--global",launchMode:"interactive",setStarting:()=>{},invoke:async(...args)=>{calls.push(args);throw Error("captured before actual launch");},terminal:{current:null},projectPreview:preview,projectLaunchEdits:edits,projectTemplate:"",useProjectSettings:true,projectConfigBusy:false};
-  const start=new Function(...Object.keys(values),code+";return startSession;")(...Object.values(values));await start();
+  const values={isMainWindow:true,desktopWindow:{slot:"main",epoch:1,main_epoch:1,restore_blocked:false,requested_session:null,owned_ids:[]},windowPreferenceKey:name=>windowContext.windowPreferenceKey("main",name),...layoutOperations,terminalLayoutRef:{current:layoutOperations.createTerminalLayout()},layoutRestore:{current:{version:0,pending:false}},setLayoutRestoreReady(){},starting:false,creatingSession:{current:false},terminalViews:{current:new TerminalViews(16)},setError:()=>{},adapters:[],selectedAdapter:"shell",command:"",cwd:"/trusted/project",prompt:"",adapterArgs:"--global",launchMode:"interactive",setStarting:()=>{},invoke:async(...args)=>{calls.push(args);throw Error("captured before actual launch");},terminal:{current:null},projectPreview:preview,projectLaunchEdits:edits,projectTemplate:"",useProjectSettings:true,projectConfigBusy:false};
+  const start=componentFunction(...Object.keys(values),code+";return startSession;")(...Object.values(values));await start();
   assert.equal(calls.length,1);assert.equal(calls[0][0],"create_session");
-  assert.deepEqual(calls[0][1].projectConfig,{root:preview.root,template:null,overrides:edits});
+  assert.deepEqual(calls[0][1].projectConfig,{root:preview.root,template:null,overrides:{...edits,mode:"interactive"}});
   assert.equal(calls[0][1].launch,null);assert.equal(calls[0][1].command,null);
  }
 });
 
 test("T09 actual preview component presents trust and cancel without a launch action",async()=>{
  const fs=await import("node:fs/promises"),ts=await import("typescript");let source="";
- try{source=await fs.readFile(new URL("../src/ProjectConfigPreview.tsx",import.meta.url),"utf8");}catch{}
+ try{source=await englishUiReadAsync(fs.readFile,new URL("../src/ProjectConfigPreview.tsx",import.meta.url),"utf8");}catch{}
  const tree=ts.default.createSourceFile("ProjectConfigPreview.tsx",source,ts.default.ScriptTarget.Latest,true,ts.default.ScriptKind.TSX);let found;
  const visit=n=>{if(ts.default.isFunctionDeclaration(n)&&n.name?.text==="ProjectConfigPreview")found=n.getText(tree);ts.default.forEachChild(n,visit);};visit(tree);
  const React={createElement:(type,props,...children)=>({type,props:props??{},children})};
- const render=found?new Function("React",ts.default.transpile(found.replace("export ",""),{jsx:ts.default.JsxEmit.React,target:ts.default.ScriptTarget.ES2022})+";return ProjectConfigPreview;")(React):()=>null;
+ const render=found?componentFunction("React",ts.default.transpile(found.replace("export ",""),{jsx:ts.default.JsxEmit.React,target:ts.default.ScriptTarget.ES2022})+";return ProjectConfigPreview;")(React):()=>null;
  const calls=[],p={root:"/fixture",identity:"device:inode",source:"bytes",trusted:false,config:{version:1,defaults:{adapter:"custom",command:"touch never-execute",env:{TARGET:"OWNER_REFERENCE"}},templates:[]}};
  const nodes=[];const walk=n=>{if(n&&typeof n==="object"){nodes.push(n);for(const child of n.children??[])if(Array.isArray(child))child.forEach(walk);else walk(child);}};
  walk(render({preview:p,busy:false,error:null,template:"",onTemplate:()=>{},onPreview:()=>calls.push("preview"),onTrust:()=>calls.push("trust"),onCancel:()=>calls.push("cancel")}));
@@ -102,17 +107,17 @@ test("T09 actual preview component presents trust and cancel without a launch ac
 });
 
 test("T09 actual App title uses the owner project command instead of stale manual defaults",async()=>{
- const fs=await import("node:fs/promises"),ts=await import("typescript"),app=await fs.readFile(new URL("../src/App.tsx",import.meta.url),"utf8");
+ const fs=await import("node:fs/promises"),ts=await import("typescript"),app=await englishUiReadAsync(fs.readFile,new URL("../src/App.tsx",import.meta.url),"utf8");
  const body=app.slice(app.indexOf("  async function startSession("),app.indexOf("  async function stopSession("));const code=ts.default.transpile(app.slice(app.indexOf("  function cancelLayoutRestore("),app.indexOf("  function terminalPaneVisible("))+body,{target:ts.default.ScriptTarget.ES2022});let titles={};
  const preview={root:"/trusted/project",identity:"root",source:"exact",trusted:true,config:{version:1,defaults:{adapter:"custom",command:"new"},templates:[]}};
  const next={session_id:"s-project",cwd:preview.root,status:"running",command:"new",launch:null};
- const values={layoutRestore:{current:{version:0,pending:false}},setLayoutRestoreReady(){},starting:false,creatingSession:{current:false},terminalViews:{current:new TerminalViews(16)},setError:()=>{},adapters:[{id:"codex",label:"Codex",available:true}],selectedAdapter:"codex",command:"old",cwd:preview.root,prompt:"",adapterArgs:"",launchMode:"interactive",setStarting:()=>{},invoke:async()=>next,terminal:{current:null},projectPreview:preview,projectLaunchEdits:{},projectTemplate:"",useProjectSettings:true,projectConfigBusy:false,setActiveProject:()=>{},setCollapsedProjects:()=>{},projectKey:v=>v,setSessionTitles:f=>{titles=f(titles);},launchDialog:{current:{close:()=>{}}},openHistory:async()=>{},refreshHistory:async()=>{}};
- const start=new Function(...Object.keys(values),code+";return startSession;")(...Object.values(values));await start();assert.equal(titles["s-project"],"new");
+ const values={isMainWindow:true,desktopWindow:{slot:"main",epoch:1,main_epoch:1,restore_blocked:false,requested_session:null,owned_ids:[]},windowPreferenceKey:name=>windowContext.windowPreferenceKey("main",name),...layoutOperations,terminalLayoutRef:{current:layoutOperations.createTerminalLayout()},layoutRestore:{current:{version:0,pending:false}},setLayoutRestoreReady(){},starting:false,creatingSession:{current:false},terminalViews:{current:new TerminalViews(16)},setError:()=>{},adapters:[{id:"codex",label:"Codex",available:true}],selectedAdapter:"codex",command:"old",cwd:preview.root,prompt:"",adapterArgs:"",launchMode:"interactive",setStarting:()=>{},invoke:async()=>next,terminal:{current:null},projectPreview:preview,projectLaunchEdits:{},projectTemplate:"",useProjectSettings:true,projectConfigBusy:false,setActiveProject:()=>{},setCollapsedProjects:()=>{},projectKey:v=>v,setSessionTitles:f=>{titles=f(titles);},launchDialog:{current:{close:()=>{}}},openHistory:async()=>{},refreshHistory:async()=>{}};
+ const start=componentFunction(...Object.keys(values),code+";return startSession;")(...Object.values(values));await start();assert.equal(titles["s-project"],"new");
 });
 
 
 async function actualProjectCallbacksHarness(){
- const fs=await import("node:fs/promises"),ts=await import("typescript"),source=await fs.readFile(new URL("../src/App.tsx",import.meta.url),"utf8");
+ const fs=await import("node:fs/promises"),ts=await import("typescript"),source=await englishUiReadAsync(fs.readFile,new URL("../src/App.tsx",import.meta.url),"utf8");
  const tree=ts.default.createSourceFile("App.tsx",source,ts.default.ScriptTarget.Latest,true,ts.default.ScriptKind.TSX);let app;
  for(const node of tree.statements)if(ts.default.isFunctionDeclaration(node)&&node.name?.text==="App")app=node;
  assert.ok(app?.body);
@@ -122,7 +127,7 @@ async function actualProjectCallbacksHarness(){
  const code=ts.default.transpile(functions.join("\n")+"\nconst changeCwd="+cwdEffect.expression.arguments[0].getText(tree)+";",{target:ts.default.ScriptTarget.ES2022});
  const selection={current:new config.ProjectConfigSelection()},generation={current:0},state={preview:null,use:false,template:"",busy:false,error:null},writes=[];
  const queue=[];const invoke=(name,args)=>new Promise((resolve,reject)=>queue.push({name,args,resolve,reject}));
- const bind=cwd=>{const values={cwd,projectSelection:selection,projectConfigVersion:generation,setProjectPreview:v=>{state.preview=v;writes.push(["preview",v]);},setUseProjectSettings:v=>{state.use=v;writes.push(["use",v]);},setProjectTemplate:v=>{state.template=v;writes.push(["template",v]);},setProjectConfigBusy:v=>{state.busy=v;writes.push(["busy",v]);},setProjectConfigError:v=>{state.error=v;writes.push(["error",v]);},invoke};return new Function(...Object.keys(values),code+";return {readProjectConfig,approveProjectConfig,cancelProjectPreview,changeCwd};")(...Object.values(values));};
+ const bind=cwd=>{const values={isMainWindow:true,desktopWindow:{slot:"main",epoch:1,main_epoch:1,restore_blocked:false,requested_session:null,owned_ids:[]},windowPreferenceKey:name=>windowContext.windowPreferenceKey("main",name),cwd,projectSelection:selection,projectConfigVersion:generation,setProjectPreview:v=>{state.preview=v;writes.push(["preview",v]);},setUseProjectSettings:v=>{state.use=v;writes.push(["use",v]);},setProjectTemplate:v=>{state.template=v;writes.push(["template",v]);},setProjectConfigBusy:v=>{state.busy=v;writes.push(["busy",v]);},setProjectConfigError:v=>{state.error=v;writes.push(["error",v]);},invoke};return componentFunction(...Object.keys(values),code+";return {readProjectConfig,approveProjectConfig,cancelProjectPreview,changeCwd};")(...Object.values(values));};
  const preview=root=>({root,identity:root,source:root,trusted:true,config:{version:1,templates:[{name:"Chosen",adapter:"shell"}]}});
  return {state,writes,queue,bind,preview,selection};
 }

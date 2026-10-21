@@ -1,4 +1,5 @@
-import {isLaunchDefaults} from "./project-config.ts";
+import {isLaunchDefaults,type CodexOptions} from "./project-config.ts";
+import {copyProviderConfig,type ProviderConfig} from "./provider-config.ts";
 
 export const LAUNCH_TEMPLATE_STORAGE_KEY="yam.launchTemplates.v1";
 export const MAX_LAUNCH_TEMPLATES=32;
@@ -6,8 +7,9 @@ export const MAX_LAUNCH_TEMPLATE_NAME_CODEPOINTS=80;
 export const MAX_LAUNCH_TEMPLATE_FIELD_CODE_UNITS=65536;
 export const MAX_LAUNCH_TEMPLATE_STORAGE_CODE_UNITS=524288;
 export const LAUNCH_TEMPLATE_WRITE_ERROR="Could not save launch templates.";
+export const LAUNCH_TEMPLATE_READ_ERROR="Could not read launch templates. Original data has not been changed. Copy it before resetting templates.";
 
-export type LaunchTemplateFields={adapter:string;mode:string;extra_args:string;prompt:string|null;command:string|null};
+export type LaunchTemplateFields={adapter:string;mode:string;extra_args:string;prompt:string|null;command:string|null;provider?:ProviderConfig|null;codex?:CodexOptions};
 export type LaunchTemplate=LaunchTemplateFields&{id:string;name:string};
 
 const templateKeys=["id","name","adapter","mode","extra_args","prompt","command"];
@@ -34,9 +36,9 @@ function densePlainArray(value:unknown):value is unknown[]{
 }
 function validFields(value:unknown):value is LaunchTemplateFields{return isLaunchDefaults(value);}
 function validTemplate(value:unknown):value is LaunchTemplate{
- if(!exactDataRecord(value,templateKeys))return false;
+ if(!exactDataRecord(value,[...templateKeys,...["provider","codex"].filter(key=>Object.prototype.hasOwnProperty.call(value??{},key))]))return false;
  const item=value as Record<string,unknown>;
- const fields={adapter:item.adapter,mode:item.mode,extra_args:item.extra_args,prompt:item.prompt,command:item.command};
+ const fields={adapter:item.adapter,mode:item.mode,extra_args:item.extra_args,prompt:item.prompt,command:item.command,...(item.provider!==undefined?{provider:item.provider}:{}),...(item.codex!==undefined?{codex:item.codex}:{})};
  return typeof item.id==="string"&&uuid.test(item.id)&&typeof item.name==="string"&&item.name.length>0&&[...item.name].length<=MAX_LAUNCH_TEMPLATE_NAME_CODEPOINTS&&item.name===item.name.trim()&&validFields(fields)&&fieldLengthOk(fields);
 }
 function requireTarget(templates:LaunchTemplate[],id:string):number{
@@ -56,9 +58,9 @@ function fieldLengthOk(fields:LaunchTemplateFields):boolean{return [fields.extra
 export function projectLaunchFields(value:unknown):LaunchTemplateFields{
  if(!value||typeof value!=="object"||Array.isArray(value))throw new Error("Launch settings are invalid.");
  const source=value as Record<string,unknown>;
- const fields={adapter:source.adapter,mode:source.mode,extra_args:source.extra_args,prompt:source.prompt,command:source.command};
+ const fields={adapter:source.adapter,mode:source.mode,extra_args:source.extra_args,prompt:source.prompt,command:source.command,...(source.provider!==undefined?{provider:source.provider}:{}),...(source.codex!==undefined?{codex:{image_mode:(source.codex as CodexOptions)?.image_mode}}:{})};
  if(!validFields(fields)||!fieldLengthOk(fields))throw new Error("Launch settings are invalid.");
- return fields;
+ return {...fields,...(fields.provider?{provider:copyProviderConfig(fields.provider)}:{})};
 }
 
 export function normalizeTemplateName(value:string):string{
@@ -97,6 +99,8 @@ export function encodeLaunchTemplates(templates:LaunchTemplate[]):string{
   ids.add(template.id);names.add(template.name);
   const clean=Object.create(null) as Record<string,unknown>;
   for(const key of templateKeys)clean[key]=(template as unknown as Record<string,unknown>)[key];
+  if(template.provider!==undefined)clean.provider=template.provider===null?null:Object.assign(Object.create(null),copyProviderConfig(template.provider));
+  if(template.codex!==undefined)clean.codex={image_mode:template.codex.image_mode};
   serializedRows.push(clean);
  }
  const cleanRows=serializedRows;Object.setPrototypeOf(cleanRows,null);
@@ -141,23 +145,29 @@ export class LaunchTemplateCollection{
  templates:LaunchTemplate[]=[];
  selectedId:string|null=null;
  writeError:string|null=null;
+ loadError:string|null=null;
+ rawStorage:string|null=null;
  private readonly storage:Pick<Storage,"getItem"|"setItem">;
  private readonly makeId:()=>string;
  constructor(storage:Pick<Storage,"getItem"|"setItem">,makeId:()=>string=()=>crypto.randomUUID()){this.storage=storage;this.makeId=makeId;}
  load():void{
-  try{this.templates=decodeLaunchTemplates(this.storage.getItem(LAUNCH_TEMPLATE_STORAGE_KEY));}
-  catch{this.templates=[];}
+  this.loadError=null;this.rawStorage=null;
+  try{this.rawStorage=this.storage.getItem(LAUNCH_TEMPLATE_STORAGE_KEY);this.templates=decodeLaunchTemplates(this.rawStorage);}
+  catch{this.templates=[];this.loadError=LAUNCH_TEMPLATE_READ_ERROR;}
   this.selectedId=null;
  }
  select(id:string|null):void{
   this.selectedId=id!==null&&this.templates.some(item=>item.id===id)?id:null;
  }
  apply():LaunchTemplate|null{return this.templates.find(item=>item.id===this.selectedId)??null;}
- private commit(candidate:LaunchTemplate[],selectedId:string|null):void{
+ private commit(candidate:LaunchTemplate[],selectedId:string|null,reset=false):void{
+  if(this.loadError&&!reset)throw new Error(this.loadError);
   try{const raw=encodeLaunchTemplates(candidate);this.storage.setItem(LAUNCH_TEMPLATE_STORAGE_KEY,raw);}
   catch(reason){this.writeError=LAUNCH_TEMPLATE_WRITE_ERROR;throw reason;}
   this.templates=candidate;this.selectedId=selectedId;this.writeError=null;
+  if(reset){this.loadError=null;this.rawStorage=null;}
  }
+ reset():void{this.commit([],null,true);}
  save(name:string,launch:unknown):LaunchTemplate{
   const candidate=saveTemplate(this.templates,name,launch,this.makeId),created=candidate[candidate.length-1];this.commit(candidate,created.id);return created;
  }

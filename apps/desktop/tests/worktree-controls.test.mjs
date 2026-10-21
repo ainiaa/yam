@@ -1,3 +1,7 @@
+import {englishUiReadAsync} from './fixtures/english-ui-source.mjs';
+import './fixtures/i18n-test-init.mjs';
+import * as windowContext from '../src/window-context.ts';
+import * as layoutOperations from '../src/terminal-layout.ts';
 // Author: Jeff.Liu. No test starts a real agent or operates a user repository.
 import assert from "node:assert/strict";
 import {test} from "node:test";
@@ -44,11 +48,11 @@ test("T13 cleanup eligibility is explicit and unfinished records cannot remove",
 });
 async function actualFunction(name,values,sourcePath="../src/App.tsx"){
  const fs=await import("node:fs/promises"),ts=await import("typescript");
- const source=await fs.readFile(new URL(sourcePath,import.meta.url),"utf8");
+ const source=await englishUiReadAsync(fs.readFile,new URL(sourcePath,import.meta.url),"utf8");
  const tree=ts.default.createSourceFile("App.tsx",source,ts.default.ScriptTarget.Latest,true,ts.default.ScriptKind.TSX);let found,cancellation;
  const visit=node=>{if(ts.default.isFunctionDeclaration(node)&&node.name?.text==="cancelLayoutRestore")cancellation=node.getText(tree);if(ts.default.isFunctionDeclaration(node)&&node.name?.text===name)found=node.getText(tree);ts.default.forEachChild(node,visit);};visit(tree);
  assert.ok(found,`actual App ${name} callback must exist`);
- values={layoutRestore:{current:{version:0,pending:false}},setLayoutRestoreReady(){},...values};
+ values={providerConfig:null,setProviderConfig(){},...layoutOperations,terminalLayoutRef:{current:layoutOperations.createTerminalLayout()},layoutRestore:{current:{version:0,pending:false}},setLayoutRestoreReady(){},...values};
  return new Function(...Object.keys(values),ts.default.transpile((cancellation??"")+"\n"+found,{target:ts.default.ScriptTarget.ES2022})+`;return ${name};`)(...Object.values(values));
 }
 test("T13 actual App created callback changes root cancels old trust and does not start",async()=>{
@@ -56,15 +60,15 @@ test("T13 actual App created callback changes root cancels old trust and does no
  await callback(record);assert.ok(calls.includes("cancel-parent-trust"));assert.ok(calls.some(v=>Array.isArray(v)&&v[0]==="cwd"&&v[1]===record.target));assert.ok(!calls.includes("forbidden-start"));
 });
 test("T13 actual App explicit managed start preserves normal owner create path",async()=>{
- const calls=[];const callback=await actualFunction("startManagedWorktree",{cwd:record.target,startSession:async(...args)=>calls.push(args),setError:v=>calls.push(["error",v])});
- await callback(record);assert.deepEqual(calls,[[undefined,record.attempt]]);
+ const calls=[];const callback=await actualFunction("startManagedWorktree",{cwd:record.target,projectToolsDialog:{current:null},newSession:(...args)=>{calls.push(args);},setError:v=>calls.push(["error",v])});
+ await callback(record);assert.deepEqual(calls,[[record.target,undefined,record.attempt]]);
 });
 
 test("T13 actual App renders explicit managed controls without an automatic launch",async()=>{
- const fs=await import("node:fs/promises"),ts=await import("typescript");const source=await fs.readFile(new URL("../src/App.tsx",import.meta.url),"utf8");const tree=ts.default.createSourceFile("App.tsx",source,ts.default.ScriptTarget.Latest,true,ts.default.ScriptKind.TSX);let element;
+ const fs=await import("node:fs/promises"),ts=await import("typescript");const source=await englishUiReadAsync(fs.readFile,new URL("../src/App.tsx",import.meta.url),"utf8");const tree=ts.default.createSourceFile("App.tsx",source,ts.default.ScriptTarget.Latest,true,ts.default.ScriptKind.TSX);let element;
  const visit=node=>{if(ts.default.isJsxSelfClosingElement(node)&&node.tagName.getText(tree)==="WorktreeControls")element=node;ts.default.forEachChild(node,visit);};visit(tree);
  assert.ok(element,"actual App must render worktree controls");const attributes=Object.fromEntries(element.attributes.properties.filter(ts.default.isJsxAttribute).map(item=>[item.name.text,item.initializer?.getText(tree)]));
- assert.equal(attributes.onCreated,"{worktreeCreated}");assert.equal(attributes.onStart,"{startManagedWorktree}");assert.equal(attributes.selected,"{selectedWorktree}");assert.match(attributes.root,/gitProjectPath/);
+ assert.equal(attributes.onCreated,"{worktreeCreated}");assert.equal(attributes.onStart,"{startManagedWorktree}");assert.equal(attributes.selected,"{selectedWorktree}");assert.equal(attributes.root,"{projectToolsPath}");
 });
 
 test("T13 actual App rejects created callback from an old project or owner",async()=>{
@@ -78,7 +82,7 @@ test("T13 actual visible component ignores late create success error and finally
  for(const mode of ["cancel","project","owner","unmount"])for(const fail of [false,true]){
   const selection=new worktree.WorktreeSelection();selection.select(record.repository,"1");await selection.previewCreate(request,async()=>preview);
   const pending=deferred(),calls=[],context={current:{root:record.repository,owner:1,version:0,alive:true}},flow={current:selection};
-  const values={context,flow,root:record.repository,owner:1,invoke:async()=>pending.promise,setBusy:value=>calls.push(["busy",value]),setError:value=>calls.push(["error",value]),setPreview:value=>calls.push(["preview",value]),setCleanupPreview:()=>{},setCleanupResult:()=>{},setRecords:value=>calls.push(["records",value]),onCreated:()=>calls.push("forbidden-created")};
+  const values={isMainWindow:true,desktopWindow:{slot:"main",epoch:1,main_epoch:1,restore_blocked:false,requested_session:null,owned_ids:[]},windowPreferenceKey:name=>windowContext.windowPreferenceKey("main",name),context,flow,root:record.repository,owner:1,invoke:async()=>pending.promise,setBusy:value=>calls.push(["busy",value]),setError:value=>calls.push(["error",value]),setPreview:value=>calls.push(["preview",value]),setCleanupPreview:()=>{},setCleanupResult:()=>{},setRecords:value=>calls.push(["records",value]),onCreated:()=>calls.push("forbidden-created")};
   const create=await actualFunction("create",values,"../src/WorktreeControls.tsx");const completion=create();
   if(mode==="cancel"){const cancel=await actualFunction("cancel",values,"../src/WorktreeControls.tsx");cancel();}
   else {context.current.version++;if(mode==="unmount"){context.current.alive=false;selection.cancel();}else if(mode==="project"){context.current.root="/B";selection.select("/B","1");}else{context.current.owner=2;selection.select(record.repository,"2");}}
@@ -88,18 +92,18 @@ test("T13 actual visible component ignores late create success error and finally
 
 test("T13 actual App owner arguments preserve manual and trusted project paths with opaque attempt",async()=>{
  for(const useProjectSettings of [false,true]){
-  const calls=[],projectPreview={root:record.target,trusted:true},values={starting:false,creatingSession:{current:false},terminalViews:{current:new TerminalViews(16)},setError:()=>{},adapters:[],selectedAdapter:"shell",command:"echo literal",cwd:record.target,prompt:"",adapterArgs:"",launchMode:"interactive",setStarting:()=>{},invoke:async(...args)=>{calls.push(args);throw Error("captured before actual launch");},terminal:{current:null},projectPreview,projectLaunchEdits:{prompt:""},projectTemplate:"",useProjectSettings,projectConfigBusy:false};
+  const calls=[],projectPreview={root:record.target,trusted:true},values={isMainWindow:true,desktopWindow:{slot:"main",epoch:1,main_epoch:1,restore_blocked:false},windowPreferenceKey:name=>windowContext.windowPreferenceKey("main",name),starting:false,creatingSession:{current:false},terminalViews:{current:new TerminalViews(16)},setError:()=>{},adapters:[],selectedAdapter:"shell",command:"echo literal",cwd:record.target,prompt:"",adapterArgs:"",launchMode:"interactive",setStarting:()=>{},invoke:async(...args)=>{calls.push(args);throw Error("captured before actual launch");},terminal:{current:null},projectPreview,projectLaunchEdits:{prompt:""},projectTemplate:"",useProjectSettings,projectConfigBusy:false};
   const start=await actualFunction("startSession",values);await start(undefined,record.attempt);assert.equal(calls.length,1);assert.equal(calls[0][0],"create_session");assert.equal(calls[0][1].worktreeAttempt,record.attempt);
-  if(useProjectSettings)assert.deepEqual(calls[0][1].projectConfig,{root:record.target,template:null,overrides:{prompt:""}});else assert.equal(calls[0][1].cwd,record.target);
+  if(useProjectSettings)assert.deepEqual(calls[0][1].projectConfig,{root:record.target,template:null,overrides:{prompt:"",mode:"interactive"}});else assert.equal(calls[0][1].cwd,record.target);
  }
 });
 
 async function renderManaged(props, records=[], states={}){
- const {readFile}=await import("node:fs/promises"),ts=(await import("typescript")).default;
+ const {readFile:rawReadFile}=await import("node:fs/promises");const readFile=(...args)=>englishUiReadAsync(rawReadFile,...args),ts=(await import("typescript")).default;
  const source=await readFile(new URL("../src/WorktreeControls.tsx",import.meta.url),"utf8"),exports={};let cursor=0;
  const React={createElement:(type,props,...children)=>({type,props:props||{},children}),useRef:value=>({current:value}),useEffect(){},useState(value){const index=cursor++;return [index in states?states[index]:index===4?records:value,()=>{}]}};
  const compiled=ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.React}}).outputText;
- new Function("exports","require","React",compiled)(exports,name=>name==="react"?React:name.includes("worktree-controls")?worktree:{invoke:async()=>records},React);
+ new Function("exports","require","React",compiled)(exports,name=>name.includes("i18n")?{t:globalThis.t}:name==="react"?React:name.includes("worktree-controls")?worktree:{invoke:async()=>records},React);
  return exports.WorktreeControls(props);
 }
 function elements(tree){const result=[];function visit(node){if(node&&typeof node==="object"){result.push(node);node.children?.flat(Infinity).forEach(visit)}}visit(tree);return result;}
@@ -138,7 +142,7 @@ test("T13 cleanup actual callbacks cancel owner root unmount and double click wi
 test("T13 cleanup actual target-root callbacks show confirmation and never start or switch project",async()=>{
  const selection=new worktree.WorktreeSelection();selection.select(record.target,"1");const calls=[],context={current:{root:record.target,owner:1,version:0,alive:true}};
  let shown=null,result=null,records=[record];
- const values={context,flow:{current:selection},invoke:async(name,args)=>{calls.push([name,args]);return name==="preview_worktree_cleanup"?cleanupPreview:removed;},setBusy(){},setError:value=>assert.equal(value,null),setCleanupPreview:value=>{shown=value;},setCleanupResult:value=>{result=value;},setRecords:update=>{records=update(records);},onCreated:()=>assert.fail("must not select project"),onStart:()=>assert.fail("must not start")};
+ const values={isMainWindow:true,desktopWindow:{slot:"main",epoch:1,main_epoch:1,restore_blocked:false,requested_session:null,owned_ids:[]},windowPreferenceKey:name=>windowContext.windowPreferenceKey("main",name),context,flow:{current:selection},invoke:async(name,args)=>{calls.push([name,args]);return name==="preview_worktree_cleanup"?cleanupPreview:removed;},setBusy(){},setError:value=>assert.equal(value,null),setCleanupPreview:value=>{shown=value;},setCleanupResult:value=>{result=value;},setRecords:update=>{records=update(records);},onCreated:()=>assert.fail("must not select project"),onStart:()=>assert.fail("must not start")};
  const prepare=await actualFunction("prepareCleanup",values,"../src/WorktreeControls.tsx");await prepare(record);assert.deepEqual(shown,cleanupPreview);
  const confirmation=await renderManaged({root:record.target,owner:1,selected:record,onCreated(){},onStart(){}},records,{7:shown});
  assert.ok(elements(confirmation).some(item=>item.type==="button"&&item.children.flat(Infinity).join("")==="Move to Trash"));

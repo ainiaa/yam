@@ -1,6 +1,9 @@
+import {englishUiRead} from './fixtures/english-ui-source.mjs';
+const readFileSync=(...args)=>englishUiRead(rawReadFileSync,...args);
+import './fixtures/i18n-test-init.mjs';
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {readFileSync} from 'node:fs';
+import {readFileSync as rawReadFileSync} from 'node:fs';
 import ts from 'typescript';
 
 const source=readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8');
@@ -50,5 +53,5 @@ test('diagnostics button stays available without any session and announces resul
  for(let node=button.parent;node;node=node.parent) {
   if(ts.isBinaryExpression(node)&&node.operatorToken.kind===ts.SyntaxKind.AmpersandAmpersandToken)assert.ok(!node.left.getText(ast).includes('session'));
  }
- assert.ok(source.includes('role="status">{diagnosticsMessage}'));
+ assert.ok(source.includes('role="status">{t(diagnosticsMessage)}'));
 });

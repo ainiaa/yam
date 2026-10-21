@@ -106,7 +106,9 @@ pub(super) struct OwnerReport {
 }
 
 pub(super) fn collect_owner(manager: &super::SessionManager) -> OwnerReport {
-    let deadline = Instant::now() + SCAN_TIME;
+    collect_owner_until(manager, Instant::now() + SCAN_TIME)
+}
+fn collect_owner_until(manager: &super::SessionManager, deadline: Instant) -> OwnerReport {
     let mut result = OwnerReport {
         connection: Health::Available,
         ..Default::default()
@@ -319,9 +321,23 @@ pub(super) fn write_selected(
         #[cfg(windows)]
         super::background::protect_windows_path(&temporary)
             .map_err(|_| "destination_unwritable")?;
+        #[cfg(test)]
+        tests::BEFORE_WRITE.with(|hook| {
+            let callback = hook.borrow_mut().take();
+            if let Some(callback) = callback {
+                callback(&mut file, &temporary);
+            }
+        });
         file.write_all(bytes)
             .and_then(|_| file.sync_all())
             .map_err(|_| "write_failed")?;
+        #[cfg(test)]
+        tests::BEFORE_PUBLISH.with(|hook| {
+            let callback = hook.borrow_mut().take();
+            if let Some(callback) = callback {
+                callback(&temporary);
+            }
+        });
         std::fs::hard_link(&temporary, target).map_err(|error| {
             if error.kind() == std::io::ErrorKind::AlreadyExists {
                 "destination_exists"
@@ -345,6 +361,175 @@ mod tests {
         sync::{Arc, Mutex},
         time::{Duration, Instant},
     };
+    type BeforePublish = Box<dyn FnOnce(&Path)>;
+    type BeforeWrite = Box<dyn FnOnce(&mut std::fs::File, &Path)>;
+    std::thread_local! {
+        pub(super) static BEFORE_PUBLISH: std::cell::RefCell<Option<BeforePublish>> = const { std::cell::RefCell::new(None) };
+        pub(super) static BEFORE_WRITE: std::cell::RefCell<Option<BeforeWrite>> = const { std::cell::RefCell::new(None) };
+    }
+
+    #[test]
+    fn closure_t17_busy_locks_and_expired_collection_are_truthful_without_initialization() {
+        let root = root();
+        fs::write(root.join("owned.log"), "unchanged").unwrap();
+        let owner = manager(&root, vec![record("running")]);
+        owner
+            .last_request
+            .store(77, std::sync::atomic::Ordering::Release);
+        let history = owner.history.lock().unwrap().as_ref().unwrap().clone();
+        let original = serde_json::to_vec(&*history.records.lock().unwrap()).unwrap();
+        let runtime = owner.terminal_runtime.lock().unwrap();
+        assert_eq!(json(&owner)["owner"]["parser"], "unknown");
+        drop(runtime);
+        let held = owner.history.lock().unwrap();
+        let value = json(&owner);
+        assert_eq!(value["owner"]["history"], "unavailable");
+        assert_eq!(value["owner"]["error"], "state_busy");
+        drop(held);
+        let client = owner.background_client.lock().unwrap();
+        let value = json(&owner);
+        assert_eq!(value["owner"]["connection"], "unavailable");
+        assert_eq!(value["owner"]["error"], "state_busy");
+        drop(client);
+        let value = serde_json::to_value(collect_owner_until(&owner, Instant::now())).unwrap();
+        assert_eq!(value["sessions"]["total"], 1);
+        assert_eq!(value["sessions"]["scanned"], 0);
+        assert_eq!(value["counts_partial"], true);
+        assert_eq!(value["storage"]["partial"], true);
+        assert_eq!(value["storage"]["error"], "scan_limit");
+        assert_eq!(
+            serde_json::to_vec(&*history.records.lock().unwrap()).unwrap(),
+            original
+        );
+        assert_eq!(
+            owner
+                .last_request
+                .load(std::sync::atomic::Ordering::Acquire),
+            77
+        );
+        assert!(owner.agent_bridge.lock().unwrap().is_none());
+        assert!(owner.terminal_runtime.lock().unwrap().is_none());
+        assert_eq!(fs::read(root.join("owned.log")).unwrap(), b"unchanged");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn closure_t17_export_worker_uses_real_report_and_preserves_cancelled_or_existing_targets() {
+        let root = root();
+        let owner = Arc::new(manager(&root, vec![record("running")]));
+        let target = root.join("report.json");
+        tauri::async_runtime::block_on(async {
+            let source = owner.clone();
+            assert!(
+                !crate::export_diagnostics_with(move || report(&source), || Ok(None))
+                    .await
+                    .unwrap()
+            );
+            assert!(!target.exists());
+            let source = owner.clone();
+            let selected = target.clone();
+            assert!(crate::export_diagnostics_with(
+                move || report(&source),
+                move || Ok(Some(selected))
+            )
+            .await
+            .unwrap());
+            let original = fs::read(&target).unwrap();
+            let text = std::str::from_utf8(&original).unwrap();
+            assert!(!text.contains("secret"));
+            assert!(!text.contains("private-session"));
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&original).unwrap()["owner"]
+                    ["sessions"]["running"],
+                1
+            );
+            let source = owner.clone();
+            let selected = target.clone();
+            assert_eq!(
+                crate::export_diagnostics_with(move || report(&source), move || Ok(Some(selected)))
+                    .await
+                    .unwrap_err(),
+                "destination_exists"
+            );
+            assert_eq!(fs::read(&target).unwrap(), original);
+            assert_eq!(
+                crate::export_diagnostics_with(
+                    || Err("size_limit"),
+                    || panic!("report error must precede chooser")
+                )
+                .await
+                .unwrap_err(),
+                "size_limit"
+            );
+            let source = owner.clone();
+            assert_eq!(
+                crate::export_diagnostics_with(
+                    move || report(&source),
+                    || Err("invalid_destination")
+                )
+                .await
+                .unwrap_err(),
+                "invalid_destination"
+            );
+            let source = owner.clone();
+            assert_eq!(
+                crate::export_diagnostics_with(
+                    move || report(&source),
+                    || panic!("owned chooser failure")
+                )
+                .await
+                .unwrap_err(),
+                "worker_failed"
+            );
+            assert_eq!(fs::read(&target).unwrap(), original);
+            assert!(fs::read_dir(&root).unwrap().all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")));
+        });
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn closure_t17_actual_write_and_publication_failures_preserve_existing_report() {
+        for fault in ["write", "publish"] {
+            let root = root();
+            let target = root.join("report.json");
+            fs::write(&target, b"original").unwrap();
+            if fault == "write" {
+                BEFORE_WRITE.with(|hook| {
+                    *hook.borrow_mut() = Some(Box::new(|file, temporary| {
+                        *file = std::fs::File::open(temporary).unwrap()
+                    }))
+                });
+            } else {
+                BEFORE_PUBLISH.with(|hook| {
+                    *hook.borrow_mut() =
+                        Some(Box::new(|temporary| fs::remove_file(temporary).unwrap()))
+                });
+            }
+            let result = write_selected(Some(&target), b"replacement");
+            BEFORE_WRITE.with(|hook| {
+                hook.borrow_mut().take();
+            });
+            BEFORE_PUBLISH.with(|hook| {
+                hook.borrow_mut().take();
+            });
+            assert_eq!(
+                result.unwrap_err(),
+                if fault == "write" {
+                    "write_failed"
+                } else {
+                    "publish_failed"
+                }
+            );
+            assert_eq!(fs::read(&target).unwrap(), b"original");
+            assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
 
     fn root() -> std::path::PathBuf {
         let root = std::env::temp_dir().join(format!(

@@ -52,6 +52,15 @@ jobs:
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --manifest-path src-tauri/Cargo.toml --locked -- --test-threads=2
+      - name: Install native coverage tools
+        run: |
+          rustup component add llvm-tools-preview
+          cargo install cargo-llvm-cov --version 0.9.1 --locked
+      - name: Enforce native crate line coverage
+        env:
+          CARGO_LLVM_COV_TARGET_DIR: ${{ runner.temp }}/yam-native-coverage
+          CARGO_BUILD_JOBS: 2
+        run: cargo llvm-cov --manifest-path src-tauri/Cargo.toml --locked --fail-under-lines=85 -- --test-threads=2
       - name: Verify memory sampling from its own application coalition
         if: runner.os == 'macOS'
         run: python3 ../../scripts/memory-self-smoke.py

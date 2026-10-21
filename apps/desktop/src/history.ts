@@ -1,6 +1,6 @@
 import type {AgentReceipt} from "./agent-events";
 import type {Project} from "./workspaces";
-export type HistoryItem={summary:{session_id:string;cwd:string;title:string;adapter:string|null;mode:string|null};status:string;started_at:number;ended_at:number|null;agent:{phase:string;integration:string;unread_count:number}};
+export type HistoryItem={previous_runs?:string[];summary:{session_id:string;cwd:string;title:string;adapter:string|null;mode:string|null};status:string;started_at:number;ended_at:number|null;agent:{phase:string;integration:string;unread_count:number}};
 export type HistoryCursor={revision:string;offset:number;context:string};
 export type HistoryPage<T>={revision:string;items:T[];next_cursor:HistoryCursor|null};
 export type HistoryOverview={total:number;active:number;unread_receipts:number;failed_receipts:number;attention_sessions:number;metadata_bytes:number|null;latest_deletion?:DeletionResult|null};

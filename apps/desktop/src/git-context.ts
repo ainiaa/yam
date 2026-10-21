@@ -21,10 +21,10 @@ export function isGitContext(value: unknown): value is GitContext {
     typeof item.dirty === "boolean" && typeof item.root === "string" && item.root.length > 0 && item.root.length <= 4096 &&
     typeof item.common_dir === "string" && item.common_dir.length > 0 && item.common_dir.length <= 4096 && item.code === undefined;
 }
-export function gitContextLabel(value: GitContext): string {
-  if (value.kind === "unavailable") return "Git status unavailable";
-  if (value.kind === "not_repository") return "Not a Git repository";
-  return `${value.branch ?? "Detached HEAD"} · ${value.dirty ? "dirty" : "clean"}`;
+export function gitContextLabel(value: GitContext,translate:(value:string)=>string=value=>value): string {
+  if (value.kind === "unavailable") return translate("Git status unavailable");
+  if (value.kind === "not_repository") return translate("Not a Git repository");
+  return `${value.branch ?? translate("Detached HEAD")} · ${translate(value.dirty ? "dirty" : "clean")}`;
 }
 function unavailable(reason: unknown): GitContext {
   return {kind: "unavailable", code: typeof reason === "string" && errorCodes.has(reason) ? reason : "git_query_failed", branch: null, dirty: null, root: null, common_dir: null};

@@ -5,12 +5,12 @@ export type MemorySample = {
   sampled_at: number;
 };
 
-export function memoryLabel(value: MemorySample | null, now = Date.now()): string {
+export function memoryLabel(value: MemorySample | null, now = Date.now(),translate:(value:string)=>string=value=>value): string {
   if (!value || !["physical footprint", "RSS", "working set"].includes(value.metric) ||
       ![value.application_bytes, value.workload_bytes, value.sampled_at].every(n => Number.isSafeInteger(n) && n >= 0) ||
-      now < value.sampled_at || now - value.sampled_at > 10_000) return "Memory unavailable";
+      now < value.sampled_at || now - value.sampled_at > 10_000) return translate("Memory unavailable");
   const mib = (n: number) => `${(n / 1048576).toFixed(1)} MiB`;
-  return `YAM ${mib(value.application_bytes)}${value.workload_bytes ? ` · Tasks ${mib(value.workload_bytes)}` : ""}`;
+  return `YAM ${mib(value.application_bytes)}${value.workload_bytes ? ` · ${translate("Tasks")} ${mib(value.workload_bytes)}` : ""}`;
 }
 
 export function startMemoryPolling(

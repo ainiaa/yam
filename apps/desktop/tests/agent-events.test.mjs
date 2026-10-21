@@ -1,10 +1,16 @@
+import {englishUiRead} from './fixtures/english-ui-source.mjs';
+const readFileSync=(...args)=>englishUiRead(rawReadFileSync,...args);
+import './fixtures/i18n-test-init.mjs';
+import {resolveAppShortcut,defaultAppShortcuts,loadAppShortcuts,validateAppShortcuts,saveAppShortcuts} from '../src/app-shortcuts.ts';
+import {terminalZoomShortcut} from "../src/terminal-settings.ts";
 import {sessionRecovery} from '../src/session-recovery.ts';
 import {paletteShortcut} from '../src/command-palette.ts';
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {unreadCount,agentLabel,nextAttention,defaultShortcuts,isShortcuts,shortcutAction,isLaunchMode} from '../src/agent-events.ts';
 import ts from 'typescript';
-import {readFileSync} from 'node:fs';
+import {readFileSync as rawReadFileSync} from 'node:fs';
+import {connectionDetails} from '../src/provider-config.ts';
 const agent=(phase='response_finished')=>({phase,integration:'connected',agent_session_id:'native-main',inbox:[{id:'g:one:TurnComplete',revision:3,turn_id:'one',kind:'response_finished',delivery:'accepted',read:false,error:null}]});
 test('OS acceptance and foreground suppression remain unread until explicitly read',()=>{
  const a=agent();assert.equal(unreadCount(a),1);a.inbox[0].delivery='suppressed';assert.equal(unreadCount(a),1);
@@ -26,12 +32,24 @@ test('attention navigation wraps through separate sessions without swallowing la
  records[0].agent.inbox.push({...agent().inbox[0],id:'g:two:TurnComplete',turn_id:'two',revision:5});assert.equal(unreadCount(records[0].agent),1);
 });
 const source=ts.createSourceFile('App.tsx',readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
+test('primary Agent connection disclosure makes native round receipt limits visible',()=>{
+ let code;const visit=node=>{if(ts.isFunctionDeclaration(node)&&node.name?.text==='SessionConnection')code=node.getText(source);ts.forEachChild(node,visit);};visit(source);assert.ok(code);
+ const React={createElement:(type,props,...children)=>({type,props:props??{},children})};
+ const Component=new Function('React','connectionDetails','ChevronDown',ts.transpile(code,{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2022})+';return SessionConnection;')(React,connectionDetails,()=>null);
+ const text=node=>typeof node==='string'?node:(node?.children??[]).flat(Infinity).map(text).join('');
+ const claude=text(Component({launch:{adapter:'claude',mode:'interactive'}}));
+ assert.match(claude,/Esc.*external.*receipt.*not guaranteed/i);assert.match(claude,/native terminal/i);
+ const codex=text(Component({launch:{adapter:'codex',mode:'interactive'}}));
+ assert.match(codex,/macOS.*0\.162\.1/);assert.match(codex,/other versions.*unverified/i);
+ assert.doesNotMatch(text(Component({launch:{adapter:'shell'}})),/0\.162\.1|Esc/);
+ assert.doesNotMatch(text(Component({launch:{adapter:'claude',mode:'task'}})),/Esc/);
+});
 let refreshSource;
 function find(node){if(ts.isFunctionDeclaration(node)&&node.name?.text==='refreshHistory')refreshSource=node.getText(source);ts.forEachChild(node,find)}find(source);
 const refreshJs=ts.transpileModule(refreshSource,{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText;
 test('older history responses and errors cannot replace the newest visible round state',async()=>{
  const pending=[];let history=[];const errors=[];
- const bindings={invoke:command=>command==='history_overview'?Promise.resolve({}):new Promise((resolve,reject)=>pending.push({resolve:items=>resolve({items,next_cursor:null}),reject})),setHistory:records=>history=records,setError:error=>errors.push(error),notifySession:()=>{},historyRefreshVersion:{current:0},setHistoryLoading:()=>{},historyContext:{current:{query:'',status:'all',titles:{},projects:[]}},historyRequest:()=>({page_size:100}),setHistoryCursor:()=>{},setHistoryOverview:()=>{},refreshInbox:()=>{},refreshPendingNotifications:()=>{},selectedRecord:{current:null},setSelectedAgent:()=>{}};
+ const bindings={refreshSelectedAgent:async()=>{},isMainWindow:true,migrateTerminalMetadata:()=>{},invoke:command=>command==='history_overview'?Promise.resolve({}):new Promise((resolve,reject)=>pending.push({resolve:items=>resolve({items,next_cursor:null}),reject})),setHistory:records=>history=records,setError:error=>errors.push(error),notifySession:()=>{},historyRefreshVersion:{current:0},setHistoryLoading:()=>{},historyContext:{current:{query:'',status:'all',titles:{},projects:[]}},historyRequest:()=>({page_size:100}),setHistoryCursor:()=>{},setHistoryOverview:()=>{},refreshInbox:()=>{},refreshPendingNotifications:()=>{},selectedRecord:{current:null},setSelectedAgent:()=>{}};
  const refresh=new Function(...Object.keys(bindings),refreshJs+';return refreshHistory')(...Object.values(bindings));
  const older=refresh();const newer=refresh();
  pending[1].resolve([{agent:agent(),notification_pending:false}]);await newer;
@@ -75,7 +93,7 @@ test('actual keyboard coordinator shares selection, defers search focus and skip
  assert.ok(code);const js=ts.transpileModule(code,{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText;
  let modal=false,editing=false,sidebar=false,paused=false,focused=0,selected=0,attention=0;const opened=[],frames=[];
  class Element {closest(){return editing?{}:null}}
- const args={paletteShortcut,openCommandPalette:()=>assert.fail('existing shortcut actions must not open palette'),document:{querySelector(){return modal?{}:null}},Element,shortcuts:defaultShortcuts,shortcutAction,jumpToAttention(){attention++},history:[{summary:{session_id:'a'}}],previousSession:{current:'a'},openSession(id){if(id==='a')opened.push(id)},setSidebarOpen(value){sidebar=value},requestAnimationFrame(fn){frames.push(fn)},searchInput:{current:{focus(){focused++},select(){selected++}}},setNotificationsPaused(fn){paused=fn(paused)},toggleNotificationPause(){paused=!paused}};
+ const args={resolveAppShortcut,shortcutsRef:{current:defaultAppShortcuts(true)},navigator:{platform:"MacIntel"},terminalZoomShortcut,paletteShortcut,openCommandPalette:()=>assert.fail('existing shortcut actions must not open palette'),document:{querySelector(){return modal?{}:null}},Element,shortcuts:defaultShortcuts,shortcutAction,jumpToAttention(){attention++},history:[{summary:{session_id:'a'}}],previousSession:{current:'a'},openSession(id){if(id==='a')opened.push(id)},setSidebarOpen(value){sidebar=value},requestAnimationFrame(fn){frames.push(fn)},searchInput:{current:{focus(){focused++},select(){selected++}}},setNotificationsPaused(fn){paused=fn(paused)},toggleNotificationPause(){paused=!paused}};
  const handler=new Function(...Object.keys(args),js+';return handleShortcut')(...Object.values(args));
  const event=key=>({key,metaKey:true,shiftKey:true,target:new Element(),preventDefault(){this.prevented=true},stopPropagation(){this.stopped=true}});
  for(const key of [']','[','k','m']){const e=event(key);handler(e);assert.equal(e.prevented,true);assert.equal(e.stopped,true)}

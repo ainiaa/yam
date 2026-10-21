@@ -1,0 +1,12 @@
+// Author: Jeff.Liu
+import assert from 'node:assert/strict';
+import {test} from 'node:test';
+import {loadZshDirectoryReporting,saveZshDirectoryReporting,zshDirectoryReportingEligible} from '../src/zsh-directory-reporting.ts';
+test('A07b1 preference defaults OFF and loads only exact boolean schema',()=>{assert.deepEqual(loadZshDirectoryReporting(()=>null),{enabled:false,error:null});for(const enabled of [true,false])assert.deepEqual(loadZshDirectoryReporting(()=>JSON.stringify({version:1,enabled})),{enabled,error:null});});
+test('A07b1 malformed and failed reads remain OFF with fixed visible errors',()=>{for(const read of [()=>'{',()=>'{"version":1,"enabled":"true"}',()=>'{"version":1,"enabled":true,"extra":1}',()=>'{"version":2,"enabled":true}',()=>{throw Error('PRIVATE');}]){const result=loadZshDirectoryReporting(read);assert.equal(result.enabled,false);assert.equal(result.error,'Could not load Zsh directory reporting settings.');}});
+test('A07b1 Save validates and writes one exact preference before caller changes state',()=>{const calls=[];saveZshDirectoryReporting((key,value)=>calls.push([key,value]),true);assert.deepEqual(calls,[['yam.zsh-directory-reporting.v1','{"version":1,"enabled":true}']]);assert.throws(()=>saveZshDirectoryReporting(()=>{throw Error('PRIVATE');},false),{message:'Could not save Zsh directory reporting settings.'});assert.throws(()=>saveZshDirectoryReporting(()=>assert.fail(),null),{message:'Invalid Zsh directory reporting settings.'});});
+test('A07b1 eligibility is exact Unix explicit executable basename and preserves shell input',()=>{for(const login of [true,false]){const shell={program:'/bin/zsh',login};assert.equal(zshDirectoryReportingEligible(true,shell,false),true);assert.deepEqual(shell,{program:'/bin/zsh',login});}for(const shell of [{program:'/bin/ZSH',login:true},{program:'/bin/zsh-other',login:true},{program:'/bin/fish',login:false},{program:'/bin/zsh/',login:true}])assert.equal(zshDirectoryReportingEligible(true,shell,false),false);assert.equal(zshDirectoryReportingEligible(false,{program:'/bin/zsh',login:true},false),false);assert.equal(zshDirectoryReportingEligible(true,{program:'/bin/zsh',login:null},true),false);});
+
+for(const shell of [undefined,null,{program:null,login:true},{program:null,login:false}])test('A07b2 default eligibility '+JSON.stringify(shell),()=>{
+ assert.equal(zshDirectoryReportingEligible(true,shell,false),true);assert.equal(zshDirectoryReportingEligible(false,shell,false),false);assert.equal(zshDirectoryReportingEligible(true,shell,true),false);
+});

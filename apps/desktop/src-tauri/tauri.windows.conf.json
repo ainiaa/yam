@@ -2,7 +2,8 @@
   "bundle": {
     "resources": [
       "target/terminal-runtime/yam-terminal.exe",
-      "target/terminal-runtime/THIRD-PARTY-NOTICES.txt"
+      "target/terminal-runtime/DEVELOPER-INCOMPLETE-NOTICES.txt",
+      "target/terminal-runtime/DEVELOPER-INCOMPLETE-NOTICES.report.json"
     ]
   }
 }

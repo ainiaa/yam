@@ -107,15 +107,36 @@ fn aggregate(
     Ok((application, workload))
 }
 
+#[cfg(unix)]
+pub(super) fn process_identity(pid: u32) -> Option<u64> {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        platform::identity(pid)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
 pub(super) fn sample(owner: &OwnerProcesses) -> Result<Sample, String> {
     sample_for_desktop(owner, std::process::id())
 }
 
 fn sample_for_desktop(owner: &OwnerProcesses, desktop: u32) -> Result<Sample, String> {
-    let before = platform::snapshot()?;
-    let gui = platform::gui_members(desktop)?;
-    let after = platform::snapshot()?;
-    if gui != platform::gui_members(desktop)? {
+    sample_for_desktop_with(owner, desktop, platform::snapshot, platform::gui_members)
+}
+fn sample_for_desktop_with(
+    owner: &OwnerProcesses,
+    desktop: u32,
+    mut snapshot: impl FnMut() -> Result<HashMap<u32, Process>, String>,
+    mut gui_members: impl FnMut(u32) -> Result<Vec<u32>, String>,
+) -> Result<Sample, String> {
+    let before = snapshot()?;
+    let gui = gui_members(desktop)?;
+    let after = snapshot()?;
+    if gui != gui_members(desktop)? {
         return Err("WebKit process membership changed during sampling".into());
     }
     let (application_bytes, workload_bytes) = aggregate(&before, &after, &gui, owner)?;
@@ -195,6 +216,30 @@ mod platform {
     use std::process::{Command, Stdio};
     pub(super) const METRIC: &str = "physical footprint";
 
+    fn process_info(pid: i32) -> Option<libc::proc_bsdinfo> {
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of_val(&info) as i32;
+        (unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                (&mut info as *mut libc::proc_bsdinfo).cast(),
+                size,
+            )
+        } == size)
+            .then_some(info)
+    }
+    pub(super) fn identity(pid: u32) -> Option<u64> {
+        let info = process_info(pid.try_into().ok()?)?;
+        if info.pbi_uid != unsafe { libc::geteuid() } {
+            return None;
+        }
+        info.pbi_start_tvsec
+            .checked_mul(1_000_000)?
+            .checked_add(info.pbi_start_tvusec)
+    }
+
     pub(super) fn snapshot() -> Result<HashMap<u32, Process>, String> {
         let started = Instant::now();
         let mut pids = vec![0i32; MAX_PROCESSES];
@@ -213,20 +258,9 @@ mod platform {
             if started.elapsed() > Duration::from_secs(2) {
                 return Err("Process snapshot timed out".into());
             }
-            let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
-            let size = std::mem::size_of_val(&info) as i32;
-            if unsafe {
-                libc::proc_pidinfo(
-                    pid,
-                    libc::PROC_PIDTBSDINFO,
-                    0,
-                    (&mut info as *mut libc::proc_bsdinfo).cast(),
-                    size,
-                )
-            } != size
-            {
+            let Some(info) = process_info(pid) else {
                 continue;
-            }
+            };
             let mut usage: libc::rusage_info_v2 = unsafe { std::mem::zeroed() };
             let available = unsafe {
                 libc::proc_pid_rusage(
@@ -311,6 +345,15 @@ mod platform {
             identity: fields.get(19)?.parse().ok()?,
             bytes: fields.get(21)?.parse::<u64>().ok()?.checked_mul(page),
         })
+    }
+    pub(super) fn identity(pid: u32) -> Option<u64> {
+        use std::os::unix::fs::MetadataExt;
+        let directory = std::path::PathBuf::from(format!("/proc/{pid}"));
+        if std::fs::metadata(&directory).ok()?.uid() != unsafe { libc::geteuid() } {
+            return None;
+        }
+        parse_stat(&std::fs::read_to_string(directory.join("stat")).ok()?, 1)
+            .map(|row| row.identity)
     }
     pub(super) fn snapshot() -> Result<HashMap<u32, Process>, String> {
         let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
@@ -485,6 +528,84 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn closure_t16_sampling_orders_and_fences_both_native_snapshots() {
+        let owner = OwnerProcesses {
+            pid: 2,
+            runtime_pid: 3,
+            workloads: vec![4],
+        };
+        let rows: HashMap<_, _> = [
+            (1, row(0, Some(10), 1)),
+            (2, row(0, Some(20), 2)),
+            (3, row(2, Some(30), 3)),
+            (4, row(2, Some(40), 4)),
+        ]
+        .into();
+        for failure in [
+            "none",
+            "first_snapshot",
+            "first_gui",
+            "second_snapshot",
+            "second_gui",
+            "changed_gui",
+        ] {
+            let order = std::cell::RefCell::new(Vec::new());
+            let mut snapshots = 0;
+            let mut memberships = 0;
+            let result = sample_for_desktop_with(
+                &owner,
+                1,
+                || {
+                    snapshots += 1;
+                    order.borrow_mut().push("snapshot");
+                    if failure == "first_snapshot" && snapshots == 1
+                        || failure == "second_snapshot" && snapshots == 2
+                    {
+                        return Err("owned snapshot unavailable".into());
+                    }
+                    Ok(rows.clone())
+                },
+                |pid| {
+                    assert_eq!(pid, 1);
+                    memberships += 1;
+                    order.borrow_mut().push("gui");
+                    if failure == "first_gui" && memberships == 1
+                        || failure == "second_gui" && memberships == 2
+                    {
+                        return Err("owned GUI unavailable".into());
+                    }
+                    Ok(if failure == "changed_gui" && memberships == 2 {
+                        vec![1, 2]
+                    } else {
+                        vec![1]
+                    })
+                },
+            );
+            match failure {
+                "none" => {
+                    let sample = result.unwrap();
+                    assert_eq!((sample.application_bytes, sample.workload_bytes), (60, 40));
+                    assert!(sample.sampled_at > 0);
+                }
+                "changed_gui" => assert_eq!(
+                    result.err().unwrap(),
+                    "WebKit process membership changed during sampling"
+                ),
+                _ => assert!(result.is_err()),
+            }
+            let expected = match failure {
+                "first_snapshot" => 1,
+                "first_gui" => 2,
+                "second_snapshot" => 3,
+                _ => 4,
+            };
+            assert_eq!(
+                &*order.borrow(),
+                &["snapshot", "gui", "snapshot", "gui"][..expected]
+            );
+        }
+    }
     fn row(parent: u32, bytes: Option<u64>, identity: u64) -> Process {
         Process {
             parent,
@@ -525,7 +646,7 @@ mod tests {
             runtime_pid: 3,
             workloads: vec![],
         };
-        for changed in [row(0, None, 1), row(0, Some(10), 99)] {
+        for changed in [row(0, None, 1), row(0, Some(10), 99), row(99, Some(10), 1)] {
             let mut after = rows.clone();
             after.insert(1, changed);
             assert!(aggregate(&rows, &after, &[1], &owner).is_err());

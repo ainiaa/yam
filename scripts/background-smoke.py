@@ -65,7 +65,7 @@ def regular_bytes(path, limit=1024 * 1024):
     return data
 
 
-def validate_f7_run(app, identifier, receipt_path, *, first_start=True):
+def validate_f7_run(app, identifier, receipt_path, *, first_start=True, owner_home=None):
     if sys.flags.optimize:
         raise ValueError("Optimized Python cannot run F7 acceptance")
     if not isinstance(identifier, str) or not re.fullmatch(r"com\.yam\.functional-validation-f7-[0-9a-f]{32}", identifier) or receipt_path is None:
@@ -110,7 +110,7 @@ def validate_f7_run(app, identifier, receipt_path, *, first_start=True):
         whole = json.loads(whole_bytes)
         if not isinstance(whole, dict) or not re.fullmatch(r"[0-9a-f]{64}", receipt.get("whole_source_fingerprint", "")) or whole.get("source_fingerprint") != receipt["whole_source_fingerprint"] or hashlib.sha256(whole_bytes).hexdigest() != receipt.get("whole_source_receipt_sha256"):
             raise ValueError("F7 whole source receipt mismatch")
-        root = unlinked(app_data(identifier))
+        root = unlinked(app_data(identifier) if owner_home is None else unlinked(owner_home) / "Library/Application Support" / identifier)
         if root.name != identifier or first_start and root.exists() and (not root.is_dir() or any(root.iterdir())):
             raise ValueError("Refusing a pre-existing F7 namespace")
         return {"executable": executable, "root": root, "receipt": receipt}
@@ -140,17 +140,39 @@ def confirm_f7_owner(owner, connection, client, request_id, previous_instance=No
 
 
 PROTOCOL_VERSION = 2
+REJECTION_KINDS = ('missing_session', 'owner_shutting_down', 'other_server_rejection')
 
-def rpc(descriptor,client,request_id,command,arguments=None,*,error=False):
+class ServerRejected(AssertionError):
+    """Safe provenance only; never retain the owner's error text."""
+    @property
+    def code(self): return 'server_rejected'
+    def __init__(self, rejection_kind='other_server_rejection'):
+        if type(rejection_kind) is not str or rejection_kind not in REJECTION_KINDS:
+            raise ValueError('Invalid server rejection kind')
+        super().__init__('server_rejected')
+        self.rejection_kind = rejection_kind
+
+
+def rpc(descriptor,client,request_id,command,arguments=None,*,error=False,timeout=None,max_response_bytes=64 * 1024 * 1024):
+    if timeout is not None and (type(timeout) not in (int, float) or not 0 < timeout <= 10):
+        raise ValueError("Invalid background timeout")
+    if type(max_response_bytes) is not int or not 0 < max_response_bytes <= 64 * 1024 * 1024:
+        raise ValueError("Invalid background response budget")
+    bounded_deadline = time.monotonic() + timeout if timeout is not None else None
+    def remaining():
+        value = bounded_deadline - time.monotonic()
+        if value <= 0:
+            raise ValueError("Background request deadline reached")
+        return value
     wire_id=request_id
     address, port = descriptor["address"].rsplit(":", 1)
     assert address == "127.0.0.1"
     assert descriptor["version"] == PROTOCOL_VERSION, "Background protocol upgrade required"
     wire = json.dumps({"version": PROTOCOL_VERSION, "token": descriptor["token"], "instance": descriptor["instance"],
                        "client": client, "id": wire_id, "command": command, "args": arguments or {}}).encode()
-    with socket.create_connection((address, int(port)), timeout=5) as stream:
-        deadline=time.monotonic()+10
-        stream.settimeout(10)
+    with socket.create_connection((address, int(port)), timeout=5 if timeout is None else remaining()) as stream:
+        deadline=time.monotonic()+10 if timeout is None else bounded_deadline
+        stream.settimeout(10 if timeout is None else remaining())
         stream.sendall(struct.pack("!I", len(wire)) + wire)
 
         def read(length):
@@ -165,13 +187,21 @@ def rpc(descriptor,client,request_id,command,arguments=None,*,error=False):
             return result
 
         length = struct.unpack("!I", read(4))[0]
-        assert 0 < length <= 64 * 1024 * 1024
+        assert 0 < length <= max_response_bytes
         result = json.loads(read(length))
         assert result["version"] == PROTOCOL_VERSION and result["instance"] == descriptor["instance"] and result["id"] == wire_id and result["client"] == client
         if error:
             assert isinstance(result["result"].get("Err"),str), "Background unexpectedly accepted an invalid command"
             return result["result"]["Err"]
-        assert "Ok" in result["result"], "Background rejected validation command"
+        if "Ok" not in result["result"]:
+            assert isinstance(result["result"].get("Err"), str), "Invalid background rejection"
+            message = result["result"]["Err"]
+            kind = 'other_server_rejection'
+            if command == 'stop_session' and isinstance(arguments, dict) and type(arguments.get('session_id')) is str and message == f"Unknown session: {arguments['session_id']}":
+                kind = 'missing_session'
+            elif message == 'Background is shutting down; reconnect':
+                kind = 'owner_shutting_down'
+            raise ServerRejected(kind)
         return result["result"]["Ok"]
 
 

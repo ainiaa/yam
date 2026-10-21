@@ -1,19 +1,24 @@
+import {englishUiRead} from './fixtures/english-ui-source.mjs';
+const readFileSync=(...args)=>englishUiRead(rawReadFileSync,...args);
+import './fixtures/i18n-test-init.mjs';
+import * as windowContext from '../src/window-context.ts';
+import * as layoutOperations from '../src/terminal-layout.ts';
 import ts from 'typescript';
-import {readFileSync} from 'node:fs';
+import {readFileSync as rawReadFileSync} from 'node:fs';
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 
 const source=ts.createSourceFile('App.tsx',readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
 function coordinator(name) {
- let found,cancellation;const visit=node=>{if(ts.isFunctionDeclaration(node)&&node.name?.text==="cancelLayoutRestore")cancellation=node.getText(source);if(ts.isFunctionDeclaration(node)&&node.name?.text===name)found=node.getText(source);ts.forEachChild(node,visit);};visit(source);
+ let found,cancellation,selectedAgent;const visit=node=>{if(ts.isFunctionDeclaration(node)&&node.name?.text==="refreshSelectedAgent")selectedAgent=node.getText(source);if(ts.isFunctionDeclaration(node)&&node.name?.text==="cancelLayoutRestore")cancellation=node.getText(source);if(ts.isFunctionDeclaration(node)&&node.name?.text===name)found=node.getText(source);ts.forEachChild(node,visit);};visit(source);
  assert.ok(found,`${name} exists`);
- return ts.transpileModule((cancellation??"")+"\n"+found,{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText;
+ return ts.transpileModule((cancellation??"")+"\n"+(name==="refreshHistory"?selectedAgent+"\n":"")+found,{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText;
 }
-function refreshHarness(invoke) {
+function refreshHarness(invoke,migrate=()=>{}) {
  const records=[];const errors=[];const overview=[];const cursor=[];
- const factory=new Function('invoke','historyRefreshVersion','setHistory','notifySession','setError','historyQuery','statusFilter','sessionTitles','projects','historyRequest','setHistoryCursor','setHistoryOverview','setHistoryLoading','refreshInbox','refreshPendingNotifications','selectedRecord','setSelectedAgent','historyPager','historyContext',`${coordinator('refreshHistory')};return refreshHistory;`);
+ const factory=new Function('sessionId','invoke','historyRefreshVersion','setHistory','notifySession','setError','historyQuery','statusFilter','sessionTitles','projects','historyRequest','setHistoryCursor','setHistoryOverview','setHistoryLoading','refreshInbox','refreshPendingNotifications','selectedRecord','setSelectedAgent','historyPager','historyContext','isMainWindow','migrateTerminalMetadata',`${coordinator('refreshHistory')};return refreshHistory;`);
  const context={current:{query:'',status:'all',titles:{},projects:[]}};
- const refresh=factory(invoke,{current:0},value=>records.push(value),()=>{},value=>errors.push(value),'','all',{},[],query=>({page_size:100,query}),value=>cursor.push(value),value=>overview.push(value),()=>{},()=>{},()=>{}, {current:null},()=>{}, {current:null},context);
+ const refresh=factory({current:null},invoke,{current:0},value=>records.push(value),()=>{},value=>errors.push(value),'','all',{},[],query=>({page_size:100,query}),value=>cursor.push(value),value=>overview.push(value),()=>{},()=>{},()=>{}, {current:null},()=>{}, {current:null},context,true,migrate);
  return {refresh,records,errors,overview,cursor,context};
 }
 test('initial history loads exactly one bounded summary page',async()=>{
@@ -36,10 +41,10 @@ test('notification metadata is loaded by ID, never by the current page',()=>{
  assert.match(body,/get_session/);assert.doesNotMatch(body,/list_sessions/);
 });
 
-function runCoordinator(name,bindings){bindings={layoutRestore:{current:{version:0,pending:false}},setLayoutRestoreReady(){},...bindings};return new Function(...Object.keys(bindings),`${coordinator(name)};return ${name};`)(...Object.values(bindings));}
+function runCoordinator(name,bindings){if(bindings.openHistory&&!bindings.openTerminal)bindings.openTerminal=(...args)=>bindings.openHistory(...args);bindings={conversationOpenRef:{current:false},isMainWindow:true,...layoutOperations,showTerminalLayout(){},reconcileTerminalLayoutSelection(){},terminalLayoutRef:{current:layoutOperations.createTerminalLayout()},layoutRestore:{current:{version:0,pending:false}},setLayoutRestoreReady(){},...bindings};return new Function(...Object.keys(bindings),`${coordinator(name)};return ${name};`)(...Object.values(bindings));}
 test('next page appends once and expired cursor requests a fresh first page',async()=>{
  let records=[{summary:{session_id:'s-one'}}];let cursor={offset:100};let refreshed=0;let error;
- const bindings={historyCursor:cursor,historyLoading:false,historyRefreshVersion:{current:0},setHistoryLoading:()=>{},historyRequest:()=>({}),historyQuery:'',statusFilter:'all',sessionTitles:{},projects:[],historyContext:{current:{query:'',status:'all',titles:{},projects:[]}},setHistory:next=>records=typeof next==='function'?next(records):next,setHistoryCursor:next=>cursor=next,setError:next=>error=next,refreshHistory:()=>refreshed++};
+ const bindings={isMainWindow:true,desktopWindow:{slot:"main",epoch:1,main_epoch:1,restore_blocked:false,requested_session:null,owned_ids:[]},windowPreferenceKey:name=>windowContext.windowPreferenceKey("main",name),historyCursor:cursor,historyLoading:false,historyRefreshVersion:{current:0},setHistoryLoading:()=>{},historyRequest:()=>({}),historyQuery:'',statusFilter:'all',sessionTitles:{},projects:[],historyContext:{current:{query:'',status:'all',titles:{},projects:[]}},setHistory:next=>records=typeof next==='function'?next(records):next,setHistoryCursor:next=>cursor=next,setError:next=>error=next,refreshHistory:()=>refreshed++};
  bindings.invoke=async()=>({items:[{summary:{session_id:'s-two'}}],next_cursor:null});
  await runCoordinator('loadMoreHistory',bindings)();assert.deepEqual(records.map(r=>r.summary.session_id),['s-one','s-two']);assert.equal(cursor,null);
  bindings.invoke=async()=>{throw Error('History cursor expired; reload history');};await runCoordinator('loadMoreHistory',bindings)();assert.equal(refreshed,1);assert.deepEqual(records,[]);assert.equal(error,undefined);
@@ -51,7 +56,7 @@ test('startup pending notifications advances stable keys after acknowledgement',
 });
 test('an older session detail cannot select after a later request',async()=>{
  let release;const opened=[];let reads=0;
- const fn=runCoordinator('openSession',{detailVersion:{current:0},invoke:async()=>++reads===1?new Promise(resolve=>release=resolve):{summary:{session_id:'s-new'}},openHistory:async r=>opened.push(r.summary.session_id),sessionId:{current:'s-new'},setError:()=>{}});
+ const fn=runCoordinator('openSession',{viewClaimSelection:{current:0},paneClaimSelection:{current:new Map()},detailVersion:{current:0},invoke:async()=>++reads===1?new Promise(resolve=>release=resolve):{summary:{session_id:'s-new'}},openHistory:async r=>opened.push(r.summary.session_id),sessionId:{current:'s-new'},setError:()=>{}});
  const old=fn('s-old');await fn('s-new');release({summary:{session_id:'s-old'}});await old;assert.deepEqual(opened,['s-new']);
 });
 
@@ -114,4 +119,8 @@ test('repeated attention requests reserve selection order before their asynchron
  const next=runCoordinator('jumpToAttention',{detailVersion:version,sessionId:{current:'s-initial'},invoke:async()=>new Promise(resolve=>releases.push(resolve)),openSession:async id=>{version.current++;opened.push(id);},setError:()=>{}});
  const older=next();const newer=next();assert.equal(version.current,2);
  releases[1]('s-new-attention');await newer;releases[0]('s-old-attention');await older;assert.deepEqual(opened,['s-new-attention']);
+});
+
+test('followup history with no selected terminal completes without hidden metadata errors',async()=>{
+ const h=refreshHarness(async command=>command==='list_session_summaries'?{items:[],next_cursor:null}:{});await h.refresh();assert.deepEqual(h.errors,[]);
 });

@@ -1,5 +1,10 @@
+import {englishUiRead} from './fixtures/english-ui-source.mjs';
+const readFileSync=(...args)=>englishUiRead(rawReadFileSync,...args);
+import './fixtures/i18n-test-init.mjs';
+import * as windowContext from '../src/window-context.ts';
+import * as layoutOperations from '../src/terminal-layout.ts';
 import ts from 'typescript';
-import {existsSync,readFileSync} from 'node:fs';
+import {existsSync,readFileSync as rawReadFileSync} from 'node:fs';
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {TerminalViews} from '../src/terminal-views.ts';
@@ -14,24 +19,24 @@ function coordinator(name,file='HistoryArchive.tsx') {
  assert.ok(found,`${file}: ${name} exists`);
  return ts.transpileModule((cancellation??"")+"\n"+found,{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText;
 }
-function run(name,bindings,file) {bindings={layoutRestore:{current:{version:0,pending:false}},setLayoutRestoreReady(){},...bindings};return new Function(...Object.keys(bindings),`${coordinator(name,file)};return ${name};`)(...Object.values(bindings));}
+function run(name,bindings,file) {bindings={windowPreferenceKey:name=>windowContext.windowPreferenceKey("main",name),...layoutOperations,showTerminalLayout(){},reconcileTerminalLayoutSelection(){},terminalLayoutRef:{current:layoutOperations.createTerminalLayout()},layoutRestore:{current:{version:0,pending:false}},setLayoutRestoreReady(){},...bindings};return new Function(...Object.keys(bindings),`${coordinator(name,file)};return ${name};`)(...Object.values(bindings));}
 
 // A missing UI action is a no-op so red comes from its observable behavior, not a missing import.
 function retentionAction(name,bindings,file='HistoryArchive.tsx') {
- bindings={layoutRestore:{current:{version:0,pending:false}},setLayoutRestoreReady(){},...bindings};
- const tree=source(file);let found,cancellation;
- const visit=node=>{if(ts.isFunctionDeclaration(node)&&node.name?.text==="cancelLayoutRestore")cancellation=node.getText(tree);if(ts.isFunctionDeclaration(node)&&node.name?.text===name)found=node.getText(tree);ts.forEachChild(node,visit);};visit(tree);
+ bindings={windowPreferenceKey:name=>windowContext.windowPreferenceKey("main",name),...layoutOperations,showTerminalLayout(){},reconcileTerminalLayoutSelection(){},terminalLayoutRef:{current:layoutOperations.createTerminalLayout()},layoutRestore:{current:{version:0,pending:false}},setLayoutRestoreReady(){},...bindings};
+ const tree=source(file);let found,cancellation,selectedAgent;
+ const visit=node=>{if(ts.isFunctionDeclaration(node)&&node.name?.text==="refreshSelectedAgent")selectedAgent=node.getText(tree);if(ts.isFunctionDeclaration(node)&&node.name?.text==="cancelLayoutRestore")cancellation=node.getText(tree);if(ts.isFunctionDeclaration(node)&&node.name?.text===name)found=node.getText(tree);ts.forEachChild(node,visit);};visit(tree);
  if(!found)return async()=>{};
- const js=ts.transpileModule((cancellation??"")+"\n"+found,{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText;
+ const js=ts.transpileModule((cancellation??"")+"\n"+(name==="refreshHistory"?selectedAgent+"\n":"")+found,{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText;
  return new Function(...Object.keys(bindings),`${js};return ${name};`)(...Object.values(bindings));
 }
 function cleanupState(extra={}) {
- return {terminalLayoutRef:{current:{mode:"single",panes:[null],focused:0,revision:0}},setTerminalLayout:()=>{},pinnedSessionsRef:{current:[]},setPinnedSessions:()=>{},terminalViews:{current:new TerminalViews(16)},previousSession:{current:null},selectedRecord:{current:null},pendingOutput:{current:{delete:()=>{}}},pendingState:{current:new Map()},detailVersion:{current:0},selectionVersion:{current:0},terminal:{current:null},fitAddon:{current:null},outputCursor:{current:null},setSession:()=>{},setSessionStatus:()=>{},...extra,localStorage:{getItem:()=>null,setItem:()=>{},removeItem:()=>{},...(extra.localStorage??{})}};
+ return {terminalLayoutRef:{current:{mode:"single",panes:[null],focused:0,revision:0}},setTerminalLayout:()=>{},pinnedSessionsRef:{current:[]},setPinnedSessions:()=>{},terminalViews:{current:new TerminalViews(16)},previousSession:{current:null},selectedRecord:{current:null},pendingOutput:{current:{delete:()=>{}}},pendingState:{current:new Map()},viewClaimSelection:{current:0},paneClaimSelection:{current:new Map()},detailVersion:{current:0},selectionVersion:{current:0},terminal:{current:null},fitAddon:{current:null},outputCursor:{current:null},setSession:()=>{},setSessionStatus:()=>{},...extra,localStorage:{getItem:()=>null,setItem:()=>{},removeItem:()=>{},...(extra.localStorage??{})}};
 }
 function deletionHarness(invoke,initial=null,extra={}) {
  const calls=[],deleted=[],errors=[];const deletionPreviewRef={current:initial},deleteRequestVersion={current:0},busyRef={current:false};
  let preview=initial,refreshed=0;
- const bindings={invoke:async(command,args)=>{calls.push({command,args});return invoke(command,args);},deletionPreviewRef,deleteRequestVersion,busyRef,setBusy:()=>{},setError:value=>errors.push(value),setDeletionPreview:value=>{preview=value;deletionPreviewRef.current=value;},onDeleted:ids=>deleted.push(ids),onChanged:async()=>refreshed++,loadArchives:async()=>{},selectedArchiveIds:['s-one','s-two'],setSelectedArchiveIds:()=>{},...extra};
+ const bindings={isMainWindow:true,desktopWindow:{slot:"main",epoch:1,main_epoch:1,restore_blocked:false,requested_session:null,owned_ids:[]},windowPreferenceKey:name=>windowContext.windowPreferenceKey("main",name),invoke:async(command,args)=>{calls.push({command,args});return invoke(command,args);},deletionPreviewRef,deleteRequestVersion,busyRef,setBusy:()=>{},setError:value=>errors.push(value),setDeletionPreview:value=>{preview=value;deletionPreviewRef.current=value;},onDeleted:ids=>deleted.push(ids),onChanged:async()=>refreshed++,loadArchives:async()=>{},selectedArchiveIds:['s-one','s-two'],setSelectedArchiveIds:()=>{},...extra};
  return {preview:retentionAction('previewDeletion',bindings),cancel:retentionAction('cancelDeletion',bindings),confirm:retentionAction('confirmDeletion',bindings),getPreview:()=>preview,calls,deleted,errors,refreshed:()=>refreshed,deletionPreviewRef,deleteRequestVersion,busyRef};
 }
 const exactPreview={preview_id:'s-preview',session_ids:['s-one','s-two'],count:2,earliest_ended_at:1,latest_ended_at:2,bytes:4096,scope:'YAM archived records, logs and saved terminal scenes; native CLI history is retained'};
@@ -86,12 +91,12 @@ test('T05 preview UI displays actual count, local times, bytes, scope and separa
 });
 test('T05 App cleans only actual deleted IDs from names and matching last-session preference',async()=>{
  let titles={'s-one':'First','s-two':'Keep','s-other':'Other'};const removed=[];
- const clear=retentionAction('clearDeletedSessionNames',cleanupState({setSessionTitles:update=>titles=update(titles),sessionId:{current:'s-other'},localStorage:{getItem:key=>key==='yam.lastSession'?JSON.stringify('s-one'):null,removeItem:key=>removed.push(key)}}),'App.tsx');
- await clear(['s-one']);assert.deepEqual(titles,{'s-two':'Keep','s-other':'Other'});assert.deepEqual(removed,['yam.lastSession']);
+ const clear=retentionAction('clearDeletedSessionNames',cleanupState({setSessionTitles:update=>titles=update(titles),sessionId:{current:'s-other'},localStorage:{getItem:key=>key==='yam.window.main.lastSession'?JSON.stringify('s-one'):null,removeItem:key=>removed.push(key)}}),'App.tsx');
+ await clear(['s-one']);assert.deepEqual(titles,{'s-two':'Keep','s-other':'Other'});assert.deepEqual(removed,['yam.window.main.lastSession']);
 });
 test('T05 retention policy is loaded explicitly and opting in never enables automatic deletion',async()=>{
  const calls=[],states=[];
- const bindings={invoke:async(command,args)=>{calls.push({command,args});return {auto_archive_30_days:false,auto_delete:false};},setAutoArchive:value=>states.push(value),setError:()=>{},busyRef:{current:false},setBusy:()=>{},policyRequestVersion:{current:0}};
+ const bindings={isMainWindow:true,desktopWindow:{slot:"main",epoch:1,main_epoch:1,restore_blocked:false,requested_session:null,owned_ids:[]},windowPreferenceKey:name=>windowContext.windowPreferenceKey("main",name),invoke:async(command,args)=>{calls.push({command,args});return {auto_archive_30_days:false,auto_delete:false};},setAutoArchive:value=>states.push(value),setError:()=>{},busyRef:{current:false},setBusy:()=>{},policyRequestVersion:{current:0}};
  await retentionAction('loadRetentionPolicy',bindings)();
  await retentionAction('saveRetentionPolicy',bindings)(true);
  assert.deepEqual(calls,[{command:'get_history_policy',args:undefined},{command:'set_history_policy',args:{autoArchive30Days:true}}]);
@@ -149,12 +154,12 @@ test('T05 review F1 partial recovery uses the same token and cleans the final ac
  h=deletionHarness(invoke,exactPreview,{loadArchives:load,onDeleted:cleanup});
  await h.confirm();
  assert.deepEqual(titles,{'s-other':'Keep'},'the final receipt must include recovery-completed B');
- assert.deepEqual(removed,['yam.lastSession']);assert.deepEqual(disposed,['s-two']);assert.equal(app.previousSession.current,null);assert.equal(app.selectedRecord.current,null);assert.equal(app.sessionId.current,null);
+ assert.deepEqual(removed,['yam.window.main.lastSession']);assert.deepEqual(disposed,['s-two']);assert.equal(app.previousSession.current,null);assert.equal(app.selectedRecord.current,null);assert.equal(app.sessionId.current,null);
  assert.deepEqual(h.calls.map(call=>call.command),['confirm_archive_deletion','list_archived_sessions','confirm_archive_deletion']);
  assert.ok(h.calls.filter(call=>call.command==='confirm_archive_deletion').every(call=>call.args.previewId==='s-preview'));assert.equal(h.getPreview(),null);
 });
 test('T05 review F1 closing after a lost response lets the actual shared App refresh consume recovered IDs',async()=>{
- let closed=0;const commands=[];let titles={'s-one':'First','s-two':'Second','s-other':'Keep'};const disposed=[],removed=[];
+ let closed=0;const commands=[],errors=[];let titles={'s-one':'First','s-two':'Second','s-other':'Keep'};const disposed=[],removed=[];
  const app=cleanupState({setSessionTitles:update=>titles=update(titles),sessionId:{current:'s-two'},previousSession:{current:'s-two'},selectedRecord:{current:{summary:{session_id:'s-two'}}},localStorage:{getItem:()=> 's-two',removeItem:key=>removed.push(key)}});
  app.terminalViews.current.open('s-two',false,()=>({dispose:()=>disposed.push('s-two')}));
  const cleanup=retentionAction('clearDeletedSessionNames',app,'App.tsx');
@@ -166,12 +171,12 @@ test('T05 review F1 closing after a lost response lets the actual shared App ref
  const effectJs=ts.transpileModule(`const mount=${effect};`,{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText;
  const unmount=new Function('dialog','loadArchives','loadRetentionPolicy','archiveRequestVersion','policyRequestVersion','cancelDeletion',`${effectJs};return mount();`)({current:null},()=>{},()=>{}, {current:0},{current:0},h.cancel);
  unmount();await new Promise(setImmediate);
- const refresh=retentionAction('refreshHistory',{invoke:async command=>{commands.push(command);if(command==='list_session_summaries')return {items:[],next_cursor:null};if(command==='history_overview')return {total:1,active:0,unread_receipts:0,attention_sessions:0,latest_deletion:{preview_id:'s-preview',deleted_ids:['s-one','s-two'],complete:true,issues:[]}};if(command==='get_session')return app.selectedRecord.current;throw Error(command);},deletionReceiptKey:{current:''},historyRefreshVersion:{current:0},historyContext:{current:{query:'',status:'all',titles:{},projects:[]}},historyRequest:()=>({page_size:100}),setHistoryLoading:()=>{},setHistory:()=>{},setHistoryCursor:()=>{},setHistoryOverview:()=>{},refreshInbox:()=>{},refreshPendingNotifications:()=>{},selectedRecord:app.selectedRecord,setSelectedAgent:()=>{},setError:()=>{},clearDeletedSessionNames:cleanup},'App.tsx');
+ const refresh=retentionAction('refreshHistory',{sessionId:app.sessionId,isMainWindow:true,migrateTerminalMetadata:()=>{},invoke:async command=>{commands.push(command);if(command==='list_session_summaries')return {items:[],next_cursor:null};if(command==='history_overview')return {total:1,active:0,unread_receipts:0,attention_sessions:0,latest_deletion:{preview_id:'s-preview',deleted_ids:['s-one','s-two'],complete:true,issues:[]}};if(command==='get_session')return app.selectedRecord.current;throw Error(command);},deletionReceiptKey:{current:''},historyRefreshVersion:{current:0},historyContext:{current:{query:'',status:'all',titles:{},projects:[]}},historyRequest:()=>({page_size:100}),setHistoryLoading:()=>{},setHistory:()=>{},setHistoryCursor:()=>{},setHistoryOverview:()=>{},refreshInbox:()=>{},refreshPendingNotifications:()=>{},selectedRecord:app.selectedRecord,setSelectedAgent:()=>{},setError:e=>errors.push(e),clearDeletedSessionNames:cleanup},'App.tsx');
  await refresh();
- assert.deepEqual(titles,{'s-other':'Keep'});assert.deepEqual(disposed,['s-two']);assert.deepEqual(removed,['yam.lastSession']);assert.equal(app.previousSession.current,null);assert.equal(app.selectedRecord.current,null);assert.equal(app.sessionId.current,null);
+ assert.deepEqual(titles,{'s-other':'Keep'});assert.deepEqual(disposed,['s-two']);assert.deepEqual(removed,['yam.window.main.lastSession']);assert.equal(app.previousSession.current,null);assert.equal(app.selectedRecord.current,null);assert.equal(app.sessionId.current,null);
  assert.equal(commands.filter(command=>command==='confirm_archive_deletion').length,1,'shared refresh only reads the committed receipt');
  assert.equal(commands.includes('get_session'),false,'the deleted selected record is cleared before detail refresh');
- const version=app.detailVersion.current;await refresh();assert.equal(app.detailVersion.current,version,'repeated receipt does not cancel a newer selection');
+ const version=app.detailVersion.current;await refresh();assert.equal(app.detailVersion.current,version,'repeated receipt does not cancel a newer selection');assert.deepEqual(errors,[]);
 });
 test('T05 review F1 a lost confirm response retains its token for idempotent retry',async()=>{
  let first=true;const h=deletionHarness(async()=>{if(first){first=false;throw Error('connection closed after committed response');}return {deleted_ids:['s-one','s-two'],complete:true,issues:[]};},exactPreview);
@@ -209,7 +214,7 @@ test('T05 review F2 only a successful restore removes its selected archive ID',a
 });
 for(const fail of [false,true])test(`T05 review F3 a delayed initial policy ${fail?'error':'false response'} cannot overwrite a newer saved opt-in`,async()=>{
  let finish;let enabled=false;const errors=[];const policyRequestVersion={current:0};
- const bindings={policyRequestVersion,invoke:async command=>command==='get_history_policy'?new Promise((resolve,reject)=>finish=()=>fail?reject(Error('stale read error')):resolve({auto_archive_30_days:false,auto_delete:false})):undefined,setAutoArchive:value=>enabled=value,setError:value=>errors.push(value),busyRef:{current:false},setBusy:()=>{}};
+ const bindings={isMainWindow:true,desktopWindow:{slot:"main",epoch:1,main_epoch:1,restore_blocked:false,requested_session:null,owned_ids:[]},windowPreferenceKey:name=>windowContext.windowPreferenceKey("main",name),policyRequestVersion,invoke:async command=>command==='get_history_policy'?new Promise((resolve,reject)=>finish=()=>fail?reject(Error('stale read error')):resolve({auto_archive_30_days:false,auto_delete:false})):undefined,setAutoArchive:value=>enabled=value,setError:value=>errors.push(value),busyRef:{current:false},setBusy:()=>{}};
  const loading=retentionAction('loadRetentionPolicy',bindings)();await retentionAction('saveRetentionPolicy',bindings)(true);assert.equal(enabled,true);
  finish();await loading;assert.equal(enabled,true);assert.ok(errors.every(error=>!String(error).includes('stale read error')));
 });

@@ -1,13 +1,23 @@
+import {englishUiRead} from './fixtures/english-ui-source.mjs';
+const readFileSync=(...args)=>englishUiRead(rawReadFileSync,...args);
+import './fixtures/i18n-test-init.mjs';
+import {defaultTerminalLineHeight,parseTerminalLineHeight} from '../src/terminal-line-height.ts';
+import {TERMINAL_SCROLLBACK_LINES} from '../src/terminal-frame.ts';
+import {terminalCursorOptions,defaultTerminalCursor} from '../src/terminal-cursor.ts';
+import {readSavedWindowPreference,windowPreferenceKey,terminalWindowClaim,publishWindowPreference,terminalMoveReply} from '../src/window-context.ts';
+import {terminalReportedCwd,terminalReportedCommand,terminalClearDisplayVersion,terminalReportedPromptNavigation} from '../src/terminal-frame.ts';
 // Author: Jeff.Liu. Actual App effects/callbacks; in-memory IPC and DOM, not native GUI.
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {readFileSync} from 'node:fs';
+import {readFileSync as rawReadFileSync} from 'node:fs';
 import ts from 'typescript';
 import {TerminalViews} from '../src/terminal-views.ts';
+import * as layoutOperations from '../src/terminal-layout.ts';
 import {createTerminalLayout,assignTerminalPane,removeTerminalPane,changeTerminalLayout,isTerminalProtocolResponse,clampSplitPercent,swapTerminalPanes} from '../src/terminal-layout.ts';
 import {loadTerminalLayout,saveTerminalLayout,decodeTerminalLayout,encodeTerminalLayout} from '../src/terminal-layout-persistence.ts';
+import {createTerminalScroll,updateTerminalScroll} from '../src/terminal-scroll.ts';
 import {applyTerminalFrame,validateTerminalFrame} from '../src/terminal-frame.ts';
-import {queueTerminalResize} from '../src/terminal-settings.ts';
+import {queueTerminalResize,saveTerminalSettings} from '../src/terminal-settings.ts';
 
 const source=ts.createSourceFile('App.tsx',readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
 const app=source.statements.find(n=>ts.isFunctionDeclaration(n)&&n.name?.text==='App');
@@ -29,18 +39,19 @@ const snapshot=(mode,panes,selected=panes[0])=>JSON.stringify({version:1,mode,pa
 function frame(id){return {projection:{version:1,session:id,instance:'a'.repeat(64),terminal_version:'6.0.0',serialize_version:'0.14.0',revision:1,data:'fixture output',cols:100,rows:40,cursorX:1,viewport:0,buffer:'normal'},end_offset:10,status:'running',persisted:false};}
 function deferred(){let resolve,reject;const promise=new Promise((ok,no)=>{resolve=ok;reject=no});return {promise,resolve,reject};}
 
-function fixture(raw,{last=null,pending=null,readError=false,writeError=false,rpc,parserPending=false}={}){
+function fixture(raw,{last=null,pending=null,readError=false,writeError=false,rpc,parserPending=false,appearanceBindings={}}={}){
  const calls=[],errors=[],storageReads=[],storageWrites=[],listeners=new Map(),raf=[],parsers=[],state={recoveryRevision:0};let nextFrame=0;
  const storage=new Map();if(raw!==null)storage.set('yam.terminalLayout',raw);if(last)storage.set('yam.lastSession',JSON.stringify(last));
  const ref=value=>({current:value});
- const refs={ownerConnectionAvailable:ref({available:true,version:0}),terminalViews:ref(new TerminalViews(16)),terminalMounted:ref(false),paneHosts:ref(new Map()),terminalHost:ref({append(e){e.parentElement=this;}}),createView:ref(null),creatingSession:ref(false),sessionId:ref(null),previousSession:ref(null),terminal:ref(null),fitAddon:ref(null),outputCursor:ref(null),selectedRecord:ref(null),detailVersion:ref(0),selectionVersion:ref(0),layoutVersion:ref(0),agentOutputWindow:ref(''),pendingState:ref(new Map()),pendingOutput:ref({drain:()=>[],push(){},delete(){},clear(){}}),pausedRef:ref(false),notificationContextVersion:ref(0),notificationContextFlight:ref({sending:false,pending:null}),terminalSettingsRef:ref({}),retryNotifications:ref(new Map()),pinnedSessionsRef:ref([]),projectConfigVersion:ref(0),projectSelection:ref({cancel(){}}),launchDialog:ref({close(){},showModal(){}}),projectDialog:ref({close(){}}),renameDialog:ref({close(){}})};
- const document={body:{},activeElement:null,hasFocus:()=>false,addEventListener(){},removeEventListener(){},createElement(){return {style:{},dataset:{},parentElement:null,inert:true,contains:()=>false,getBoundingClientRect:()=>({width:600,height:400}),addEventListener(){},remove(){}};}};document.activeElement=document.body;
+ const refs={conversationOpenRef:ref(false),titlesRef:ref({}),terminalReopen:ref(null),terminalReopenFlight:ref(null),terminalMoveTaskRef:ref(null),terminalMoveIncomingRef:ref(null),terminalMoveOperationRef:ref(false),pendingViewClaims:ref(new Map()),viewClaimSelection:ref(0),paneClaimSelection:ref(new Map()),fileDropPending:ref(null),pastePending:ref(null),zoomedPaneIdRef:ref(null),terminalPaneZoomIntent:ref(0),ownerConnectionAvailable:ref({available:true,version:0}),terminalViews:ref(new TerminalViews(16)),terminalMounted:ref(false),paneHosts:ref(new Map()),terminalHost:ref({append(e){e.parentElement=this;}}),createView:ref(null),creatingSession:ref(false),sessionId:ref(null),previousSession:ref(null),terminal:ref(null),fitAddon:ref(null),outputCursor:ref(null),selectedRecord:ref(null),detailVersion:ref(0),selectionVersion:ref(0),layoutVersion:ref(0),agentOutputWindow:ref(''),pendingState:ref(new Map()),pendingOutput:ref({drain:()=>[],push(){},delete(){},clear(){}}),pausedRef:ref(false),notificationContextVersion:ref(0),notificationContextFlight:ref({sending:false,pending:null}),terminalSettingsRef:ref({fontFamily:"SFMono-Regular, Menlo, Consolas, monospace",fontSize:13,theme:"dark"}),retryNotifications:ref(new Map()),pinnedSessionsRef:ref([]),projectConfigVersion:ref(0),projectSelection:ref({cancel(){}}),launchDialog:ref({close(){},showModal(){},querySelectorAll(){return [];}}),projectDialog:ref({close(){}}),renameDialog:ref({close(){}})};
+ const document={body:{},activeElement:null,hasFocus:()=>false,addEventListener(){},removeEventListener(){},createElement(){return {style:{},dataset:{},parentElement:null,inert:true,contains:()=>false,getBoundingClientRect:()=>({width:600,height:400}),addEventListener(){},removeEventListener(){},remove(){}};}};document.activeElement=document.body;
  class Terminal {
-  constructor(){this.cols=100;this.rows=40;this.options={};this.textarea={};this.modes={mouseTrackingMode:'none'};this._core={_inputHandler:{_activeBuffer:{x:0}}};}
+  constructor(options){this.cols=100;this.rows=40;this.options={...options};this.textarea={};this.modes={mouseTrackingMode:'none'};this._core={_inputHandler:{_activeBuffer:{x:0}}};}
   loadAddon(){}open(){}onData(fn){this.data=fn;return {dispose(){}};}onScroll(){return {dispose(){}};}reset(){}resize(){}scrollToLine(){}hasSelection(){return false;}focus(){document.activeElement=this.textarea;}dispose(){}write(data,done){if(parserPending&&done)parsers.push(done);else done?.();}writeln(){}
  }
- const localStorage={getItem(key){storageReads.push(key);if(readError&&key==='yam.terminalLayout')throw Error('SECRET_STORAGE_PATH');return storage.get(key)??null;},removeItem:key=>storage.delete(key),setItem(key,value){if(writeError&&key==='yam.terminalLayout')throw Error('SECRET_STORAGE_WRITE');storageWrites.push({key,value});storage.set(key,value);}};
- const args={setRecoveryRevision:update=>{state.recoveryRevision=typeof update==='function'?update(state.recoveryRevision):update;},...refs,document,localStorage,Terminal,FitAddon:class{fit(){}},ResizeObserver:class{observe(){}disconnect(){}},window:{addEventListener(){},removeEventListener(){},setInterval(){return 1;},clearInterval(){}},requestAnimationFrame:fn=>{const id=++nextFrame;fn.rafId=id;raf.push(fn);return id;},cancelAnimationFrame:id=>{const index=raf.findIndex(fn=>fn.rafId===id);if(index>=0)raf.splice(index,1);},createTerminalLayout,assignTerminalPane,removeTerminalPane,changeTerminalLayout,swapTerminalPanes,clampSplitPercent,isTerminalProtocolResponse,loadTerminalLayout,saveTerminalLayout,decodeTerminalLayout,encodeTerminalLayout,queueTerminalResize,applyTerminalFrame,validateTerminalFrame,terminalOptions:()=>({}),terminalStatuses:new Set(['succeeded','failed','stopped','needs_attention']),replayOutput:value=>({data:value.data??'',nextOffset:value.end_offset??0}),consumeOutput(){},refreshHistory(){},notifySession(){},updateAgentPhase(){},readPreference(key,fallback,valid){try{const value=JSON.parse(localStorage.getItem(key));return valid(value)?value:fallback;}catch{return fallback;}},listen:async(name,callback)=>{listeners.set(name,callback);return ()=>listeners.delete(name);},invoke:async(name,parameters)=>{calls.push({name,...parameters});const custom=rpc?.(name,parameters);if(custom!==undefined)return custom;if(name==='pending_notification_selection')return pending;if(name==='get_session')return record(parameters.sessionId);if(name==='read_terminal_frame')return frame(parameters.sessionId);return null;},setError:value=>{state.error=value;if(value)errors.push(value);},setSession:value=>state.session=value,setActiveProject(){},setSessionStatus(){},setSelectedAgent(){},setTerminalNotice:value=>state.notice=value,setAgentPhase(){},setPinnedSessions(){},setSessionTitles(){},setCollapsedProjects(){},setStarting(){},canCloseSessionView:status=>['succeeded','failed','stopped','needs_attention'].includes(status),starting:false,adapters:[],selectedAdapter:'shell',command:'',cwd:'',prompt:'',adapterArgs:'',useProjectSettings:false,projectPreview:null,projectConfigBusy:false,launchMode:'interactive',projectTemplate:'',projectLaunchEdits:{},projectKey:value=>value,setCwd(){},setProjectPreview(){},setUseProjectSettings(){},setProjectConfigBusy(){},setProjectConfigError(){},setProjectLaunchEdits(){},setSelectedAdapter(){},setLaunchMode(){},setCommand(){},setPrompt(){},setAdapterArgs(){},activeProject:'',session:null,globalLaunchDefaults:{adapter:'shell',mode:'task',extra_args:'',prompt:null,command:null},useRef:ref,useState:initial=>[typeof initial==='function'?initial():initial,()=>{}]};
+ const localStorage={getItem(key){storageReads.push(key);if(readError&&key==='yam.terminalLayout')throw Error('SECRET_STORAGE_PATH');return storage.get(key)??null;},removeItem:key=>storage.delete(key),setItem(key,value){if(writeError&&key==='yam.window.main.terminalLayout')throw Error('SECRET_STORAGE_WRITE');storageWrites.push({key,value});storage.set(key,value);}};
+ const desktopWindow={slot:"main",epoch:1,main_epoch:1,owned_ids:[],conflict:false,restore_blocked:false,requested_session:null,preference:readSavedWindowPreference(localStorage,"main")};
+ const args={currentProject:null,terminalProfileCollection:{profiles:[],defaultId:null,loadError:null},terminalProfileStart:()=>({cwd:""}),shellLaunchRef:{current:null},shellWindows:false,setLaunchDirectoryOverride(){},setLaunchTerminalProfile(){},setLaunchWorktreeAttempt(){},setConversationOpen(){},providerConfig:null,setProviderConfig(){},TERMINAL_SCROLLBACK_LINES,desktopWindow,isMainWindow:true,windowPreferenceKey:name=>windowPreferenceKey("main",name),terminalWindowClaim:()=>1,installTerminalLinks:()=>({dispose(){}}),shortcutMac:false,setZoomedPaneId(){},...layoutOperations,createTerminalScroll,updateTerminalScroll,setRecoveryRevision:update=>{state.recoveryRevision=typeof update==='function'?update(state.recoveryRevision):update;},...refs,document,localStorage,Terminal,FitAddon:class{fit(){}},ResizeObserver:class{observe(){}disconnect(){}},window:{addEventListener(){},removeEventListener(){},setInterval(){return 1;},clearInterval(){}},requestAnimationFrame:fn=>{const id=++nextFrame;fn.rafId=id;raf.push(fn);return id;},cancelAnimationFrame:id=>{const index=raf.findIndex(fn=>fn.rafId===id);if(index>=0)raf.splice(index,1);},createTerminalLayout,assignTerminalPane,removeTerminalPane,changeTerminalLayout,swapTerminalPanes,clampSplitPercent,isTerminalProtocolResponse,loadTerminalLayout,saveTerminalLayout,decodeTerminalLayout,encodeTerminalLayout,queueTerminalResize,applyTerminalFrame,terminalReportedCwd,terminalReportedCommand,terminalClearDisplayVersion,terminalReportedPromptNavigation,validateTerminalFrame,terminalLineHeightRef:{current:defaultTerminalLineHeight},terminalCursorRef:{current:defaultTerminalCursor},terminalCursorOptions,terminalSystemThemeRef:{current:"dark"},terminalOptions:()=>({}),terminalStatuses:new Set(['succeeded','failed','stopped','needs_attention']),replayOutput:value=>({data:value.data??'',nextOffset:value.end_offset??0}),consumeOutput(){},refreshHistory(){},notifySession(){},updateAgentPhase(){},readPreference(key,fallback,valid){try{const value=JSON.parse(localStorage.getItem(key));return valid(value)?value:fallback;}catch{return fallback;}},listen:async(name,callback)=>{listeners.set(name,callback);return ()=>listeners.delete(name);},invoke:async(name,parameters)=>{calls.push({name,...parameters});const custom=rpc?.(name,parameters);if(custom!==undefined)return custom;if(name==='claim_terminal_view')return 1;if(name==='pending_notification_selection')return pending;if(name==='get_session')return record(parameters.sessionId);if(name==='read_terminal_frame')return frame(parameters.sessionId);return null;},setError:value=>{state.error=value;if(value)errors.push(value);},setSession:value=>state.session=value,setActiveProject(){},setSessionStatus(){},setSelectedAgent:value=>state.agent=value,setTerminalNotice:value=>state.notice=value,setAgentPhase(){},setPinnedSessions:next=>state.pins=typeof next==='function'?next(state.pins??[]):next,setSessionTitles:next=>state.titles=typeof next==='function'?next(state.titles??{}):next,setCollapsedProjects(){},setStarting(){},canCloseSessionView:status=>['succeeded','failed','stopped','needs_attention'].includes(status),starting:false,adapters:[],selectedAdapter:'shell',command:'',cwd:'',prompt:'',adapterArgs:'',useProjectSettings:false,projectPreview:null,projectConfigBusy:false,launchMode:'interactive',projectTemplate:'',projectLaunchEdits:{},projectKey:value=>value,setCwd(){},setProjectPreview(){},setUseProjectSettings(){},setProjectConfigBusy(){},setProjectConfigError(){},setProjectLaunchEdits(){},setLaunchDraft(){},setSelectedAdapter(){},setLaunchMode(){},setCommand(){},setPrompt(){},setAdapterArgs(){},activeProject:'',session:null,globalLaunchDefaults:{adapter:'shell',mode:'task',extra_args:'',prompt:null,command:null},useRef:ref,useState:initial=>[typeof initial==='function'?initial():initial,()=>{}],...appearanceBindings};
  // Actual declarations initialize the layout and any narrowly scoped restore state.
  const names=initializers.map(n=>n.name.getText(source));
  const declared=new Set(initializers.filter(n=>ts.isIdentifier(n.name)).map(n=>n.name.text));
@@ -48,13 +59,19 @@ function fixture(raw,{last=null,pending=null,readError=false,writeError=false,rp
  const init=initializers.map(n=>`let ${n.getText(source)};`).join('\n');
  const stateBindings=initializers.filter(n=>ts.isArrayBindingPattern(n.name)&&n.name.elements.length===2).map(n=>{const [value,setter]=n.name.elements.map(e=>e.name?.getText(source));return `${setter}=next=>{${value}=typeof next==='function'?next(${value}):next;};`;}).join('\n');
  const getters=names.map(name=>ts.isIdentifier(initializers[names.indexOf(name)].name)?name:name.slice(1,-1).split(',')[0].trim());
- const code=init+'\n'+stateBindings+'\n'+declarations.map(n=>n.getText(source)).join('\n')+`\nconst setup=${setupText};\nconst persist=()=>{${persistenceText.map(text=>`(${text})();`).join('\n')}};\nreturn {setup,persist,${getters.map(name=>`get ${name}(){return ${name}}`).join(',')},openSession,openHistory,focusTerminalPane,changeLayoutMode,closeTerminalPane,commitTerminalSplit,newSession,startSession,clearDeletedSessionNames,closeEndedView};`;
+ const code=init+'\n'+stateBindings+'\n'+declarations.map(n=>n.getText(source)).join('\n')+`\nconst setup=${setupText};\nconst persist=()=>{${persistenceText.map(text=>`(${text})();`).join('\n')}};\nreturn {setup,persist,get retrySavedLayout(){return retrySavedLayout;},commitTerminalAppearance,receiveWindowPreference,${getters.map(name=>`get ${name}(){return ${name}}`).join(',')},refreshSelectedAgent,openReceipt,showConversation,applyTerminalPreferences,migrateTerminalMetadata,applyTerminalTabMove,disposeMoveSource,openSession,openHistory,selectTerminalTab,reopenTerminalTab,canReopenTerminalTab,closeTerminalTab,focusTerminalPane,changeLayoutMode,splitFocusedTerminalPane,closeTerminalPane,commitTerminalSplit,newSession,startSession,clearDeletedSessionNames,closeEndedView};`;
  const actual=new Function(...Object.keys(context),transpile(code))(...Object.values(context));
- return {actual,refs,state,calls,errors,storage,storageReads,storageWrites,listeners,raf,parsers,localStorage,async mount(){this.cleanup=actual.setup();await settle();},emit(name,payload){listeners.get(name)?.({payload});},layout:()=>actual.terminalLayoutRef.current,save:()=>actual.persist(),async flush(){await settle();while(raf.length)raf.shift()();await settle();}};
+ return {actual,desktopWindow,refs,document,state,calls,errors,storage,storageReads,storageWrites,listeners,raf,parsers,localStorage,async mount(){this.cleanup=actual.setup();await settle();},emit(name,payload){listeners.get(name)?.({payload});},layout:()=>actual.terminalLayoutRef.current,save:()=>actual.persist(),async flush(){await settle();while(raf.length)raf.shift()();await settle();}};
 }
 const forbidden=['create_session','resume_session','stop_session','write_session','take_terminal_control','resize_session'];
 function noTaskMutation(h){assert.deepEqual(h.calls.filter(call=>forbidden.includes(call.name)),[]);}
-function assertStored(h,expected){const writes=h.storageWrites.filter(w=>w.key==='yam.terminalLayout');assert.ok(writes.length,'actual App persistence writes the layout');assert.deepEqual(JSON.parse(writes.at(-1).value),expected.version===1?{...expected,version:2,splitPercent:50}:expected);}
+function assertStored(h,expected){
+ const writes=h.storageWrites.filter(w=>w.key==='yam.window.main.terminalLayout');assert.ok(writes.length,'actual App persistence writes the layout');
+ const saved=JSON.parse(writes.at(-1).value);assert.equal(saved.version,5);assert.deepEqual(Object.keys(saved).sort(),['appearances','focusedPane','root','version']);
+ const result=decodeTerminalLayout(writes.at(-1).value);assert.equal(result.warning,null);assert.deepEqual(result.layout.panes,expected.panes);assert.equal(result.layout.mode,expected.mode);
+ assert.equal(result.layout.panes[result.layout.focused],expected.selected);assert.equal(result.layout.focused,h.layout().focused,'exact empty pane identity persists');
+ if(expected.mode==='horizontal'||expected.mode==='vertical')assert.equal(result.splitPercent,expected.splitPercent??50);
+}
 
 test('T15 actual App restores two existing IDs in their saved panes and focus',async()=>{
  const h=fixture(snapshot('horizontal',ids.slice(0,2),ids[1]));await h.mount();await h.flush();
@@ -62,6 +79,236 @@ test('T15 actual App restores two existing IDs in their saved panes and focus',a
  assert.deepEqual(h.layout().panes,ids.slice(0,2));assert.equal(h.refs.sessionId.current,ids[1]);
  for(const id of ids.slice(0,2)){const view=h.refs.terminalViews.current.get(id);assert.ok(view);assert.equal(view.ready,true);assert.equal(view.writable,false);assert.equal(view.firstAttachment,false);}noTaskMutation(h);
 });
+test('opening an ended terminal resumes by stored identity and replaces its saved tab',async()=>{
+ const old=ids[0],next=ids[1],ended={...record(old),status:'stopped'};
+ const h=fixture(snapshot('single',[old]),{rpc:(name,args)=>name==='get_session'?Promise.resolve(args.sessionId===old?ended:record(next)):name==='create_session'?Promise.resolve({...record(next).summary,status:'running'}):undefined});
+ await h.mount();await h.flush();
+ assert.deepEqual(h.calls.filter(c=>c.name==='create_session').map(({name,...args})=>args),[{resumeFrom:old,cwd:null,command:null,launch:null}]);
+ assert.deepEqual(h.layout().panes,[next]);assert.equal(h.refs.sessionId.current,next);
+ assert.equal(h.refs.terminalViews.current.get(next).live,true);
+ assert.equal(h.calls.filter(c=>c.name==='stop_session').length,0);h.cleanup();
+});
+
+test('opening stale history attaches the returned live execution and does not re-run its command',async()=>{
+ const old=ids[0],next=ids[1],ended={...record(old),status:'stopped'};
+ const h=fixture(null,{rpc:(name,args)=>name==='get_session'?Promise.resolve(args.sessionId===old?ended:record(next)):name==='create_session'?Promise.resolve({...record(next).summary,status:'running'}):undefined});
+ await h.mount();assert.equal(await h.actual.openSession(old),true);await h.flush();
+ const calls=h.calls.filter(c=>c.name==='create_session');assert.equal(calls.length,1);assert.equal(calls[0].resumeFrom,old);assert.equal(calls[0].command,null);
+ assert.equal(h.refs.sessionId.current,next);h.cleanup();
+});
+
+test('recovery releases the native claim but keeps its old scene until attachment at the sixteen-tab limit',async()=>{
+ const members=Array.from({length:16},(_,i)=>`s-19aa2b3-${(i+1).toString(16)}`),next='s-19aa2b4-1';
+ let saved=createTerminalLayout();for(const id of members)saved=assignTerminalPane(saved,0,id);
+ let h,recovering=false;h=fixture(encodeTerminalLayout(saved),{rpc:(name,args)=>{
+  if(recovering&&name==='get_session'&&args.sessionId===members[0])return Promise.resolve({...record(members[0]),status:'stopped'});
+  if(name==='create_session'){assert.equal(h.refs.terminalViews.current.size,16);assert.equal(h.refs.terminalViews.current.get(members[0])?.disposed,false);assert.ok(h.calls.some(c=>c.name==='release_terminal_view'&&c.sessionId===members[0]));return Promise.resolve({...record(next).summary,status:'running'});}
+ }});
+ await h.mount();await h.flush();const old=h.refs.terminalViews.current.get(members[0]);old.live=false;old.status='stopped';old.record.status='stopped';recovering=true;
+ assert.equal(await h.actual.openSession(members[0]),true);await h.flush();
+ assert.equal(old.disposed,true);assert.equal(h.refs.terminalViews.current.size,16);assert.equal(layoutOperations.terminalMembers(h.layout()).length,16);assert.ok(!layoutOperations.terminalMembers(h.layout()).includes(members[0]));h.cleanup();
+});
+
+test('visible ended panes both recover in their original positions while hidden ended tabs stay idle',async()=>{
+ const next=[ids[2],ids[3]],hidden='s-19aa2b3-a';let layout=changeTerminalLayout(createTerminalLayout(),'horizontal');
+ layout=assignTerminalPane(layout,0,hidden);layout=assignTerminalPane(layout,0,ids[0]);layout=assignTerminalPane(layout,1,ids[1]);
+ const h=fixture(encodeTerminalLayout(layout),{rpc:(name,args)=>{
+  if(name==='get_session')return Promise.resolve({...record(args.sessionId),status:next.includes(args.sessionId)?'running':'stopped'});
+  if(name==='create_session')return Promise.resolve({...record(next[ids.indexOf(args.resumeFrom)]).summary,status:'running'});
+  if(name==='read_terminal_frame')return Promise.resolve({...frame(args.sessionId),status:args.sessionId===hidden?'stopped':'running',persisted:args.sessionId===hidden});
+ }});
+ await h.mount();await h.flush();assert.deepEqual(h.layout().panes,next);assert.equal(h.refs.sessionId.current,next[1]);
+ assert.deepEqual(h.calls.filter(c=>c.name==='create_session').map(c=>c.resumeFrom),ids.slice(0,2));
+ assert.deepEqual(layoutOperations.terminalTabs(layoutOperations.terminalLeaves(layoutOperations.terminalLayoutRoot(h.layout()))[0]),[hidden,next[0]]);
+ assert.equal(h.refs.terminalViews.current.get(hidden).live,false);h.cleanup();
+});
+
+test('an obsolete recovery result cannot replace a newer selection or overwrite its error',async()=>{
+ for(const outcome of ['resolve','reject']){
+  const pending=deferred();
+  const h=fixture(null,{rpc:(name,args)=>name==='get_session'?Promise.resolve({...record(args.sessionId),status:args.sessionId===ids[0]?'stopped':'running'}):name==='create_session'?pending.promise:undefined});
+  await h.mount();const opening=h.actual.openSession(ids[0]);await settle();
+  assert.ok(h.calls.some(c=>c.name==='create_session'));
+  assert.equal(await h.actual.openSession(ids[1]),true);h.state.error='keep newer error';
+  if(outcome==='resolve')pending.resolve({...record(ids[2]).summary,status:'running'});else pending.reject(Error('late recovery failure'));
+  assert.equal(await opening,false);assert.equal(h.refs.sessionId.current,ids[1]);assert.equal(h.state.error,'keep newer error');
+  assert.ok(!layoutOperations.terminalMembers(h.layout()).includes(ids[2]));h.cleanup();
+ }
+});
+
+test('explicit previous-run inspection keeps ended output read-only without a recovery request',async()=>{
+ const h=fixture(null,{rpc:(name,args)=>name==='get_session'?Promise.resolve({...record(args.sessionId),status:'stopped'}):name==='read_terminal_frame'?Promise.resolve({...frame(args.sessionId),status:'stopped',persisted:true}):undefined});
+ await h.mount();assert.equal(await h.actual.openSession(ids[0],undefined,undefined,true),true);await h.flush();
+ assert.equal(h.refs.terminalViews.current.get(ids[0]).live,false);assert.equal(h.calls.some(c=>c.name==='create_session'),false);
+ await h.actual.openSession(ids[1],undefined,undefined,true);h.actual.selectTerminalTab(0,ids[0]);await h.flush();assert.equal(h.calls.some(c=>c.name==='create_session'),false,'selecting a previous-run log remains read-only');h.cleanup();
+});
+test('I1 selecting ended history while reading Conversation never resumes its process',async()=>{
+ const h=fixture(null,{rpc:(name,args)=>name==='get_session'?Promise.resolve({...record(args.sessionId),status:'stopped'}):name==='read_terminal_frame'?Promise.resolve({...frame(args.sessionId),status:'stopped',persisted:true}):undefined});
+ await h.mount();h.refs.conversationOpenRef.current=true;assert.equal(await h.actual.openSession(ids[0]),true);await h.flush();noTaskMutation(h);assert.equal(h.refs.terminalViews.current.get(ids[0]).recordedOnly,true);h.cleanup();
+});
+test('I1 startup keeps ended Codex panes, native identities and recorded-only history without resume',async()=>{
+ const launch={adapter:'codex',mode:'interactive'},h=fixture(snapshot('horizontal',ids.slice(0,2),ids[1]),{rpc:(name,args)=>name==='get_session'?Promise.resolve({...record(args.sessionId),summary:{...record(args.sessionId).summary,launch},status:'stopped',agent:{generation:'g',agent_session_id:'native'}}):name==='read_terminal_frame'?Promise.resolve({...frame(args.sessionId),status:'stopped',persisted:true}):undefined});
+ await h.mount();await h.flush();noTaskMutation(h);assert.deepEqual(h.layout().panes,ids.slice(0,2));for(const id of ids.slice(0,2)){const view=h.refs.terminalViews.current.get(id);assert.equal(view.live,false);assert.equal(view.recordedOnly,true);assert.equal(view.record.agent.agent_session_id,'native');}h.cleanup();
+});
+test('I1 reader intent stays read-only when Terminal is selected before the history lookup finishes',async()=>{
+ const pending=deferred(),h=fixture(null,{rpc:(name,args)=>name==='get_session'?pending.promise:name==='read_terminal_frame'?Promise.resolve({...frame(args.sessionId),status:'stopped',persisted:true}):undefined});await h.mount();h.refs.conversationOpenRef.current=true;const opening=h.actual.openSession(ids[0]);h.refs.conversationOpenRef.current=false;pending.resolve({...record(ids[0]),status:'stopped'});assert.equal(await opening,true);await h.flush();noTaskMutation(h);h.cleanup();
+});
+
+test('an ended hidden terminal reopens in its remembered pane after focus moves elsewhere',async()=>{
+ const old=ids[1],next=ids[2];
+ const h=fixture(snapshot('horizontal',ids.slice(0,2),old),{rpc:(name,args)=>name==='create_session'?Promise.resolve({...record(next).summary,status:'running'}):undefined});
+ await h.mount();await h.flush();const originalPane=layoutOperations.terminalPaneId(h.layout(),1),view=h.refs.terminalViews.current.get(old);
+ view.live=false;view.status='stopped';view.record.status='stopped';
+ h.actual.closeTerminalTab(1,old);h.actual.focusTerminalPane(0);assert.equal(h.actual.canReopenTerminalTab(),true);
+ await h.actual.reopenTerminalTab();await h.flush();
+ assert.deepEqual(h.layout().panes,[ids[0],next]);assert.equal(layoutOperations.terminalPaneId(h.layout(),1),originalPane);h.cleanup();
+});
+
+test('a recovered terminal routed to another window does not change local pane membership',async()=>{
+ const old=ids[0],foreign=ids[1];let recovering=false;
+ const h=fixture(snapshot('single',[old]),{rpc:(name,args)=>{
+  if(recovering&&name==='get_session'&&args.sessionId===old)return Promise.resolve({...record(old),status:'stopped'});
+  if(name==='create_session')return Promise.resolve({...record(foreign).summary,status:'running'});
+  if(name==='claim_terminal_view'&&args.sessionId===foreign)return Promise.resolve(null);
+ }});
+ await h.mount();await h.flush();recovering=true;const view=h.refs.terminalViews.current.get(old);view.record.status='stopped';view.status='stopped';view.live=false;
+ assert.equal(await h.actual.openSession(old),false);await h.flush();assert.deepEqual(h.layout().panes,[old]);
+ assert.equal(h.refs.terminalViews.current.get(foreign),undefined);h.cleanup();
+});
+
+for(const main of [true,false])test(`terminal recovery retains title and pin with durable main ownership: ${main}`,async()=>{
+ const old=ids[0],next=ids[1];
+ const h=fixture(null,{appearanceBindings:{isMainWindow:main},rpc:(name,args)=>name==='get_session'?Promise.resolve({...record(args.sessionId),status:args.sessionId===old?'stopped':'running'}):name==='create_session'?Promise.resolve({...record(next).summary,status:'running'}):undefined});
+ await h.mount();h.refs.titlesRef.current={[old]:'My terminal'};h.refs.pinnedSessionsRef.current=[old];h.state.titles={[old]:'My terminal'};h.state.pins=[old];h.storage.set('yam.pinnedSessions',JSON.stringify([old]));h.storage.set('yam.sessionTitles',JSON.stringify(h.state.titles));
+ assert.equal(await h.actual.openSession(old),true);await h.flush();
+ assert.equal(h.state.titles[next],'My terminal');assert.deepEqual(h.state.pins,[next]);assert.deepEqual(h.refs.pinnedSessionsRef.current,[next]);
+ if(main){assert.deepEqual(JSON.parse(h.storage.get('yam.pinnedSessions')),[next]);assert.equal(JSON.parse(h.storage.get('yam.sessionTitles'))[next],'My terminal');}
+ else{
+  assert.deepEqual(JSON.parse(h.storage.get('yam.pinnedSessions')),[old]);
+  assert.equal(h.calls.filter(c=>c.name==='create_session'&&c.resumeFrom===old).length,1);const forwarded={payload:{previous:old,next}};
+  const primary=fixture(null);await primary.mount();primary.refs.titlesRef.current={[old]:'My terminal'};primary.refs.pinnedSessionsRef.current=[old];
+  primary.emit('terminal-reopened',forwarded.payload);await primary.flush();
+  assert.deepEqual(JSON.parse(primary.storage.get('yam.pinnedSessions')),[next]);assert.equal(JSON.parse(primary.storage.get('yam.sessionTitles'))[next],'My terminal');primary.cleanup();
+ }
+ h.cleanup();
+});
+
+test('main history refresh repairs metadata after a missed secondary-window recovery event',async()=>{
+ const old=ids[0],next=ids[1],h=fixture(null);await h.mount();
+ h.refs.titlesRef.current={[old]:'Keep this name'};h.refs.pinnedSessionsRef.current=[old];
+ await actualRefresh(h,[],[{...record(next),previous_runs:[old]}]);
+ assert.equal(JSON.parse(h.storage.get('yam.sessionTitles'))[next],'Keep this name');assert.deepEqual(JSON.parse(h.storage.get('yam.pinnedSessions')),[next]);h.cleanup();
+});
+
+for(const inactive of [false,true])test(`explicit previous-run inspection survives saved layout restore: inactive=${inactive}`,async()=>{
+ const old=ids[0],live=ids[1],next=ids[2];
+ const rpc=(name,args)=>name==='get_session'?Promise.resolve({...record(args.sessionId),status:args.sessionId===old?'stopped':'running'}):name==='create_session'?Promise.resolve({...record(next).summary,status:'running'}):name==='read_terminal_frame'?Promise.resolve({...frame(args.sessionId),status:args.sessionId===old?'stopped':'running',persisted:args.sessionId===old}):undefined;
+ const original=fixture(null,{rpc});await original.mount();await original.actual.openSession(old,undefined,undefined,true);
+ if(inactive)await original.actual.openSession(live);
+ await original.flush();original.save();const raw=original.storage.get('yam.window.main.terminalLayout');original.cleanup();
+ const restored=fixture(raw,{rpc});await restored.mount();await restored.flush();
+ if(inactive){restored.actual.selectTerminalTab(0,old);await restored.flush();}
+ assert.equal(restored.calls.filter(c=>c.name==='create_session').length,0,'explicit recorded views must never start a process on restore or reselection');
+ assert.equal(restored.refs.sessionId.current,old);assert.equal(restored.refs.terminalViews.current.get(old).recordedOnly,true);restored.cleanup();
+});
+
+for(const action of ['closeTerminalTab','closeTerminalPane'])for(const recordedOnly of [false,true])test(`revealing an ended tab through ${action} preserves readonly=${recordedOnly}`,async()=>{
+ const old=ids[0],live=ids[1],next=ids[2];let layout=createTerminalLayout();layout=assignTerminalPane(layout,0,old);layout=assignTerminalPane(layout,0,live);
+ const h=fixture(encodeTerminalLayout(layout),{rpc:(name,args)=>name==='get_session'?Promise.resolve({...record(args.sessionId),status:args.sessionId===old?'stopped':'running'}):name==='create_session'?Promise.resolve({...record(next).summary,status:'running'}):name==='read_terminal_frame'?Promise.resolve({...frame(args.sessionId),status:args.sessionId===old?'stopped':'running',persisted:args.sessionId===old}):undefined});
+ await h.mount();await h.flush();h.refs.terminalViews.current.get(old).recordedOnly=recordedOnly;
+ if(action==='closeTerminalTab')h.actual.closeTerminalTab(0,live);else h.actual.closeTerminalPane(0);
+ await h.flush();
+ assert.equal(h.calls.filter(c=>c.name==='create_session').length,recordedOnly?0:1);
+ assert.equal(h.refs.sessionId.current,recordedOnly?old:next);assert.equal(h.refs.terminalViews.current.get(recordedOnly?old:next).live,!recordedOnly);h.cleanup();
+});
+
+test('recovery through an older run retains metadata from the latest execution',async()=>{
+ const old=ids[0],latest=ids[1],next=ids[2];
+ const h=fixture(null,{rpc:(name,args)=>name==='get_session'?Promise.resolve({...record(args.sessionId),status:args.sessionId===next?'running':'stopped'}):name==='create_session'?Promise.resolve({...record(next).summary,status:'running',reopened_from:latest}):undefined});
+ await h.mount();h.refs.titlesRef.current={[old]:'Outdated name',[latest]:'Current name'};h.refs.pinnedSessionsRef.current=[latest];
+ assert.equal(await h.actual.openSession(old),true);await h.flush();
+ assert.equal(h.refs.titlesRef.current[next],'Current name');assert.deepEqual(h.refs.pinnedSessionsRef.current,[next]);
+ await actualRefresh(h,[],[{...record(next),previous_runs:[latest,old]}]);assert.equal(h.refs.titlesRef.current[next],'Current name');h.cleanup();
+});
+
+test('moving the active tab recovers a revealed ended source tab without stealing target focus',async()=>{
+ const old=ids[0],live=ids[1],right=ids[2],next=ids[3];let layout=createTerminalLayout();layout=assignTerminalPane(layout,0,old);layout=assignTerminalPane(layout,0,live);layout=layoutOperations.changeTerminalLayout(layout,'horizontal');layout=assignTerminalPane(layout,1,right);
+ const h=fixture(encodeTerminalLayout(layout),{rpc:(name,args)=>name==='get_session'?Promise.resolve({...record(args.sessionId),status:args.sessionId===old?'stopped':'running'}):name==='create_session'?Promise.resolve({...record(next).summary,status:'running'}):name==='read_terminal_frame'?Promise.resolve({...frame(args.sessionId),status:args.sessionId===old?'stopped':'running',persisted:args.sessionId===old}):undefined});
+ await h.mount();await h.flush();h.actual.applyTerminalTabMove(layoutOperations.moveTerminalTab(h.layout(),live,1),live);await h.flush();
+ assert.equal(h.calls.filter(c=>c.name==='create_session').length,1);assert.deepEqual(h.layout().panes,[next,live]);assert.equal(h.layout().focused,1);assert.equal(h.refs.sessionId.current,live);h.cleanup();
+});
+
+test('moving an ended tab after its initial frame read fails recovers and attaches exactly once',async()=>{
+ const old=ids[0],live=ids[1],right=ids[2],next=ids[3];let failed=false,layout=createTerminalLayout();layout=assignTerminalPane(layout,0,old);layout=assignTerminalPane(layout,0,live);layout=layoutOperations.changeTerminalLayout(layout,'horizontal');layout=assignTerminalPane(layout,1,right);
+ const h=fixture(encodeTerminalLayout(layout),{rpc:(name,args)=>{
+  if(name==='get_session')return Promise.resolve({...record(args.sessionId),status:args.sessionId===old?'stopped':'running'});
+  if(name==='create_session')return Promise.resolve({...record(next).summary,status:'running'});
+  if(name==='read_terminal_frame'){if(args.sessionId===old&&!failed){failed=true;return Promise.reject(Error('Frame temporarily unavailable'));}return Promise.resolve({...frame(args.sessionId),status:args.sessionId===old?'stopped':'running',persisted:args.sessionId===old});}
+ }});
+ await h.mount();await h.flush();assert.equal(h.actual.layoutRestore.current.pending,false);assert.equal(h.refs.terminalViews.current.get(old).availability,'terminal_unavailable');
+ h.actual.applyTerminalTabMove(layoutOperations.moveTerminalTab(h.layout(),old,1),old);await h.flush();
+ assert.equal(h.calls.filter(c=>c.name==='create_session').length,1);assert.deepEqual(h.layout().panes,[live,next]);
+ assert.equal(h.refs.sessionId.current,next);assert.equal(h.refs.terminalViews.current.get(next)?.ready,true);assert.equal(h.refs.terminalViews.current.get(next)?.live,true);h.cleanup();
+});
+
+test('moving an unready live tab and recovering its revealed source do not cancel each other',async()=>{
+ const old=ids[0],moved=ids[1],right=ids[2],next=ids[3];let failed=false,layout=createTerminalLayout();layout=assignTerminalPane(layout,0,old);layout=assignTerminalPane(layout,0,moved);layout=layoutOperations.changeTerminalLayout(layout,'horizontal');layout=assignTerminalPane(layout,1,right);
+ const h=fixture(encodeTerminalLayout(layout),{rpc:(name,args)=>{
+  if(name==='get_session')return Promise.resolve({...record(args.sessionId),status:args.sessionId===old?'stopped':'running'});
+  if(name==='create_session')return Promise.resolve({...record(next).summary,status:'running'});
+  if(name==='read_terminal_frame'){if(args.sessionId===moved&&!failed){failed=true;return Promise.reject(Error('Frame temporarily unavailable'));}return Promise.resolve({...frame(args.sessionId),status:args.sessionId===old?'stopped':'running',persisted:args.sessionId===old});}
+ }});
+ await h.mount();await h.flush();assert.equal(h.refs.terminalViews.current.get(moved).availability,'terminal_unavailable');
+ h.actual.applyTerminalTabMove(layoutOperations.moveTerminalTab(h.layout(),moved,1),moved);await h.flush();
+ assert.equal(h.calls.filter(c=>c.name==='create_session').length,1);assert.deepEqual(h.layout().panes,[next,moved]);
+ assert.equal(h.refs.sessionId.current,moved);for(const id of [next,moved]){assert.equal(h.refs.terminalViews.current.get(id)?.ready,true);assert.equal(h.refs.terminalViews.current.get(id)?.live,true);}h.cleanup();
+});
+
+test('a superseded revealed-tab recovery retains its old scene and can attach the already started successor',async()=>{
+ const old=ids[0],moved=ids[1],right=ids[2],next=ids[3],pending=deferred();let layout=createTerminalLayout();layout=assignTerminalPane(layout,0,old);layout=assignTerminalPane(layout,0,moved);layout=layoutOperations.changeTerminalLayout(layout,'horizontal');layout=assignTerminalPane(layout,1,right);
+ const h=fixture(encodeTerminalLayout(layout),{rpc:(name,args)=>name==='get_session'?Promise.resolve({...record(args.sessionId),status:args.sessionId===old?'stopped':'running'}):name==='create_session'?pending.promise:name==='read_terminal_frame'?Promise.resolve({...frame(args.sessionId),status:args.sessionId===old?'stopped':'running',persisted:args.sessionId===old}):undefined});
+ await h.mount();await h.flush();const previous=h.refs.terminalViews.current.get(old);
+ h.actual.applyTerminalTabMove(layoutOperations.moveTerminalTab(h.layout(),moved,1),moved);await settle();
+ assert.equal(h.refs.terminalViews.current.get(old),previous);assert.equal(previous.disposed,false);assert.equal(previous.writable,false);
+ h.actual.focusTerminalPane(1);pending.resolve({...record(next).summary,status:'running'});await h.flush();
+ assert.equal(h.refs.terminalViews.current.get(old),previous);assert.equal(h.refs.sessionId.current,moved);
+ h.actual.selectTerminalTab(0,old);await h.flush();assert.deepEqual(h.layout().panes,[next,moved]);assert.equal(h.refs.terminalViews.current.get(next)?.live,true);h.cleanup();
+});
+
+test('readonly historical intent survives reclaiming a cached view with a new native generation',async()=>{
+ const old=ids[0];let generation=1;
+ const h=fixture(null,{appearanceBindings:{terminalWindowClaim:()=>generation},rpc:(name,args)=>name==='claim_terminal_view'?Promise.resolve(generation):name==='get_session'?Promise.resolve({...record(args.sessionId),status:'stopped'}):name==='read_terminal_frame'?Promise.resolve({...frame(args.sessionId),status:'stopped',persisted:true}):undefined});
+ await h.mount();await h.actual.openSession(old,undefined,undefined,true);await h.flush();generation=2;
+ h.actual.selectTerminalTab(0,old);await h.flush();assert.equal(h.refs.terminalViews.current.get(old)?.desktopGeneration,2);
+ assert.equal(h.refs.terminalViews.current.get(old)?.recordedOnly,true);assert.equal(h.calls.some(c=>c.name==='create_session'),false);h.cleanup();
+});
+
+test('a saved tab with no cached renderer remains selectable after startup recovery is cancelled',async()=>{
+ const old=ids[0],live=ids[1],next=ids[2],pending=deferred();
+ const h=fixture(snapshot('horizontal',[old,live],live),{rpc:(name,args)=>name==='get_session'?Promise.resolve({...record(args.sessionId),status:args.sessionId===old?'stopped':'running'}):name==='create_session'?pending.promise:undefined});
+ await h.mount();await h.flush();h.actual.focusTerminalPane(1);pending.resolve({...record(next).summary,status:'running'});await h.flush();
+ assert.equal(h.refs.terminalViews.current.get(old),undefined);h.actual.selectTerminalTab(0,old);await h.flush();
+ assert.deepEqual(h.layout().panes,[next,live]);assert.equal(h.refs.sessionId.current,next);assert.equal(h.refs.terminalViews.current.get(next)?.ready,true);h.cleanup();
+});
+
+for(const action of ['closeEndedView','clearDeletedSessionNames'])test(`ended view removal through ${action} recovers its revealed ordinary tab`,async()=>{
+ const old=ids[0],removed=ids[1],next=ids[2];let layout=createTerminalLayout();layout=assignTerminalPane(layout,0,old);layout=assignTerminalPane(layout,0,removed);
+ const h=fixture(encodeTerminalLayout(layout),{rpc:(name,args)=>name==='create_session'?Promise.resolve({...record(next).summary,status:'running'}):undefined});
+ await h.mount();await h.flush();for(const id of [old,removed]){const view=h.refs.terminalViews.current.get(id);view.status='stopped';view.record.status='stopped';view.live=false;view.persisted=true;}
+ if(action==='closeEndedView')h.actual.closeEndedView();else h.actual.clearDeletedSessionNames([removed]);await h.flush();
+ assert.equal(h.calls.filter(c=>c.name==='create_session').length,1);assert.equal(h.refs.sessionId.current,next);h.cleanup();
+});
+
+test('cross-window source disposal recovers the revealed tab after acknowledging its ownership release',async()=>{
+ const old=ids[0],moved=ids[1],next=ids[2];let layout=createTerminalLayout();layout=assignTerminalPane(layout,0,old);layout=assignTerminalPane(layout,0,moved);
+ const receipt={token:1,session_id:moved,source:'main',source_epoch:1,source_generation:1,target:'terminal-secondary',target_epoch:2,target_generation:2,appearance:{fontFamily:'monospace',fontSize:13,theme:'dark'},phase:'awaiting_source',source_destroyed:false,target_destroyed:false,accepted:false};
+ const h=fixture(encodeTerminalLayout(layout),{appearanceBindings:{terminalMoveReply},rpc:(name,args)=>name==='get_session'?Promise.resolve({...record(args.sessionId),status:args.sessionId===old?'stopped':'running'}):name==='create_session'?Promise.resolve({...record(next).summary,status:'running'}):name==='release_terminal_view'&&args.moveToken?Promise.resolve({status:'completed',receipt:{...receipt,phase:'completed'}}):name==='read_terminal_frame'?Promise.resolve({...frame(args.sessionId),status:args.sessionId===old?'stopped':'running',persisted:args.sessionId===old}):undefined});
+ await h.mount();await h.flush();const view=h.refs.terminalViews.current.get(moved),task={id:moved,view,instance:view.instance,generation:view.desktopGeneration,attachment:view.attachVersion,connection:h.refs.ownerConnectionAvailable.current.version};h.refs.terminalMoveTaskRef.current=task;
+ await h.actual.disposeMoveSource(task,receipt);await h.flush();
+ const released=h.calls.findIndex(c=>c.name==='release_terminal_view'&&c.moveToken===receipt.token),recovered=h.calls.findIndex(c=>c.name==='create_session');
+ assert.ok(released>=0&&recovered>released);assert.deepEqual(h.layout().panes,[next]);h.cleanup();
+});
+
 test('F2 owner error revokes an in-flight attachment busy state through the real App listener',async()=>{
  const pending=[];const h=fixture(snapshot('horizontal',ids.slice(0,2),ids[0]),{rpc:(name,args)=>name==='read_terminal_frame'?new Promise(resolve=>pending.push({id:args.sessionId,resolve})):undefined});await h.mount();await settle();
  const view=h.refs.terminalViews.current.get(ids[0]);assert.ok(view);view.attaching=true;const before=h.state.recoveryRevision;
@@ -79,7 +326,7 @@ test('T15 actual App preserves intentional all-empty layout and does not use leg
 });
 test('T15 actual App suppresses first persistence while verification waits, then saves settled layout',async()=>{
  const d=deferred(),raw=snapshot('vertical',ids.slice(0,2),ids[0]);const h=fixture(raw,{rpc:(name,args)=>name==='get_session'&&args.sessionId===ids[0]?d.promise:undefined});
- await h.mount();h.save();assert.equal(h.storage.get('yam.terminalLayout'),raw);assert.equal(h.storageWrites.filter(w=>w.key==='yam.terminalLayout').length,0);
+ await h.mount();h.save();assert.equal(h.storage.get('yam.terminalLayout'),raw);assert.equal(h.storageWrites.filter(w=>w.key==='yam.window.main.terminalLayout').length,0);
  d.resolve(record(ids[0]));await h.flush();h.save();assertStored(h,{version:1,mode:'vertical',panes:ids.slice(0,2),selected:ids[0]});
 });
 test('F2 App persists only the committed bounded split ratio beside existing ID state',async()=>{
@@ -103,7 +350,7 @@ test('T15 actual App any unknown, rejected or mismatched saved ID discards entir
 });
 test('T15 actual App pending startup notification bypasses saved IDs and is acknowledged after attachment',async()=>{
  const h=fixture(snapshot('horizontal',ids.slice(0,2),ids[0]),{pending:notificationId});await h.mount();await h.flush();
- assert.equal(h.refs.sessionId.current,notificationId);assert.deepEqual(h.calls.filter(c=>c.name==='get_session').map(c=>c.sessionId),[notificationId]);assert.deepEqual(h.calls.filter(c=>c.name==='acknowledge_notification_selection').map(c=>c.sessionId),[notificationId]);h.save();assertStored(h,{version:1,mode:'single',panes:[notificationId],selected:notificationId});noTaskMutation(h);
+ assert.equal(h.refs.sessionId.current,notificationId);assert.deepEqual(h.calls.filter(c=>c.name==='get_session').map(c=>c.sessionId),[notificationId,notificationId]);assert.deepEqual(h.calls.filter(c=>c.name==='acknowledge_notification_selection').map(c=>c.sessionId),[notificationId]);h.save();assertStored(h,{version:1,mode:'single',panes:[notificationId],selected:notificationId});noTaskMutation(h);
 });
 test('T15 actual App user mode and empty focus during pending restore beat late success and failure',async()=>{
  for(const reject of [false,true]){const d=deferred(),h=fixture(snapshot('horizontal',ids.slice(0,2),ids[0]),{rpc:name=>name==='get_session'?d.promise:undefined});await h.mount();h.actual.changeLayoutMode('grid');h.actual.focusTerminalPane(2,false);h.save();
@@ -119,7 +366,7 @@ test('T15 actual App owner gap or fatal error prevents old restore success and e
  for(const name of ['background-gap','session-error']){const d=deferred(),h=fixture(snapshot('grid',ids,ids[0]),{rpc:n=>n==='get_session'?d.promise:undefined});await h.mount();h.emit(name,name==='background-gap'?{missing_events:false}:{session_id:'',data:'Owner unavailable'});d.resolve(record(ids[0]));await h.flush();assert.deepEqual(h.layout().panes,[null]);assert.equal(h.refs.sessionId.current,null);assert.equal(h.refs.terminalViews.current.all.length,0);noTaskMutation(h);}
 });
 test('T15 actual App unmount and repeated setup invalidate prior restore finalizers',async()=>{
- const d=deferred(),h=fixture(snapshot('horizontal',ids.slice(0,2),ids[0]),{rpc:(name,args)=>name==='get_session'&&args.sessionId===ids[0]?d.promise:undefined});await h.mount();h.cleanup();d.resolve(record(ids[0]));await h.flush();assert.deepEqual(h.layout().panes,[null]);assert.equal(h.refs.terminalViews.current.all.length,0);assert.equal(h.storageWrites.filter(w=>w.key==='yam.terminalLayout').length,0);assert.deepEqual(h.errors,[]);
+ const d=deferred(),h=fixture(snapshot('horizontal',ids.slice(0,2),ids[0]),{rpc:(name,args)=>name==='get_session'&&args.sessionId===ids[0]?d.promise:undefined});await h.mount();h.cleanup();d.resolve(record(ids[0]));await h.flush();assert.deepEqual(h.layout().panes,[null]);assert.equal(h.refs.terminalViews.current.all.length,0);assert.equal(h.storageWrites.filter(w=>w.key==='yam.window.main.terminalLayout').length,0);assert.deepEqual(h.errors,[]);
  await h.mount();await h.flush();assert.deepEqual(h.layout().panes,ids.slice(0,2));noTaskMutation(h);
 });
 test('T15 actual App later mode close and focus mutations save exact ID-only data',async()=>{
@@ -135,8 +382,12 @@ test('T15 actual App validates every saved ID before attaching any pane',async()
  assert.ok(h.calls.some(c=>c.name==='get_session'&&c.sessionId===ids[3]),'current owner validates last saved ID');assert.equal(h.refs.terminalViews.current.size,0);assert.deepEqual(h.calls.filter(c=>c.name==='read_terminal_frame'),[]);
  d.resolve(null);await h.flush();assert.deepEqual(h.layout().panes,[null]);assert.equal(h.refs.terminalViews.current.size,0);
 });
-test('T15 actual App existing ended and archived owner records restore without resume or control',async()=>{
- const h=fixture(snapshot('vertical',ids.slice(0,2),ids[1]),{rpc:(name,args)=>name==='get_session'?Promise.resolve({...record(args.sessionId),status:'succeeded',archived:true}):name==='read_terminal_frame'?Promise.resolve({...frame(args.sessionId),status:'succeeded',persisted:true}):undefined});await h.mount();await h.flush();assert.deepEqual(h.layout().panes,ids.slice(0,2));for(const id of ids.slice(0,2)){assert.equal(h.refs.terminalViews.current.get(id).live,false);assert.equal(h.refs.terminalViews.current.get(id).writable,false);}noTaskMutation(h);
+test('ended and archived visible tabs recover while failed recovery preserves a readable saved scene',async()=>{
+ const h=fixture(snapshot('vertical',ids.slice(0,2),ids[1]),{rpc:(name,args)=>name==='get_session'?Promise.resolve({...record(args.sessionId),status:'succeeded',archived:true}):name==='create_session'?Promise.reject(Error('No trusted native conversation ID is available')):name==='read_terminal_frame'?Promise.resolve({...frame(args.sessionId),status:'succeeded',persisted:true}):undefined});
+ await h.mount();await h.flush();assert.deepEqual(h.layout().panes,ids.slice(0,2));
+ assert.deepEqual(h.calls.filter(c=>c.name==='create_session').map(c=>c.resumeFrom),ids.slice(0,2));
+ for(const id of ids.slice(0,2)){assert.equal(h.refs.terminalViews.current.get(id).live,false);assert.equal(h.refs.terminalViews.current.get(id).writable,false);}
+ assert.match(h.state.error,/No trusted native conversation ID/);assert.equal(h.calls.some(c=>['write_session','stop_session','take_terminal_control'].includes(c.name)),false);h.cleanup();
 });
 for(const action of ['same-focus','empty-focus','close','new','start','delete','close-ended'])test(`T15 actual App ${action} intent cancels pending saved validation`,async()=>{
  const d=deferred(),created=deferred(),h=fixture(snapshot('horizontal',ids.slice(0,2),ids[0]),{rpc:name=>name==='get_session'?d.promise:name==='create_session'?created.promise:undefined});await h.mount();
@@ -184,9 +435,9 @@ test('T15 actual App newer empty-pane user intent defeats a deferred notificatio
 
 
 // Actual refreshHistory body calls the actual App deletion reconciler; only inbox IO is inert.
-async function actualRefresh(h,deletedIds){
+async function actualRefresh(h,deletedIds,items=[]){
  const refresh=app.body.statements.find(n=>ts.isFunctionDeclaration(n)&&n.name?.text==='refreshHistory');
- const args={setRecoveryRevision(){},historyRefreshVersion:{current:0},historyContext:{current:{query:'',status:'all',titles:{},projects:[]}},historyRequest:()=>({}),setHistoryLoading(){},setHistory(){},setHistoryCursor(){},setHistoryOverview(){},deletionReceiptKey:{current:''},clearDeletedSessionNames:h.actual.clearDeletedSessionNames,refreshInbox(){},refreshPendingNotifications(){},selectedRecord:h.refs.selectedRecord,setSelectedAgent(){},setError:e=>h.errors.push(e),invoke:async name=>name==='list_session_summaries'?{items:[],next_cursor:null}:name==='history_overview'?{latest_deletion:{preview_id:'historical-deletion',deleted_ids:deletedIds}}:null};
+ const args={refreshSelectedAgent:h.actual.refreshSelectedAgent,isMainWindow:true,migrateTerminalMetadata:h.actual.migrateTerminalMetadata,TERMINAL_SCROLLBACK_LINES,setRecoveryRevision(){},historyRefreshVersion:{current:0},historyContext:{current:{query:'',status:'all',titles:{},projects:[]}},historyRequest:()=>({}),setHistoryLoading(){},setHistory(){},setHistoryCursor(){},setHistoryOverview(){},deletionReceiptKey:{current:''},clearDeletedSessionNames:h.actual.clearDeletedSessionNames,refreshInbox(){},refreshPendingNotifications(){},selectedRecord:h.refs.selectedRecord,setSelectedAgent(){},setError:e=>h.errors.push(e),invoke:async name=>name==='list_session_summaries'?{items,next_cursor:null}:name==='history_overview'?{latest_deletion:{preview_id:'historical-deletion',deleted_ids:deletedIds}}:null};
  await new Function(...Object.keys(args),transpile(refresh.getText(source))+';return refreshHistory;')(...Object.values(args))();
  return args;
 }
@@ -215,7 +466,7 @@ test('T15 repair multiple same-turn intents coalesce to final membership and foc
  const frames=[];const h=fixture(snapshot('grid',ids,ids[0]),{rpc:(name,args)=>name==='read_terminal_frame'?new Promise(resolve=>frames.push({id:args.sessionId,resolve})):undefined});await h.mount();
  h.actual.changeLayoutMode('horizontal');h.actual.closeTerminalPane(0);h.actual.focusTerminalPane(1,false);await settle();
  for(const entry of frames)entry.resolve(frame(entry.id));await h.flush();
- assert.deepEqual(h.layout().panes,[null,ids[1]]);assert.equal(h.refs.sessionId.current,ids[1]);assert.equal(h.refs.terminalViews.current.get(ids[1])?.ready,true);assert.equal(h.refs.terminalViews.current.get(ids[0])?.element.style.visibility,'hidden');assert.ok(frames.length<=5,'bounded first four plus retained one');noTaskMutation(h);
+ assert.deepEqual(h.layout().panes,[ids[2],ids[1]]);assert.deepEqual(layoutOperations.terminalMembers(h.layout()),[ids[2],ids[3],ids[1]]);assert.equal(h.refs.sessionId.current,ids[1]);assert.equal(h.refs.terminalViews.current.get(ids[1])?.ready,true);assert.equal(h.refs.terminalViews.current.get(ids[0])?.element.style.visibility,'hidden');assert.ok(frames.length<=7,'bounded first four plus all three retained members');noTaskMutation(h);
 });
 for(const invalidation of ['notification','owner','gap','unmount'])test(`T15 repair ${invalidation} supersedes queued adoption and its late callbacks`,async()=>{
  const frames=[];let pending=null;const h=fixture(snapshot('horizontal',ids.slice(0,2),ids[0]),{rpc:(name,args)=>name==='pending_notification_selection'?Promise.resolve(pending):name==='read_terminal_frame'&&args.sessionId!==notificationId?new Promise(resolve=>frames.push({id:args.sessionId,resolve})):undefined});await h.mount();
@@ -266,4 +517,156 @@ for(const action of ['focus','mode','notification','owner'])for(const reject of 
  if(reject)clicked.reject(Error('SECRET_OLD_HISTORY_FAILURE'));else clicked.resolve(record(notificationId));await selecting;
  for(const entry of frames)entry.resolve(frame(entry.id));await h.flush();
  assert.deepEqual({panes:h.layout().panes,id:h.refs.sessionId.current,errors:h.errors},intent);noTaskMutation(h);
+});
+
+
+test('B02a actual App restores nested v3 tree and exact empty focused identity after validating all members',async()=>{
+ let saved=changeTerminalLayout(createTerminalLayout(),'horizontal');saved=assignTerminalPane(saved,0,ids[0]);saved=assignTerminalPane(saved,1,ids[1]);saved=layoutOperations.splitTerminalPane({...saved,focused:1},'vertical');
+ const raw=encodeTerminalLayout(saved),h=fixture(raw);await h.mount();await h.flush();
+ assert.deepEqual(h.layout().root,decodeTerminalLayout(encodeTerminalLayout(saved)).layout.root);assert.equal(h.layout().focused,2);assert.equal(h.refs.sessionId.current,null);
+ assert.deepEqual(h.calls.filter(c=>c.name==='get_session').map(c=>c.sessionId),ids.slice(0,2));
+ const firstAttach=h.calls.findIndex(c=>c.name==='read_terminal_frame');assert.ok(h.calls.slice(0,firstAttach).filter(c=>c.name==='get_session').length===2);noTaskMutation(h);
+ h.save();const latest=JSON.parse(h.storageWrites.filter(w=>w.key==='yam.window.main.terminalLayout').at(-1).value);assert.deepEqual({...latest,version:4,appearances:undefined},{...JSON.parse(raw),appearances:undefined});
+});
+test('B02a actual App missing v3 member discards whole tree without attaching or task mutation',async()=>{
+ let saved=changeTerminalLayout(createTerminalLayout(),'horizontal');saved=assignTerminalPane(saved,0,ids[0]);saved=assignTerminalPane(saved,1,ids[1]);saved=layoutOperations.splitTerminalPane({...saved,focused:1},'vertical');
+ const h=fixture(encodeTerminalLayout(saved),{rpc:(name,args)=>name==='get_session'&&args.sessionId===ids[1]?Promise.resolve(null):undefined});await h.mount();await h.flush();
+ assert.deepEqual(h.layout(),createTerminalLayout());assert.equal(h.calls.some(c=>c.name==='read_terminal_frame'),false);noTaskMutation(h);
+});
+test('B02a actual user split cancels pending v3 verification and late reply cannot overwrite empty tree',async()=>{
+ const wait=deferred(),saved=assignTerminalPane(createTerminalLayout(),0,ids[0]);
+ const h=fixture(encodeTerminalLayout(saved),{rpc:name=>name==='get_session'?wait.promise:undefined});await h.mount();
+ assert.equal(h.storageWrites.filter(w=>w.key==='yam.window.main.terminalLayout').length,0);
+ h.actual.splitFocusedTerminalPane('vertical');const root=structuredClone(h.layout().root);wait.resolve(record(ids[0]));await h.flush();
+ assert.deepEqual(h.layout().root,root);assert.deepEqual(h.layout().panes,[null,null]);assert.equal(h.layout().focused,1);assert.equal(h.refs.sessionId.current,null);assert.equal(h.refs.terminalViews.current.size,0);noTaskMutation(h);
+});
+
+test('B02b actual startup verifies and attaches every hidden member while preserving order active and empty focus',async()=>{
+ let layout=layoutOperations.splitTerminalPane(createTerminalLayout(),'horizontal');layout=assignTerminalPane(layout,0,ids[0]);layout=assignTerminalPane(layout,0,ids[1]);layout={...layout,focused:1};
+ const h=fixture(encodeTerminalLayout(layout));await h.mount();await h.flush();h.save();
+ assert.deepEqual(h.calls.filter(c=>c.name==='get_session').map(c=>c.sessionId),ids.slice(0,2));assert.deepEqual(h.layout().panes,[ids[1],null]);assert.equal(h.layout().focused,1);assert.equal(h.refs.sessionId.current,null);
+ for(const id of ids.slice(0,2))assert.equal(h.refs.terminalViews.current.get(id).ready,true);assert.equal(h.refs.terminalViews.current.get(ids[0]).element.inert,true);assert.equal(h.refs.terminalViews.current.get(ids[1]).element.style.visibility,'visible');
+ assert.deepEqual(layoutOperations.terminalMembers(decodeTerminalLayout(h.storage.get('yam.window.main.terminalLayout')).layout),ids.slice(0,2));noTaskMutation(h);
+});
+test('B02b invalid hidden owner member makes the complete saved layout unavailable before attachment',async()=>{
+ let layout=assignTerminalPane(createTerminalLayout(),0,ids[0]);layout=assignTerminalPane(layout,0,ids[1]);
+ const h=fixture(encodeTerminalLayout(layout),{rpc:(name,args)=>name==='get_session'&&args.sessionId===ids[0]?null:undefined});await h.mount();await h.flush();
+ assert.deepEqual(h.layout().panes,[null]);assert.equal(h.refs.terminalViews.current.size,0);assert.equal(h.calls.some(c=>c.name==='read_terminal_frame'),false);noTaskMutation(h);assert.ok(h.errors.some(e=>/Saved terminal layout is unavailable/.test(e)));
+});
+
+// Independent B05a review reproduction promoted unchanged in behavior to the actual restore fixture.
+for(const failure of ['owner-rejection','mismatched-record','null-record'])test(`B05a post-bootstrap ${failure} preserves namespaced raw and persistence gate`,async()=>{
+ const raw=snapshot('horizontal',ids.slice(0,2),ids[0]);
+ const h=fixture(raw,{rpc:(name,args)=>name==='get_session'?(failure==='owner-rejection'?Promise.reject(Error('temporary owner failure')):Promise.resolve(failure==='null-record'?null:record(notificationId))):undefined});
+ h.storage.set('yam.window.main.terminalLayout',raw);await h.mount();await h.flush();h.save();h.save();
+ assert.equal(h.storage.get('yam.window.main.terminalLayout'),raw);assert.equal(h.storageWrites.filter(row=>row.key==='yam.window.main.terminalLayout').length,0);assert.ok(h.errors.some(error=>/Saved terminal layout is unavailable/.test(error)));assert.equal(h.refs.terminalViews.current.size,0);noTaskMutation(h);
+});
+test('B05a post-bootstrap successful records permit normal settled persistence',async()=>{const raw=snapshot('horizontal',ids.slice(0,2),ids[1]),h=fixture(raw);h.storage.set('yam.window.main.terminalLayout',raw);await h.mount();await h.flush();h.save();assertStored(h,{mode:'horizontal',panes:ids.slice(0,2),selected:ids[1]});noTaskMutation(h);});
+test('B05a post-bootstrap pending selection owner error preserves raw without retry or spawn',async()=>{const raw=snapshot('horizontal',ids.slice(0,2),ids[0]),h=fixture(raw,{rpc:name=>name==='pending_notification_selection'?Promise.reject(Error('owner unavailable')):undefined});h.storage.set('yam.window.main.terminalLayout',raw);await h.mount();await h.flush();h.save();assert.equal(h.storage.get('yam.window.main.terminalLayout'),raw);assert.equal(h.storageWrites.length,0);assert.ok(h.errors.length);noTaskMutation(h);});
+
+function retrySaved(h){let button;function walk(node){if(ts.isJsxElement(node)&&node.openingElement.tagName.getText(source)==='button'&&node.children.some(child=>ts.isJsxText(child)&&child.text.trim()==='Retry saved layout'))button=node;ts.forEachChild(node,walk);}walk(source);assert.ok(button,'actual restore error must expose Retry saved layout');const props=button.openingElement.attributes.properties;assert.ok(props.some(prop=>prop.name?.text==='disabled'),'busy retry is disabled');return h.actual.retrySavedLayout();}
+test('B05a actual restore error retry succeeds without spawn and reuses warm renderer',async()=>{let failing=true;const raw=snapshot('horizontal',ids.slice(0,2),ids[0]),h=fixture(raw,{rpc:name=>name==='get_session'&&failing?Promise.reject(Error('temporary')):undefined});h.storage.set('yam.window.main.terminalLayout',raw);await h.mount();h.save();assert.equal(h.storage.get('yam.window.main.terminalLayout'),raw);failing=false;await h.actual.openHistory(record(ids[0]));const warm=h.refs.terminalViews.current.get(ids[0]);await retrySaved(h);await h.flush();h.save();assert.equal(h.refs.terminalViews.current.get(ids[0]),warm);assertStored(h,{mode:'horizontal',panes:ids.slice(0,2),selected:ids[0]});noTaskMutation(h);});
+test('B05a actual duplicate retry clicks share one recovery and failed retry preserves raw',async()=>{let mode='fail',reads=0;const wait=deferred(),raw=snapshot('horizontal',ids.slice(0,2),ids[0]),h=fixture(raw,{rpc:(name,args)=>{if(name!=='get_session')return;if(mode==='fail')return Promise.reject(Error('temporary'));reads++;return args.sessionId===ids[0]?wait.promise:record(args.sessionId);}});h.storage.set('yam.window.main.terminalLayout',raw);await h.mount();await retrySaved(h);h.save();assert.equal(h.storage.get('yam.window.main.terminalLayout'),raw);mode='wait';const first=retrySaved(h),duplicate=retrySaved(h);await settle();assert.equal(reads,1);assert.equal(h.actual.layoutRestoreRetrying,true);wait.resolve(record(ids[0]));await Promise.all([first,duplicate]);await h.flush();h.save();assertStored(h,{mode:'horizontal',panes:ids.slice(0,2),selected:ids[0]});noTaskMutation(h);});
+test('B05a actual later layout intent defeats late retry without overwriting selection',async()=>{let failing=true;const wait=deferred(),raw=snapshot('horizontal',ids.slice(0,2),ids[0]),h=fixture(raw,{rpc:name=>name==='get_session'?(failing?Promise.reject(Error('temporary')):wait.promise):undefined});h.storage.set('yam.window.main.terminalLayout',raw);await h.mount();failing=false;const retry=retrySaved(h);await settle();h.actual.changeLayoutMode('grid');h.actual.focusTerminalPane(2,false);const current={panes:[...h.layout().panes],focus:h.layout().focused};wait.resolve(record(ids[0]));await retry;await h.flush();assert.deepEqual({panes:h.layout().panes,focus:h.layout().focused},current);assert.equal(h.refs.terminalViews.current.size,0);h.save();assert.equal(h.storage.get('yam.window.main.terminalLayout'),raw);noTaskMutation(h);});
+
+test('B05a actual New intent rejects late retry error without replacing current state',async()=>{let failing=true;const wait=deferred(),raw=snapshot('horizontal',ids.slice(0,2),ids[0]),h=fixture(raw,{rpc:name=>name==='get_session'?(failing?Promise.reject(Error('temporary')):wait.promise):undefined});h.storage.set('yam.window.main.terminalLayout',raw);await h.mount();failing=false;const retry=retrySaved(h);await settle();h.actual.newSession('/fixture/new');const current={panes:[...h.layout().panes],focus:h.layout().focused,error:h.state.error};wait.reject(Error('late retry rejection'));await retry;await h.flush();assert.deepEqual({panes:h.layout().panes,focus:h.layout().focused,error:h.state.error},current);h.save();assert.equal(h.storage.get('yam.window.main.terminalLayout'),raw);assert.equal(h.actual.layoutRestoreRetrying,false);noTaskMutation(h);});
+
+// Author: Jeff.Liu. Preserve raw invalid preference through actual setup -> finish -> persistence.
+for(const raw of ['{invalid raw',JSON.stringify({version:999,secret:'PRIVATE'}),JSON.stringify({version:4,root:{type:'leaf',id:'bad'},focusedPane:'bad'})])test('invalid saved-layout warning keeps raw across actual persistence '+raw.slice(0,20),async()=>{const h=fixture(raw);h.storage.set('yam.window.main.terminalLayout',raw);h.desktopWindow.preference=readSavedWindowPreference(h.localStorage,'main');await h.mount();await h.flush();h.save();h.save();assert.equal(h.storage.get('yam.window.main.terminalLayout'),raw);assert.equal(h.storageWrites.filter(x=>x.key==='yam.window.main.terminalLayout').length,0);assert.equal(h.desktopWindow.restore_blocked,true);await h.actual.retrySavedLayout();h.save();assert.equal(h.storage.get('yam.window.main.terminalLayout'),raw);assert.equal(h.calls.filter(c=>['get_session','claim_terminal_view'].includes(c.name)).length,0);assert.ok(h.errors.length);noTaskMutation(h);});
+test('unreadable saved-layout warning never overwrites raw on persistence rerun',async()=>{const raw='PRIVATE_UNREADABLE',h=fixture(raw,{readError:true});await h.mount();await h.flush();h.save();h.save();assert.equal(h.storage.get('yam.terminalLayout'),raw);assert.equal(h.storageWrites.length,0);assert.equal(h.desktopWindow.restore_blocked,true);noTaskMutation(h);});
+test('explicit new terminal start retains existing invalid-layout unblock escape',async()=>{const h=fixture('{invalid',{rpc:name=>name==='create_session'?Promise.reject(Error('controlled create rejection')):undefined});await h.mount();assert.equal(h.desktopWindow.restore_blocked,true);const promise=h.actual.startSession({cwd:'/fixture',command:'fixture'});await promise;assert.equal(h.desktopWindow.restore_blocked,false);assert.equal(h.calls.filter(c=>c.name==='create_session').length,1);});
+
+test('invalid raw survives actual appearance Save and subsequent layout persistence effect',async()=>{const raw='{invalid appearance raw',h=fixture(raw,{appearanceBindings:{saveTerminalSettings,publishWindowPreference,nativeInvoke:async()=>null,setTerminalSettings(){},setTerminalSettingsError(){}}});h.storage.set('yam.window.main.terminalLayout',raw);h.desktopWindow.preference=readSavedWindowPreference(h.localStorage,'main');await h.mount();h.actual.applyTerminalPreferences({fontFamily:'monospace',fontSize:14,theme:'dark'});await h.flush();h.save();assert.equal(h.storage.get('yam.window.main.terminalLayout'),raw);assert.equal(h.storageWrites.filter(x=>x.key==='yam.window.main.terminalLayout').length,0);assert.equal(h.storageWrites.filter(x=>x.key==='yam.terminalSettings').length,1);noTaskMutation(h);});
+
+const restoreAppearance={fontFamily:'Saved Profile',fontSize:22,theme:'system'};
+test('v5 actual fresh restore uses saved appearance while cached renderer and global fallback preserve precedence',async()=>{const settings=await import('../src/terminal-settings.ts');const saved=assignTerminalPane(createTerminalLayout(),0,ids[0]),raw=encodeTerminalLayout(saved,undefined,{[ids[0]]:restoreAppearance});const h=fixture(raw,{appearanceBindings:{terminalSettingsRef:{current:settings.defaultTerminalSettings},terminalOptions:value=>settings.terminalOptions(value,'light')}});await h.mount();await h.flush();const view=h.refs.terminalViews.current.get(ids[0]);assert.deepEqual(view.appearance,restoreAppearance);assert.equal(view.instance.options.fontSize,22);assert.equal(view.instance.options.theme.background,'#fafafa');h.save();assert.deepEqual(decodeTerminalLayout(h.storage.get('yam.window.main.terminalLayout')).appearances[ids[0]],restoreAppearance);noTaskMutation(h);});
+test('v5 invalid annotation follows preserved-raw gate with zero session/claim reads',async()=>{const core=JSON.parse(encodeTerminalLayout(assignTerminalPane(createTerminalLayout(),0,ids[0])));const raw=JSON.stringify({...core,version:5,appearances:{[ids[0]]:{...restoreAppearance,fontSize:9}}});const h=fixture(raw);h.storage.set('yam.window.main.terminalLayout',raw);h.desktopWindow.preference=readSavedWindowPreference(h.localStorage,'main');await h.mount();h.save();assert.equal(h.storage.get('yam.window.main.terminalLayout'),raw);assert.equal(h.desktopWindow.restore_blocked,true);assert.equal(h.calls.filter(c=>['get_session','claim_terminal_view'].includes(c.name)).length,0);noTaskMutation(h);});
+
+test('v5 hidden layout tabs retain distinct appearance and cached views ignore old restored annotation',async()=>{const settings=await import('../src/terminal-settings.ts');let layout=assignTerminalPane(createTerminalLayout(),0,ids[0]);layout=assignTerminalPane(layout,0,ids[1]);const second={fontFamily:'Hidden',fontSize:10,theme:'solarized'},raw=encodeTerminalLayout(layout,undefined,{[ids[0]]:restoreAppearance,[ids[1]]:second});const h=fixture(raw,{appearanceBindings:{terminalSettingsRef:{current:settings.defaultTerminalSettings},terminalOptions:settings.terminalOptions}});await h.mount();await h.flush();assert.deepEqual(h.refs.terminalViews.current.get(ids[0]).appearance,restoreAppearance);const view=h.refs.terminalViews.current.get(ids[1]);assert.deepEqual(view.appearance,second);await h.actual.openHistory(record(ids[1]),false,undefined,undefined,undefined,restoreAppearance);assert.equal(h.refs.terminalViews.current.get(ids[1]),view);assert.deepEqual(view.appearance,second);h.save();assert.deepEqual(decodeTerminalLayout(h.storage.get('yam.window.main.terminalLayout')).appearances,{[ids[0]]:restoreAppearance,[ids[1]]:second});noTaskMutation(h);});
+test('v5 late claim from obsolete owner cannot create an annotated renderer',async()=>{const wait=deferred(),raw=encodeTerminalLayout(assignTerminalPane(createTerminalLayout(),0,ids[0]),undefined,{[ids[0]]:restoreAppearance}),h=fixture(raw,{rpc:name=>name==='claim_terminal_view'?wait.promise:undefined});await h.mount();h.refs.ownerConnectionAvailable.current.version++;wait.resolve(1);await h.flush();assert.equal(h.refs.terminalViews.current.size,0);noTaskMutation(h);});
+test('v5 failed layout write keeps applied appearance and original raw; explicit Apply retries snapshot',async()=>{const settings=await import('../src/terminal-settings.ts'),saved=assignTerminalPane(createTerminalLayout(),0,ids[0]),raw=encodeTerminalLayout(saved,undefined,{[ids[0]]:restoreAppearance});const h=fixture(raw,{appearanceBindings:{saveTerminalSettings,publishWindowPreference,nativeInvoke:async()=>null,setTerminalSettings(){},setTerminalSettingsError(){},terminalSettingsRef:{current:settings.defaultTerminalSettings},terminalOptions:settings.terminalOptions}});await h.mount();await h.flush();h.save();const old=h.storage.get('yam.window.main.terminalLayout'),write=h.localStorage.setItem;h.localStorage.setItem=(key,value)=>{if(key==='yam.window.main.terminalLayout')throw Error('quota');write(key,value);};const next={fontFamily:'Applied',fontSize:19,theme:'light'};h.actual.applyTerminalPreferences(next);h.save();assert.equal(h.storage.get('yam.window.main.terminalLayout'),old);assert.deepEqual(h.refs.terminalViews.current.get(ids[0]).appearance,next);assert.ok(h.errors.some(error=>error.includes('save terminal layout')));h.localStorage.setItem=write;h.actual.applyTerminalPreferences(next);h.save();assert.deepEqual(decodeTerminalLayout(h.storage.get('yam.window.main.terminalLayout')).appearances[ids[0]],next);noTaskMutation(h);});
+
+test('v5 valid saved appearance survives owner rejection and explicit Retry; missing annotation uses global',async()=>{const settings=await import('../src/terminal-settings.ts');for(const annotated of [true,false]){let failing=true;const raw=encodeTerminalLayout(assignTerminalPane(createTerminalLayout(),0,ids[0]),undefined,annotated?{[ids[0]]:restoreAppearance}:{}),h=fixture(raw,{rpc:name=>name==='get_session'&&failing?Promise.reject(Error('owner unavailable')):undefined,appearanceBindings:{terminalSettingsRef:{current:settings.defaultTerminalSettings},terminalOptions:settings.terminalOptions}});h.storage.set('yam.window.main.terminalLayout',raw);await h.mount();h.save();assert.equal(h.storage.get('yam.window.main.terminalLayout'),raw);failing=false;await retrySaved(h);await h.flush();assert.deepEqual(h.refs.terminalViews.current.get(ids[0]).appearance,annotated?restoreAppearance:settings.defaultTerminalSettings);noTaskMutation(h);}});
+test('v5 actual secondary appearance commit saves only its own annotated layout with zero shared echo',async()=>{const settings=await import('../src/terminal-settings.ts'),context=await import('../src/window-context.ts'),raw=encodeTerminalLayout(assignTerminalPane(createTerminalLayout(),0,ids[0]),undefined,{[ids[0]]:restoreAppearance});let echo=0;const h=fixture(raw,{appearanceBindings:{isMainWindow:false,windowPreferenceKey:name=>windowPreferenceKey('terminal-secondary',name),preferenceRevision:{current:0},acceptWindowPreferenceCommit:context.acceptWindowPreferenceCommit,publishWindowPreference:()=>{echo++;return Promise.resolve();},saveTerminalSettings:()=>assert.fail('secondary global write'),setTerminalSettings(){},setTerminalSettingsError(){},terminalSettingsRef:{current:settings.defaultTerminalSettings},terminalOptions:settings.terminalOptions}});h.desktopWindow.slot='terminal-secondary';await h.mount();await h.flush();const next={fontFamily:'Shared',fontSize:16,theme:'light'};h.actual.receiveWindowPreference({source_epoch:1,revision:1,key:'yam.terminalSettings',value:JSON.stringify(next),appearance_action:'apply'});h.save();assert.deepEqual(decodeTerminalLayout(h.storage.get('yam.window.terminal-secondary.terminalLayout')).appearances[ids[0]],next);assert.equal(echo,0);assert.equal(h.storageWrites.filter(x=>x.key==='yam.terminalSettings').length,0);assert.equal(h.storageWrites.filter(x=>x.key==='yam.window.main.terminalLayout').length,0);noTaskMutation(h);});
+
+// A native dialog close may restore focus after the next window-claim await.
+test('provider desktop start attaches new view before modal focus restoration',async()=>{
+ const h=fixture(snapshot('single',[ids[0]],ids[0]),{rpc:(name)=>name==='create_session'?{...record(ids[1]).summary,status:'running'}:undefined});
+ await h.mount();await h.flush();
+ const old=h.refs.terminalViews.current.get(ids[0]);assert.equal(old.element.inert,false);
+ let closed=0;
+ const origin={tagName:"TEXTAREA"};h.document.activeElement=origin;
+ h.refs.launchDialog.current.open=true;h.refs.launchDialog.current.contains=element=>element===origin;
+ h.refs.launchDialog.current.close=()=>{h.refs.launchDialog.current.open=false;closed++;queueMicrotask(()=>{if(!old.element.inert)h.actual.focusTerminalPane(h.layout().focused);});};
+ await h.actual.startSession({cwd:'/fixture',command:'',launch:null});await h.flush();
+ assert.deepEqual(h.errors,[]);assert.equal(closed,1);
+ assert.equal(h.refs.sessionId.current,ids[1],'modal focus restoration must not cancel the explicit new-session attachment');
+ assert.equal(h.refs.terminalViews.current.get(ids[1]).ready,true);
+ assert.equal(h.refs.terminal.current,h.refs.terminalViews.current.get(ids[1]).instance);
+ assert.equal(h.document.activeElement,h.refs.terminalViews.current.get(ids[1]).instance.textarea);
+});
+
+for(const action of ['direct terminal','continue','closed modal'])test('desktop delayed start preserves newer search focus: '+action,async()=>{
+ const wait=deferred(),h=fixture(snapshot('single',[ids[0]],ids[0]),{rpc:(name,args)=>name==='create_session'?{...record(ids[1]).summary,status:'running'}:name==='read_terminal_frame'&&args.sessionId===ids[1]?wait.promise:undefined});
+ await h.mount();await h.flush();
+ const dialog=h.refs.launchDialog.current;dialog.open=action==='closed modal';dialog.contains=()=>true;
+ const start=h.actual.startSession(action==='continue'?{resumeFrom:ids[0]}:{cwd:'/fixture',command:'',launch:null});await settle();
+ assert.equal(h.refs.terminalViews.current.get(ids[1]).ready,false,'attachment must be pending before the new focus intent');
+ dialog.open=false;
+ const search={tagName:'INPUT',isConnected:true};h.document.activeElement=search;
+ wait.resolve(frame(ids[1]));await start;await h.flush();
+ assert.deepEqual(h.errors,[]);assert.equal(h.refs.terminalViews.current.get(ids[1]).ready,true);
+ assert.equal(h.document.activeElement,search,'late attachment must not redirect newer input to the terminal');
+});
+
+for(const via of ['tab','pane','sidebar','reader','terminal'])test('followup warm '+via+' refreshes hidden authoritative conversation identity without restarting',async()=>{
+ let latest=false;const fresh={generation:'g',agent_session_id:'native-after-hidden',phase:'waiting',last_receipt:{revision:7}};
+ const h=fixture(via==='pane'?snapshot('horizontal',ids.slice(0,2),ids[1]):null,{rpc:(name,args)=>name==='get_session'?Promise.resolve({...record(args.sessionId),agent:latest&&args.sessionId===ids[0]?fresh:{phase:'working'}}):undefined});await h.mount();
+ if(via!=='pane'){await h.actual.openSession(ids[0]);await h.actual.openSession(ids[1]);}await h.flush();const a=h.refs.terminalViews.current.get(ids[0]),version=a.attachVersion;
+ latest=true;h.refs.conversationOpenRef.current=!['reader','terminal'].includes(via);
+ if(via==='sidebar')await h.actual.openSession(ids[0]);else if(via==='pane')h.actual.focusTerminalPane(0);else {h.actual.selectTerminalTab(0,ids[0]);await h.flush();if(via==='reader')h.actual.showConversation(true);}
+ await h.flush();assert.deepEqual(h.state.agent,fresh);assert.deepEqual(a.record.agent,fresh);assert.equal(a.attachVersion,version);noTaskMutation(h);h.cleanup();
+});
+
+for(const invalidation of ['selection','owner','attachment','disposed','mismatched','rejection','newer-request','same-focus'])test('followup selected agent refresh fences '+invalidation,async()=>{
+ const wait=deferred();let refresh=false;const fresh={generation:'new',agent_session_id:'native-new',phase:'waiting'};
+ const h=fixture(null,{rpc:(name,args)=>name==='get_session'&&refresh?wait.promise:undefined});await h.mount();await h.actual.openSession(ids[0]);await h.flush();const view=h.refs.terminalViews.current.get(ids[0]);
+ refresh=true;h.actual.showConversation(true);await settle();assert.ok(h.calls.filter(c=>c.name==='get_session').length>=2,'opening reader must refresh the current authenticated record');
+ if(invalidation==='selection'){h.actual.changeLayoutMode('horizontal');h.actual.focusTerminalPane(1);assert.equal(h.refs.sessionId.current,null);}
+ if(invalidation==='owner')h.refs.ownerConnectionAvailable.current.version++;
+ if(invalidation==='attachment')view.attachVersion++;
+ if(invalidation==='disposed')view.disposed=true;
+ if(invalidation==='newer-request'||invalidation==='same-focus'){refresh=false;if(invalidation==='same-focus')h.actual.focusTerminalPane(0);else h.actual.showConversation(true);await settle();}
+ const before=structuredClone({agent:h.state.agent,selected:h.refs.selectedRecord.current,record:view.record});
+ if(invalidation==='rejection')wait.reject(Error('unavailable'));else wait.resolve({...record(invalidation==='mismatched'?ids[1]:ids[0]),agent:fresh});await h.flush();
+ assert.deepEqual({agent:h.state.agent,selected:h.refs.selectedRecord.current,record:view.record},before);noTaskMutation(h);h.cleanup();
+});
+
+test('followup pending warm claim cannot overwrite a newer selected agent record',async()=>{
+ const claim=deferred();let delayed=false,latest=false;
+ const fresh={generation:'g-new',agent_session_id:'native-new',phase:'waiting',last_receipt:{revision:8}};
+ const h=fixture(null,{rpc:(name,args)=>name==='claim_terminal_view'&&delayed?claim.promise:name==='get_session'?Promise.resolve({...record(args.sessionId),agent:latest?fresh:{phase:'working'}}):undefined});await h.mount();await h.actual.openSession(ids[0]);await h.flush();h.refs.conversationOpenRef.current=true;
+ const view=h.refs.terminalViews.current.get(ids[0]),version=view.attachVersion;delayed=true;const opening=h.actual.openHistory(view.record);await settle();latest=true;await h.actual.refreshSelectedAgent();assert.deepEqual(view.record.agent,fresh);
+ claim.resolve(1);await opening;await h.flush();assert.deepEqual(view.record.agent,fresh);assert.deepEqual(h.state.agent,fresh);assert.equal(view.attachVersion,version);noTaskMutation(h);h.cleanup();
+});
+
+for(const reading of [false,true])test('P1 actual Inbox ended card keeps original process read-only reading='+reading,async()=>{
+ const {captureAttention,isCurrentAttention}=await import('../src/attention-actions.ts');
+ const entry={id:'g:t:PermissionRequest',revision:3,turn_id:'t',kind:'needs_permission',delivery:'accepted',read:false,error:null},agent={generation:'g',turn_id:'t',revision:3,phase:'needs_permission',integration:'connected',inbox:[entry]};
+ const ended={...record(ids[0]),status:'stopped',agent};
+ const h=fixture(null,{rpc:(name,args)=>name==='get_session'?Promise.resolve(ended):name==='read_terminal_frame'?Promise.resolve({...frame(ids[0]),status:'stopped',persisted:true}):undefined,appearanceBindings:{captureAttention,isCurrentAttention,attentionOperation:{current:0}}});await h.mount();h.refs.conversationOpenRef.current=reading;
+ await h.actual.openReceipt(ended,entry,agent);await h.flush();assert.equal(h.refs.sessionId.current,ids[0]);assert.equal(h.refs.terminalViews.current.get(ids[0]).recordedOnly,true);assert.equal(h.refs.conversationOpenRef.current,false);noTaskMutation(h);assert.equal(h.calls.some(c=>c.name==='read_agent_receipt'),false);h.cleanup();
+});
+
+test('P1 actual live Inbox card opens Terminal and acknowledges before deferred focus restoration',async()=>{
+ const {captureAttention,isCurrentAttention}=await import('../src/attention-actions.ts');const entry={id:'g:t:PermissionRequest',revision:3,turn_id:'t',kind:'needs_permission',delivery:'accepted',read:false,error:null},agent={generation:'g',turn_id:'t',revision:3,phase:'needs_permission',integration:'connected',inbox:[entry]},live={...record(ids[0]),agent};
+ const h=fixture(null,{rpc:name=>name==='get_session'?Promise.resolve(live):undefined,appearanceBindings:{captureAttention,isCurrentAttention,attentionOperation:{current:0}}});await h.mount();h.refs.conversationOpenRef.current=true;await h.actual.openReceipt(live,entry,agent);await h.flush();assert.equal(h.refs.conversationOpenRef.current,false);assert.equal(h.calls.filter(c=>c.name==='read_agent_receipt').length,1);assert.equal(h.refs.terminalViews.current.get(ids[0]).live,true);noTaskMutation(h);h.cleanup();
+});
+
+for(const transition of ['newer input focus','process exit'])test('P1 actual delayed Inbox navigation preserves '+transition,async()=>{
+ const {captureAttention,isCurrentAttention}=await import('../src/attention-actions.ts'),wait=deferred();let reads=0;
+ const entry={id:'g:t:PermissionRequest',revision:3,turn_id:'t',kind:'needs_permission',delivery:'accepted',read:false,error:null},agent={generation:'g',turn_id:'t',revision:3,phase:'needs_permission',integration:'connected',inbox:[entry]},live={...record(ids[0]),agent};
+ const h=fixture(null,{rpc:name=>name==='get_session'?(++reads>1?wait.promise:Promise.resolve(live)):undefined,appearanceBindings:{captureAttention,isCurrentAttention,attentionOperation:{current:0}}});await h.mount();h.refs.conversationOpenRef.current=true;const opening=h.actual.openReceipt(live,entry,agent);await settle();assert.ok(reads>=3);
+ const search={tagName:'INPUT',isConnected:true};if(transition==='newer input focus')h.document.activeElement=search;else{const view=h.refs.terminalViews.current.get(ids[0]);view.live=false;view.status='stopped';view.record.status='stopped';}
+ wait.resolve(transition==='process exit'?{...live,status:'stopped'}:live);await opening;await h.flush();assert.equal(h.refs.conversationOpenRef.current,false);if(transition==='newer input focus')assert.equal(h.document.activeElement,search);assert.equal(h.calls.filter(c=>c.name==='read_agent_receipt').length,transition==='process exit'?0:1);noTaskMutation(h);h.cleanup();
 });

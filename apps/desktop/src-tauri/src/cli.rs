@@ -255,13 +255,16 @@ pub(super) fn owner_start(
         .get("adapter")
         .and_then(serde_json::Value::as_str)
         .ok_or("cli_invalid_adapter")?;
-    if !["codex", "claude", "opencode"].contains(&adapter) {
+    if !["codex", "claude", "gemini", "opencode"].contains(&adapter) {
         return Err("cli_invalid_adapter".into());
     }
     let executable = resolve_agent(adapter)
         .filter(|path| path.is_absolute())
         .ok_or("cli_missing_agent")?;
     let launch = super::AgentLaunch {
+        codex: (adapter == "codex").then(Default::default),
+        provider: None,
+        env_refs: Default::default(),
         adapter: adapter.into(),
         mode: start
             .get("mode")
@@ -353,12 +356,7 @@ fn execute(command: &Command, key: &mut Option<String>) -> Result<serde_json::Va
     } else {
         None
     };
-    let context = super::app_context();
-    let root = resolve_owner_root(
-        &context.config().identifier,
-        context.config().app.app_directories_override.is_some(),
-        native_user_data,
-    )?;
+    let root = owner_root()?;
     let allow_start = matches!(command,Command::Start(options) if options.start_owner);
     let client = connect_owner(&root, allow_start, || {
         let executable = std::env::current_exe().map_err(|_| "cli_executable")?;
@@ -383,6 +381,15 @@ fn execute(command: &Command, key: &mut Option<String>) -> Result<serde_json::Va
         Command::Stop(id) => client.call_cli("cli_stop", serde_json::json!({"session_id":id})),
         Command::Start(_) => start_on_client(&client, prepared.ok_or(ErrorClass::Arguments)?, key),
     }
+}
+
+pub(super) fn owner_root() -> Result<PathBuf, ErrorClass> {
+    let context = super::app_context();
+    resolve_owner_root(
+        &context.config().identifier,
+        context.config().app.app_directories_override.is_some(),
+        native_user_data,
+    )
 }
 
 fn prepare_start(options: &StartOptions) -> Result<serde_json::Value, ErrorClass> {

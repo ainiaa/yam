@@ -44,6 +44,60 @@ class SmokeProtocolTests(unittest.TestCase):
    with self.assertRaises(AssertionError):smoke.rpc({**self.descriptor,'address':'example.com:12345'},'c'*64,7,'list_sessions')
    connect.assert_not_called()
 
+ def test_rejection_has_safe_fixed_code_and_preserves_assertion_and_error_true(self):
+  secret='TOKEN /private/secret server prose'
+  with mock.patch.object(smoke.socket,'create_connection',return_value=Stream({'result':{'Err':secret}})):
+   with self.assertRaises(AssertionError) as caught:smoke.rpc(self.descriptor,'c'*64,7,'list_sessions')
+   self.assertEqual(getattr(caught.exception,'code',None),'server_rejected')
+   self.assertNotIn(secret,str(caught.exception));self.assertNotIn(secret,repr(caught.exception.__dict__))
+   with self.assertRaises(AttributeError):caught.exception.code='other'
+   self.assertEqual(smoke.rpc(self.descriptor,'c'*64,7,'list_sessions',error=True),secret)
+
+ def test_malformed_error_envelope_is_protocol_failure_not_typed_server_rejection(self):
+  for result in [{'Err':None},{'extra':'secret'}, {'Err':{'secret':'path'}}]:
+   with mock.patch.object(smoke.socket,'create_connection',return_value=Stream({'result':result})):
+    with self.assertRaises(AssertionError) as caught:smoke.rpc(self.descriptor,'c'*64,7,'list_sessions')
+    self.assertIsNone(getattr(caught.exception,'code',None))
+
+class StopRejectionDiagnostics(unittest.TestCase):
+ def test_matched_wire_exact_categories_and_safe_exception(self):
+  descriptor={'version':2,'address':'127.0.0.1:12345','token':'token-secret','instance':'instance-secret'}
+  cases=[('stop_session',{'session_id':'private-id'},'Unknown session: private-id','missing_session'),
+         ('stop_session',{'session_id':'private-id'},'Unknown session: another-id','other_server_rejection'),
+         ('list_sessions',{'session_id':'private-id'},'Unknown session: private-id','other_server_rejection'),
+         ('stop_session',{},'Unknown session: None','other_server_rejection'),
+         ('stop_session',{'session_id':'private-id'},'Background is shutting down; reconnect','owner_shutting_down'),
+         ('shutdown',{},'Background is shutting down; reconnect','owner_shutting_down'),
+         ('stop_session',{'session_id':'private-id'},'Background is shutting down; reconnect /private/secret','other_server_rejection'),
+         ('stop_session',{'session_id':'private-id'},'token-secret /private/secret arbitrary error','other_server_rejection')]
+  for command,args,message,kind in cases:
+   with self.subTest(command=command,message=message):
+    with mock.patch.object(smoke.socket,'create_connection',return_value=Stream({'result':{'Err':message}})):
+     with self.assertRaises(smoke.ServerRejected) as caught:smoke.rpc(descriptor,'client-secret',9,command,args)
+    error=caught.exception
+    self.assertEqual(error.rejection_kind,kind);self.assertEqual(error.args,('server_rejected',))
+    self.assertEqual(str(error),'server_rejected');self.assertIsNone(error.__cause__);self.assertIsNone(error.__context__)
+    serialized=json.dumps({'state':vars(error),'args':error.args,'kind':error.rejection_kind})
+    for secret in ('private-id','another-id','token-secret','client-secret','instance-secret','/private/secret',message):self.assertNotIn(secret,serialized)
+ def test_compatibility_and_invalid_constructor_never_retains_input(self):
+  self.assertEqual(smoke.ServerRejected().rejection_kind,'other_server_rejection')
+  for invalid in ('/private/secret',None,[],{}):
+   with self.assertRaises(ValueError) as caught:smoke.ServerRejected(invalid)
+   self.assertNotIn('/private/secret',str(caught.exception))
+  descriptor={'version':2,'address':'127.0.0.1:12345','token':'a'*64,'instance':'b'*64}
+  with mock.patch.object(smoke.socket,'create_connection',return_value=Stream({'result':{'Err':'Unknown session: private-id'}})):
+   self.assertEqual(smoke.rpc(descriptor,'client',1,'stop_session',{'session_id':'private-id'},error=True),'Unknown session: private-id')
+  with mock.patch.object(smoke.socket,'create_connection',return_value=Stream()):self.assertEqual(smoke.rpc(descriptor,'client',1,'stop_session'),'中文😀')
+ def test_malformed_or_unmatched_wire_never_gets_rejection_category(self):
+  descriptor={'version':2,'address':'127.0.0.1:12345','token':'a'*64,'instance':'b'*64}
+  changes=[{'result':{'Err':None}},{'result':{'Err':{'secret':'value'}}}]
+  changes += [{key:value,'result':{'Err':'Unknown session: private-id'}} for key,value in [('version',1),('instance','wrong'),('client','wrong'),('id',2)]]
+  for change in changes:
+   with mock.patch.object(smoke.socket,'create_connection',return_value=Stream(change)):
+    with self.assertRaises(AssertionError) as caught:smoke.rpc(descriptor,'client',1,'stop_session',{'session_id':'private-id'})
+   self.assertNotIsInstance(caught.exception,smoke.ServerRejected)
+   self.assertIsNone(getattr(caught.exception,'rejection_kind',None))
+
 class RetainedLogFlowTests(unittest.TestCase):
  def replies(self):
   return [{'complete':True,'hits':[{'session_id':'s-fixture','offset':0,'column':0,'text':'NATIVE_CONTINUITY 中😀'}]},'NATIVE_CONTINUITY 中😀\n',{'data':'\x1b[?1049hNATIVE_CONTINUITY 中😀\r\n'}]
@@ -271,6 +325,17 @@ class F7CurrentRunTests(unittest.TestCase):
   with self.patched():
    value=self.preflight();self.assertEqual(value['executable'],self.exe);self.assertEqual(value['root'],self.root)
    self.root.mkdir(parents=True);self.assertEqual(self.preflight()['root'],self.root)
+ def test_f7_explicit_private_home_absent_parents_and_no_fallback(self):
+  home=self.folder/'private-run'/'home';expected=home/'Library/Application Support'/self.identifier
+  with self.patched():
+   value=smoke.validate_f7_run(self.app,self.identifier,self.receipt_path,owner_home=home)
+   self.assertEqual(value['root'],expected);self.assertFalse(home.exists());smoke.app_data.assert_not_called()
+   expected.mkdir(parents=True);(expected/'prior').write_text('keep')
+   with self.assertRaises(ValueError):smoke.validate_f7_run(self.app,self.identifier,self.receipt_path,owner_home=home)
+   self.assertEqual((expected/'prior').read_text(),'keep')
+ def test_f7_explicit_linked_home_rejected(self):
+  home=self.folder/'linked-home';home.symlink_to(self.home,target_is_directory=True)
+  with self.patched(),self.assertRaises(ValueError):smoke.validate_f7_run(self.app,self.identifier,self.receipt_path,owner_home=home)
  def test_f7_receipt_identity_source_bundle_and_compiled_config_fail_closed(self):
   mutations=[('schema_version',True),('identifier','com.yam.performance-validation-t06'),('source_sha256','f'*64),('package_sha256','f'*64),('resources_sha256','f'*64),('terminal_resource_sha256','f'*64),('executable_path',str(self.folder/'other'))]
   for key,value in mutations:

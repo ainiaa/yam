@@ -1,3 +1,5 @@
+import {t} from "./i18n";
+import {Select} from "./Select";
 import {useEffect,useRef,useState} from "react";
 import {invoke} from "@tauri-apps/api/core";
 import {LatestLogRequest,formatRetainedRange,isSafeLogOffset,logHitPosition,type LogHit,type LogSearchPage,type LogSourceCursor} from "./session-logs";
@@ -49,26 +51,26 @@ export function SessionLogSearch({sessions,selected,onClose,onSelect}:Props) {
   }catch(reason){setError(String(reason));}
  }
  return <dialog ref={dialog} className="app-dialog log-search-dialog" aria-labelledby="log-search-title" onCancel={event=>{event.preventDefault();onClose();}}>
-  <header className="dialog-header"><h2 id="log-search-title">Search session logs</h2><button type="button" onClick={onClose} aria-label="Close log search">Close</button></header>
+  <header className="dialog-header"><h2 id="log-search-title">{t("Search session logs")}</h2><button type="button" onClick={onClose} aria-label={t("Close log search")}>{t("Close")}</button></header>
   <form className="dialog-fields" onSubmit={event=>{event.preventDefault();void search();}}>
-   <label>Log content<input ref={queryInput} aria-label="Log content query" disabled={busy} maxLength={256} value={query} onChange={event=>{setQuery(event.target.value);setPage(null);setHit(null);previews.current.cancel();}}/></label>
-   <label>Search scope<select aria-label="Log search scope" disabled={busy} value={scope} onChange={event=>{setScope(event.target.value);setPage(null);setHit(null);previews.current.cancel();}}>
-    <option value="">All sessions</option>{scope&&!sessions.some(session=>session.id===scope)&&<option value={scope}>{scope}</option>}{sessions.map(session=><option key={session.id} value={session.id}>{session.title} · {session.cwd}</option>)}
-   </select></label>
-   <label className="log-checkbox"><input type="checkbox" checked={sensitive} disabled={busy} onChange={event=>{setSensitive(event.target.checked);setPage(null);setHit(null);previews.current.cancel();}}/>Match case</label>
-   <div className="dialog-actions"><button type="submit" disabled={busy||!query.trim()}>{busy?"Searching…":"Search logs"}</button>{busy&&<button type="button" onClick={()=>void cancel()}>Cancel search</button>}</div>
+   <label>{t("Log content")}<input ref={queryInput} aria-label={t("Log content query")} autoCorrect="off" autoCapitalize="none" spellCheck={false} disabled={busy} maxLength={256} value={query} onChange={event=>{setQuery(event.target.value);setPage(null);setHit(null);previews.current.cancel();}}/></label>
+   <label>{t("Search scope")}<Select aria-label={t("Log search scope")} disabled={busy} value={scope} onChange={event=>{setScope(event.target.value);setPage(null);setHit(null);previews.current.cancel();}}>
+    <option value="">{t("All sessions")}</option>{scope&&!sessions.some(session=>session.id===scope)&&<option value={scope}>{scope}</option>}{sessions.map(session=><option key={session.id} value={session.id}>{session.title} · {session.cwd}</option>)}
+   </Select></label>
+   <label className="log-checkbox"><input type="checkbox" checked={sensitive} disabled={busy} onChange={event=>{setSensitive(event.target.checked);setPage(null);setHit(null);previews.current.cancel();}}/>{t("Match case")}</label>
+   <div className="dialog-actions"><button type="submit" disabled={busy||!query.trim()}>{busy?t("Searching…"):t("Search logs")}</button>{busy&&<button type="button" onClick={()=>void cancel()}>{t("Cancel search")}</button>}</div>
   </form>
-  <p className="log-note">Searches retained output only. Older output may have been removed. Each page scans the current records.</p>
-  {error&&<p role="alert">{error}</p>}
-  {page&&<section aria-label="Log search results">
-   <p role="status">{page.hits.length} matching lines for “{searched}”{!page.complete?" · Partial results":""}</p>
-   {page.scanned_ranges?.map(range=><p key={range.session_id} className="log-note">{sessions.find(s=>s.id===range.session_id)?.title??range.session_id} · {formatRetainedRange(range.range)} · {range.line_scan_complete?"Retained lines scanned":"Line scan incomplete"}</p>)}
+  <p className="log-note">{t("Searches retained output only. Older output may have been removed. Each page scans the current records.")}</p>
+  {error&&<p role="alert">{t(error)}</p>}
+  {page&&<section aria-label={t("Log search results")}>
+   <p role="status">{page.hits.length} {t("matching lines for “")}{searched}”{!page.complete?t(" · Partial results"):""}</p>
+   {page.scanned_ranges?.map(range=><p key={range.session_id} className="log-note">{sessions.find(s=>s.id===range.session_id)?.title??range.session_id} · {formatRetainedRange(range.range,t)} · {range.line_scan_complete?t("Retained lines scanned"):t("Line scan incomplete")}</p>)}
    {page.issues.map((issue,index)=><p key={index} className="log-note">{issue}</p>)}
    <ul className="log-results">{page.hits.map(hit=><li key={`${hit.session_id}:${hit.offset}`}><button type="button" onClick={()=>void show(hit)}>
-    <strong>{sessions.find(s=>s.id===hit.session_id)?.title??hit.session_id}</strong><span>{hit.cwd} · {logHitPosition(hit,page.scanned_ranges)}</span><pre>{hit.text}</pre>
+    <strong>{sessions.find(s=>s.id===hit.session_id)?.title??hit.session_id}</strong><span>{hit.cwd} · {logHitPosition(hit,page.scanned_ranges,t)}</span><pre>{hit.text}</pre>
    </button></li>)}</ul>
-   <div className="dialog-actions">{skip>0&&<button disabled={busy} onClick={()=>void search(Math.max(0,skip-50),page.current_cursor??null)}>Previous results</button>}{page.has_more&&<button disabled={busy||skip>=5000} onClick={()=>void search(skip+50,page.current_cursor??null)}>Next results</button>}{page.next_cursor&&<button disabled={busy} onClick={()=>void search(0,page.next_cursor??null)}>Continue search</button>}</div>
+   <div className="dialog-actions">{skip>0&&<button disabled={busy} onClick={()=>void search(Math.max(0,skip-50),page.current_cursor??null)}>{t("Previous results")}</button>}{page.has_more&&<button disabled={busy||skip>=5000} onClick={()=>void search(skip+50,page.current_cursor??null)}>{t("Next results")}</button>}{page.next_cursor&&<button disabled={busy} onClick={()=>void search(0,page.next_cursor??null)}>{t("Continue search")}</button>}</div>
   </section>}
-  {hit&&<section aria-label="Recorded log location"><h3>Recorded output · {logHitPosition(hit,page?.scanned_ranges)}</h3><pre className="log-excerpt">{excerpt??hit.text}</pre><p className="log-note">Bounded text excerpt around the matching position. The selected terminal remains available after closing this dialog.</p></section>}
+  {hit&&<section aria-label={t("Recorded log location")}><h3>{t("Recorded output ·")+" "}{logHitPosition(hit,page?.scanned_ranges,t)}</h3><pre className="log-excerpt">{excerpt??hit.text}</pre><p className="log-note">{t("Bounded text excerpt around the matching position. The selected terminal remains available after closing this dialog.")}</p></section>}
  </dialog>;
 }

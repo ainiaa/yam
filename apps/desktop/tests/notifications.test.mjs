@@ -1,5 +1,8 @@
+import {englishUiRead} from './fixtures/english-ui-source.mjs';
+const readFileSync=(...args)=>englishUiRead(rawReadFileSync,...args);
+import './fixtures/i18n-test-init.mjs';
 import ts from 'typescript';
-import {readFileSync} from 'node:fs';
+import {readFileSync as rawReadFileSync} from 'node:fs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { NotificationQueue, inferAgentPhase, notificationFailure, discardAttentionRetries, terminalStatuses } from '../src/notifications.ts';
@@ -96,7 +99,7 @@ function findCoordinator(node) {
 }
 findCoordinator(appSource);
 assert.ok(coordinator, 'App notification coordinator must exist');
-const coordinatorJs = ts.transpileModule(focusPredicate+"\n"+coordinator, {compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText;
+const coordinatorJs = ts.transpileModule("const terminalPaneVisible=()=>true;\n"+focusPredicate+"\n"+coordinator, {compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText;
 function notificationHarness(options = {}) {
  const q = new NotificationQueue();
  const pending = new Map();
@@ -115,8 +118,8 @@ function notificationHarness(options = {}) {
   }
  };
  const paused={current:options.paused??false};
- const factory = new Function('invoke','notifications','retryNotifications','document','sessionId','titlesRef','projectName','statusLabels','terminalStatuses','setNotificationError','discardAttentionRetries','pausedRef','terminalLayoutRef','terminalViews', `${coordinatorJs}; return notifySession;`);
- const notify = factory(invoke,{current:q},{current:pending},{hasFocus:()=>false},{current:null},{current:{}},()=> 'repo',{},terminalStatuses,error=>errors.push(error),discardAttentionRetries,paused,{current:{panes:[null],focused:0}},{current:new Map()});
+ const factory = new Function('isMainWindow','invoke','notifications','retryNotifications','document','sessionId','titlesRef','projectName','statusLabels','terminalStatuses','setNotificationError','discardAttentionRetries','pausedRef','terminalLayoutRef','terminalViews', `${coordinatorJs}; return notifySession;`);
+ const notify = factory(true,invoke,{current:q},{current:pending},{hasFocus:()=>false},{current:null},{current:{}},()=> 'repo',{},terminalStatuses,error=>errors.push(error),discardAttentionRetries,paused,{current:{panes:[null],focused:0}},{current:new Map()});
  if(options.pauseRef)options.pauseRef.current=paused;
  return {notify,q,pending,sends,receipts,errors};
 }
@@ -132,6 +135,7 @@ test('pausing while session metadata loads defers delivery without consuming its
  const options={pauseRef:ref,listSessions:()=>new Promise(resolve=>release=resolve)};
  const h=notificationHarness(options);
  const sending=h.notify(notificationEvent('succeeded'));
+ await new Promise(setImmediate);
  ref.current.current=true;
  release([{summary:{session_id:'s-one',cwd:'/repo'},status:'succeeded'}]);
  await sending;

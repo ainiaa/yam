@@ -39,6 +39,8 @@ pub(crate) struct PreparedLaunch {
     pub launch: Option<crate::AgentLaunch>,
     pub command: Option<String>,
     pub env: BTreeMap<String, String>,
+    pub source: Preview,
+    pub cwd_identity: String,
 }
 #[derive(Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -50,10 +52,10 @@ struct Store {
 fn code(value: &str) -> String {
     value.into()
 }
-fn reserved(name: &str) -> bool {
+pub(crate) fn reserved(name: &str) -> bool {
     name.to_ascii_uppercase().starts_with("YAM_")
 }
-fn variable(name: &str) -> bool {
+pub(crate) fn variable(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 128
         && name
@@ -84,12 +86,43 @@ fn validate_settings(value: &Value, template: bool) -> Result<(), String> {
             "command",
             "cwd",
             "env",
+            "provider",
+            "codex",
         ]
         .contains(&key.as_str())
         {
             return Err(code("project_config_invalid"));
         }
-        if key == "env" {
+        if key == "codex" {
+            if fields
+                .get("adapter")
+                .and_then(Value::as_str)
+                .is_some_and(|adapter| adapter != "codex")
+            {
+                return Err(code("project_config_invalid"));
+            }
+            let options: crate::codex_context::Options = serde_json::from_value(value.clone())
+                .map_err(|_| code("project_config_invalid"))?;
+            if options.context.is_some() {
+                return Err(code("project_config_invalid"));
+            }
+        } else if key == "provider" {
+            if !value.is_null() {
+                let provider: crate::provider_launch::ProviderConfig =
+                    serde_json::from_value(value.clone())
+                        .map_err(|_| code("project_config_invalid"))?;
+                provider
+                    .validate(
+                        match provider.id.as_str() {
+                            "claude" => "claude",
+                            "gemini" => "gemini",
+                            _ => "codex",
+                        },
+                        "",
+                    )
+                    .map_err(|_| code("project_config_invalid"))?;
+            }
+        } else if key == "env" {
             let env = value
                 .as_object()
                 .ok_or_else(|| code("project_config_invalid"))?;
@@ -115,7 +148,7 @@ fn validate_settings(value: &Value, template: bool) -> Result<(), String> {
                 return Err(code("project_config_invalid"));
             }
             if key == "adapter"
-                && !["shell", "custom", "codex", "claude", "opencode"].contains(&text)
+                && !["shell", "custom", "codex", "claude", "gemini", "opencode"].contains(&text)
             {
                 return Err(code("project_config_invalid"));
             }
@@ -360,6 +393,35 @@ fn matches(approved: &Preview, current: &Preview) -> bool {
         && approved.identity == current.identity
         && approved.source == current.source
 }
+pub(crate) fn revalidate(
+    source: &Preview,
+    cwd: &Path,
+    cwd_identity: &str,
+    private: &Path,
+) -> Result<(), String> {
+    let check = || {
+        let _gate = CONFIG_GATE
+            .lock()
+            .map_err(|_| code("project_config_changed"))?;
+        let current = observed(Path::new(&source.root))?;
+        if !matches(source, &current)
+            || !read_store(private)?
+                .trusted
+                .iter()
+                .any(|approved| matches(approved, &current))
+        {
+            return Err(code("project_config_changed"));
+        }
+        if fs::canonicalize(cwd).map_err(|_| code("project_config_changed"))? != cwd
+            || !cwd.starts_with(Path::new(&source.root))
+            || root_identity(cwd)? != cwd_identity
+        {
+            return Err(code("project_config_changed"));
+        }
+        Ok(())
+    };
+    check().map_err(|_: String| code("project_config_changed"))
+}
 pub(crate) fn preview(project: &Path, private: &Path) -> Result<Preview, String> {
     let _gate = CONFIG_GATE
         .lock()
@@ -491,6 +553,30 @@ pub(crate) fn prepare(
             .filter(|path| path.is_file())
             .ok_or_else(|| code("project_config_cli_missing"))?;
         let launch = crate::AgentLaunch {
+            codex: if adapter == "codex" {
+                Some(
+                    settings
+                        .get("codex")
+                        .map(|value| serde_json::from_value(value.clone()))
+                        .transpose()
+                        .map_err(|_| code("project_config_invalid"))?
+                        .unwrap_or_default(),
+                )
+            } else {
+                None
+            },
+            env_refs: settings
+                .get("env")
+                .map(|value| serde_json::from_value(value.clone()))
+                .transpose()
+                .map_err(|_| code("project_config_invalid"))?
+                .unwrap_or_default(),
+            provider: settings
+                .get("provider")
+                .filter(|value| !value.is_null())
+                .map(|value| serde_json::from_value(value.clone()))
+                .transpose()
+                .map_err(|_| code("project_config_invalid"))?,
             adapter,
             mode,
             extra_args: text("extra_args").unwrap_or_default(),
@@ -499,23 +585,41 @@ pub(crate) fn prepare(
         crate::agent_command(&executable, &launch).map_err(|_| code("project_config_invalid"))?;
         Some(launch)
     };
-    let mut resolved = BTreeMap::new();
-    if let Some(references) = settings.get("env").and_then(Value::as_object) {
-        for (target, source) in references {
-            let value =
-                env(source.as_str().unwrap()).ok_or_else(|| code("project_config_env_missing"))?;
-            if value.contains('\0') {
-                return Err(code("project_config_env_missing"));
-            }
-            resolved.insert(target.clone(), value);
-        }
-    }
+    let references = settings
+        .get("env")
+        .map(|value| serde_json::from_value(value.clone()))
+        .transpose()
+        .map_err(|_| code("project_config_invalid"))?
+        .unwrap_or_default();
+    let resolved = resolve_env_refs(&references, env)?;
+    let cwd_identity = root_identity(&cwd)?;
     Ok(PreparedLaunch {
         cwd,
         launch,
         command,
         env: resolved,
+        source: current,
+        cwd_identity,
     })
+}
+
+pub(crate) fn validate_env_refs(references: &BTreeMap<String, String>) -> Result<(), String> {
+    validate_settings(&json!({"env":references}), false)
+}
+pub(crate) fn resolve_env_refs(
+    references: &BTreeMap<String, String>,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<BTreeMap<String, String>, String> {
+    validate_env_refs(references)?;
+    references
+        .iter()
+        .map(|(target, source)| {
+            let value = lookup(source)
+                .filter(|value| !value.contains('\0'))
+                .ok_or_else(|| code("project_config_env_missing"))?;
+            Ok((target.clone(), value))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -933,5 +1037,33 @@ mod tests {
             builder.get_env("TARGET_KEY").unwrap().to_str(),
             Some("owner-only-secret; $(literal)")
         );
+    }
+}
+
+#[cfg(test)]
+mod codex_options_tests {
+    #[test]
+    fn project_codex_image_mode_validates_without_persisting_session_identity() {
+        for mode in ["native", "gateway_api"] {
+            assert!(super::validate_settings(
+                &serde_json::json!({"adapter":"codex","codex":{"image_mode":mode}}),
+                false
+            )
+            .is_ok());
+        }
+        assert!(super::validate_settings(
+            &serde_json::json!({"adapter":"claude","codex":{"image_mode":"native"}}),
+            false
+        )
+        .is_err());
+        for options in [
+            serde_json::json!({"image_mode":"other"}),
+            serde_json::json!({"image_mode":"native","context":"0123456789abcdef0123456789abcdef"}),
+            serde_json::Value::Null,
+        ] {
+            assert!(
+                super::validate_settings(&serde_json::json!({"codex":options}), false).is_err()
+            );
+        }
     }
 }

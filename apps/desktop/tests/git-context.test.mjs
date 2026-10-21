@@ -1,3 +1,5 @@
+import {englishUiReadAsync} from './fixtures/english-ui-source.mjs';
+import './fixtures/i18n-test-init.mjs';
 import assert from "node:assert/strict";
 import {test} from "node:test";
 import * as git from "../src/git-context.ts";
@@ -40,7 +42,7 @@ test("T12 query errors become fixed unavailable state without raw error disclosu
 });
 test("T12 actual App Git effect wires active project owner cancellation and interval",async()=>{
  const fs=await import("node:fs/promises"),ts=await import("typescript");
- const source=await fs.readFile(new URL("../src/App.tsx",import.meta.url),"utf8");
+ const source=await englishUiReadAsync(fs.readFile,new URL("../src/App.tsx",import.meta.url),"utf8");
  const tree=ts.default.createSourceFile("App.tsx",source,ts.default.ScriptTarget.Latest,true,ts.default.ScriptKind.TSX);
  let effect;const visit=n=>{if(ts.default.isCallExpression(n)&&n.expression.getText(tree)==="useEffect"&&n.arguments[0]?.getText(tree).includes("get_git_context"))effect=n.arguments[0].getText(tree);ts.default.forEachChild(n,visit);};visit(tree);
  assert.ok(effect,"actual App Git polling effect must exist");
@@ -72,7 +74,7 @@ test("T12 failure and cancel retain per-path minimum interval and invalid respon
 
 test("T12 actual App selection owner and unmount cancel late success error and interval",async()=>{
  const fs=await import("node:fs/promises"),ts=await import("typescript");
- const source=await fs.readFile(new URL("../src/App.tsx",import.meta.url),"utf8");
+ const source=await englishUiReadAsync(fs.readFile,new URL("../src/App.tsx",import.meta.url),"utf8");
  const tree=ts.default.createSourceFile("App.tsx",source,ts.default.ScriptTarget.Latest,true,ts.default.ScriptKind.TSX);
  let effect;const visit=n=>{if(ts.default.isCallExpression(n)&&n.expression.getText(tree)==="useEffect"&&n.arguments[0]?.getText(tree).includes("get_git_context"))effect=n.arguments[0].getText(tree);ts.default.forEachChild(n,visit);};visit(tree);
  assert.ok(effect,"actual Git effect exists");

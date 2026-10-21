@@ -327,6 +327,130 @@ mod tests {
         assert_eq!(fixture.git(&["branch", "--list"]), branches);
     }
     #[test]
+    fn closure_t08_create_rejects_stale_manifest_and_held_start_gate_without_side_effects() {
+        let _serial = serial_worktree_test();
+        let fixture = GitFixture::new();
+        let preview = preview_create(&fixture.private, &fixture.input()).unwrap();
+        let branches = fixture.git(&["branch", "--list"]);
+        let gate = start_guard().unwrap();
+        assert_eq!(
+            preview_create(&fixture.private, &fixture.input()).unwrap_err(),
+            "worktree_busy"
+        );
+        assert_eq!(
+            create_managed(&fixture.private, &preview.record.attempt).unwrap_err(),
+            "worktree_busy"
+        );
+        assert!(start_guard().is_err());
+        drop(gate);
+        let mut manifest = Manifest {
+            version: 1,
+            revision: preview.revision + 1,
+            records: Vec::new(),
+            identities: Default::default(),
+            cleanup: Default::default(),
+        };
+        save_manifest(&fixture.private, &manifest).unwrap();
+        let before = std::fs::read(fixture.private.join("worktrees.json")).unwrap();
+        assert_eq!(
+            create_managed(&fixture.private, &preview.record.attempt).unwrap_err(),
+            "worktree_preview_changed"
+        );
+        assert!(!fixture.target.exists());
+        assert_eq!(fixture.git(&["branch", "--list"]), branches);
+        assert_eq!(
+            std::fs::read(fixture.private.join("worktrees.json")).unwrap(),
+            before
+        );
+        manifest.revision = preview.revision;
+        save_manifest(&fixture.private, &manifest).unwrap();
+        let created = create_managed(&fixture.private, &preview.record.attempt).unwrap();
+        assert_eq!(created.session_id, preview.record.session_id);
+    }
+    #[test]
+    fn closure_t08_post_checkout_config_and_attributes_change_never_publish_created() {
+        let _serial = serial_worktree_test();
+        for attributes in [false, true] {
+            let fixture = GitFixture::new();
+            let preview = preview_create(&fixture.private, &fixture.input()).unwrap();
+            let path = fixture.repository.join(if attributes {
+                ".git/info/attributes"
+            } else {
+                ".git/config"
+            });
+            CREATE_ACTION.with(|action| {
+                *action.borrow_mut() = Some(Box::new(move |stage| {
+                    if stage == CreateFault::Checkout {
+                        use std::io::Write;
+                        std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(&path)
+                            .unwrap()
+                            .write_all(if attributes {
+                                b"\nfile.txt -text\n"
+                            } else {
+                                b"\n[fixture]\nchanged = true\n"
+                            })
+                            .unwrap();
+                    }
+                }))
+            });
+            let result = create_managed(&fixture.private, &preview.record.attempt);
+            CREATE_ACTION.with(|action| *action.borrow_mut() = None);
+            assert_eq!(result.unwrap_err(), "worktree_preview_changed");
+            let durable = read_manifest(&fixture.private).unwrap();
+            assert_eq!(durable.records.len(), 1);
+            assert_eq!(durable.records[0].session_id, preview.record.session_id);
+            assert!(!durable.records[0].checkout_complete);
+            let reopened = list_managed(&fixture.private).unwrap();
+            assert_eq!(reopened.len(), 1);
+            assert_ne!(reopened[0].state, RecordState::Created);
+            assert!(!reopened[0].checkout_complete);
+            assert_eq!(reopened[0].attempt, preview.record.attempt);
+        }
+    }
+    #[test]
+    fn closure_t08_manifest_io_failure_keeps_durable_incomplete_record_and_collision_bytes() {
+        let _serial = serial_worktree_test();
+        let fixture = GitFixture::new();
+        let preview = preview_create(&fixture.private, &fixture.input()).unwrap();
+        let private = fixture.private.clone();
+        let collision = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let captured = collision.clone();
+        CREATE_ACTION.with(|action| {
+            *action.borrow_mut() = Some(Box::new(move |stage| {
+                if stage == CreateFault::Checkout {
+                    let path = private.join(format!(
+                        "worktrees-{}-{}.tmp",
+                        std::process::id(),
+                        NEXT_WRITE.load(Ordering::Relaxed)
+                    ));
+                    std::fs::write(&path, b"owned collision sentinel").unwrap();
+                    *captured.lock().unwrap() = Some(path);
+                }
+            }))
+        });
+        let result = create_managed(&fixture.private, &preview.record.attempt);
+        CREATE_ACTION.with(|action| *action.borrow_mut() = None);
+        assert_eq!(result.unwrap_err(), "worktree_manifest_unavailable");
+        let collision = collision.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            std::fs::read(collision).unwrap(),
+            b"owned collision sentinel"
+        );
+        let durable = read_manifest(&fixture.private).unwrap();
+        assert_eq!(durable.records.len(), 1);
+        assert_eq!(durable.records[0].state, RecordState::Creating);
+        assert_eq!(durable.records[0].session_id, preview.record.session_id);
+        assert!(!durable.records[0].checkout_complete);
+        let reopened = list_managed(&fixture.private).unwrap();
+        assert_eq!(reopened.len(), 1);
+        assert_ne!(reopened[0].state, RecordState::Created);
+        assert!(!reopened[0].checkout_complete);
+        assert_eq!(reopened[0].attempt, preview.record.attempt);
+    }
+    #[test]
     fn t13_git_create_populates_fixed_commit_without_copying_uncommitted_changes_and_is_idempotent()
     {
         let _serial = serial_worktree_test();
@@ -1518,8 +1642,10 @@ mod tests {
             crate::HistoryStore::open(fixture.owned.0.join("mock-history")).unwrap(),
         );
         std::sync::Arc::new(crate::Session {
+            _directory_reporting_assets: None,
             _resume_claim: None,
             summary: crate::SessionSummary {
+                ssh: None,
                 session_id: "s-1-1".into(),
                 cwd: cwd.to_str().unwrap().into(),
                 command: None,
@@ -1544,6 +1670,11 @@ mod tests {
             stop_requested: AtomicBool::new(false),
             idle_notified: AtomicBool::new(false),
             completed: (Mutex::new(completed), Condvar::new()),
+            pending_finish: Mutex::new(None),
+            exit_observation_fault: None,
+            cleanup_done: AtomicBool::new(false),
+            #[cfg(unix)]
+            process_identity: None,
             last_activity: Mutex::new(std::time::Instant::now()),
             status: Mutex::new("succeeded".into()),
         })
@@ -2784,6 +2915,11 @@ fn create_managed(private: &std::path::Path, attempt: &str) -> Result<ManagedRec
 }
 #[cfg(test)]
 fn fault_point(stage: CreateFault) -> Result<(), String> {
+    CREATE_ACTION.with(|action| {
+        if let Some(action) = action.borrow().as_ref() {
+            action(stage);
+        }
+    });
     if CREATE_FAULT.with(|fault| fault.get()) == Some(stage) {
         FAULT_HIT.with(|hit| hit.set(Some(stage)));
         return Err("worktree_injected_fault".into());
@@ -2883,6 +3019,10 @@ enum CreateFault {
     Registration,
     Checkout,
 }
+#[cfg(test)]
+type CreateAction = Box<dyn Fn(CreateFault)>;
+#[cfg(test)]
+thread_local! {static CREATE_ACTION:std::cell::RefCell<Option<CreateAction>>=const{std::cell::RefCell::new(None)};}
 #[cfg(test)]
 thread_local! {static CREATE_FAULT:std::cell::Cell<Option<CreateFault>>=const {std::cell::Cell::new(None)};static FAULT_HIT:std::cell::Cell<Option<CreateFault>>=const {std::cell::Cell::new(None)};}
 

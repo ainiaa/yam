@@ -121,7 +121,7 @@ pub(super) struct Snapshot {
     progress: Option<Transfer>,
     reason: Option<&'static str>,
     install_allowed: bool,
-    install_blocked_reason: &'static str,
+    install_blocked_reason: Option<&'static str>,
 }
 struct Flight {
     deadline: Instant,
@@ -151,10 +151,12 @@ struct State {
     verified: Option<Vec<u8>>,
     flight: Option<Arc<Flight>>,
     closed: bool,
+    installing: bool,
 }
 pub(super) struct Controller {
     state: Mutex<State>,
     exit_cleanup: std::sync::atomic::AtomicBool,
+    install_done: Condvar,
 }
 struct Progress {
     controller: Weak<Controller>,
@@ -234,14 +236,16 @@ fn initialize_with(
                 progress: None,
                 reason,
                 install_allowed: false,
-                install_blocked_reason: "install_unavailable",
+                install_blocked_reason: Some("not_ready"),
             },
             candidate: None,
             verified: None,
             flight: None,
             closed: false,
+            installing: false,
         }),
         exit_cleanup: std::sync::atomic::AtomicBool::new(false),
+        install_done: Condvar::new(),
     }))
 }
 impl Controller {
@@ -251,7 +255,10 @@ impl Controller {
             let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             state.closed = true;
             state.verified = None;
-            (state.dto.generation, state.flight.is_some())
+            (
+                state.dto.generation,
+                state.flight.is_some() || state.installing,
+            )
         };
         if pending {
             let _ = self.request_cancel(generation, "cancelled");
@@ -267,6 +274,9 @@ impl Controller {
         let mut state = self.state.lock().map_err(|_| "updater_unavailable")?;
         if state.closed {
             return Err("updater_shutdown".into());
+        }
+        if state.installing {
+            return Err("updater_busy".into());
         }
         if state.dto.generation != expected {
             return Err("updater_stale".into());
@@ -293,13 +303,16 @@ impl Controller {
             if state.closed {
                 return Err("updater_shutdown".into());
             }
+            if state.dto.reason == Some("rollback_failed") {
+                return Err("updater_recovery_required".into());
+            }
             if !state.dto.configured {
                 return Err("updater_not_configured".into());
             }
             if expected != state.dto.generation {
                 return Err("updater_stale".into());
             }
-            if state.flight.is_some() {
+            if state.flight.is_some() || state.installing {
                 return Err("updater_busy".into());
             }
             if matches!(operation, Operation::Download)
@@ -460,6 +473,9 @@ impl Controller {
             if state.dto.generation != expected {
                 return Err("updater_stale".into());
             }
+            if state.installing {
+                return Err("updater_installing".into());
+            }
             let Some(flight) = state.flight.clone() else {
                 return Ok(None);
             };
@@ -490,8 +506,77 @@ impl Controller {
         }
         Ok(self.status())
     }
-    pub(super) fn install(&self) -> Result<Snapshot, String> {
-        Err("updater_install_unavailable".into())
+    fn install_with(
+        self: &Arc<Self>,
+        expected: u64,
+        work: impl FnOnce(Candidate, &[u8]) -> Result<(), &'static str> + Send + 'static,
+        restart: impl FnOnce() + Send + 'static,
+    ) -> Result<Snapshot, String> {
+        let (candidate, bytes, snapshot) = {
+            let mut state = self.state.lock().map_err(|_| "updater_unavailable")?;
+            if state.closed {
+                return Err("updater_shutdown".into());
+            }
+            if state.dto.reason == Some("rollback_failed") {
+                return Err("updater_recovery_required".into());
+            }
+            if state.dto.generation != expected {
+                return Err("updater_stale".into());
+            }
+            if state.installing || state.flight.is_some() {
+                return Err("updater_busy".into());
+            }
+            if state.dto.state != "verified"
+                || state.candidate.is_none()
+                || state.verified.is_none()
+            {
+                return Err("updater_not_verified".into());
+            }
+            state.dto.generation = state
+                .dto
+                .generation
+                .checked_add(1)
+                .filter(|n| *n < MAX_GENERATION)
+                .ok_or("updater_generation_exhausted")?;
+            state.installing = true;
+            state.dto.state = "installing".into();
+            state.dto.reason = None;
+            let bytes = state.verified.take().unwrap();
+            (state.candidate.clone().unwrap(), bytes, state.dto.clone())
+        };
+        let controller = self.clone();
+        std::thread::spawn(move || {
+            // Installation is a critical section: exit joins it and cancellation cannot abandon it.
+            let result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(candidate, &bytes)))
+                    .unwrap_or(Err("operation_failed"));
+            let restart_now = {
+                let mut state = controller.state.lock().unwrap_or_else(|p| p.into_inner());
+                state.installing = false;
+                if !state.closed {
+                    if let Err(reason) = result {
+                        state.verified = Some(bytes);
+                        state.dto.state = "verified".into();
+                        state.dto.reason = Some(match reason {
+                            "running_tasks" => "running_tasks",
+                            "owner_upgrade_required" => "owner_upgrade_required",
+                            "owner_unavailable" => "owner_unavailable",
+                            "manual_install_required" => "manual_install_required",
+                            "rollback_failed" => "rollback_failed",
+                            _ => "operation_failed",
+                        });
+                    } else {
+                        state.dto.state = "restarting".into();
+                    }
+                }
+                result.is_ok() && !state.closed
+            };
+            controller.install_done.notify_all();
+            if restart_now {
+                restart();
+            }
+        });
+        Ok(snapshot)
     }
     #[cfg(test)]
     fn has_verified_bytes(&self) -> bool {
@@ -509,6 +594,12 @@ impl Controller {
             flight.wait();
         }
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        while state.installing {
+            state = self
+                .install_done
+                .wait(state)
+                .unwrap_or_else(|p| p.into_inner());
+        }
         state.candidate = None;
         state.verified = None;
         state.dto.release = None;
@@ -556,8 +647,32 @@ pub(super) fn initialize(app: &tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 #[tauri::command]
-pub(super) fn updater_status(controller: tauri::State<'_, Arc<Controller>>) -> Snapshot {
-    controller.status()
+pub(super) async fn updater_status<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    controller: tauri::State<'_, Arc<Controller>>,
+) -> Result<Snapshot, String> {
+    let controller = controller.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut snapshot = controller.status();
+        if snapshot.state == "verified" {
+            if snapshot.reason == Some("rollback_failed") {
+                snapshot.install_blocked_reason = Some("manual_recovery_required");
+                return snapshot;
+            }
+            let status = background_client(&app).and_then(|client| {
+                client
+                    .call("background_status", serde_json::json!({}))
+                    .map_err(|_| "owner_unavailable")
+            });
+            snapshot.install_blocked_reason = status
+                .and_then(|value| idle_install_permission(&value))
+                .err();
+            snapshot.install_allowed = snapshot.install_blocked_reason.is_none();
+        }
+        snapshot
+    })
+    .await
+    .map_err(|_| "updater_unavailable".into())
 }
 #[tauri::command(rename_all = "snake_case")]
 pub(super) fn updater_set_automatic_checks(
@@ -588,30 +703,33 @@ pub(super) fn updater_check(
             let Some(update) = sdk.check().await.map_err(|_| "updater_operation_failed")? else {
                 return Ok(Outcome::NoUpdate);
             };
-            let url = &update.download_url;
-            if url.scheme() != "https"
-                || url.host_str().is_none()
-                || !url.username().is_empty()
-                || url.password().is_some()
-                || url.fragment().is_some()
-                || url.as_str().len() > 2048
-            {
-                return Err("updater_artifact_invalid".into());
-            }
-            let release = Release {
-                version: update.version.clone(),
-                notes: update.body.clone().unwrap_or_default(),
-                published: update.date.map(|date| date.to_string()),
-            };
-            if !release.valid() {
-                return Err("updater_metadata_invalid".into());
-            }
-            Ok(Outcome::Available(Candidate {
-                release,
-                sdk: Some(Box::new(update)),
-            }))
+            candidate_from_update(update).map(Outcome::Available)
         },
     )
+}
+fn candidate_from_update(update: tauri_plugin_updater::Update) -> Result<Candidate, String> {
+    let url = &update.download_url;
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+        || url.as_str().len() > 2048
+    {
+        return Err("updater_artifact_invalid".into());
+    }
+    let release = Release {
+        version: update.version.clone(),
+        notes: update.body.clone().unwrap_or_default(),
+        published: update.date.map(|date| date.to_string()),
+    };
+    if !release.valid() {
+        return Err("updater_metadata_invalid".into());
+    }
+    Ok(Candidate {
+        release,
+        sdk: Some(Box::new(update)),
+    })
 }
 #[tauri::command(rename_all = "snake_case")]
 pub(super) fn updater_download(
@@ -654,15 +772,597 @@ pub(super) async fn updater_cancel(
         .await
         .map_err(|_| "updater_unavailable")?
 }
-#[tauri::command]
+fn background_client<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> Result<Arc<crate::background::Client>, &'static str> {
+    use tauri::Manager;
+    app.state::<crate::SessionManager>()
+        .background_client
+        .lock()
+        .map_err(|_| "owner_unavailable")?
+        .clone()
+        .ok_or("owner_unavailable")
+}
+fn idle_install_permission(status: &serde_json::Value) -> Result<(), &'static str> {
+    if status["updater_idle_install_v2"] != true {
+        Err("owner_upgrade_required")
+    } else if status["active_sessions"].as_u64() != Some(0) {
+        Err("running_tasks")
+    } else {
+        Ok(())
+    }
+}
+fn release_install_admission(closing: &std::sync::atomic::AtomicBool, reason: &str) -> bool {
+    if reason == "rollback_failed" {
+        return false;
+    }
+    closing.store(false, std::sync::atomic::Ordering::Release);
+    reason != "running_tasks"
+}
+fn wait_for_owner(
+    root: &std::path::Path,
+    timeout: Duration,
+) -> Result<crate::background::OwnerLock, &'static str> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Ok(owner) = crate::background::OwnerLock::acquire(root) {
+            return Ok(owner);
+        }
+        if Instant::now() >= deadline {
+            return Err("owner_unavailable");
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+fn install_candidate(
+    app: &tauri::AppHandle,
+    candidate: Candidate,
+    bytes: &[u8],
+) -> Result<(), &'static str> {
+    use tauri::Manager;
+    let update = candidate.sdk.ok_or("operation_failed")?;
+    let client = background_client(app)?;
+    let status = client
+        .call("background_status", serde_json::json!({}))
+        .map_err(|_| "owner_unavailable")?;
+    // The count is advisory. prepare_update repeats admission atomically with native session creation.
+    idle_install_permission(&status)?;
+    let root = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "owner_unavailable")?
+        .join("background");
+    let manager = app.state::<crate::SessionManager>();
+    let result = (|| {
+        client
+            .call("prepare_update", serde_json::json!({}))
+            .map_err(|error| {
+                if error == "running_tasks" {
+                    "running_tasks"
+                } else {
+                    "owner_unavailable"
+                }
+            })?;
+        manager
+            .shutting_down
+            .store(true, std::sync::atomic::Ordering::Release);
+        // The v2 owner exits after preparing, even if its receipt is lost; no second RPC can strand it.
+        // Keep the owner file lock through replacement so CLI clients cannot start the old binary.
+        let _owner = wait_for_owner(&root, Duration::from_secs(5))?;
+        crate::updater_install::install(&update, bytes)
+    })();
+    if let Err(reason) = result {
+        if !release_install_admission(&manager.shutting_down, reason) {
+            return result;
+        }
+        // A lost preparation receipt may still have committed the owner's exit.
+        let Ok(owner) = wait_for_owner(&root, Duration::from_secs(5)) else {
+            return result;
+        };
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while manager
+            .background_events
+            .lock()
+            .map(|poll| poll.is_running())
+            .unwrap_or(true)
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        drop(owner);
+        // Installation was admitted only while idle, so reconnecting cannot rerun an interrupted task.
+        let _ = crate::background::attach(app);
+    }
+    result
+}
+#[tauri::command(rename_all = "snake_case")]
 pub(super) fn updater_install(
+    app: tauri::AppHandle,
+    webview: tauri::Webview,
     controller: tauri::State<'_, Arc<Controller>>,
+    expected_generation: u64,
 ) -> Result<Snapshot, String> {
-    controller.install()
+    if webview.label() != "main" || webview.window().label() != "main" {
+        return Err("updater_main_window_required".into());
+    }
+    let restart = app.clone();
+    controller.install_with(
+        expected_generation,
+        move |candidate, bytes| install_candidate(&app, candidate, bytes),
+        move || restart.request_restart(),
+    )
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn async_status_keeps_unavailable_busy_and_manual_recovery_install_gates() {
+        use tauri::Manager;
+        let root = std::env::temp_dir().join(format!(
+            "yam-update-status-gates-{}",
+            crate::next_session_id()
+        ));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = calls.clone();
+        let server = crate::background::Server::start(&root, move |_| {
+            observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(serde_json::json!({"active_sessions":1,"updater_idle_install_v2":true}))
+        })
+        .unwrap();
+        let controller = controller();
+        controller.state.lock().unwrap().dto.state = "verified".into();
+        let app = tauri::test::mock_builder()
+            .manage(crate::SessionManager::default())
+            .manage(controller.clone())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let status = || {
+            tauri::async_runtime::block_on(super::updater_status(app.handle().clone(), app.state()))
+                .unwrap()
+        };
+        let unavailable = status();
+        assert!(!unavailable.install_allowed);
+        assert_eq!(
+            unavailable.install_blocked_reason,
+            Some("owner_unavailable")
+        );
+        *app.state::<crate::SessionManager>()
+            .background_client
+            .lock()
+            .unwrap() = Some(Arc::new(
+            crate::background::Client::new(crate::background::Descriptor::read(&root).unwrap())
+                .unwrap(),
+        ));
+        let busy = status();
+        assert!(!busy.install_allowed);
+        assert_eq!(busy.install_blocked_reason, Some("running_tasks"));
+        controller.state.lock().unwrap().dto.reason = Some("rollback_failed");
+        let recovery = status();
+        assert!(!recovery.install_allowed);
+        assert_eq!(
+            recovery.install_blocked_reason,
+            Some("manual_recovery_required")
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+        drop(server);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn status_poll_yields_the_caller_while_owner_response_is_held() {
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+        use tauri::Manager;
+        let root =
+            std::env::temp_dir().join(format!("yam-update-status-{}", crate::next_session_id()));
+        let (entered, observed) = std::sync::mpsc::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        let held = Mutex::new(held);
+        let server = crate::background::Server::start(&root, move |request| {
+            assert_eq!(request.command, "background_status");
+            entered.send(()).unwrap();
+            held.lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(3))
+                .unwrap();
+            Ok(serde_json::json!({"active_sessions":0,"updater_idle_install_v2":true}))
+        })
+        .unwrap();
+        let manager = crate::SessionManager::default();
+        *manager.background_client.lock().unwrap() = Some(Arc::new(
+            crate::background::Client::new(crate::background::Descriptor::read(&root).unwrap())
+                .unwrap(),
+        ));
+        let controller = controller();
+        controller.state.lock().unwrap().dto.state = "verified".into();
+        let app = tauri::test::mock_builder()
+            .manage(manager)
+            .manage(controller)
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let mut pending = Box::pin(super::updater_status(app.handle().clone(), app.state()));
+        let start = Instant::now();
+        assert!(matches!(
+            pending
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop())),
+            Poll::Pending
+        ));
+        assert!(
+            start.elapsed() < Duration::from_millis(200),
+            "status polling must yield before waiting for the owner"
+        );
+        observed.recv_timeout(Duration::from_secs(2)).unwrap();
+        release.send(()).unwrap();
+        let result = tauri::async_runtime::block_on(pending).unwrap();
+        assert_eq!(result.state, "verified");
+        assert!(result.install_allowed);
+        assert_eq!(result.install_blocked_reason, None);
+        drop(server);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn owner_wait_never_reconnects_to_an_owner_that_still_holds_the_lock() {
+        let root =
+            std::env::temp_dir().join(format!("yam-update-lock-{}", crate::next_session_id()));
+        let owner = crate::background::OwnerLock::acquire(&root).unwrap();
+        assert!(super::wait_for_owner(&root, std::time::Duration::ZERO).is_err());
+        drop(owner);
+        let retained = super::wait_for_owner(&root, std::time::Duration::ZERO).unwrap();
+        assert!(crate::background::OwnerLock::acquire(&root).is_err());
+        drop(retained);
+        assert!(crate::background::OwnerLock::acquire(&root).is_ok());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn install_failure_only_reopens_safe_admission_and_never_restarts_after_failed_rollback() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        for (reason, reconnect, closed) in [
+            ("rollback_failed", false, true),
+            ("running_tasks", false, false),
+            ("owner_unavailable", true, false),
+            ("operation_failed", true, false),
+        ] {
+            let closing = AtomicBool::new(true);
+            assert_eq!(
+                super::release_install_admission(&closing, reason),
+                reconnect
+            );
+            assert_eq!(closing.load(Ordering::Acquire), closed);
+        }
+    }
+    #[test]
+    fn idle_install_requires_self_exiting_owner_and_explicit_zero_tasks() {
+        use serde_json::json;
+        for (status, expected) in [
+            (
+                json!({"updater_idle_install_v1":true,"active_sessions":0}),
+                Err("owner_upgrade_required"),
+            ),
+            (
+                json!({"updater_idle_install_v2":"true","active_sessions":0}),
+                Err("owner_upgrade_required"),
+            ),
+            (
+                json!({"updater_idle_install_v2":true,"active_sessions":1}),
+                Err("running_tasks"),
+            ),
+            (
+                json!({"updater_idle_install_v2":true}),
+                Err("running_tasks"),
+            ),
+            (
+                json!({"updater_idle_install_v2":true,"active_sessions":0}),
+                Ok(()),
+            ),
+        ] {
+            assert_eq!(super::idle_install_permission(&status), expected);
+        }
+    }
+    #[cfg(target_os = "macos")]
+    struct ClosureT14Fixture {
+        child: std::process::Child,
+        root: std::path::PathBuf,
+        endpoint: String,
+    }
+    #[cfg(target_os = "macos")]
+    impl ClosureT14Fixture {
+        fn new(mode: &str) -> Self {
+            use std::io::BufRead;
+            use std::os::unix::fs::PermissionsExt;
+            let root = std::env::temp_dir()
+                .join(format!("yam-updater-owned-{}", crate::next_session_id()));
+            std::fs::create_dir(&root).unwrap();
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let mut child = std::process::Command::new("python3")
+                .arg(
+                    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                        .join("../tests/fixtures/updater_api.py"),
+                )
+                .args(["--mode", mode, "--root"])
+                .arg(&root)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            let mut ready = String::new();
+            std::io::BufReader::new(child.stdout.take().unwrap())
+                .read_line(&mut ready)
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_str(&ready).unwrap();
+            Self {
+                child,
+                root,
+                endpoint: value["endpoint"].as_str().unwrap().into(),
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    impl Drop for ClosureT14Fixture {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn closure_t14_real_sdk_verifies_bytes_and_signed_version_on_owned_https() {
+        use tauri::Manager;
+        use tauri_plugin_updater::UpdaterExt;
+        tauri::async_runtime::block_on(async {
+            for mode in [
+                "valid",
+                "changed-bytes",
+                "wrong-version",
+                "no-update",
+                "held",
+            ] {
+                let fixture = ClosureT14Fixture::new(mode);
+                let mut context = tauri::test::mock_context(tauri::test::noop_assets());
+                context.config_mut().plugins.0.insert("updater".into(),serde_json::json!({
+                    "pubkey":include_str!("../../tests/fixtures/updater-public.key").trim(),
+                    "endpoints":[fixture.endpoint],"requireSignedVersion":true,"allowDowngrades":false
+                }));
+                let app = tauri::test::mock_builder()
+                    .plugin(tauri_plugin_updater::Builder::new().build())
+                    .build(context)
+                    .unwrap();
+                // This private session accepts its ephemeral certificate; production client stays unchanged.
+                let sdk = app
+                    .updater_builder()
+                    .timeout(Duration::from_secs(3))
+                    .executable_path(fixture.root.join("YAM.app/Contents/MacOS/YAM"))
+                    .configure_client(|builder| {
+                        builder
+                            .https_only(true)
+                            .danger_accept_invalid_certs(true)
+                            .no_proxy()
+                    })
+                    .build()
+                    .unwrap();
+                let found = sdk.check().await.unwrap();
+                if mode == "no-update" {
+                    assert!(found.is_none());
+                    let receipts =
+                        std::fs::read_to_string(fixture.root.join("requests.jsonl")).unwrap();
+                    assert_eq!(receipts.lines().count(), 1);
+                    continue;
+                }
+                let mut update = found.unwrap();
+                update.timeout = Some(if mode == "held" {
+                    Duration::from_millis(100)
+                } else {
+                    Duration::from_secs(3)
+                });
+                if mode == "valid" {
+                    let candidate = candidate_from_update(update.clone()).unwrap();
+                    assert_eq!(candidate.release.version, "7.8.9");
+                    for url in [
+                        "http://127.0.0.1/a",
+                        "https://user:password@example.test/a",
+                        "https://example.test/a#fragment",
+                    ] {
+                        let mut invalid = update.clone();
+                        invalid.download_url = url.parse().unwrap();
+                        assert_eq!(
+                            candidate_from_update(invalid).err().unwrap(),
+                            "updater_artifact_invalid"
+                        );
+                    }
+                    let mut invalid = update.clone();
+                    invalid.body = Some("x".repeat(8193));
+                    assert_eq!(
+                        candidate_from_update(invalid).err().unwrap(),
+                        "updater_metadata_invalid"
+                    );
+                }
+                let finished = std::sync::atomic::AtomicBool::new(false);
+                let observed = std::sync::atomic::AtomicUsize::new(0);
+                let result = update
+                    .download(
+                        |bytes, _| {
+                            observed.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+                        },
+                        || finished.store(true, std::sync::atomic::Ordering::Release),
+                    )
+                    .await;
+                assert_eq!(
+                    finished.load(std::sync::atomic::Ordering::Acquire),
+                    mode != "held"
+                );
+                assert_eq!(
+                    observed.load(std::sync::atomic::Ordering::Relaxed) > 0,
+                    mode != "held"
+                );
+                if mode == "valid" {
+                    assert_eq!(
+                        result.unwrap(),
+                        include_bytes!("../../tests/fixtures/updater-artifact.txt")
+                    );
+                } else if mode == "held" {
+                    assert!(
+                        matches!(result,Err(tauri_plugin_updater::Error::Reqwest(ref error)) if error.is_timeout())
+                    );
+                } else {
+                    assert!(
+                        result.is_err(),
+                        "SDK must reject {mode} after the transfer callback"
+                    );
+                }
+                let controller = controller();
+                let candidate = candidate_from_update(update).unwrap();
+                controller
+                    .start(
+                        Operation::Check,
+                        0,
+                        Duration::from_secs(3),
+                        move |_, _| async move { Ok(Outcome::Available(candidate)) },
+                    )
+                    .unwrap();
+                await_state(&controller, "available");
+                app.manage(controller.clone());
+                updater_download(app.state(), controller.status().generation).unwrap();
+                if mode == "held" {
+                    let deadline = Instant::now() + Duration::from_secs(2);
+                    while std::fs::read_to_string(fixture.root.join("requests.jsonl"))
+                        .unwrap()
+                        .lines()
+                        .count()
+                        < 3
+                        && Instant::now() < deadline
+                    {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    assert_eq!(
+                        std::fs::read_to_string(fixture.root.join("requests.jsonl"))
+                            .unwrap()
+                            .lines()
+                            .count(),
+                        3
+                    );
+                    updater_cancel(app.state(), controller.status().generation)
+                        .await
+                        .unwrap();
+                    assert_eq!(controller.status().state, "cancelled");
+                    assert!(controller.state.lock().unwrap().flight.is_none());
+                } else {
+                    await_state(
+                        &controller,
+                        if mode == "valid" { "verified" } else { "error" },
+                    );
+                }
+                assert_eq!(controller.has_verified_bytes(), mode == "valid");
+                if mode != "valid" {
+                    assert!(controller
+                        .install_with(
+                            controller.status().generation,
+                            |_, _| panic!("unverified"),
+                            || {}
+                        )
+                        .is_err());
+                }
+                controller.shutdown_and_join();
+                let paths: Vec<_> = std::fs::read_to_string(fixture.root.join("requests.jsonl"))
+                    .unwrap()
+                    .lines()
+                    .map(|row| {
+                        serde_json::from_str::<serde_json::Value>(row).unwrap()["path"]
+                            .as_str()
+                            .unwrap()
+                            .to_string()
+                    })
+                    .collect();
+                assert_eq!(paths, ["/manifest", "/artifact", "/artifact"]);
+            }
+        });
+    }
+
+    #[test]
+    fn closure_t14_exit_fences_and_joins_updater_before_detached_client_return() {
+        let root =
+            std::env::temp_dir().join(format!("yam-updater-exit-{}", crate::next_session_id()));
+        let server =
+            crate::background::Server::start(&root, |_| panic!("fixture never sends RPC")).unwrap();
+        let manager = crate::SessionManager::default();
+        *manager.background_client.lock().unwrap() = Some(Arc::new(
+            crate::background::Client::new(crate::background::Descriptor::read(&root).unwrap())
+                .unwrap(),
+        ));
+        let controller = controller();
+        let (entered, ready) = std::sync::mpsc::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        controller
+            .start(
+                Operation::Check,
+                0,
+                Duration::from_secs(3),
+                move |_, _| async move {
+                    entered.send(()).unwrap();
+                    held.recv_timeout(Duration::from_secs(2)).unwrap();
+                    Ok(Outcome::NoUpdate)
+                },
+            )
+            .unwrap();
+        ready.recv_timeout(Duration::from_secs(1)).unwrap();
+        let prevented = std::cell::Cell::new(0);
+        let (exited, exit) = std::sync::mpsc::channel();
+        let cleanup = std::cell::RefCell::new(None);
+        assert!(crate::handle_gui_exit_with(
+            &manager,
+            Some(&controller),
+            Some(7),
+            false,
+            || prevented.set(prevented.get() + 1),
+            |owned, code| {
+                *cleanup.borrow_mut() = Some(std::thread::spawn(move || {
+                    owned.shutdown_and_join();
+                    exited.send(code).unwrap();
+                }));
+            }
+        ));
+        let early = exit.recv_timeout(Duration::from_millis(50));
+        assert!(crate::handle_gui_exit_with(
+            &manager,
+            Some(&controller),
+            Some(7),
+            false,
+            || prevented.set(prevented.get() + 1),
+            |_, _| panic!("duplicate exit cleanup")
+        ));
+        assert!(!manager
+            .shutting_down
+            .load(std::sync::atomic::Ordering::Acquire));
+        release.send(()).unwrap();
+        cleanup.into_inner().unwrap().join().unwrap();
+        assert!(
+            early.is_err(),
+            "exit happened before the exact worker joined"
+        );
+        assert_eq!(exit.recv_timeout(Duration::from_secs(1)).unwrap(), 7);
+        assert_eq!(prevented.get(), 2);
+        assert!(controller
+            .start(
+                Operation::Check,
+                controller.status().generation,
+                Duration::from_secs(1),
+                |_, _| async { panic!("closed controller cannot start") }
+            )
+            .is_err());
+        assert!(crate::handle_gui_exit_with(
+            &manager,
+            Some(&controller),
+            Some(7),
+            false,
+            || panic!("joined exit must not be prevented"),
+            |_, _| panic!("joined exit has no cleanup")
+        ));
+        assert!(manager
+            .shutting_down
+            .load(std::sync::atomic::Ordering::Acquire));
+        drop(server);
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn t20_actual_exit_body_fences_worker_before_background_client_return() {
         let controller = controller();
@@ -911,8 +1611,14 @@ mod tests {
         let dto = serde_json::to_string(&controller.status()).unwrap();
         assert!(!dto.contains("private signature"));
         assert_eq!(
-            controller.install().unwrap_err(),
-            "updater_install_unavailable"
+            controller
+                .install_with(
+                    controller.status().generation,
+                    |_, _| panic!("unverified"),
+                    || {}
+                )
+                .unwrap_err(),
+            "updater_not_verified"
         );
     }
     #[test]
@@ -1014,7 +1720,7 @@ mod tests {
         assert!(controller.status().release.is_none());
     }
     #[test]
-    fn t20_sdk_success_boundary_has_fixed_dto_and_install_always_denied() {
+    fn t20_sdk_success_boundary_has_fixed_dto_and_requires_owner_admission() {
         let controller = controller();
         controller
             .start(
@@ -1035,10 +1741,14 @@ mod tests {
             .unwrap();
         await_state(&controller, "verified");
         assert!(controller.has_verified_bytes());
-        assert_eq!(
-            controller.install().unwrap_err(),
-            "updater_install_unavailable"
-        );
+        controller
+            .install_with(
+                controller.status().generation,
+                |_, _| Err("running_tasks"),
+                || panic!("restart"),
+            )
+            .unwrap();
+        await_state(&controller, "verified");
         let dto = serde_json::to_value(controller.status()).unwrap();
         assert_eq!(dto.as_object().unwrap().len(), 10);
         assert_eq!(dto["install_allowed"], false);
@@ -1108,6 +1818,130 @@ mod tests {
         assert_eq!(
             configuration(Some(&supplied()), false).unwrap_err(),
             "updater_platform_unsupported"
+        );
+    }
+    fn downloaded() -> Arc<Controller> {
+        let controller = controller();
+        controller
+            .start(Operation::Check, 0, Duration::from_secs(1), |_, _| async {
+                Ok(Outcome::Available(candidate()))
+            })
+            .unwrap();
+        await_state(&controller, "available");
+        controller
+            .start(
+                Operation::Download,
+                controller.status().generation,
+                Duration::from_secs(1),
+                |_, _| async { Ok(Outcome::Verified(vec![1, 2, 3])) },
+            )
+            .unwrap();
+        await_state(&controller, "verified");
+        controller
+    }
+    #[test]
+    fn update_install_requires_verified_generation_and_retries_failed_idle_admission() {
+        let controller = controller();
+        assert_eq!(
+            controller
+                .install_with(0, |_, _| panic!("unverified"), || {})
+                .unwrap_err(),
+            "updater_not_verified"
+        );
+        let controller = downloaded();
+        let generation = controller.status().generation;
+        assert_eq!(
+            controller
+                .install_with(generation - 1, |_, _| panic!("stale"), || {})
+                .unwrap_err(),
+            "updater_stale"
+        );
+        controller
+            .install_with(
+                generation,
+                |_, bytes| {
+                    assert_eq!(bytes, [1, 2, 3]);
+                    Err("running_tasks")
+                },
+                || panic!("failed restart"),
+            )
+            .unwrap();
+        await_state(&controller, "verified");
+        assert!(controller.has_verified_bytes());
+        assert_eq!(controller.status().reason, Some("running_tasks"));
+        controller
+            .install_with(controller.status().generation, |_, _| Ok(()), || {})
+            .unwrap();
+        await_state(&controller, "restarting");
+    }
+    #[test]
+    fn update_install_cannot_be_cancelled_replaced_or_abandoned_during_exit() {
+        let controller = downloaded();
+        let (entered, ready) = std::sync::mpsc::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        controller
+            .install_with(
+                controller.status().generation,
+                move |_, _| {
+                    entered.send(()).unwrap();
+                    wait.recv().unwrap();
+                    Ok(())
+                },
+                || {},
+            )
+            .unwrap();
+        ready.recv().unwrap();
+        assert_eq!(controller.status().state, "installing");
+        let generation = controller.status().generation;
+        assert!(controller.cancel_and_join(generation).is_err());
+        assert!(controller
+            .start(
+                Operation::Check,
+                generation,
+                Duration::from_secs(1),
+                |_, _| async { panic!("replace") }
+            )
+            .is_err());
+        assert!(controller.prepare_exit());
+        let copy = controller.clone();
+        let (done, joined) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            copy.shutdown_and_join();
+            done.send(()).unwrap();
+        });
+        assert!(joined.recv_timeout(Duration::from_millis(20)).is_err());
+        release.send(()).unwrap();
+        joined.recv_timeout(Duration::from_secs(2)).unwrap();
+        thread.join().unwrap();
+    }
+    #[test]
+    fn update_failed_rollback_requires_manual_recovery_before_any_replacement_or_recheck() {
+        let controller = downloaded();
+        controller
+            .install_with(
+                controller.status().generation,
+                |_, _| Err("rollback_failed"),
+                || panic!("restart"),
+            )
+            .unwrap();
+        await_state(&controller, "verified");
+        let generation = controller.status().generation;
+        assert_eq!(
+            controller
+                .install_with(generation, |_, _| panic!("retry"), || {})
+                .unwrap_err(),
+            "updater_recovery_required"
+        );
+        assert_eq!(
+            controller
+                .start(
+                    Operation::Check,
+                    generation,
+                    Duration::from_secs(1),
+                    |_, _| async { panic!("reset recovery") }
+                )
+                .unwrap_err(),
+            "updater_recovery_required"
         );
     }
 }

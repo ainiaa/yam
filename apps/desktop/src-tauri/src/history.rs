@@ -22,6 +22,94 @@ pub(crate) struct HistoryStore {
     pub(crate) instance: String,
     pub(crate) archive_pending: AtomicBool,
 }
+// Only a newly created, still-unreferenced log belongs to allocation rollback.
+pub(crate) struct PendingSessionLog {
+    file: Option<File>,
+    history: std::sync::Arc<HistoryStore>,
+    id: String,
+    created: bool,
+    committing: bool,
+}
+impl PendingSessionLog {
+    pub(crate) fn open(history: std::sync::Arc<HistoryStore>, id: &str) -> Result<Self, String> {
+        let path = history.log_path(id);
+        let mut options = OpenOptions::new();
+        options.read(true).append(true);
+        let (file, created) = match options.create_new(true).open(&path) {
+            Ok(file) => (file, true),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (
+                options
+                    .create_new(false)
+                    .open(&path)
+                    .map_err(|error| error.to_string())?,
+                false,
+            ),
+            Err(error) => return Err(format!("Failed to open session log: {error}")),
+        };
+        Ok(Self {
+            file: Some(file),
+            history,
+            id: id.into(),
+            created,
+            committing: false,
+        })
+    }
+    pub(crate) fn file(&mut self) -> &mut File {
+        self.file
+            .as_mut()
+            .expect("pending log retains its file until commit")
+    }
+    pub(crate) fn begin_commit(&mut self) {
+        self.committing = true;
+    }
+    pub(crate) fn commit(mut self) -> File {
+        self.created = false;
+        self.file.take().expect("pending log commits once")
+    }
+}
+impl Drop for PendingSessionLog {
+    fn drop(&mut self) {
+        if !self.created {
+            return;
+        }
+        if self.committing {
+            // A failed directory fsync can follow a successful history rename.
+            let records = (|| {
+                let (file, _) = deletion_file(&self.history.records_path(), &DeleteRole::Log)?
+                    .ok_or("History commit is uncertain")?;
+                let mut bytes = Vec::new();
+                file.take(MAX_SESSION_HISTORY_BYTES + 1)
+                    .read_to_end(&mut bytes)
+                    .map_err(|_| "History commit is uncertain")?;
+                if bytes.len() as u64 > MAX_SESSION_HISTORY_BYTES {
+                    return Err("History commit is uncertain".into());
+                }
+                serde_json::from_slice::<Vec<SessionRecord>>(&bytes).map_err(|e| e.to_string())
+            })();
+            if !records.is_ok_and(|records| records.iter().all(|r| r.summary.session_id != self.id))
+            {
+                return;
+            }
+        }
+        let path = self.history.log_path(&self.id);
+        if let (Some(file), Ok(Some((_, current)))) =
+            (&self.file, deletion_file(&path, &DeleteRole::Log))
+        {
+            if proof(file, Some(&DeleteRole::Log)).is_ok_and(|owned| owned == current) {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
+}
+
+fn execution_order(record: &SessionRecord) -> (u64, Option<u128>, Option<u64>) {
+    let mut parts = record.summary.session_id.split('-').skip(1);
+    (
+        record.started_at,
+        parts.next().and_then(|v| u128::from_str_radix(v, 16).ok()),
+        parts.next().and_then(|v| u64::from_str_radix(v, 16).ok()),
+    )
+}
 pub(crate) fn bounded_history(path: &Path) -> Result<String, String> {
     let mut bytes = Vec::new();
     File::open(path)
@@ -38,6 +126,12 @@ pub(crate) fn bounded_history(path: &Path) -> Result<String, String> {
 
 impl HistoryStore {
     pub(crate) fn open(root: PathBuf) -> Result<Self, String> {
+        Self::open_with_restore(root, |from, to| fs::copy(from, to))
+    }
+    fn open_with_restore(
+        root: PathBuf,
+        restore: impl FnOnce(&Path, &Path) -> std::io::Result<u64>,
+    ) -> Result<Self, String> {
         fs::create_dir_all(&root)
             .map_err(|error| format!("Failed to create session data directory: {error}"))?;
         let records_path = root.join("sessions.json");
@@ -62,7 +156,7 @@ impl HistoryStore {
                         root.join(format!("sessions.corrupt-{}", next_session_id())),
                     )
                     .map_err(|error| format!("Failed to preserve corrupt history: {error}"))?;
-                    fs::copy(&backup, &records_path).map_err(|error| {
+                    restore(&backup, &records_path).map_err(|error| {
                         format!("Failed to restore session history backup: {error}")
                     })?;
                     records
@@ -148,11 +242,67 @@ impl HistoryStore {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn start(&self, summary: &SessionSummary) -> Result<(), String> {
+        self.start_continuation(summary, None)
+    }
+    pub(crate) fn latest_terminal(&self, source: &str) -> Result<SessionRecord, String> {
+        let records = self.lock_records()?;
+        let original = self.get_locked(&records, source)?;
+        let conversation = original.conversation_id.as_deref().unwrap_or(source);
+        Ok(records
+            .iter()
+            .chain(std::iter::once(&original))
+            .filter(|record| {
+                record
+                    .conversation_id
+                    .as_deref()
+                    .unwrap_or(&record.summary.session_id)
+                    == conversation
+            })
+            .max_by_key(|record| execution_order(record))
+            .cloned()
+            .unwrap_or(original))
+    }
+    pub(crate) fn start_continuation(
+        &self,
+        summary: &SessionSummary,
+        source: Option<&str>,
+    ) -> Result<(), String> {
         let mut records = self.lock_records()?;
+        let conversation_id = source
+            .map(|source| {
+                let original = self.get_locked(&records, source)?;
+                let new_shell = summary.command.is_none()
+                    && summary.launch.is_none()
+                    && original
+                        .summary
+                        .launch
+                        .as_ref()
+                        .is_none_or(|v| v.mode != "interactive");
+                if source == summary.session_id
+                    || original.summary.cwd != summary.cwd
+                    || original.summary.ssh != summary.ssh
+                    || (!new_shell
+                        && original
+                            .summary
+                            .launch
+                            .as_ref()
+                            .map(|v| (&v.adapter, &v.provider, &v.env_refs))
+                            != summary
+                                .launch
+                                .as_ref()
+                                .map(|v| (&v.adapter, &v.provider, &v.env_refs)))
+                {
+                    return Err("Continuation differs from its stored connection".into());
+                }
+                Ok::<_, String>(original.conversation_id.unwrap_or_else(|| source.into()))
+            })
+            .transpose()?;
         let mut updated = records.clone();
         updated.retain(|record| record.summary.session_id != summary.session_id);
         updated.push(SessionRecord {
+            conversation_id,
             summary: summary.clone(),
             status: summary.status.clone(),
             exit_code: None,
@@ -286,6 +436,8 @@ pub(crate) struct ItemAgent {
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct HistoryItem {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub previous_runs: Vec<String>,
     pub summary: ItemSummary,
     pub status: String,
     pub started_at: u64,
@@ -343,6 +495,9 @@ fn attention(record: &SessionRecord) -> bool {
     unread(record) > 0 || record.status == "needs_attention"
 }
 fn title(record: &SessionRecord) -> Cow<'_, str> {
+    if let Some(ssh) = record.summary.ssh.as_ref() {
+        return Cow::Owned(super::ssh_launch::title(ssh));
+    }
     record
         .summary
         .launch
@@ -369,6 +524,7 @@ fn title(record: &SessionRecord) -> Cow<'_, str> {
 fn item(record: &SessionRecord) -> HistoryItem {
     let launch = record.summary.launch.as_ref();
     HistoryItem {
+        previous_runs: vec![],
         summary: ItemSummary {
             session_id: record.summary.session_id.clone(),
             cwd: record.summary.cwd.clone(),
@@ -468,13 +624,58 @@ impl HistoryStore {
         if offset > records.len() {
             return Err("Invalid history cursor offset".into());
         }
+        // Restore changes storage order; generated IDs retain the millisecond/counter order.
+        let mut latest: std::collections::HashMap<&str, &SessionRecord> = Default::default();
+        for record in records.iter() {
+            let conversation = record
+                .conversation_id
+                .as_deref()
+                .unwrap_or(&record.summary.session_id);
+            let head = latest.entry(conversation).or_insert(record);
+            if execution_order(record) >= execution_order(head) {
+                *head = record;
+            }
+        }
         let mut items = records
             .iter()
             .rev()
+            .filter(|record| {
+                latest[record
+                    .conversation_id
+                    .as_deref()
+                    .unwrap_or(&record.summary.session_id)]
+                .summary
+                .session_id
+                    == record.summary.session_id
+            })
             .filter(|record| request.matches(record))
             .skip(offset)
             .take(size + 1)
-            .map(item)
+            .map(|record| {
+                let mut entry = item(record);
+                let conversation = record
+                    .conversation_id
+                    .as_deref()
+                    .unwrap_or(&record.summary.session_id);
+                let mut previous = records
+                    .iter()
+                    .rev()
+                    .filter(|other| {
+                        other.summary.session_id != record.summary.session_id
+                            && other
+                                .conversation_id
+                                .as_deref()
+                                .unwrap_or(&other.summary.session_id)
+                                == conversation
+                    })
+                    .collect::<Vec<_>>();
+                previous.sort_by_key(|other| std::cmp::Reverse(execution_order(other)));
+                entry.previous_runs = previous
+                    .into_iter()
+                    .map(|other| other.summary.session_id.clone())
+                    .collect();
+                entry
+            })
             .collect::<Vec<_>>();
         let next_cursor = (items.len() > size).then(|| PageCursor {
             revision: revision.clone(),
@@ -804,12 +1005,24 @@ struct RetentionPolicy {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct FileProof {
+pub(crate) struct FileProof {
     device: u64,
     inode: u64,
     length: u64,
     modified: u64,
     links: u64,
+}
+impl FileProof {
+    pub(crate) fn same_identity(&self, other: &Self) -> bool {
+        self.device == other.device && self.inode == other.inode
+    }
+}
+pub(crate) fn private_file_stamp(file: &File) -> Result<FileProof, String> {
+    proof(file, None)
+}
+pub(crate) fn private_directory_identity(path: &Path) -> Result<(u64, u64), String> {
+    let stamp = directory_proof_with_permissions(path, true)?;
+    Ok((stamp.device, stamp.inode))
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -906,6 +1119,9 @@ fn proof(file: &File, role: Option<&DeleteRole>) -> Result<FileProof, String> {
     }
 }
 fn directory_proof(path: &Path) -> Result<FileProof, String> {
+    directory_proof_with_permissions(path, false)
+}
+fn directory_proof_with_permissions(path: &Path, private: bool) -> Result<FileProof, String> {
     let m = fs::symlink_metadata(path).map_err(|_| "Unsafe deletion file")?;
     if linked(&m) || !m.is_dir() {
         return Err("Unsafe deletion file".into());
@@ -922,10 +1138,24 @@ fn directory_proof(path: &Path) -> Result<FileProof, String> {
         use std::os::windows::fs::OpenOptionsExt;
         options.custom_flags(0x00200000 | 0x02000000);
     }
-    proof(
-        &options.open(path).map_err(|_| "Unsafe deletion file")?,
-        None,
-    )
+    let file = options.open(path).map_err(|_| "Unsafe deletion file")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if private
+            && file
+                .metadata()
+                .map_err(|_| "Unsafe private directory")?
+                .mode()
+                & 0o077
+                != 0
+        {
+            return Err("Unsafe private directory".into());
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = private;
+    proof(&file, None)
 }
 #[cfg(windows)]
 fn windows_file_proof(file: &File, metadata: &fs::Metadata) -> Result<FileProof, String> {
@@ -2484,6 +2714,7 @@ mod tests {
         let store = super::HistoryStore::open(root.clone()).unwrap();
         for status in ["running", "starting", "stopped", "needs_attention"] {
             let summary = crate::SessionSummary {
+                ssh: None,
                 session_id: format!("s-{status}"),
                 cwd: "/tmp".into(),
                 command: None,
@@ -3562,6 +3793,84 @@ mod tests {
         history.archive(id, &Default::default(), &Default::default())
     }
     #[test]
+    fn closure_t07_double_corrupt_history_preserves_both_files_and_archive() {
+        let history = archive_fixture(2);
+        archive_one(&history, "s-00000").unwrap();
+        let manifest = history.root.join("archive/root.json");
+        let archive_before = fs::read(&manifest).unwrap();
+        let primary = b"invalid primary: preserve me";
+        let backup = b"invalid backup: preserve me too";
+        fs::write(history.records_path(), primary).unwrap();
+        fs::write(history.root.join("sessions.json.bak"), backup).unwrap();
+        let error = HistoryStore::open(history.root.clone()).err().unwrap();
+        assert!(error.contains("history and backup are corrupt"), "{error}");
+        assert_eq!(fs::read(history.records_path()).unwrap(), primary);
+        assert_eq!(
+            fs::read(history.root.join("sessions.json.bak")).unwrap(),
+            backup
+        );
+        assert_eq!(fs::read(manifest).unwrap(), archive_before);
+        assert_eq!(
+            history
+                .archive_page(Default::default())
+                .unwrap()
+                .items
+                .len(),
+            1
+        );
+        fs::remove_dir_all(history.root).unwrap();
+    }
+    #[test]
+    fn closure_t07_failed_backup_restore_preserves_evidence_and_is_retryable() {
+        let history = archive_fixture(2);
+        let backup = fs::read(history.records_path()).unwrap();
+        let expected = serde_json::to_value(history.list().unwrap()).unwrap();
+        fs::write(history.root.join("sessions.json.bak"), &backup).unwrap();
+        let corrupt = b"corrupt primary before failed restore";
+        fs::write(history.records_path(), corrupt).unwrap();
+        let calls = std::cell::Cell::new(0);
+        let error = HistoryStore::open_with_restore(history.root.clone(), |from, to| {
+            calls.set(calls.get() + 1);
+            assert_eq!(from, history.root.join("sessions.json.bak"));
+            assert_eq!(to, history.records_path());
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "fixture restore denied",
+            ))
+        })
+        .err()
+        .unwrap();
+        assert!(
+            error.contains("Failed to restore session history backup"),
+            "{error}"
+        );
+        assert_eq!(calls.get(), 1);
+        assert_eq!(fs::read(history.records_path()).unwrap(), corrupt);
+        assert_eq!(
+            fs::read(history.root.join("sessions.json.bak")).unwrap(),
+            backup
+        );
+        let evidence = fs::read_dir(&history.root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("sessions.corrupt-")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(fs::read(&evidence[0]).unwrap(), corrupt);
+        let reopened = HistoryStore::open(history.root.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(reopened.list().unwrap()).unwrap(),
+            expected
+        );
+        assert_eq!(fs::read(reopened.records_path()).unwrap(), backup);
+        fs::remove_dir_all(history.root).unwrap();
+    }
+    #[test]
     fn t04_archive_restore_preserves_by_id_record_unicode_logs_and_frame_paths() {
         let history = archive_fixture(1);
         let before = serde_json::to_value(history.get("s-00000").unwrap()).unwrap();
@@ -3888,6 +4197,9 @@ mod tests {
             record.summary.cwd = history.root.to_string_lossy().into();
             record.summary.command = None;
             record.summary.launch = Some(super::super::AgentLaunch {
+                codex: None,
+                provider: None,
+                env_refs: Default::default(),
                 adapter: "codex".into(),
                 mode: "interactive".into(),
                 extra_args: String::new(),
@@ -4411,12 +4723,74 @@ mod tests {
         fs::remove_dir_all(history.root).unwrap();
     }
 
+    #[test]
+    fn terminal_reopen_uses_latest_execution_and_never_replays_custom_commands() {
+        let history = archive_fixture(3);
+        {
+            let mut records = history.records.lock().unwrap();
+            for record in records.iter_mut() {
+                record.summary.cwd = history.root.to_string_lossy().into();
+            }
+            records[1].conversation_id = Some("s-00000".into());
+            records[2].conversation_id = Some("s-00000".into());
+            records[2].started_at = 0;
+            history.save_locked(&records).unwrap();
+        }
+        let record = history.latest_terminal("s-00000").unwrap();
+        assert_eq!(record.summary.session_id, "s-00001");
+        let (launch, native) = super::super::terminal_reopen_launch(&record).unwrap();
+        assert!(launch.is_none());
+        assert!(native.is_none());
+        assert!(history.latest_terminal("missing").is_err());
+        let mut invalid = record.clone();
+        invalid.summary.cwd = history.root.join("missing").to_string_lossy().into();
+        assert!(super::super::terminal_reopen_launch(&invalid).is_err());
+        let mut agent = record;
+        agent.summary.command = None;
+        agent.summary.launch = Some(super::super::AgentLaunch {
+            codex: None,
+            adapter: "codex".into(),
+            mode: "interactive".into(),
+            extra_args: String::new(),
+            prompt: Some("do not replay".into()),
+            provider: None,
+            env_refs: Default::default(),
+        });
+        assert!(super::super::terminal_reopen_launch(&agent).is_err());
+        agent.agent.generation = "trusted".into();
+        agent.agent.agent_session_id = Some("01a0f6ec-5463-78c3-a404-5a7ad3b933fe".into());
+        let (launch, native) = super::super::terminal_reopen_launch(&agent).unwrap();
+        assert!(launch.unwrap().prompt.is_none());
+        assert!(native.is_some());
+        fs::remove_dir_all(history.root).unwrap();
+    }
+
+    #[test]
+    fn terminal_reopen_previous_runs_remain_newest_first_after_archive_restore() {
+        let history = archive_fixture(3);
+        {
+            let mut records = history.records.lock().unwrap();
+            records[1].conversation_id = Some("s-00000".into());
+            records[2].conversation_id = Some("s-00000".into());
+            history.save_locked(&records).unwrap();
+        }
+        archive_one(&history, "s-00000").unwrap();
+        history.restore_archive("s-00000").unwrap();
+        let page = history.page(Default::default()).unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].summary.session_id, "s-00002");
+        assert_eq!(page.items[0].previous_runs, vec!["s-00001", "s-00000"]);
+        fs::remove_dir_all(history.root).unwrap();
+    }
+
     fn store(count: usize) -> HistoryStore {
         let root = std::env::temp_dir().join(format!("yam-history-pages-{}", next_session_id()));
         let store = HistoryStore::open(root).unwrap();
         *store.records.lock().unwrap() = (0..count)
             .map(|index| SessionRecord {
+                conversation_id: None,
                 summary: SessionSummary {
+                    ssh: None,
                     session_id: format!("s-{index:05}"),
                     cwd: "/中文/😀".into(),
                     command: Some("secret command".into()),
@@ -4728,6 +5102,9 @@ mod tests {
             let mut records = store.records.lock().unwrap();
             records[0].summary.command = None;
             records[0].summary.launch = Some(super::super::AgentLaunch {
+                codex: None,
+                provider: None,
+                env_refs: Default::default(),
                 adapter: "codex".into(),
                 mode: "interactive".into(),
                 extra_args: String::new(),
@@ -4770,6 +5147,9 @@ mod tests {
         {
             let mut records = store.records.lock().unwrap();
             records[0].summary.launch = Some(super::super::AgentLaunch {
+                codex: None,
+                provider: None,
+                env_refs: Default::default(),
                 adapter: "codex".into(),
                 mode: "interactive".into(),
                 extra_args: "PRIVATE_ARGV".into(),
@@ -4931,5 +5311,42 @@ mod tests {
         fs::remove_file(link).unwrap();
         fs::remove_dir_all(store.root).unwrap();
         fs::remove_dir_all(outside).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod d03a_tests {
+    #[test]
+    fn d03a_typed_history_plain_title_and_old_record() {
+        let raw = serde_json::json!({"summary":{"session_id":"s-1-1","cwd":"/local","command":null,"status":"ended","ssh":{"host":"Alias_1","user":"jeff","port":2222}},"status":"ended","exit_code":0,"reason":null,"started_at":1,"ended_at":2});
+        let record: super::SessionRecord = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(super::title(&record), "SSH jeff@Alias_1:2222");
+        assert_eq!(
+            serde_json::to_value(&record).unwrap()["summary"]["ssh"],
+            raw["summary"]["ssh"]
+        );
+        let mut old = raw.clone();
+        old["summary"].as_object_mut().unwrap().remove("ssh");
+        assert!(serde_json::from_value::<super::SessionRecord>(old)
+            .unwrap()
+            .summary
+            .ssh
+            .is_none());
+        let mut malformed = raw;
+        malformed["summary"]["ssh"]
+            .as_object_mut()
+            .unwrap()
+            .remove("user");
+        assert!(serde_json::from_value::<super::SessionRecord>(malformed).is_err());
+    }
+    #[test]
+    fn d03b_ipv6_typed_history_roundtrip_and_title() {
+        let raw = serde_json::json!({"summary":{"session_id":"s-ipv6","cwd":"/local","command":null,"status":"ended","ssh":{"host":"2001:0DB8::1","user":"jeff","port":2222}},"status":"ended","exit_code":0,"reason":null,"started_at":1,"ended_at":2});
+        let record: super::SessionRecord = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(super::title(&record), "SSH jeff@[2001:0DB8::1]:2222");
+        assert_eq!(
+            serde_json::to_value(record).unwrap()["summary"]["ssh"],
+            raw["summary"]["ssh"]
+        );
     }
 }

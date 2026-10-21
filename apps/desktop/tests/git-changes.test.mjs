@@ -1,18 +1,23 @@
+import {englishUiReadAsync} from './fixtures/english-ui-source.mjs';
+import './fixtures/i18n-test-init.mjs';
+import {componentFunction} from './fixtures/component-function.mjs';
 import assert from "node:assert/strict";
 import {test} from "node:test";
 import fs from "node:fs/promises";
 import ts from "typescript";
+import {parseUnifiedDiff,findDiffLine} from '../src/git-diff-navigation.ts';
 
 test("F3 actual App exposes a read-only Git changes entry bound to current directory and owner", async () => {
-  const source = await fs.readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
+  const source = await englishUiReadAsync(fs.readFile,new URL("../src/App.tsx", import.meta.url), "utf8");
   const tree = ts.createSourceFile("App.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   const elements = [];
   const visit = node => { if (ts.isJsxSelfClosingElement(node) && node.tagName.getText(tree) === "GitChanges") elements.push(node); ts.forEachChild(node, visit); };
   visit(tree);
   assert.equal(elements.length, 1, "actual App must render the Git changes component");
   const attrs = new Map(elements[0].attributes.properties.map(x => [x.name?.getText(tree), x.initializer?.getText(tree)]));
-  assert.equal(attrs.get("path"), "{gitProjectPath}");
+  assert.equal(attrs.get("path"), "{projectToolsPath}");
   assert.equal(attrs.get("owner"), "{gitOwner}");
+  assert.equal(attrs.get("sessionId"), "{session?.session_id ?? null}");
 });
 
 import * as git from "../src/git-context.ts";
@@ -52,18 +57,18 @@ test("F3 actual controller busy exposes explicit retry without automatically rep
 });
 
 async function componentHarness() {
- const source=await fs.readFile(new URL("../src/GitChanges.tsx",import.meta.url),"utf8");
+ const source=await englishUiReadAsync(fs.readFile,new URL("../src/GitChanges.tsx",import.meta.url),"utf8");
  const tree=ts.createSourceFile("GitChanges.tsx",source,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
  const fn=tree.statements.find(n=>ts.isFunctionDeclaration(n)&&n.name?.text==="GitChanges");assert.ok(fn);
  const slots=[],refs=[],effects=[];let i=0,j=0,k=0;let props={path:"/repo",owner:1},nodes;
- const values={GitChangesController:git.GitChangesController,invoke:null,React:{createElement:(tag,props,...children)=>({tag,props:props??{},children:children.flat(Infinity)})},useCallback:fn=>fn,
+ const values={GitChangesController:git.GitChangesController,GitPatchView:"GitPatchView",FilePreview:"FilePreview",invoke:null,React:{createElement:(tag,props,...children)=>({tag,props:props??{},children:children.flat(Infinity)})},useCallback:fn=>fn,
  useState:initial=>{const n=i++;if(!(n in slots))slots[n]=initial;return [slots[n],v=>{slots[n]=typeof v==="function"?v(slots[n]):v;}];},
  useRef:initial=>{const n=j++;return refs[n]??(refs[n]={current:initial});},
  useEffect:(fn,deps)=>{const n=k++,key=JSON.stringify(deps);if(effects[n]?.key!==key){effects[n]={key,fn,pending:true,cleanup:effects[n]?.cleanup};}}};
  const calls=[],pending=[];
  values.invoke=(name,args)=>{calls.push([name,args]);if(name==="cancel_git_changes")return Promise.resolve({});const d=deferred();pending.push({args,...d});return d.promise;};
  const code=ts.transpileModule(fn.getText(tree).replace("export function","function"),{compilerOptions:{target:ts.ScriptTarget.ES2022,jsx:ts.JsxEmit.React}}).outputText+";return GitChanges;";
- const component=new Function(...Object.keys(values),code)(...Object.values(values));
+ const component=componentFunction(...Object.keys(values),code)(...Object.values(values));
  const render=(next,flush=true)=>{if(next)props=next;i=j=k=0;nodes=component(props);if(flush)for(const effect of effects)if(effect.pending){effect.pending=false;effect.cleanup?.();effect.cleanup=effect.fn();}return nodes;};
  const buttons=()=>{const all=[];const walk=n=>{if(!n||typeof n!=="object")return;if(n.tag==="button")all.push(n);for(const child of n.children??[])walk(child);};walk(nodes);return all;};
  const unmount=()=>effects.forEach(e=>e.cleanup?.());
@@ -80,6 +85,43 @@ test("F3 actual component opens list and selected-side request then cancels on c
  h.pending[1].resolve(result(h.pending[1].args,{patch:{path:"file.txt",side:"staged",kind:"text",text:"+old"}}));await new Promise(r=>setImmediate(r));h.render();
  assert.ok(!JSON.stringify(h.slots).includes("+old"));h.unmount();
 });
+
+async function patchHarness(patch) {
+ const raw=await englishUiReadAsync(fs.readFile,new URL('../src/GitChanges.tsx',import.meta.url),'utf8'),source=ts.createSourceFile('GitChanges.tsx',raw,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
+ const fn=source.statements.find(node=>ts.isFunctionDeclaration(node)&&node.name?.text==='GitPatchView');assert.ok(fn,'actual diff navigation component required');
+ const slots=[],focused=[];let i=0,tree;const root={querySelector:selector=>({focus:()=>focused.push(selector),scrollIntoView(){}})};
+ const values={parseUnifiedDiff,findDiffLine,useMemo:fn=>fn(),useRef:()=>({current:root}),useState:initial=>{const at=i++;if(!(at in slots))slots[at]=initial;return [slots[at],value=>slots[at]=typeof value==='function'?value(slots[at]):value];},React:{createElement:(tag,props,...children)=>({tag,props:props??{},children:children.flat(Infinity)})}};
+ const render=componentFunction(...Object.keys(values),ts.transpileModule(fn.getText(source).replace(/^export /,''),{compilerOptions:{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ESNext}}).outputText+';return GitPatchView;')(...Object.values(values));
+ const nodes=node=>[node,...(node?.children??[]).flatMap(child=>child&&typeof child==='object'?nodes(child):[])];
+ const refresh=()=>{i=0;tree=render({patch});};refresh();
+ return {refresh,focused,button:label=>nodes(tree).find(node=>node.tag==='button'&&node.children.join('')===label),control:label=>nodes(tree).find(node=>node.props?.['aria-label']===label),get text(){return nodes(tree).flatMap(node=>node.children??[]).filter(child=>typeof child==='string').join(' ');}};
+}
+
+test('R2B Git untracked names require separate preview; stale row callbacks cannot cross scope',async()=>{
+ const h=await componentHarness();h.render({path:'/repo',owner:1,sessionId:'s-one'});h.buttons().find(b=>b.children.includes('Git changes')).props.onClick();h.render();const p=h.pending[0];p.resolve(result(p.args,{rows:[{path:'untracked.html',staged:' ',worktree:' ',untracked:true,unsupported:false}]}));await new Promise(r=>setImmediate(r));h.render();
+ const nodes=n=>[n,...(n?.children??[]).flatMap(c=>c&&typeof c==='object'?nodes(c):[])];
+ assert.equal(h.calls.length,1);const button=h.buttons().find(b=>b.props['aria-label']==='Preview current file untracked.html');assert.ok(button);button.props.onClick();let preview=nodes(h.render()).find(n=>n.tag==='FilePreview');assert.deepEqual(preview.props.request.target,{sessionId:'s-one',path:'/repo/untracked.html'});
+ const switched=h.render({path:'/other',owner:2,sessionId:'s-two'},false);assert.equal(nodes(switched).find(n=>n.tag==='FilePreview').props.request,undefined);button.props.onClick();preview=nodes(h.render()).find(n=>n.tag==='FilePreview');assert.equal(preview.props.request,undefined);h.unmount();
+});
+test('R2B Git close and reopen do not replay prior file request or remount its serializer',async()=>{
+ const h=await componentHarness();h.render({path:'/repo',owner:1,sessionId:'s-one'});h.buttons().find(b=>b.children.includes('Git changes')).props.onClick();h.render();let p=h.pending[0];p.resolve(result(p.args));await new Promise(r=>setImmediate(r));h.render();h.buttons().find(b=>b.props['aria-label']==='Preview current file file.txt').props.onClick();
+ const nodes=n=>[n,...(n?.children??[]).flatMap(c=>c&&typeof c==='object'?nodes(c):[])];
+ let preview=nodes(h.render()).find(n=>n.tag==='FilePreview');assert.ok(preview.props.request);const key=preview.props.key;
+ h.buttons().find(b=>b.children.includes('Close Git changes')).props.onClick();h.render();h.buttons().find(b=>b.children.includes('Git changes')).props.onClick();preview=nodes(h.render()).find(n=>n.tag==='FilePreview');assert.equal(preview.props.request,undefined);assert.equal(key,undefined,'serializer must survive scope switches');h.unmount();
+});
+
+test('R2A actual diff component exposes keyboard buttons, both line sides and bounded row focus',async()=>{
+ const h=await patchHarness({path:'a name.txt',side:'staged',kind:'text',text:'@@ -1 +1 @@\n-old\n+new\n@@ -8 +8 @@\n-before\n+after\n'});
+ assert.match(h.text,/HEAD/);assert.match(h.text,/index/);assert.equal(h.button('Previous change').props.disabled,true);assert.equal(h.button('Next change').props.disabled,false);
+ h.button('Next change').props.onClick();h.refresh();assert.equal(h.button('Next change').props.disabled,true);assert.ok(h.focused.at(-1).includes('3'));
+ h.control('Diff line number').props.onChange({target:{value:'1'}});h.refresh();h.control('Diff line side').props.onChange({target:{value:'old'}});h.refresh();h.button('Go to line').props.onClick();h.refresh();assert.ok(h.focused.at(-1).includes('1'));
+ h.control('Diff line number').props.onChange({target:{value:'4'}});h.refresh();h.button('Go to line').props.onClick();h.refresh();assert.match(h.text,/not included/);
+});
+
+test('R2A actual diff component keeps malformed text literal and labels working tree separately',async()=>{
+ const h=await patchHarness({path:'<script>.txt',side:'worktree',kind:'text',text:'@@ malformed\n<script>literal</script>'});assert.match(h.text,/working tree/i);assert.match(h.text,/<script>literal<\/script>/);assert.equal(h.button('Next change'),undefined);assert.match(h.text,/Line navigation unavailable/);
+ const empty=await patchHarness({path:'mode.txt',side:'staged',kind:'text',text:'old mode 100644\nnew mode 100755\n'});assert.match(empty.text,/No change blocks/);
+});
 test("F3 actual component owner change and unmount fence late success and errors",async()=>{
  for(const failed of [false,true]){
   const h=await componentHarness();h.render();h.buttons().find(b=>b.children.includes("Git changes")).props.onClick();h.render();
@@ -93,7 +135,7 @@ test("F3 actual component owner change and unmount fence late success and errors
 // Tauri's default argument case is camelCase. The actual component uses the fixed
 // snake_case semantic RPC DTO, so both public adapters explicitly preserve it.
 test("F3 actual Tauri adapters preserve the component's snake_case argument contract", async () => {
-  const source = await fs.readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
+  const source = await englishUiReadAsync(fs.readFile,new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
   for (const name of ["get_git_changes", "cancel_git_changes"]) {
     const declaration = source.match(new RegExp('#\\[tauri::command(?:\\([^\\)]*\\))?\\]\\s*async fn ' + name + '\\('));
     assert.ok(declaration, `actual async adapter ${name}`);

@@ -22,6 +22,30 @@ use std::{
 };
 
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[cfg(test)]
+#[test]
+fn closure_t15_callback_wait_discards_late_and_repeated_delivery_results() {
+    let (sender, receiver) = mpsc::channel();
+    assert!(
+        wait_callback(receiver, Duration::from_millis(1), "authorization")
+            .unwrap_err()
+            .starts_with("Wait for macOS notification authorization:")
+    );
+    assert!(sender.send(Ok(())).is_err());
+    let (sender, receiver) = mpsc::channel();
+    sender.send(Err("denied".into())).unwrap();
+    sender.send(Ok(())).unwrap();
+    assert_eq!(
+        wait_callback(receiver, Duration::from_millis(10), "authorization").unwrap_err(),
+        "denied"
+    );
+    assert!(sender.send(Ok(())).is_err());
+    let (sender, receiver) = mpsc::channel();
+    sender.send(Ok(())).unwrap();
+    wait_callback(receiver, Duration::from_millis(10), "delivery").unwrap();
+    assert!(sender.send(Err("late failure".into())).is_err());
+}
 static DELEGATE_READY: AtomicBool = AtomicBool::new(false);
 
 struct DelegateIvars {
@@ -126,22 +150,28 @@ pub fn send(
                 UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound,
                 &authorization,
             );
-            receiver
-                .recv_timeout(CALLBACK_TIMEOUT)
-                .map_err(|error| format!("Wait for macOS notification authorization: {error}"))??;
+            wait_callback(receiver, CALLBACK_TIMEOUT, "authorization")?;
             let (sender, receiver) = mpsc::channel();
             let delivery = RcBlock::new(move |error: *mut NSError| {
                 let result = delivery_result(unsafe { error.as_ref() });
                 let _ = sender.send(result);
             });
             center.addNotificationRequest_withCompletionHandler(&request, Some(&delivery));
-            receiver
-                .recv_timeout(CALLBACK_TIMEOUT)
-                .map_err(|error| format!("Wait for macOS notification delivery: {error}"))?
+            wait_callback(receiver, CALLBACK_TIMEOUT, "delivery")
         })
     })
     .join()
     .map_err(|_| "macOS notification worker panicked".to_string())?
+}
+
+fn wait_callback(
+    receiver: mpsc::Receiver<Result<(), String>>,
+    timeout: Duration,
+    stage: &str,
+) -> Result<(), String> {
+    receiver
+        .recv_timeout(timeout)
+        .map_err(|error| format!("Wait for macOS notification {stage}: {error}"))?
 }
 
 fn authorization_result(granted: bool, error: Option<&NSError>) -> Result<(), String> {

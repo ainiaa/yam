@@ -30,6 +30,7 @@ class ReleaseTests(unittest.TestCase):
         (desktop/"package.json").write_text('{"dependencies":{}}')
         (desktop/"pnpm-lock.yaml").write_text("private fixture lock")
         (desktop/"src-tauri/Cargo.lock").write_text('version=4\n[[package]]\nname="yam-desktop"\nversion="0.1.0"\n')
+        (desktop/"src-tauri/Cargo.toml").write_text('[package]\nname="yam-desktop"\nversion="0.1.0"\n')
         patcher=patch.object(notices,"NPM_EXPECTED",[]);patcher.start();self.addCleanup(patcher.stop)
         patcher=patch.object(release,"NOTICE_ROOT",root);patcher.start();self.addCleanup(patcher.stop)
         patcher=patch.object(notices,"NPM_INPUTS",{key:value for key,value in notices.inputs(root).items() if key!="cargo_lock"});patcher.start();self.addCleanup(patcher.stop)

@@ -1,3 +1,6 @@
+import {englishUiRead} from './fixtures/english-ui-source.mjs';
+const readFileSync=(...args)=>englishUiRead(rawReadFileSync,...args);
+import './fixtures/i18n-test-init.mjs';
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
 import {LatestLogRequest} from '../src/session-logs.ts';
@@ -26,7 +29,7 @@ test('closing or cancelling a search invalidates an outstanding response',async(
 });
 
 import ts from 'typescript';
-import {readFileSync} from 'node:fs';
+import {readFileSync as rawReadFileSync} from 'node:fs';
 import * as logPolicy from '../src/session-logs.ts';
 
 const knownRange=(start,end,bytes,truncation='truncated')=>({start_offset:start,end_offset_exclusive:end,retained_bytes:bytes,truncation});
@@ -51,8 +54,8 @@ test('F6 saved receipts preserve legacy string and null without casting objects'
 });
 
 function deferred(){let resolve,reject;const promise=new Promise((r,j)=>{resolve=r;reject=j;});return{promise,resolve,reject};}
-function componentHarness(filename,invoke) {
- const source=readFileSync(new URL('../src/'+filename,import.meta.url),'utf8');
+function componentHarness(filename,invoke,raw=false) {
+ const source=(raw?rawReadFileSync:readFileSync)(new URL('../src/'+filename,import.meta.url),'utf8');
  const cells=[],effects=[];let index=0,pending=[],writes=[];
  const React={
   useRef(value){const i=index++;return cells[i]??=( {current:value} );},
@@ -61,7 +64,7 @@ function componentHarness(filename,invoke) {
  };
  const jsx=(type,props)=>({type,props});const exports={};
  const js=ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX}}).outputText;
- new Function('require','exports',js)(name=>name==='react'?React:name==='react/jsx-runtime'?{jsx,jsxs:jsx,Fragment:'fragment'}:name==='@tauri-apps/api/core'?{invoke}:name==='./session-logs'?logPolicy:(()=>{throw Error('Unexpected import '+name);})(),exports);
+ new Function('require','exports',js)(name=>name==='react'?React:name==='react/jsx-runtime'?{jsx,jsxs:jsx,Fragment:'fragment'}:name==='@tauri-apps/api/core'?{invoke}:name==='./i18n'?{t:realT}:name==='./Select'?{Select:'select'}:name==='./session-logs'?logPolicy:(()=>{throw Error('Unexpected import '+name);})(),exports);
  const component=exports[filename.replace('.tsx','')];
  return{render(props,flush=true){index=0;const tree=component(props);if(flush)this.flush();return tree;},flush(){const jobs=pending;pending=[];jobs.forEach(f=>f());},clear(){writes=[];},get writes(){return writes;},replayEffects(){effects.forEach(e=>{if(e){e.cleanup?.();e.cleanup=e.callback();}});},unmount(){effects.forEach(e=>e?.cleanup?.());},cells};
 }
@@ -159,3 +162,16 @@ test('F6 R1 actual authoritative empty export retains zero byte label',async()=>
   assert.match(JSON.stringify(h.render(exportProps())),/0 retained bytes/);
  }
 });
+
+test('saved-log searches preserve exact query text and case sensitivity without system correction',async()=>{
+ const calls=[],h=componentHarness('SessionLogSearch.tsx',async(name,args)=>{calls.push([name,args]);return {hits:[],has_more:false,complete:true,issues:[]};});
+ const props={sessions:[],selected:null,onClose(){},async onSelect(){}};let tree=h.render(props);
+ const input=nodes(tree,n=>n.type==='input'&&n.props['aria-label']==='Log content query')[0];
+ assert.equal(input.props.autoCorrect,'off');assert.equal(input.props.autoCapitalize,'none');assert.equal(input.props.spellCheck,false);
+ input.props.onChange({target:{value:'hooks'}});nodes(tree,n=>n.type==='input'&&n.props.type==='checkbox')[0].props.onChange({target:{checked:true}});
+ tree=h.render(props);nodes(tree,n=>n.type==='form')[0].props.onSubmit({preventDefault(){}});await new Promise(setImmediate);
+ assert.equal(calls[0][1].request.query,'hooks');assert.equal(calls[0][1].request.case_sensitive,true);h.unmount();
+});
+
+import {t as realT,setLocale} from '../src/i18n.ts';
+test('export receipt rerenders owned success and retained-range text in the current locale',async()=>{setLocale('en');try{const h=componentHarness('SessionLogExport.tsx',async()=>({path:'/RAW/export.txt',range:knownRange('1','5',4)}),true);save(h.render(exportProps()));await new Promise(setImmediate);assert.match(JSON.stringify(h.render(exportProps())),/Saved to/);setLocale('zh-CN');const tree=h.render(exportProps());const text=JSON.stringify(tree);assert.doesNotMatch(text,/Saved to/);assert.ok(text.includes('/RAW/export.txt'));assert.ok(text.includes('1')&&text.includes('5'));}finally{setLocale('en');}});

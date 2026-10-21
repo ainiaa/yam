@@ -275,6 +275,22 @@ pub(super) fn credential() -> Result<String, String> {
     }
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
+fn delivery_foreground<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    gui: impl FnOnce() -> bool,
+) -> bool {
+    use tauri::Manager;
+    let manager = app.state::<super::SessionManager>();
+    if manager.background_owner {
+        manager
+            .desktop_focus
+            .lock()
+            .is_ok_and(|focus| focus.1 && focus.0.elapsed() < Duration::from_secs(3))
+    } else {
+        gui()
+    }
+}
+
 pub(super) struct Bridge {
     pub(super) address: SocketAddr,
     bindings: Arc<Mutex<HashMap<String, (String, String)>>>,
@@ -362,7 +378,30 @@ impl Bridge {
         })
     }
     pub(super) fn start_delivery(&self, app: tauri::AppHandle) -> Result<(), String> {
-        use tauri::{Emitter, Manager};
+        use tauri::Manager;
+        self.start_delivery_with(
+            app,
+            |app| {
+                delivery_foreground(app, || {
+                    app.get_window("main")
+                        .is_some_and(|window| window.is_focused().unwrap_or(false))
+                })
+            },
+            |app, id, title, body| {
+                super::send_native_notification(app.clone(), id.into(), title, body)
+            },
+        )
+    }
+
+    fn start_delivery_with<R: tauri::Runtime>(
+        &self,
+        app: tauri::AppHandle<R>,
+        foreground: impl Fn(&tauri::AppHandle<R>) -> bool + Send + 'static,
+        send_native: impl Fn(&tauri::AppHandle<R>, &str, String, String) -> Result<(), String>
+            + Send
+            + 'static,
+    ) -> Result<(), String> {
+        use tauri::Emitter;
         let mut worker = self
             .delivery_worker
             .lock()
@@ -384,15 +423,7 @@ impl Bridge {
                         epoch = retry.load(Ordering::Acquire);
                         queue.retry();
                     }
-                    let manager = app.state::<super::SessionManager>();
-                    let foreground = if manager.background_owner {
-                        manager.desktop_focus.lock().is_ok_and(|focus| {
-                            focus.1 && focus.0.elapsed() < Duration::from_secs(3)
-                        })
-                    } else {
-                        app.get_webview_window("main")
-                            .is_some_and(|w| w.is_focused().unwrap_or(false))
-                    };
+                    let foreground = foreground(&app);
                     let result = queue.tick(
                         &history,
                         started.elapsed().as_millis().min(u64::MAX as u128) as u64,
@@ -403,23 +434,16 @@ impl Bridge {
                         },
                         !context.0 || context.2,
                         |id, entry| {
-                            let label = match entry.kind.as_str() {
-                                "response_finished" => "Response finished",
-                                "needs_permission" => "Permission required",
-                                "interrupted" => "Round interrupted",
-                                "failed" => "Round failed",
-                                "needs_attention" => "Response ready; hooks may continue",
-                                _ => "Agent attention",
-                            };
+                            let (title, body) = super::system_entry::notification_round(&entry.kind,super::system_entry::notification_chinese(&app));
                             history.native_delivery(
                                 id,
                                 super::agent_events::NativeSource::Round(entry),
                                 |_| {
-                                    super::send_native_notification(
-                                        app.clone(),
-                                        id.into(),
-                                        format!("YAM · {label}"),
-                                        format!("{label}. Open YAM to review this round."),
+                                    send_native(
+                                        &app,
+                                        id,
+                                        title,
+                                        body,
                                     )
                                 },
                             )
@@ -453,6 +477,7 @@ impl Bridge {
         }));
         Ok(())
     }
+
     pub(super) fn register(
         &self,
         session: &str,
@@ -573,6 +598,8 @@ pub(crate) fn helper_entry() -> bool {
         Some("--yam-agent-hook") => false,
         Some("--yam-agent-notify") => true,
         Some("--yam-claude-hook") => false,
+        #[cfg(target_os = "macos")]
+        Some("--yam-codex-outcome") => false,
         _ => return false,
     };
     let raw = (|| {
@@ -611,6 +638,18 @@ pub(crate) fn helper_entry() -> bool {
         let own = (|| {
             let value: serde_json::Value =
                 serde_json::from_str(&raw).map_err(|_| "Invalid native agent payload")?;
+            #[cfg(target_os = "macos")]
+            if mode.as_deref() == Some("--yam-codex-outcome") {
+                if let Some(event) = crate::codex_outcome::run(&raw)? {
+                    let address = local_address(
+                        &std::env::var("YAM_AGENT_ADDRESS").map_err(|_| "Missing agent address")?,
+                    )?;
+                    let token =
+                        std::env::var("YAM_AGENT_TOKEN").map_err(|_| "Missing agent credential")?;
+                    submit(address, &token, event)?;
+                }
+                return Ok(());
+            }
             let event = if mode.as_deref() == Some("--yam-claude-hook") {
                 normalize_claude(&value)?
             } else {
@@ -620,7 +659,12 @@ pub(crate) fn helper_entry() -> bool {
                 &std::env::var("YAM_AGENT_ADDRESS").map_err(|_| "Missing agent address")?,
             )?;
             let token = std::env::var("YAM_AGENT_TOKEN").map_err(|_| "Missing agent credential")?;
-            submit(address, &token, event)
+            submit(address, &token, event.clone())?;
+            #[cfg(target_os = "macos")]
+            if mode.as_deref() == Some("--yam-agent-hook") {
+                crate::codex_outcome::start(&value, &event)?;
+            }
+            Ok(())
         })();
         original.and(own)
     })();
@@ -636,6 +680,7 @@ fn effective_notify(
     program: &std::ffi::OsStr,
     prefix: &[std::ffi::OsString],
     cwd: &std::path::Path,
+    environment: Option<&super::provider_launch::Environment>,
 ) -> Result<Vec<String>, String> {
     previous_notify(&agent_query(
         program,
@@ -643,6 +688,7 @@ fn effective_notify(
         cwd,
         "config/read",
         serde_json::json!({"cwd":cwd.to_string_lossy(),"includeLayers":true}),
+        environment,
     )?)
 }
 fn agent_query(
@@ -651,6 +697,7 @@ fn agent_query(
     cwd: &std::path::Path,
     method: &str,
     params: serde_json::Value,
+    environment: Option<&super::provider_launch::Environment>,
 ) -> Result<serde_json::Value, String> {
     use std::io::BufRead;
     let mut command = std::process::Command::new(program);
@@ -662,6 +709,9 @@ fn agent_query(
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
+    if let Some(environment) = environment {
+        environment.apply_command(&mut command);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -671,6 +721,9 @@ fn agent_query(
     {
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x08000000);
+    }
+    if let Some(environment) = environment {
+        environment.validate_before_spawn()?;
     }
     let mut child = command
         .spawn()
@@ -898,6 +951,11 @@ fn opencode_plugin(assets: &std::path::Path) -> Result<std::path::PathBuf, Strin
 pub(super) fn validate_interactive_args(adapter: &str, args: &[String]) -> Result<(), String> {
     let (values, flags): (&[&str], &[&str]) = if adapter == "opencode" {
         (&["--model", "-m", "--agent"], &[])
+    } else if adapter == "gemini" {
+        (
+            &["--model", "-m", "--approval-mode"],
+            &["--sandbox", "--screen-reader"],
+        )
     } else if adapter == "claude" {
         (
             &[
@@ -965,19 +1023,21 @@ pub(super) fn validate_interactive_args(adapter: &str, args: &[String]) -> Resul
 fn measured_version(
     program: &std::ffi::OsStr,
     prefix: &[std::ffi::OsString],
-) -> Result<(), String> {
+) -> Result<String, String> {
     measured_version_checked(program, prefix, compatible_claude_version)
 }
 fn measured_version_checked(
     program: &std::ffi::OsStr,
     prefix: &[std::ffi::OsString],
     compatible: fn(&str) -> bool,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let mut command = std::process::Command::new(program);
     command
         .args(prefix)
         .arg("--version")
         .env("PATH", super::agent_path())
+        .env("DISABLE_AUTOUPDATER", "1")
+        .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
@@ -1021,7 +1081,7 @@ fn measured_version_checked(
                     break Err("Cannot read agent version".into());
                 }
                 break if bytes.len() <= 4096 && compatible(String::from_utf8_lossy(&bytes).trim()) {
-                    Ok(())
+                    Ok(String::from_utf8_lossy(&bytes).trim().to_string())
                 } else {
                     Err("This CLI version has not passed YAM hook compatibility checks".into())
                 };
@@ -1079,14 +1139,10 @@ pub(super) fn validate_resume(
     executable: &std::path::Path,
     cwd: &std::path::Path,
     id: &str,
+    launch: &super::AgentLaunch,
+    environment: Option<&super::provider_launch::Environment>,
 ) -> Result<(), String> {
-    let launch = super::AgentLaunch {
-        adapter: "codex".into(),
-        mode: "interactive".into(),
-        extra_args: String::new(),
-        prompt: None,
-    };
-    let command = super::agent_command(executable, &launch)?;
+    let command = super::agent_command(executable, launch)?;
     let argv = command.get_argv();
     let config = agent_query(
         &argv[0],
@@ -1094,6 +1150,7 @@ pub(super) fn validate_resume(
         cwd,
         "config/read",
         serde_json::json!({"cwd":cwd.to_string_lossy(),"includeLayers":true}),
+        environment,
     )?;
     let provider = match &config["result"]["config"]["model_provider"] {
         serde_json::Value::Null => "openai",
@@ -1106,12 +1163,14 @@ pub(super) fn validate_resume(
         cwd,
         "thread/read",
         serde_json::json!({"threadId":id,"includeTurns":false}),
+        environment,
     )?;
     validate_resume_metadata(&thread, id, cwd, provider)
 }
 pub(super) struct Prepared {
     pub(super) token: String,
     pub(super) generation: String,
+    pub(super) cli_version: Option<String>,
     args: Vec<String>,
     original: Vec<String>,
     opencode: Option<String>,
@@ -1121,17 +1180,20 @@ pub(super) fn prepare(
     launch: &super::AgentLaunch,
     cwd: &std::path::Path,
     assets: &std::path::Path,
+    environment: Option<&super::provider_launch::Environment>,
 ) -> Result<Prepared, String> {
     if launch.adapter == "opencode" && launch.mode == "interactive" {
         validate_interactive_args("opencode", &super::parse_agent_args(&launch.extra_args)?)?;
         let plain = super::AgentLaunch {
+            codex: None,
             prompt: None,
             extra_args: String::new(),
             ..launch.clone()
         };
         let command = super::agent_command(executable, &plain)?;
         let argv = command.get_argv();
-        measured_version_checked(&argv[0], &argv[1..], compatible_opencode_version)?;
+        let cli_version =
+            measured_version_checked(&argv[0], &argv[1..], compatible_opencode_version)?;
         let path = opencode_plugin(assets)?;
         let url = tauri::Url::from_file_path(&path).map_err(|_| "Invalid YAM plugin path")?;
         let original = std::env::var("OPENCODE_CONFIG_CONTENT")
@@ -1146,6 +1208,7 @@ pub(super) fn prepare(
         return Ok(Prepared {
             token: credential()?,
             generation: credential()?,
+            cli_version: Some(cli_version),
             args: vec![],
             original: vec![],
             opencode: Some(opencode_config(Some(&original), url.as_str())?),
@@ -1154,17 +1217,19 @@ pub(super) fn prepare(
     if launch.adapter == "claude" && launch.mode == "interactive" {
         validate_interactive_args("claude", &super::parse_agent_args(&launch.extra_args)?)?;
         let plain = super::AgentLaunch {
+            codex: None,
             prompt: None,
             extra_args: String::new(),
             ..launch.clone()
         };
         let command = super::agent_command(executable, &plain)?;
         let argv = command.get_argv();
-        measured_version(&argv[0], &argv[1..])?;
+        let cli_version = measured_version(&argv[0], &argv[1..])?;
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         return Ok(Prepared {
             token: credential()?,
             generation: credential()?,
+            cli_version: Some(cli_version),
             args: claude_args(exe.to_str().ok_or("Helper executable path is not UTF-8")?)?,
             original: vec![],
             opencode: None,
@@ -1176,6 +1241,9 @@ pub(super) fn prepare(
     let extra = super::parse_agent_args(&launch.extra_args)?;
     validate_interactive_args("codex", &extra)?;
     let plain = super::AgentLaunch {
+        codex: launch.codex.clone(),
+        provider: launch.provider.clone(),
+        env_refs: launch.env_refs.clone(),
         adapter: "codex".into(),
         mode: "interactive".into(),
         extra_args: String::new(),
@@ -1183,7 +1251,17 @@ pub(super) fn prepare(
     };
     let command = super::agent_command(executable, &plain)?;
     let argv = command.get_argv();
-    let original = effective_notify(&argv[0], &argv[1..], cwd)?;
+    let cli_version = measured_version_checked(&argv[0], &argv[1..], |output| {
+        output.strip_prefix("codex-cli ").is_some_and(|version| {
+            let parts: Vec<_> = version.split('.').collect();
+            parts.len() == 3
+                && parts
+                    .iter()
+                    .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+        })
+    })
+    .ok();
+    let original = effective_notify(&argv[0], &argv[1..], cwd, environment)?;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let exe = exe.to_str().ok_or("Helper executable path is not UTF-8")?;
     if original.first().is_some_and(|program| program == exe) {
@@ -1198,11 +1276,13 @@ pub(super) fn prepare(
         cwd,
         "hooks/list",
         serde_json::json!({"cwds":[cwd.to_string_lossy()]}),
+        environment,
     )?;
     validate_hook_capabilities(&capabilities, cwd)?;
     Ok(Prepared {
         token: credential()?,
         generation: credential()?,
+        cli_version,
         args,
         original,
         opencode: None,
@@ -1238,6 +1318,311 @@ impl Prepared {
 mod tests {
     use super::*;
     #[test]
+    fn closure_t05_real_delivery_loop_applies_context_focus_ttl_and_bounded_stop() {
+        use tauri::Manager;
+        let root =
+            std::env::temp_dir().join(format!("yam-closure-delivery-{}", crate::next_session_id()));
+        let history = Arc::new(crate::HistoryStore::open(root.clone()).unwrap());
+        let bridge = Bridge::start(history.clone(), |_, _| {}).unwrap();
+        let add = |id: &str| {
+            history
+                .start(&crate::SessionSummary {
+                    ssh: None,
+                    session_id: id.into(),
+                    cwd: root.to_string_lossy().into_owned(),
+                    command: None,
+                    status: "running".into(),
+                    launch: None,
+                })
+                .unwrap();
+            history.configure_agent(id, id).unwrap();
+            let token = credential().unwrap();
+            bridge.register(id, &token, id).unwrap();
+            for kind in ["SessionStart", "UserPromptSubmit", "TurnComplete"] {
+                submit(bridge.address,&token,normalize(&serde_json::json!({"hook_event_name":kind,"session_id":id,"turn_id":"owned-turn"}),false).unwrap()).unwrap();
+            }
+        };
+        add("s-selected");
+        let app = tauri::test::mock_app();
+        let manager = crate::SessionManager {
+            background_owner: true,
+            ..Default::default()
+        };
+        app.manage(manager);
+        *app.state::<crate::SessionManager>()
+            .desktop_focus
+            .lock()
+            .unwrap() = (std::time::Instant::now(), true);
+        *bridge.context.lock().unwrap() = (true, Some("s-selected".into()), false);
+        let (tick_tx, tick_rx) = std::sync::mpsc::channel();
+        let ticks = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let observed_ticks = ticks.clone();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let sends = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_sends = sends.clone();
+        bridge
+            .start_delivery_with(
+                app.handle().clone(),
+                move |app| {
+                    let foreground = delivery_foreground(app, || {
+                        panic!("background owner must use its real focus TTL")
+                    });
+                    let tick = observed_ticks.fetch_add(1, Ordering::AcqRel) + 1;
+                    tick_tx.send(tick).unwrap();
+                    foreground
+                },
+                move |_, id, title, body| {
+                    assert_eq!(id, "s-deliver");
+                    assert!(title.contains("Response finished") && body.contains("review"));
+                    observed_sends.fetch_add(1, Ordering::AcqRel);
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+                    Ok(())
+                },
+            )
+            .unwrap();
+        bridge
+            .start_delivery_with(
+                app.handle().clone(),
+                |_| panic!("duplicate delivery worker"),
+                |_, _, _, _| panic!("duplicate sender"),
+            )
+            .unwrap();
+        let wait_cycles = || {
+            let target = ticks.load(Ordering::Acquire) + 3;
+            loop {
+                if tick_rx.recv_timeout(Duration::from_secs(2)).unwrap() >= target {
+                    break;
+                }
+            }
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while history.get("s-selected").unwrap().agent.inbox[0].delivery != "suppressed" {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "foreground selection did not suppress its receipt"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        *bridge.context.lock().unwrap() = (false, Some("s-deliver".into()), false);
+        wait_cycles();
+        add("s-deliver");
+        wait_cycles();
+        assert_eq!(
+            history.get("s-deliver").unwrap().agent.inbox[0].delivery,
+            "pending"
+        );
+        assert_eq!(sends.load(Ordering::Acquire), 0);
+        *bridge.context.lock().unwrap() = (true, Some("s-deliver".into()), true);
+        wait_cycles();
+        assert_eq!(
+            history.get("s-deliver").unwrap().agent.inbox[0].delivery,
+            "pending"
+        );
+        assert_eq!(sends.load(Ordering::Acquire), 0);
+        *app.state::<crate::SessionManager>()
+            .desktop_focus
+            .lock()
+            .unwrap() = (std::time::Instant::now() - Duration::from_secs(4), true);
+        *bridge.context.lock().unwrap() = (true, Some("s-deliver".into()), false);
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(
+            history.get("s-deliver").unwrap().agent.inbox[0].delivery,
+            "pending"
+        );
+        add("s-late");
+        let stopped = std::time::Instant::now();
+        let result = bridge.stop_until(stopped + Duration::from_millis(50));
+        let retained = bridge.delivery_worker.lock().unwrap().is_some();
+        release_tx.send(()).unwrap();
+        bridge
+            .stop_until(std::time::Instant::now() + Duration::from_secs(1))
+            .unwrap();
+        assert!(result.unwrap_err().contains("timed out") && retained);
+        assert!(
+            bridge.worker.lock().unwrap().is_none()
+                && bridge.delivery_worker.lock().unwrap().is_none()
+        );
+        assert_eq!(sends.load(Ordering::Acquire), 1);
+        assert_eq!(
+            history.get("s-deliver").unwrap().agent.inbox[0].delivery,
+            "accepted"
+        );
+        assert_eq!(
+            history.get("s-late").unwrap().agent.inbox[0].delivery,
+            "pending"
+        );
+        assert!(history
+            .list()
+            .unwrap()
+            .iter()
+            .all(|record| !record.agent.inbox[0].read));
+        let gui = tauri::test::mock_app();
+        gui.manage(crate::SessionManager::default());
+        assert!(delivery_foreground(gui.handle(), || true));
+        assert!(!delivery_foreground(gui.handle(), || false));
+        drop(bridge);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn closure_t05_normalized_hooks_commit_authenticated_receipts_reopen_and_deliver_once() {
+        use crate::{HistoryStore, SessionSummary};
+        let root =
+            std::env::temp_dir().join(format!("yam-closure-agent-{}", crate::next_session_id()));
+        let history = Arc::new(HistoryStore::open(root.clone()).unwrap());
+        let bridge = Bridge::start(history.clone(), |_, _| {}).unwrap();
+        let mut expected = Vec::new();
+        for (name, outcome, phase) in [
+            ("complete", "TurnComplete", "response_finished"),
+            ("failure", "TurnFailed", "failed"),
+            ("cancel", "Interrupt", "interrupted"),
+        ] {
+            let id = format!("s-{name}");
+            let native = format!("native-{name}");
+            let generation = format!("generation-{name}");
+            let token = credential().unwrap();
+            history
+                .start(&SessionSummary {
+                    ssh: None,
+                    session_id: id.clone(),
+                    cwd: root.to_string_lossy().into_owned(),
+                    command: None,
+                    status: "running".into(),
+                    launch: None,
+                })
+                .unwrap();
+            history.configure_agent(&id, &generation).unwrap();
+            bridge.register(&id, &token, &generation).unwrap();
+            let hook = |kind: &str| {
+                normalize(
+                    &serde_json::json!({
+                        "hook_event_name": kind, "session_id": native, "turn_id": "owned-turn",
+                    }),
+                    false,
+                )
+                .unwrap()
+            };
+            for kind in ["SessionStart", "UserPromptSubmit", outcome, outcome] {
+                submit(bridge.address, &token, hook(kind)).unwrap();
+            }
+            let before = history.get(&id).unwrap();
+            assert_eq!(
+                before.status, "running",
+                "a turn result cannot invent process exit"
+            );
+            assert_eq!(before.agent.phase, phase);
+            assert_eq!(before.agent.inbox.len(), 1);
+            assert_eq!(before.agent.inbox[0].kind, phase);
+            assert_eq!(before.agent.inbox[0].delivery, "pending");
+            let mut foreign = hook("TurnComplete");
+            foreign.agent_session_id = "other-native".into();
+            submit(bridge.address, &token, foreign).unwrap();
+            assert!(submit(bridge.address, &credential().unwrap(), hook("TurnComplete")).is_err());
+            assert_eq!(history.get(&id).unwrap(), before);
+            if name == "cancel" {
+                history
+                    .update(
+                        &id,
+                        "stopped",
+                        None,
+                        Some("owned session cancellation".into()),
+                        None,
+                    )
+                    .unwrap();
+                assert!(submit(bridge.address, &token, hook("UserPromptSubmit")).is_err());
+            }
+            expected.push((id, generation, phase));
+        }
+        let stopped = std::time::Instant::now();
+        bridge
+            .stop_until(stopped + Duration::from_millis(500))
+            .unwrap();
+        assert!(stopped.elapsed() < Duration::from_secs(1));
+        drop(bridge);
+        drop(history);
+        let history = HistoryStore::open(root.clone()).unwrap();
+        let mut queue = crate::agent_events::DeliveryQueue::default();
+        assert!(queue
+            .tick(&history, 0, None, true, |_, _| panic!(
+                "paused delivery cannot send"
+            ))
+            .unwrap()
+            .is_empty());
+        let mut sent = Vec::new();
+        let changed = queue
+            .tick(&history, 0, None, false, |id, receipt| {
+                sent.push((id.to_string(), receipt.id.clone()));
+                if receipt.kind == "failed" {
+                    Err("owned transient notifier refusal".into())
+                } else {
+                    Ok(true)
+                }
+            })
+            .unwrap();
+        assert_eq!(changed.len(), 3);
+        assert_eq!(sent.len(), 3);
+        drop(history);
+        let history = HistoryStore::open(root.clone()).unwrap();
+        for (id, generation, phase) in &expected {
+            let record = history.get(id).unwrap();
+            assert_eq!(record.agent.generation, *generation);
+            assert_eq!(record.agent.phase, *phase);
+            assert_eq!(record.agent.inbox.len(), 1);
+            let receipt = &record.agent.inbox[0];
+            assert_eq!(
+                receipt.delivery,
+                if *phase == "failed" {
+                    "failed"
+                } else {
+                    "accepted"
+                }
+            );
+            assert!(
+                !receipt.read,
+                "delivery never means the user read the receipt"
+            );
+            assert!(history
+                .read_agent_receipt(id, &receipt.id, receipt.revision + 1)
+                .is_err());
+            assert!(!history.get(id).unwrap().agent.inbox[0].read);
+        }
+        assert!(queue
+            .tick(&history, 1, None, false, |_, _| panic!(
+                "transient refusal must honor backoff"
+            ))
+            .unwrap()
+            .is_empty());
+        queue.retry();
+        let changed = queue
+            .tick(&history, 1, None, false, |id, receipt| {
+                sent.push((id.to_string(), receipt.id.clone()));
+                Ok(true)
+            })
+            .unwrap();
+        assert_eq!(changed, ["s-failure"]);
+        assert_eq!(sent.len(), 4);
+        assert!(queue
+            .tick(&history, 100_000, None, false, |_, _| panic!(
+                "accepted receipts must not notify again"
+            ))
+            .unwrap()
+            .is_empty());
+        drop(history);
+        let reopened = HistoryStore::open(root.clone()).unwrap();
+        assert!(reopened
+            .list()
+            .unwrap()
+            .iter()
+            .all(|record| record.agent.inbox.len() == 1
+                && record.agent.inbox[0].delivery == "accepted"
+                && !record.agent.inbox[0].read));
+        assert_eq!(reopened.get("s-cancel").unwrap().status, "stopped");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn three_agent_receipts_and_logs_remain_isolated_across_connections_and_history_reopen() {
         use super::super::{session_logs, AgentLaunch, HistoryStore, SessionSummary};
         let root = std::env::temp_dir().join(format!(
@@ -1254,11 +1639,15 @@ mod tests {
             let token = credential().unwrap();
             history
                 .start(&SessionSummary {
+                    ssh: None,
                     session_id: id.clone(),
                     cwd: root.to_string_lossy().into_owned(),
                     command: None,
                     status: "running".into(),
                     launch: Some(AgentLaunch {
+                        codex: None,
+                        provider: None,
+                        env_refs: Default::default(),
                         adapter: adapter.into(),
                         mode: "interactive".into(),
                         extra_args: String::new(),
@@ -1641,6 +2030,7 @@ mod tests {
         let prepared = Prepared {
             token: credential().unwrap(),
             generation: credential().unwrap(),
+            cli_version: None,
             args: vec!["-c".into(), "notify=[]".into()],
             original: vec!["existing".into(), "literal ' 中文".into()],
             opencode: None,
@@ -1678,6 +2068,7 @@ mod tests {
         let history = Arc::new(super::super::HistoryStore::open(root.clone()).unwrap());
         history
             .start(&super::super::SessionSummary {
+                ssh: None,
                 session_id: "a".into(),
                 cwd: "/tmp".into(),
                 command: None,
@@ -1757,6 +2148,7 @@ mod tests {
         assert!(runtime.is_none());
         history
             .start(&super::super::SessionSummary {
+                ssh: None,
                 session_id: "new".into(),
                 cwd: "/tmp".into(),
                 command: None,
@@ -1791,6 +2183,7 @@ mod tests {
         for id in ["a", "b"] {
             history
                 .start(&super::super::SessionSummary {
+                    ssh: None,
                     session_id: id.into(),
                     cwd: "/tmp".into(),
                     command: None,
@@ -1939,6 +2332,7 @@ mod tests {
             std::ffi::OsStr::new("/bin/sh"),
             &["-c".into(), script.into()],
             std::path::Path::new("/tmp"),
+            None,
         )
         .unwrap();
         assert_eq!(result, vec!["/original", "turn-ended"]);
@@ -1948,7 +2342,8 @@ mod tests {
                 "-c".into(),
                 "printf '%s\\n' '{\"id\":1,\"error\":{}}'".into()
             ],
-            std::path::Path::new("/tmp")
+            std::path::Path::new("/tmp"),
+            None,
         )
         .is_err());
     }
@@ -2067,6 +2462,9 @@ mod tests {
             "--worktree",
         ] {
             let launch = super::super::AgentLaunch {
+                codex: None,
+                provider: None,
+                env_refs: Default::default(),
                 adapter: "codex".into(),
                 mode: "interactive".into(),
                 extra_args: extra.into(),
@@ -2077,6 +2475,7 @@ mod tests {
                 &launch,
                 std::path::Path::new("/tmp"),
                 std::path::Path::new("/tmp"),
+                None,
             )
             .err()
             .unwrap();
@@ -2234,5 +2633,248 @@ mod tests {
             start.elapsed() < Duration::from_millis(600),
             "an exited query must not wait for descendants holding stdout"
         );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn closure_t10_config_query_refuses_changed_managed_home_before_child_spawn() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(super::super::next_session_id());
+        std::fs::create_dir(&root).unwrap();
+        let launch: super::super::AgentLaunch = serde_json::from_value(serde_json::json!({
+            "adapter":"codex","mode":"interactive","extra_args":"","prompt":null,
+            "provider":{"id":"custom","model":"fixture","base_url":"http://127.0.0.1:3425","api_key_env":null}
+        })).unwrap();
+        let environment = super::super::provider_launch::prepare(&root, &launch, &|_| {
+            panic!("no source credentials")
+        })
+        .unwrap();
+        let marker = root.join("query-spawned");
+        let program = root.join("owned-query");
+        std::fs::write(
+            &program,
+            format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(
+            environment.home.as_ref().unwrap().join("config.toml"),
+            b"model_provider = 'changed'\n",
+        )
+        .unwrap();
+        let error = agent_query(
+            program.as_os_str(),
+            &[],
+            &root,
+            "hooks/list",
+            serde_json::json!({}),
+            Some(&environment),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "Managed provider configuration changed; no CLI was started"
+        );
+        assert!(!marker.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn measured_version_retains_the_bounded_verified_launch_output() {
+        let output = measured_version(
+            std::ffi::OsStr::new("/bin/sh"),
+            &[
+                "-c".into(),
+                "printf '2.1.302 (Claude Code)\\n'".into(),
+                "yam-version".into(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(output).unwrap(),
+            serde_json::json!("2.1.302 (Claude Code)")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn version_query_disables_cli_background_update_and_telemetry() {
+        let output = measured_version(std::ffi::OsStr::new("/bin/sh"), &[
+            "-c".into(), "if [ \"$DISABLE_AUTOUPDATER\" = 1 ] && [ \"$CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC\" = 1 ]; then printf '2.1.302 (Claude Code)'; else exit 9; fi".into(), "yam-version".into()
+        ]);
+        assert!(
+            output.is_ok(),
+            "version probe must disable background CLI traffic"
+        );
+    }
+}
+
+#[cfg(test)]
+mod inherited_context_native_tests {
+    #[test]
+    #[ignore = "Opt-in installed Codex configuration/auth queries only; no inference calls"]
+    fn native_codex_inherited_context_matches_direct_config_and_bare_child() {
+        use std::path::Path;
+        let root = std::env::temp_dir().join(format!(
+            "yam-native-inheritance-{}",
+            super::credential().unwrap()
+        ));
+        let source = root.join("original");
+        let project = root.join("project");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir(&project).unwrap();
+        let original = b"sandbox_mode = 'workspace-write'\nmodel_reasoning_effort = 'low'\n[features]\nmulti_agent = true\n[mcp_servers.fixture]\ncommand = '/usr/bin/true'\nenabled = false\n";
+        std::fs::write(source.join("config.toml"), original).unwrap();
+        std::fs::write(source.join("auth.json"), b"desktop-auth-sentinel").unwrap();
+        std::fs::write(
+            source.join("work.config.toml"),
+            "model = 'profile-model'\nmodel_provider = 'original'\n",
+        )
+        .unwrap();
+        let mut launch: crate::AgentLaunch = serde_json::from_value(serde_json::json!({"adapter":"codex","mode":"interactive","extra_args":"","prompt":null,"provider":{"id":"codex","model":"gpt-6.1-sol","base_url":"http://127.0.0.1:19999","api_key_env":null},"codex":{"image_mode":"native"}})).unwrap();
+        crate::codex_context::assign_context(&mut launch).unwrap();
+        let env = crate::provider_launch::prepare(&root.join("private"), &launch, &|name| {
+            (name == "CODEX_HOME").then(|| source.to_string_lossy().into_owned())
+        })
+        .unwrap();
+        let executable =
+            crate::find_executable("codex").expect("Install Codex before this explicit check");
+        let main = crate::agent_command(&executable, &launch).unwrap();
+        for prefix in [&main.get_argv()[1..], &[][..]] {
+            let config = super::agent_query(
+                executable.as_os_str(),
+                prefix,
+                &project,
+                "config/read",
+                serde_json::json!({"includeLayers":false}),
+                Some(&env),
+            )
+            .unwrap();
+            assert_eq!(config["result"]["config"]["model_provider"], "openai");
+            assert_eq!(
+                config["result"]["config"]["openai_base_url"],
+                "http://127.0.0.1:19999/v1"
+            );
+            assert_eq!(config["result"]["config"]["model_reasoning_effort"], "low");
+            assert_eq!(
+                config["result"]["config"]["sandbox_mode"],
+                "workspace-write"
+            );
+            assert_eq!(config["result"]["config"]["features"]["multi_agent"], true);
+            assert_eq!(
+                config["result"]["config"]["mcp_servers"]["fixture"]["command"],
+                "/usr/bin/true"
+            );
+            let account = super::agent_query(
+                executable.as_os_str(),
+                prefix,
+                &project,
+                "account/read",
+                serde_json::json!({"refreshToken":false}),
+                Some(&env),
+            )
+            .unwrap();
+            assert_eq!(account["result"]["account"]["type"], "apiKey");
+            env.validate_before_spawn().unwrap();
+        }
+        // app-server rejects --profile; exercise the supported native MCP command instead.
+        let mut budget = crate::git_context::Budget {
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
+            remaining: 1024 * 1024,
+        };
+        let profile_env = env
+            .vars
+            .iter()
+            .map(|(key, value)| (key.into(), value.into()))
+            .collect::<Vec<_>>();
+        let profile = budget
+            .run_env(
+                &executable,
+                &["--profile", "work", "mcp", "list", "--json"],
+                &project,
+                &profile_env,
+            )
+            .unwrap();
+        assert!(
+            profile.status.success(),
+            "native profile configuration rejected"
+        );
+        let profile: serde_json::Value = serde_json::from_slice(&profile.stdout).unwrap();
+        assert_eq!(profile[0]["name"], "fixture");
+        let direct = root.join("direct");
+        std::fs::create_dir(&direct).unwrap();
+        let mut direct_config = b"model = 'gpt-6.1-sol'\nmodel_provider = 'openai'\nopenai_base_url = 'http://127.0.0.1:19999/v1'\ncli_auth_credentials_store = 'file'\nforced_login_method = 'api'\n".to_vec();
+        direct_config.extend_from_slice(original);
+        std::fs::write(direct.join("config.toml"), direct_config).unwrap();
+        std::fs::write(
+            direct.join("auth.json"),
+            br#"{"OPENAI_API_KEY":"yam-local-gateway"}"#,
+        )
+        .unwrap();
+        let mut unmanaged = launch.clone();
+        unmanaged.provider = None;
+        let direct_env =
+            crate::provider_launch::prepare(&root.join("unused"), &unmanaged, &|_| None)
+                .unwrap()
+                .with_project_env(&std::collections::BTreeMap::from([(
+                    "CODEX_HOME".into(),
+                    direct.to_string_lossy().into_owned(),
+                )]));
+        let direct_config = super::agent_query(
+            executable.as_os_str(),
+            &[],
+            &project,
+            "config/read",
+            serde_json::json!({"includeLayers":false}),
+            Some(&direct_env),
+        )
+        .unwrap();
+        let inherited = super::agent_query(
+            executable.as_os_str(),
+            &[],
+            &project,
+            "config/read",
+            serde_json::json!({"includeLayers":false}),
+            Some(&env),
+        )
+        .unwrap();
+        for key in [
+            "model",
+            "model_provider",
+            "openai_base_url",
+            "sandbox_mode",
+            "model_reasoning_effort",
+            "features",
+            "mcp_servers",
+        ] {
+            assert_eq!(
+                inherited["result"]["config"][key], direct_config["result"]["config"][key],
+                "{key}"
+            );
+        }
+        let direct_account = super::agent_query(
+            executable.as_os_str(),
+            &[],
+            &project,
+            "account/read",
+            serde_json::json!({"refreshToken":false}),
+            Some(&direct_env),
+        )
+        .unwrap();
+        assert_eq!(direct_account["result"]["account"]["type"], "apiKey");
+        assert_eq!(std::fs::read(source.join("config.toml")).unwrap(), original);
+        assert_eq!(
+            std::fs::read(source.join("auth.json")).unwrap(),
+            b"desktop-auth-sentinel"
+        );
+        assert!(
+            crate::provider_launch::existing_home(&root.join("private"), &launch)
+                .unwrap()
+                .starts_with(root.canonicalize().unwrap())
+        );
+        assert_eq!(
+            Path::new(&env.vars["CODEX_HOME"]).file_name().unwrap(),
+            env.home.as_ref().unwrap().file_name().unwrap()
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

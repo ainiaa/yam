@@ -8,6 +8,7 @@
       "target/terminal-runtime/yam-terminal",
       "target/terminal-runtime/THIRD-PARTY-NOTICES.txt",
       "target/terminal-runtime/THIRD-PARTY-NOTICES.report.json"
-    ]
+    ],
+    "createUpdaterArtifacts": true
   }
 }

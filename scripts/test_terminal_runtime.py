@@ -57,7 +57,7 @@ class RuntimeTests(unittest.TestCase):
   # This oracle is independent of any production descriptor list.
   expected = [("react", "19.3.0"), ("react-dom", "19.3.0"),
               ("lucide-react", "0.468.0"), ("@xterm/xterm", "6.0.0"),
-              ("@xterm/addon-fit", "0.11.0")]
+              ("@xterm/addon-fit", "0.11.0"), ("@xterm/addon-search", "0.16.0")]
   with tempfile.TemporaryDirectory(prefix="yam-notice-fixture-") as directory:
    repo = pathlib.Path(directory).resolve()
    scripts = repo / "scripts"; scripts.mkdir()
@@ -97,6 +97,7 @@ class RuntimeTests(unittest.TestCase):
    (desktop / "package.json").write_text(json.dumps({"dependencies": {row["name"]: row["version"] for row in notices.NPM_EXPECTED}}))
    (desktop / "pnpm-lock.yaml").write_text("fixture frozen lock")
    (desktop / "src-tauri/Cargo.lock").write_text('version=4\n[[package]]\nname="yam-desktop"\nversion="0.1.0"\n')
+   (desktop / "src-tauri/Cargo.toml").write_text('[package]\nname="yam-desktop"\nversion="0.1.0"\n')
    records=[]
    for row in notices.NPM_EXPECTED:
     body=bodies.get(row["name"], "EXISTING_XTERM_LICENSE_FIXTURE\n" if row["name"] in {"@xterm/headless", "@xterm/addon-serialize"} else "EXTRA_LICENSE_FIXTURE\n")
@@ -186,5 +187,26 @@ class RuntimeTests(unittest.TestCase):
     self.assertEqual(fixture["output"].read_bytes(), b"EXISTING_BINARY_FIXTURE")
     self.assertEqual(fixture["notices"].read_bytes(), b"EXISTING_NOTICES_FIXTURE")
     fixture["url"].assert_not_called()
+
+class SearchNoticeTests(unittest.TestCase):
+ def mocked_notice_main(self):return RuntimeTests().mocked_notice_main()
+ def test_search_actual_frontend_source_is_included(self):
+  with self.mocked_notice_main() as fixture:
+   sources=runtime.frontend_notices(fixture["desktop"])
+   self.assertIn("@xterm/addon-search 0.16.0\n"+fixture["bodies"]["@xterm/addon-search"],sources)
+ def test_search_invalid_sources_reject_before_runtime_fetch_or_sea(self):
+  for case in ["version","missing","symlink","tamper"]:
+   with self.subTest(case=case),self.mocked_notice_main() as fixture:
+    module=fixture["desktop"]/"node_modules/@xterm/addon-search";body=module/"LICENSE"
+    if case=="version":
+     metadata=json.loads((module/"package.json").read_text());metadata["version"]="0.0.0";(module/"package.json").write_text(json.dumps(metadata))
+    elif case=="missing":body.unlink()
+    elif case=="symlink":
+     original=module/"original-body";original.write_bytes(body.read_bytes());body.unlink();body.symlink_to(original)
+    else:body.write_bytes(b"TAMPERED INSTALLED SEARCH LICENSE")
+    with self.assertRaises(ValueError):runtime.main()
+    fixture["run"].assert_not_called();fixture["version"].assert_not_called();fixture["url"].assert_not_called()
+    self.assertEqual(fixture["output"].read_bytes(),b"EXISTING_BINARY_FIXTURE")
+    self.assertEqual(fixture["notices"].read_bytes(),b"EXISTING_NOTICES_FIXTURE")
 
 if __name__=='__main__':unittest.main()

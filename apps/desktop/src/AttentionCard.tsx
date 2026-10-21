@@ -1,3 +1,4 @@
+import {t} from "./i18n";
 import type {AgentReceipt,AgentState} from "./agent-events";
 import {captureAttention,type AttentionSession} from "./attention-actions";
 
@@ -6,10 +7,10 @@ export function AttentionCard({record,entry,agent,title,onOpen}:Props) {
   const action=captureAttention(record,entry,agent);
   return <article className="attention-card">
     <strong>{title}</strong>
-    <span>{action.label} · {entry.delivery}</span>
-    <p>{action.explanation}</p>
-    <span>{action.state==="current"?"Current round":"Historical / current round unconfirmed"}</span>
-    {entry.error&&<p>{entry.error}</p>}
-    <button type="button" onClick={onOpen}>{action.state==="current"?"View / handle in terminal":"View recorded terminal"}</button>
+    <span>{t(action.label)} · {t(entry.delivery)}</span>
+    <p>{t(action.explanation)}</p>
+    <span>{action.state==="current"?t("Current round"):t("Historical / current round unconfirmed")}</span>
+    {entry.error&&<p>{t(entry.error)}</p>}
+    <button type="button" onClick={onOpen}>{action.state==="current"?t("View / handle in terminal"):t("View recorded terminal")}</button>
   </article>;
 }

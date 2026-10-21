@@ -35,10 +35,10 @@ export function normalizeRetainedRange(value:unknown):RetainedLogRange {
  if(start>end||end-start!==BigInt(bytes)||v.truncation!==(start===0n?'complete':'truncated'))return unknown;
  return {start_offset:v.start_offset,end_offset_exclusive:v.end_offset_exclusive,retained_bytes:bytes,truncation:v.truncation};
 }
-export function formatRetainedRange(value:unknown):string {
+export function formatRetainedRange(value:unknown,translate:(value:string)=>string=value=>value):string {
  const range=normalizeRetainedRange(value);
- const count=range.retained_bytes===null?'retained byte count unknown':`${range.retained_bytes} retained bytes`;
- return range.truncation==='unknown'?`Absolute byte range unknown · ${count}`:`Bytes [${range.start_offset}, ${range.end_offset_exclusive}) · ${range.truncation} · ${count}`;
+ const count=range.retained_bytes===null?translate('retained byte count unknown'):`${range.retained_bytes} ${translate('retained bytes')}`;
+ return range.truncation==='unknown'?`${translate("Absolute byte range unknown")} · ${count}`:`${translate("Bytes")} [${range.start_offset}, ${range.end_offset_exclusive}) · ${translate(range.truncation)} · ${count}`;
 }
 export function normalizeLogExport(value:unknown):LogExportReceipt|null {
  if(value===null)return null;
@@ -48,8 +48,8 @@ export function normalizeLogExport(value:unknown):LogExportReceipt|null {
  return {path:v.path,range:normalizeRetainedRange(v.range)};
 }
 export function isSafeLogOffset(offset:unknown):offset is number {return typeof offset==='number'&&Number.isSafeInteger(offset)&&offset>=0;}
-export function logHitPosition(hit:LogHit,ranges?:ScannedLogRange[]):string {
- if(!isSafeLogOffset(hit.offset))return 'Recorded position unknown; excerpt unavailable';
+export function logHitPosition(hit:LogHit,ranges?:ScannedLogRange[],translate:(value:string)=>string=value=>value):string {
+ if(!isSafeLogOffset(hit.offset))return translate('Recorded position unknown; excerpt unavailable');
  const range=normalizeRetainedRange(ranges?.find(r=>r.session_id===hit.session_id)?.range);
- return `${range.truncation==='unknown'?'Retained-log position':'Output byte position'} ${hit.offset}`;
+ return `${translate(range.truncation==='unknown'?'Retained-log position':'Output byte position')} ${hit.offset}`;
 }
