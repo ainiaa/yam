@@ -717,7 +717,7 @@ export const zh:Record<string,string>={
   "Connection": "连接",
   "CLI version at launch": "启动时的 CLI 版本",
   "Not connected; trusted hooks required": "未连接；需要信任钩子",
-  "Unverified platform or connection": "版本或平台尚未验证",
+  "Unverified platform or connection": "平台或连接尚未验证",
   "Configured endpoint": "已配置的服务地址",
   "Codex default": "Codex 默认方式",
   "Existing Codex configuration": "现有 Codex 配置",

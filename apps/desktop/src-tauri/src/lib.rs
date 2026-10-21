@@ -7290,17 +7290,10 @@ mod tests {
                 pixel_height: 0,
             })
             .unwrap();
-        #[cfg(windows)]
-        let builder = shell_command(Some(command));
-        #[cfg(not(windows))]
-        let builder = {
-            // Worker fixtures must not inherit login-shell profiles or Zsh's delayed PTY teardown.
-            let mut builder = portable_pty::CommandBuilder::new("/bin/sh");
-            builder.arg("-c");
-            builder.arg(command);
-            builder
-        };
-        let child = pair.slave.spawn_command(builder).unwrap();
+        let child = pair
+            .slave
+            .spawn_command(shell_command(Some(command)))
+            .unwrap();
         #[cfg(unix)]
         let process_identity = child
             .process_id()
@@ -7348,8 +7341,8 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn test_session_fixture_uses_a_fixed_non_login_shell() {
-        let (session, mut reader, root) = test_session("printf '%s' \"$0\"");
+    fn terminal_tail_fixture_uses_an_explicit_non_login_shell() {
+        let (session, mut reader, root) = test_session(r#"exec /bin/sh -c 'printf "%s" "$0"'"#);
         let mut output = String::new();
         reader.read_to_string(&mut output).unwrap();
         session.child.lock().unwrap().wait().unwrap();

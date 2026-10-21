@@ -864,7 +864,7 @@ fn macos_exit_poll_leaves_running_child_running() {
 #[test]
 fn closure_t02_frame_publication_failure_keeps_session_until_same_finalizer_recovers() {
     use tauri::Manager;
-    let (session, reader, root) = test_session("printf frame-tail; exit 0");
+    let (session, reader, root) = test_session(r#"exec /bin/sh -c "printf frame-tail; exit 0""#);
     let mut fixture = Rust85Session {
         session,
         root,
@@ -1033,7 +1033,7 @@ pub(super) fn closure_t02_wait_workers(
 #[test]
 fn closure_t02_real_workers_drain_utf8_before_status_frame_removal_and_completion() {
     use tauri::Manager;
-    let (session, reader, root) = test_session("printf 'tail-\\317\\200\\342\\202'; exit 0");
+    let (session, reader, root) = test_session(r#"exec /bin/sh -c "printf 'tail-\317\200\342\202'; exit 0""#);
     let mut fixture = Rust85Session {
         session,
         root,

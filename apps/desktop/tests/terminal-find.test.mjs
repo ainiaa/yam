@@ -20,10 +20,20 @@ test('A06 find shortcut platform IME repeat alternate modifiers',()=>{
  const event={key:'f',metaKey:true,ctrlKey:false,shiftKey:false,altKey:false,isComposing:false,repeat:false,keyCode:70};assert.equal(find.terminalFindShortcut(event,true),true);assert.equal(find.terminalFindShortcut({...event,metaKey:false,ctrlKey:true},false),true);
  for(const change of [{metaKey:false},{ctrlKey:true},{shiftKey:true},{altKey:true},{isComposing:true},{repeat:true},{keyCode:229},{key:'g'}])assert.equal(find.terminalFindShortcut({...event,...change},true),false);
 });
-function workerFactory(){const worker=new Worker(`const {parentPort}=require('node:worker_threads');import(${JSON.stringify(new URL('../src/terminal-find-worker.ts',import.meta.url).href)}).then(({scanFindText})=>parentPort.on('message',r=>{try{parentPort.postMessage({id:r.id,...scanFindText(r.text,r.query,r.regex,r.caseSensitive)});}catch(e){parentPort.postMessage({id:r.id,error:String(e)});}}));`,{eval:true});const port={onmessage:null,onerror:null,postMessage:v=>worker.postMessage(v),terminate:()=>worker.terminate()};worker.on('message',data=>port.onmessage?.({data}));worker.on('error',error=>port.onerror?.(error));return port;}
-test('A06 actual worker deadline kills catastrophic regex and replacement literal continues',async()=>{
- assert.equal(typeof find.FindWorker,'function','Worker runner exists');const runner=new find.FindWorker(workerFactory,100);const start=Date.now();await assert.rejects(runner.run('a'.repeat(100000)+'!','(a+)+$',true,true),/timed out/);assert.ok(Date.now()-start<1500);const result=await runner.run('ok ok','ok',false,true);assert.deepEqual(result.matches,[[0,2],[3,5]]);runner.dispose();await assert.rejects(runner.run('a','a',false,true),/disposed/);
+function workerFactory(){const worker=new Worker(`const {parentPort}=require('node:worker_threads');import(${JSON.stringify(new URL('../src/terminal-find-worker.ts',import.meta.url).href)}).then(({scanFindText})=>{parentPort.on('message',r=>{try{parentPort.postMessage({id:r.id,...scanFindText(r.text,r.query,r.regex,r.caseSensitive)});}catch(e){parentPort.postMessage({id:r.id,error:String(e)});}});parentPort.postMessage('ready');});`,{eval:true});const port={onmessage:null,onerror:null,postMessage:v=>worker.postMessage(v),terminate:()=>worker.terminate()};port.ready=new Promise((resolve,reject)=>{worker.on('message',data=>data==='ready'?resolve():port.onmessage?.({data}));worker.on('error',error=>{reject(error);port.onerror?.(error);});});return port;}
+test('A06 actual worker deadline kills catastrophic regex and replacement literal continues',{timeout:10000},async()=>{
+ assert.equal(typeof find.FindWorker,'function','Worker runner exists');
+ // Measure execution cancellation and replacement after OS thread/module cold start.
+ const ports=[workerFactory(),workerFactory()],workers=[...ports];
+ const runner=new find.FindWorker(()=>{const port=ports.shift();assert.ok(port);return port;},100);
+ try{
+  await Promise.all(workers.map(port=>port.ready));
+  const start=Date.now();await assert.rejects(runner.run('a'.repeat(100000)+'!','(a+)+$',true,true),/timed out/);assert.ok(Date.now()-start<1500);
+  const result=await runner.run('ok ok','ok',false,true);assert.deepEqual(result.matches,[[0,2],[3,5]]);
+  runner.dispose();await assert.rejects(runner.run('a','a',false,true),/disposed/);
+ }finally{runner.dispose();await Promise.all(workers.map(port=>port.terminate()));}
 });
+
 function controller(){
  const events=[],term=terminal([line([...('hello hello')].map(c=>cell(c)))],20);let selection;Object.assign(term,{getSelectionPosition:()=>selection,hasSelection:()=>!!selection,clearSelection(){selection=undefined;events.push('clear');},select(col,row,size){selection={start:{x:col,y:row},end:{x:col+size,y:row}};events.push(['select',col,row,size]);},scrollToLine:n=>events.push(['scroll',n]),registerMarker:()=>({dispose(){}}),registerDecoration:()=>({dispose(){}})});
  const addon=()=>({findNext(query,opts){assert.equal(opts.regex,false);term.select(0,0,query.length);return true;},findPrevious(query,opts){assert.equal(opts.regex,false);term.select(6,0,query.length);return true;},dispose(){events.push('addon-dispose');}});

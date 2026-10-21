@@ -38,3 +38,13 @@ test('CI uses the validated Rust toolchain while retaining strict platform linti
  assert.match(workflow,/cargo clippy --manifest-path src-tauri\/Cargo.toml --all-targets -- -D warnings/);
  assert.doesNotMatch(workflow,/RUSTFLAGS:.*allow|clippy.*-A /);
 });
+
+test('MSVC test executables receive the same Common Controls v6 manifest as the application',()=>{
+ const build=readFileSync(new URL('apps/desktop/src-tauri/build.rs',root),'utf8');
+ const xml=readFileSync(new URL('apps/desktop/src-tauri/windows-app-manifest.xml',root),'utf8');
+ assert.match(build,/CARGO_CFG_TARGET_OS/);assert.match(build,/CARGO_CFG_TARGET_ENV/);
+ assert.match(build,/new_without_app_manifest/);
+ assert.match(build,/cargo:rustc-link-arg=\/MANIFEST:EMBED/);
+ assert.match(build,/cargo:rustc-link-arg=\/MANIFESTINPUT:/);
+ assert.match(xml,/Microsoft\.Windows\.Common-Controls/);assert.match(xml,/version="6\.0\.0\.0"/);
+});
