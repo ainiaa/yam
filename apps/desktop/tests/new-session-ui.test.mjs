@@ -1,3 +1,4 @@
+import {sessionActionBindings} from './fixtures/session-action-bindings.mjs';
 import {englishUiRead} from './fixtures/english-ui-source.mjs';
 const readFileSync=(...args)=>englishUiRead(rawReadFileSync,...args);
 import './fixtures/i18n-test-init.mjs';
@@ -16,7 +17,7 @@ function nodes(predicate,root=file){const result=[];function visit(n){if(predica
 function attribute(n,name){return (n.openingElement??n).attributes.properties.find(a=>a.name?.getText(file)===name)?.initializer;}
 const launchDialog=nodes(n=>ts.isJsxElement(n)&&n.openingElement.tagName.getText(file)==='dialog'&&attribute(n,'aria-labelledby')?.text==='launch-title')[0];
 function advanced(n){for(let p=n.parent;p&&p!==launchDialog;p=p.parent)if(ts.isJsxElement(p)&&p.openingElement.tagName.getText(file)==='details')return p;}
-function callback(name,bindings){bindings={sessionTerminal:'yam',isMainWindow:true,currentProject:null,session:null,activeProject:'',formAdapter:'codex',formLaunch:{command:null,provider:null},useProjectSettings:false,launchWorktreeAttempt:undefined,launchDirectoryOverride:undefined,launchTerminalProfile:undefined,setCwd(){},setLaunchDirectoryOverride(){},setLaunchTerminalProfile(){},setLaunchWorktreeAttempt(){},...bindings};const fn=nodes(n=>ts.isFunctionDeclaration(n)&&n.name?.text===name)[0];assert.ok(fn,name);return new Function(...Object.keys(bindings),ts.transpile(fn.getText(file),{target:ts.ScriptTarget.ES2022})+`;return ${name};`)(...Object.values(bindings));}
+function callback(name,bindings){bindings={cwd:"",...sessionActionBindings(),...bindings};bindings={sessionTerminal:'yam',isMainWindow:true,currentProject:null,session:null,activeProject:'',formAdapter:'codex',formLaunch:{command:null,provider:null},useProjectSettings:false,launchWorktreeAttempt:undefined,launchDirectoryOverride:undefined,launchTerminalProfile:undefined,setCwd(){},setLaunchDirectoryOverride(){},setLaunchTerminalProfile(){},setLaunchWorktreeAttempt(){},...bindings};const fn=nodes(n=>ts.isFunctionDeclaration(n)&&n.name?.text===name)[0];assert.ok(fn,name);return new Function(...Object.keys(bindings),ts.transpile(fn.getText(file),{target:ts.ScriptTarget.ES2022})+`;return ${name};`)(...Object.values(bindings));}
 const draft={adapter:'codex',mode:'interactive',extra_args:'--verbose',prompt:'keep message',command:null,provider:null};
 function formFixture(initial=draft){
  const state={draft:structuredClone(initial),edits:{},errors:[]};
@@ -28,7 +29,7 @@ function formFixture(initial=draft){
 test('new session keeps directory, CLI and terminal target outside closed advanced options',()=>{
  assert.ok(launchDialog);
  const controls=nodes(n=>(ts.isJsxElement(n)||ts.isJsxSelfClosingElement(n))&&(['input','Select','textarea'].includes((n.openingElement??n).tagName.getText(file))||attribute(n,'aria-label')?.text==='Startup program'),launchDialog);
- const primary=controls.filter(n=>!advanced(n));
+ const primary=controls.filter(n=>!advanced(n)&&attribute(n,'value')?.expression?.getText(file)!=='copyName');
  assert.equal(primary.length,3,'directory, CLI and terminal target are primary inputs');
  assert.ok(primary.some(n=>attribute(n,'aria-label')?.text==='Startup program'));
  assert.doesNotMatch(launchDialog.getText(file),/Run mode|Model source|<GitChanges|<WorktreeControls|<LaunchTemplates|Save current fields as application defaults/);
@@ -156,4 +157,13 @@ test('auxiliary window starts an available CLI with the same isolated provider p
 test('auxiliary CLI startup error does not retry or redirect',async()=>{
  const redirected=[],f=startFixture(false,{isMainWindow:false,openMainSettings:()=>redirected.push(true),invoke:async()=>{throw Error('terminal_start_outcome_unknown');}});
  await f.start();assert.deepEqual(redirected,[]);assert.match(f.errors.join(' '),/outcome unknown/i);
+});
+
+test('explicit custom commands remain visible and editable in either window, including copied sessions',()=>{
+ const input=nodes(n=>ts.isJsxSelfClosingElement(n)&&n.tagName.getText(file)==='input'&&attribute(n,'aria-label')?.text==='Custom command')[0];assert.ok(input);
+ let expression=input.parent;while(expression&&!ts.isJsxExpression(expression))expression=expression.parent;assert.ok(expression?.expression);
+ const js=ts.transpile('return ('+expression.expression.getText(file)+');',{target:ts.ScriptTarget.ES2022,jsx:ts.JsxEmit.React});
+ for(const isMainWindow of [true,false])for(const formAdapter of ['shell','custom']){
+  const element=new Function('React','t','formAdapter','isMainWindow','formLaunch','editLaunch',js)({createElement:(type,props,...children)=>({type,props,children})},s=>s,formAdapter,isMainWindow,{command:'printf reviewed'},()=>{});assert.ok(element,'the command cannot become a hidden launch argument');
+ }
 });

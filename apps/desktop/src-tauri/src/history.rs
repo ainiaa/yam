@@ -4813,7 +4813,9 @@ mod tests {
             provider: None,
             env_refs: Default::default(),
         });
-        assert!(super::super::terminal_reopen_launch(&agent).is_err());
+        let (picker, native) = super::super::terminal_reopen_launch(&agent).unwrap();
+        assert!(picker.unwrap().prompt.is_none());
+        assert!(native.is_none());
         agent.agent.generation = "trusted".into();
         agent.agent.agent_session_id = Some("01a0f6ec-5463-78c3-a404-5a7ad3b933fe".into());
         let (launch, native) = super::super::terminal_reopen_launch(&agent).unwrap();

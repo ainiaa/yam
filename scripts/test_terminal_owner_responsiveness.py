@@ -274,6 +274,22 @@ class AdmissionAndSupervisor(unittest.TestCase):
             bad={pid:dict(row) for pid,row in rows.items()};bad[102][field]=value
             with self.assertRaises(ValueError):runner.verify_identities(owner,101,ready,'a'*32,Path('/app/Resources'),Path('/python'),bad.get)
         with self.assertRaises(ValueError):runner.verify_identities(owner,101,ready[:1],'a'*32,Path('/app/Resources'),Path('/python'),rows.get)
+    def test_node_parser_identity_uses_authenticated_pid_and_native_parent(self):
+        owner=Owner();rows={100:{'pid':100,'parent':1,'started':'a','executable':'/app/owner'},101:{'pid':101,'parent':100,'started':'b','executable':'/opt/homebrew/bin/node'},102:{'pid':102,'parent':100,'started':'c','executable':'/python'},103:{'pid':103,'parent':100,'started':'d','executable':'/python'}}
+        ready=[{'pid':102,'nonce':'a'*32,'mode':'fixture-echo'},{'pid':103,'nonce':'a'*32,'mode':'fixture-flood'}]
+        self.assertEqual(set(runner.verify_identities(owner,101,ready,'a'*32,Path('/app/Resources'),Path('/python'),rows.get)),set(rows))
+        result=type('Result',(),{'stdout':'101 102'})()
+        with patch.object(runner.subprocess,'run',return_value=result),patch.object(runner,'inspect_process',side_effect=rows.get):
+            self.assertEqual(runner.parser_identity(owner,Path('/app/Resources'),101),rows[101])
+            with self.assertRaises(ValueError):runner.parser_identity(owner,Path('/app/Resources'),103)
+            with self.assertRaises(ValueError):runner.parser_identity(owner,Path('/app/Resources'))
+            rows[101]['parent']=999
+            with self.assertRaises(ValueError):runner.parser_identity(owner,Path('/app/Resources'),101)
+
+    def test_canonical_versioned_runtime_name_requires_authenticated_pid(self):
+        row={'pid':101,'parent':100,'started':'b','executable':'/opt/node/node-real-25'}
+        self.assertTrue(runner.parser_image(row,Path('/app/Resources'),101));self.assertFalse(runner.parser_image(row,Path('/app/Resources')));self.assertFalse(runner.parser_image(row,Path('/app/Resources'),102))
+
     def test_known_created_sessions_retained_on_second_create_failure(self):
         calls=[]
         def call(command,args,**kwargs):
@@ -317,6 +333,29 @@ class AdmissionAndSupervisor(unittest.TestCase):
             with self.assertRaises(ValueError):runner.validate_ledger(bad,'a'*32,0)
 
 class RuntimeWiring(unittest.TestCase):
+    def test_script_owner_receives_node_outside_isolated_path(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as temporary:
+            app=Path(temporary).resolve()/'YAM.app'
+            resource=app/'Contents/Resources/target/terminal-runtime/yam-terminal.cjs'
+            resource.parent.mkdir(parents=True);resource.write_text('script')
+            executable=app/'Contents/MacOS/yam-desktop'
+            for location in ('nvm/node-real-25','private-cache/node'):
+                node=app.parent/location;node.parent.mkdir();node.write_text('node');node.chmod(0o700)
+                with patch.object(runner.shutil,'which',return_value=str(node)):
+                    command=runner.owner_command(app,executable)
+                self.assertEqual(command,[str(executable),'--yam-background','--yam-terminal-node',str(node)])
+                with patch.object(runner.shutil,'which',return_value=None):
+                    self.assertEqual(runner.owner_command(app,executable,node),command)
+            with patch.object(runner.shutil,'which',return_value=None):
+                with self.assertRaisesRegex(ValueError,'terminal-node'):runner.owner_command(app,executable)
+            for invalid in (Path('node'),app/'missing',app.parent/'private-cache'):
+                with self.assertRaises(ValueError):runner.owner_command(app,executable,invalid)
+            node.chmod(0o600)
+            with self.assertRaises(ValueError):runner.owner_command(app,executable,node)
+    def test_legacy_owner_keeps_existing_startup_command(self):
+        with patch.object(runner.shutil,'which',return_value=None):
+            self.assertEqual(runner.owner_command(Path('/legacy/YAM.app'),Path('/legacy/owner')),['/legacy/owner','--yam-background'])
     def test_omitted_artifact_gate_never_starts_owner(self):
         import types
         args=types.SimpleNamespace(artifact_gate=Path('/private/gate'),identifier='id',receipt=Path('/private/receipt'))

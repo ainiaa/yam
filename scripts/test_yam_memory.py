@@ -129,6 +129,19 @@ class MemoryTests(unittest.TestCase):
             with self.assertRaises(ValueError): memory.attribute_sample("com.yam.validation",memory.parse_apps(APPS),rows,rows,footprint,bad)
         with self.assertRaises(ValueError): memory.attribute_sample("com.yam.validation",[],rows,rows,footprint,owner)
 
+    def test_authenticated_external_node_parser_is_application_memory_not_workload(self):
+        extra="30 1 80 Thu Oct 1 22:45:22 2026 /apps/YAM Validation.app/Contents/MacOS/yam-desktop\n31 30 90 Thu Oct 1 22:45:22 2026 /opt/homebrew/Cellar/node/bin/node\n"
+        rows=memory.parse_processes(PROCESSES+extra);owner={"pid":30,"runtime_pid":31,"desktop_connected":True};footprint={"unit":"byte","processes":[{"pid":pid,"auxiliary":{"phys_footprint":pid*110}} for pid in rows]}
+        sample=memory.attribute_sample("com.yam.validation",memory.parse_apps(APPS),rows,rows,footprint,owner);self.assertEqual(sample["status"],"complete");self.assertEqual(sample["application"][-1]["role"],"terminal-service");self.assertNotIn(31,[row["pid"] for row in sample["agents"]])
+        with mock.patch.object(memory,"owner_status",return_value=owner):self.assertEqual(memory.measured_owner(None,rows)["runtime_pid"],31)
+        with mock.patch.object(memory,"owner_status",return_value={**owner,"runtime_pid":13}):
+            with self.assertRaises(ValueError):memory.measured_owner(None,rows)
+
+    def test_authenticated_runtime_may_have_a_canonical_versioned_executable_name(self):
+        extra="30 1 80 Thu Oct 1 22:45:22 2026 /apps/YAM Validation.app/Contents/MacOS/yam-desktop\n31 30 90 Thu Oct 1 22:45:22 2026 /opt/node/node-real-25\n"
+        rows=memory.parse_processes(PROCESSES+extra);owner={"pid":30,"runtime_pid":31,"desktop_connected":True};footprint={"unit":"byte","processes":[{"pid":pid,"auxiliary":{"phys_footprint":pid*110}} for pid in rows]}
+        value=memory.attribute_sample("com.yam.validation",memory.parse_apps(APPS),rows,rows,footprint,owner);self.assertEqual(value["status"],"complete");self.assertEqual(value["application"][-1]["role"],"terminal-service")
+
     def test_connection_descriptor_is_private_bounded_and_loopback_only(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = pathlib.Path(temporary)/'connection.json'

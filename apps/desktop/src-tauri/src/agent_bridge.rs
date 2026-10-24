@@ -81,6 +81,7 @@ fn local_address(value: &str) -> Result<SocketAddr, String> {
     }
     Ok(address)
 }
+#[cfg(any(test, not(target_os = "macos")))]
 fn previous_notify(response: &serde_json::Value) -> Result<Vec<String>, String> {
     let config = response
         .get("result")
@@ -121,6 +122,9 @@ fn previous_notify(response: &serde_json::Value) -> Result<Vec<String>, String> 
     }
 }
 fn normalize(value: &serde_json::Value, notify: bool) -> Result<AgentEvent, String> {
+    if !notify && value.get("agent_id").is_some_and(|id| !id.is_null()) {
+        return Err("Subagent hook is not a root session event".into());
+    }
     let kind = if notify {
         if value.get("type").and_then(|v| v.as_str()) != Some("agent-turn-complete") {
             return Err("Unsupported notify event".into());
@@ -646,6 +650,11 @@ pub(crate) fn helper_entry() -> bool {
                 }
                 return Ok(());
             }
+            if mode.as_deref() == Some("--yam-agent-hook")
+                && value.get("agent_id").is_some_and(|id| !id.is_null())
+            {
+                return Ok(());
+            }
             let event = if mode.as_deref() == Some("--yam-claude-hook") {
                 normalize_claude(&value)?
             } else {
@@ -672,6 +681,7 @@ pub(crate) fn helper_entry() -> bool {
     }
     true
 }
+#[cfg(any(test, not(target_os = "macos")))]
 fn effective_notify(
     program: &std::ffi::OsStr,
     prefix: &[std::ffi::OsString],
@@ -695,6 +705,17 @@ fn agent_query(
     params: serde_json::Value,
     environment: Option<&super::provider_launch::Environment>,
 ) -> Result<serde_json::Value, String> {
+    agent_query_with_version(program, prefix, cwd, method, params, environment).map(|reply| reply.0)
+}
+
+fn agent_query_with_version(
+    program: &std::ffi::OsStr,
+    prefix: &[std::ffi::OsString],
+    cwd: &std::path::Path,
+    method: &str,
+    params: serde_json::Value,
+    environment: Option<&super::provider_launch::Environment>,
+) -> Result<(serde_json::Value, Option<String>), String> {
     use std::io::BufRead;
     let mut command = std::process::Command::new(program);
     command
@@ -776,7 +797,21 @@ fn agent_query(
                     .into(),
             );
         }
-        Ok(response)
+        let version = initialized["result"]["userAgent"]
+            .as_str()
+            .and_then(|agent| {
+                let version = agent
+                    .strip_prefix("codex_cli_rs/")?
+                    .split_whitespace()
+                    .next()?;
+                let parts: Vec<_> = version.split('.').collect();
+                (parts.len() == 3
+                    && parts
+                        .iter()
+                        .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit())))
+                .then(|| format!("codex-cli {version}"))
+            });
+        Ok((response, version))
     })();
     #[cfg(unix)]
     unsafe {
@@ -829,13 +864,17 @@ fn injected_args(exe: &str) -> Result<Vec<String>, String> {
             serde_json::to_string(&command).map_err(|e| e.to_string())?
         ));
     }
-    args.push("-c".into());
-    args.push(format!(
-        "notify={}",
-        serde_json::to_string(&vec![exe, "--yam-agent-notify"]).map_err(|e| e.to_string())?
-    ));
+    #[cfg(not(target_os = "macos"))]
+    {
+        args.push("-c".into());
+        args.push(format!(
+            "notify={}",
+            serde_json::to_string(&vec![exe, "--yam-agent-notify"]).map_err(|e| e.to_string())?
+        ));
+    }
     Ok(args)
 }
+#[cfg(any(test, not(target_os = "macos")))]
 fn validate_hook_capabilities(
     response: &serde_json::Value,
     cwd: &std::path::Path,
@@ -1174,9 +1213,9 @@ pub(super) struct Prepared {
 pub(super) fn prepare(
     executable: &std::path::Path,
     launch: &super::AgentLaunch,
-    cwd: &std::path::Path,
+    _cwd: &std::path::Path,
     assets: &std::path::Path,
-    environment: Option<&super::provider_launch::Environment>,
+    _environment: Option<&super::provider_launch::Environment>,
 ) -> Result<Prepared, String> {
     if launch.adapter == "opencode" && launch.mode == "interactive" {
         validate_interactive_args("opencode", &super::parse_agent_args(&launch.extra_args)?)?;
@@ -1236,53 +1275,60 @@ pub(super) fn prepare(
     }
     let extra = super::parse_agent_args(&launch.extra_args)?;
     validate_interactive_args("codex", &extra)?;
-    let plain = super::AgentLaunch {
-        codex: launch.codex.clone(),
-        provider: launch.provider.clone(),
-        env_refs: launch.env_refs.clone(),
-        adapter: "codex".into(),
-        mode: "interactive".into(),
-        extra_args: String::new(),
-        prompt: None,
-    };
-    let command = super::agent_command(executable, &plain)?;
-    let argv = command.get_argv();
-    let cli_version = measured_version_checked(&argv[0], &argv[1..], |output| {
-        output.strip_prefix("codex-cli ").is_some_and(|version| {
-            let parts: Vec<_> = version.split('.').collect();
-            parts.len() == 3
-                && parts
-                    .iter()
-                    .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+    #[cfg(target_os = "macos")]
+    {
+        // Native hooks compose with inherited hooks; the actual CLI confirms delivery at SessionStart.
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let args = injected_args(exe.to_str().ok_or("Helper executable path is not UTF-8")?)?;
+        Ok(Prepared {
+            token: credential()?,
+            generation: credential()?,
+            cli_version: None,
+            args,
+            original: vec![],
+            opencode: None,
         })
-    })
-    .ok();
-    let original = effective_notify(&argv[0], &argv[1..], cwd, environment)?;
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let exe = exe.to_str().ok_or("Helper executable path is not UTF-8")?;
-    if original.first().is_some_and(|program| program == exe) {
-        return Err("Recursive notify callback rejected".into());
     }
-    let args = injected_args(exe)?;
-    let mut probe = argv[1..].to_vec();
-    probe.extend(args.iter().map(std::ffi::OsString::from));
-    let capabilities = agent_query(
-        &argv[0],
-        &probe,
-        cwd,
-        "hooks/list",
-        serde_json::json!({"cwds":[cwd.to_string_lossy()]}),
-        environment,
-    )?;
-    validate_hook_capabilities(&capabilities, cwd)?;
-    Ok(Prepared {
-        token: credential()?,
-        generation: credential()?,
-        cli_version,
-        args,
-        original,
-        opencode: None,
-    })
+    #[cfg(not(target_os = "macos"))]
+    {
+        let plain = super::AgentLaunch {
+            codex: launch.codex.clone(),
+            provider: launch.provider.clone(),
+            env_refs: launch.env_refs.clone(),
+            adapter: "codex".into(),
+            mode: "interactive".into(),
+            extra_args: String::new(),
+            prompt: None,
+        };
+        let command = super::agent_command(executable, &plain)?;
+        let argv = command.get_argv();
+        let original = effective_notify(&argv[0], &argv[1..], _cwd, _environment)?;
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let exe = exe.to_str().ok_or("Helper executable path is not UTF-8")?;
+        if original.first().is_some_and(|program| program == exe) {
+            return Err("Recursive notify callback rejected".into());
+        }
+        let args = injected_args(exe)?;
+        let mut probe = argv[1..].to_vec();
+        probe.extend(args.iter().map(std::ffi::OsString::from));
+        let (capabilities, cli_version) = agent_query_with_version(
+            &argv[0],
+            &probe,
+            _cwd,
+            "hooks/list",
+            serde_json::json!({"cwds":[_cwd.to_string_lossy()]}),
+            _environment,
+        )?;
+        validate_hook_capabilities(&capabilities, _cwd)?;
+        Ok(Prepared {
+            token: credential()?,
+            generation: credential()?,
+            cli_version,
+            args,
+            original,
+            opencode: None,
+        })
+    }
 }
 impl Prepared {
     pub(super) fn install(
@@ -2343,10 +2389,133 @@ mod tests {
         )
         .is_err());
     }
+    #[cfg(unix)]
+    #[test]
+    fn codex_start_launches_only_the_target_without_preflight_queries() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "yam-start-probes-{}",
+            super::super::next_session_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let executable = root.join("codex");
+        let count = root.join("starts");
+        let script = format!(
+            r#"#!/bin/sh
+printf 'start\n' >> '{}'
+if [ "$1" = '--target-only' ]; then exit; fi
+if [ "$1" = '--version' ]; then printf 'codex-cli 0.163.0\n'; exit; fi
+read init
+printf '%s\n' '{{"id":1,"result":{{"userAgent":"codex_cli_rs/0.163.0 (test)"}}}}'
+read initialized
+read query
+case "$query" in
+  *config/read*) printf '%s\n' '{{"id":2,"result":{{"config":{{"notify":["/original","done"]}}}}}}' ;;
+  *) printf '%s\n' '{{"id":2,"result":{{"data":[{{"cwd":"{}","errors":[],"hooks":[{}]}}]}}}}' ;;
+esac
+read end
+"#,
+            count.display(),
+            root.display(),
+            [
+                "sessionStart",
+                "userPromptSubmit",
+                "stop",
+                "interrupt",
+                "permissionRequest",
+                "postToolUse"
+            ]
+            .iter()
+            .map(|event| format!(
+                r#"{{"eventName":"{event}","source":"sessionFlags","enabled":true}}"#
+            ))
+            .collect::<Vec<_>>()
+            .join(",")
+        );
+        std::fs::write(&executable, script).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let launch = super::super::AgentLaunch {
+            adapter: "codex".into(),
+            mode: "interactive".into(),
+            codex: None,
+            provider: None,
+            env_refs: Default::default(),
+            extra_args: String::new(),
+            prompt: None,
+        };
+        let prepared = prepare(&executable, &launch, &root, &root, None).unwrap();
+        if cfg!(target_os = "macos") {
+            assert!(
+                prepared.original.is_empty(),
+                "native notify stays owned by Codex"
+            );
+            assert!(prepared.cli_version.is_none());
+            assert!(!count.exists(), "preparation must not execute Codex");
+        } else {
+            assert_eq!(prepared.original, vec!["/original", "done"]);
+            assert_eq!(std::fs::read_to_string(&count).unwrap().lines().count(), 2);
+        }
+        let mut builder = portable_pty::CommandBuilder::new(&executable);
+        builder.arg("--target-only");
+        prepared
+            .install(&mut builder, "127.0.0.1:12345".parse().unwrap())
+            .unwrap();
+        assert_eq!(
+            builder
+                .get_argv()
+                .iter()
+                .any(|v| v.to_string_lossy().starts_with("notify=")),
+            !cfg!(target_os = "macos")
+        );
+        assert!(std::process::Command::new(&builder.get_argv()[0])
+            .args(&builder.get_argv()[1..])
+            .status()
+            .unwrap()
+            .success());
+        assert_eq!(
+            std::fs::read_to_string(&count).unwrap().lines().count(),
+            if cfg!(target_os = "macos") { 1 } else { 3 }
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn query_version_metadata_is_optional_and_never_blocks_the_query() {
+        for (metadata, expected) in [
+            (
+                serde_json::json!({"userAgent":"codex_cli_rs/0.164.1 (test)"}),
+                Some("codex-cli 0.164.1"),
+            ),
+            (serde_json::json!({}), None),
+            (serde_json::json!({"userAgent":"other/0.163.0"}), None),
+            (
+                serde_json::json!({"userAgent":"codex_cli_rs/0.164.0-beta"}),
+                None,
+            ),
+            (serde_json::json!({"userAgent":"codex_cli_rs/0..1"}), None),
+            (serde_json::json!({"userAgent":"codex_cli_rs/"}), None),
+        ] {
+            let init = serde_json::json!({"id":1,"result":metadata});
+            let script=format!("read init; printf '%s\\n' '{}'; read initialized; read query; printf '%s\\n' '{{\"id\":2,\"result\":{{}}}}'; read end",init);
+            let (response, version) = agent_query_with_version(
+                std::ffi::OsStr::new("/bin/sh"),
+                &["-c".into(), script.into()],
+                std::path::Path::new("/tmp"),
+                "config/read",
+                serde_json::json!({}),
+                None,
+            )
+            .unwrap();
+            assert_eq!(response["id"], 2);
+            assert_eq!(version.as_deref(), expected);
+        }
+    }
+
     #[test]
     fn injected_config_contains_no_policy_override_and_quotes_the_executable() {
         let args = injected_args("/application path/YAM").unwrap();
-        assert_eq!(args.len(), 14);
+        assert_eq!(args.len(), if cfg!(target_os = "macos") { 12 } else { 14 });
         assert!(!args
             .iter()
             .any(|arg| arg.contains("hooks.PostToolUseFailure=")));
@@ -2362,9 +2531,10 @@ mod tests {
                 .iter()
                 .any(|a| a.starts_with(&format!("hooks.{kind}="))));
         }
-        assert!(args
-            .iter()
-            .any(|a| a == "notify=[\"/application path/YAM\",\"--yam-agent-notify\"]"));
+        assert_eq!(
+            args.iter().any(|a| a.starts_with("notify=")),
+            !cfg!(target_os = "macos")
+        );
         assert!(args.iter().any(|a| a.contains("--yam-agent-hook")));
         for arg in &args {
             assert!(!arg.contains("bypass"));
@@ -2372,6 +2542,29 @@ mod tests {
             assert!(!arg.contains("approval"));
         }
         assert!(injected_args("").is_err());
+    }
+
+    #[test]
+    fn native_subagent_hooks_are_not_root_session_events() {
+        for kind in [
+            "SessionStart",
+            "UserPromptSubmit",
+            "Stop",
+            "Interrupt",
+            "PermissionRequest",
+            "PostToolUse",
+        ] {
+            let root = serde_json::json!({"hook_event_name":kind,"session_id":"root","turn_id":"root-turn"});
+            assert!(normalize(&root, false).is_ok(), "{kind}");
+            let mut child = root.clone();
+            child["agent_id"] = "child".into();
+            assert!(
+                normalize(&child, false).is_err(),
+                "{kind}: subagent must not replace the root turn"
+            );
+            child["agent_id"] = serde_json::Value::Null;
+            assert!(normalize(&child, false).is_ok());
+        }
     }
 
     #[test]

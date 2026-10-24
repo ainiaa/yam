@@ -152,15 +152,38 @@ impl Runtime {
             .map_err(|_| "Terminal process lock poisoned")?
             .id())
     }
+    #[cfg(test)]
     pub(super) fn start(
         executable: &Path,
         input: impl Fn(String, String) -> Result<(), String> + Send + 'static,
     ) -> Result<Self, String> {
+        Self::start_command(service_command(executable), false, input)
+    }
+    pub(super) fn start_node(
+        executable: &Path,
+        script: &Path,
+        input: impl Fn(String, String) -> Result<(), String> + Send + 'static,
+    ) -> Result<Self, String> {
+        if !executable.is_absolute() || !script.is_absolute() {
+            return Err("Terminal runtime paths must be absolute".into());
+        }
+        let mut command = service_command(executable);
+        command.arg(script);
+        Self::start_command(command, true, input)
+    }
+    fn start_command(
+        mut command: Command,
+        node: bool,
+        input: impl Fn(String, String) -> Result<(), String> + Send + 'static,
+    ) -> Result<Self, String> {
         let instance = super::agent_bridge::credential()?;
-        let mut child = service_command(executable)
-            .env_remove("NODE_OPTIONS")
-            .env_remove("NODE_PATH")
-            .env_remove("NODE_SEA_OPTIONS")
+        for (key, _) in std::env::vars_os() {
+            let name = key.to_string_lossy().to_ascii_uppercase();
+            if name.starts_with("NODE_") || name.starts_with("DYLD_") || name.starts_with("LD_") {
+                command.env_remove(key);
+            }
+        }
+        let mut child = command
             .env("YAM_TERMINAL_INSTANCE", &instance)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -256,6 +279,28 @@ impl Runtime {
             || ready["serialize_version"] != "0.14.0"
         {
             return Err("Bundled terminal parser version mismatch".into());
+        }
+        if node
+            && (!super::node_runtime::compatible_version(
+                ready["node_version"].as_str().unwrap_or(""),
+            ) || ready["node_arch"]
+                != if cfg!(target_arch = "aarch64") {
+                    "arm64"
+                } else {
+                    "x64"
+                }
+                || ready["node_platform"]
+                    != if cfg!(target_os = "macos") {
+                        "darwin"
+                    } else if cfg!(windows) {
+                        "win32"
+                    } else {
+                        "linux"
+                    })
+        {
+            return Err(
+                "Node version or native platform is incompatible with the terminal parser".into(),
+            );
         }
         Ok(runtime)
     }
@@ -849,67 +894,75 @@ readline.createInterface({input:process.stdin}).on('line',line=>{const r=JSON.pa
         } else {
             "yam-terminal"
         });
-        let (send, receive) = std::sync::mpsc::channel();
-        let runtime = Runtime::start(&executable, move |session, data| {
-            send.send((session, data))
-                .map_err(|_| "Query consumer closed".into())
-        })
-        .unwrap();
-        runtime
-            .call("create", "s-one", serde_json::json!({"cols":20,"rows":8}))
+        for node in [false, true] {
+            let (send, receive) = std::sync::mpsc::channel();
+            let input = move |session, data| {
+                send.send((session, data))
+                    .map_err(|_| "Query consumer closed".into())
+            };
+            let runtime = if node {
+                let node = super::super::find_executable("node").expect("Node test prerequisite");
+                Runtime::start_node(&node, &directory.join("yam-terminal.cjs"), input)
+            } else {
+                Runtime::start(&executable, input)
+            }
             .unwrap();
-        runtime
-            .call(
-                "write",
-                "s-one",
-                serde_json::json!({"data":base64(&[0xe4,0xb8])}),
-            )
-            .unwrap();
-        assert!(!runtime
-            .call("snapshot", "s-one", serde_json::json!({}))
-            .unwrap()["data"]
-            .as_str()
-            .unwrap()
-            .contains('�'));
-        runtime
-            .call(
-                "write",
-                "s-one",
-                serde_json::json!({"data":base64(&[0xad])}),
-            )
-            .unwrap();
-        runtime
-            .call(
-                "write",
-                "s-one",
-                serde_json::json!({"data":base64(b"\x1b[?1049hALT\x1b[6n")}),
-            )
-            .unwrap();
-        let frame = runtime
-            .call("snapshot", "s-one", serde_json::json!({}))
-            .unwrap();
-        assert_eq!(frame["buffer"], "alternate");
-        assert!(frame["data"].as_str().unwrap().contains("ALT"));
-        let query = receive
-            .recv_timeout(std::time::Duration::from_secs(2))
-            .unwrap();
-        assert_eq!(query.0, "s-one");
-        assert!(query.1.ends_with('R'));
-        assert!(runtime
-            .call("resize", "s-one", serde_json::json!({"cols":0,"rows":8}))
-            .is_err());
-        assert_eq!(
             runtime
+                .call("create", "s-one", serde_json::json!({"cols":20,"rows":8}))
+                .unwrap();
+            runtime
+                .call(
+                    "write",
+                    "s-one",
+                    serde_json::json!({"data":base64(&[0xe4,0xb8])}),
+                )
+                .unwrap();
+            assert!(!runtime
                 .call("snapshot", "s-one", serde_json::json!({}))
-                .unwrap()["cols"],
-            20
-        );
-        runtime.child.lock().unwrap().kill().unwrap();
-        assert!(runtime
-            .call("snapshot", "s-one", serde_json::json!({}))
-            .is_err());
-        assert!(runtime
-            .call("snapshot", "s-one", serde_json::json!({}))
-            .is_err());
+                .unwrap()["data"]
+                .as_str()
+                .unwrap()
+                .contains('�'));
+            runtime
+                .call(
+                    "write",
+                    "s-one",
+                    serde_json::json!({"data":base64(&[0xad])}),
+                )
+                .unwrap();
+            runtime
+                .call(
+                    "write",
+                    "s-one",
+                    serde_json::json!({"data":base64(b"\x1b[?1049hALT\x1b[6n")}),
+                )
+                .unwrap();
+            let frame = runtime
+                .call("snapshot", "s-one", serde_json::json!({}))
+                .unwrap();
+            assert_eq!(frame["buffer"], "alternate");
+            assert!(frame["data"].as_str().unwrap().contains("ALT"));
+            let query = receive
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap();
+            assert_eq!(query.0, "s-one");
+            assert!(query.1.ends_with('R'));
+            assert!(runtime
+                .call("resize", "s-one", serde_json::json!({"cols":0,"rows":8}))
+                .is_err());
+            assert_eq!(
+                runtime
+                    .call("snapshot", "s-one", serde_json::json!({}))
+                    .unwrap()["cols"],
+                20
+            );
+            runtime.child.lock().unwrap().kill().unwrap();
+            assert!(runtime
+                .call("snapshot", "s-one", serde_json::json!({}))
+                .is_err());
+            assert!(runtime
+                .call("snapshot", "s-one", serde_json::json!({}))
+                .is_err());
+        }
     }
 }

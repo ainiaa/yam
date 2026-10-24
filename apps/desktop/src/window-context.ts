@@ -1,3 +1,4 @@
+import {isSessionPreferenceKey} from "./session-actions.ts";
 import {isTerminalSettings,type TerminalSettings} from "./terminal-settings.ts";
 // Author: Jeff.Liu. Fixed-slot bootstrap before React mount; no process launch during restore.
 import {decodeTerminalLayout,type TerminalLayoutPreference} from "./terminal-layout-persistence.ts";
@@ -75,12 +76,12 @@ export async function desktopInvoke<T>(call:Call,snapshot:Pick<WindowContext,"sl
 type WindowStorage={getItem(key:string):string|null;setItem(key:string,value:string):void;removeItem(key:string):void};
 export function createWindowStorage(storage:WindowStorage,snapshot:Pick<WindowContext,"slot"|"epoch">,publish:(key:string,value:string|null)=>void):WindowStorage {
  const own=`yam.window.${snapshot.slot}.`;
- const writable=(key:string)=>{if(key.startsWith("yam.window.")&&!key.startsWith(own))throw Error("Other window preferences are unavailable.");if(snapshot.slot!=="main"&&!key.startsWith(own))throw Error("Shared preferences must be changed in the main window.");};
+ const writable=(key:string)=>{if(key.startsWith("yam.window.")&&!key.startsWith(own))throw Error("Other window preferences are unavailable.");if(snapshot.slot!=="main"&&!key.startsWith(own)&&!isSessionPreferenceKey(key))throw Error("Shared preferences must be changed in the main window.");};
  return {getItem:key=>storage.getItem(key),setItem(key,value){writable(key);storage.setItem(key,value);if(!key.startsWith(own)&&key!=="yam.terminalSettings")publish(key,value);},removeItem(key){writable(key);storage.removeItem(key);if(!key.startsWith(own))publish(key,null);}};
 }
 let preferenceFlight=Promise.resolve();
 export function publishWindowPreference(call:Call,snapshot:Pick<WindowContext,"slot"|"epoch">,key:string,value:string|null,appearanceAction:string|null=null):Promise<void>{
- if(snapshot.slot!=="main")return Promise.reject(Error("Shared preferences must be changed in the main window."));
+ if(snapshot.slot!=="main"&&!isSessionPreferenceKey(key))return Promise.reject(Error("Shared preferences must be changed in the main window."));
  const args={desktopEpoch:snapshot.epoch,key,value,appearanceAction};
  const next=preferenceFlight.then(()=>call<void>("commit_window_preferences",args));preferenceFlight=next.catch(()=>{});return next;
 }

@@ -48,7 +48,7 @@ test('isolated history parsers share the aggregate terminal memory budget',async
 }));
 
 test('persistent native parser preserves split UTF-8, CSI, alternate screen, query output and viewport across snapshots',async()=>fixture(async({call,greeting,inputs})=>{
- assert.deepEqual(await greeting,{type:'ready',version:1,instance:'d'.repeat(64),terminal_version:'6.0.0',serialize_version:'0.14.0'});
+ assert.deepEqual(await greeting,{type:'ready',version:1,instance:'d'.repeat(64),terminal_version:'6.0.0',serialize_version:'0.14.0',node_version:process.versions.node,node_arch:process.arch,node_platform:process.platform});
  assert.equal((await call({op:'create',session:'one',cols:20,rows:8})).ok,true);
  await call({op:'write',session:'one',data:data([0xe4,0xb8])});
  let frame=(await call({op:'snapshot',session:'one'})).data;assert.equal(frame.revision,1);assert.ok(!frame.data.includes('�'));

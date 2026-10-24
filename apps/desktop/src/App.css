@@ -559,7 +559,7 @@ input::placeholder {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.statusbar .memory-usage {
+.statusbar .memory-usage, .workspace-footer .memory-usage {
   flex-shrink: 0;
   font-variant-numeric: tabular-nums;
 }
@@ -782,8 +782,6 @@ input::placeholder {
 .session-item {display:flex;flex-wrap:wrap;align-items:center;min-width:0;}
 .session-runs {flex:0 0 100%;min-width:0;}
 .session-item .session-row {flex:1;min-width:0;}
-.session-pin {border:0;background:transparent;color:var(--muted);font-size:10px;padding:4px;cursor:pointer;}
-.session-pin[aria-pressed="true"] {color:var(--text);}
 .terminal-preference-error {position:absolute;bottom:28px;left:16px;right:16px;z-index:3;padding:8px;background:color-mix(in srgb,var(--error) 14%,var(--background));color:var(--error);font-size:12px;}
 .terminal-settings-dialog {width:min(420px,90vw);}
 .command-palette-dialog {width:min(520px,90vw);}
@@ -882,12 +880,10 @@ input::placeholder {
 .layout-more .toolbar-more-actions,.sidebar-more .toolbar-more-actions { left:0; right:auto; }
 .sidebar-more { margin:6px 0; }
 .project-more { flex-shrink:0; }
-.project-more .toolbar-more-actions { position:fixed; left:12px; right:auto; top:auto; z-index:40; }
+.project-more .toolbar-more-actions { position:fixed; right:auto; z-index:40; }
 .pane-more .toolbar-more-actions { min-width:180px; }
 .terminal-pane:has(.pane-more[open]) { overflow:visible; z-index:3; }
 .terminal-layout-toolbar:has(details[open]) { z-index:5; }
-.session-pin { opacity:0; }
-.session-item:hover .session-pin,.session-item:focus-within .session-pin,.session-pin:focus-visible { opacity:1; }
 .engine-details,.diagnostics-details { display:grid; gap:5px; padding:5px 8px; font-size:11px; overflow-wrap:anywhere; }
 .toolbar-more-actions .round-status { white-space:normal; }
 .session-connection > summary { display:flex; align-items:center; gap:4px; }
@@ -1136,3 +1132,22 @@ input::placeholder {
  .settings-surface .dialog-fields { padding:16px; }
  .settings-surface .theme-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
 }
+.session-delete-dialog .dialog-header { padding:24px 24px 12px; }
+.session-delete-dialog .dialog-body { padding:0 24px 24px; overflow-y:auto; overflow-wrap:anywhere; line-height:1.65; font-size:13px; }
+.session-delete-dialog .dialog-body p { margin:0 0 14px; }
+.session-delete-dialog .dialog-body p:last-child { margin-bottom:0; color:var(--muted); }
+.session-delete-dialog .dialog-body [role="alert"] { color:var(--error); }
+.session-delete-dialog .dialog-actions { padding:16px 24px; }
+.session-delete-dialog .dialog-actions button:last-child { background:var(--error); color:var(--surface); border-color:var(--error); }
+.session-context-menu { position:static; }
+.session-context-menu .toolbar-more-actions { position:fixed; right:auto; z-index:60; min-width:148px; padding:4px; gap:2px; border-radius:10px; background:color-mix(in srgb,var(--surface) 96%,var(--text)); box-shadow:0 12px 30px color-mix(in srgb,var(--shadow) 75%,transparent); }
+.session-context-menu .toolbar-more-actions button { min-height:32px; padding:7px 10px; border-radius:7px; font-size:13px; }
+.session-context-menu .toolbar-more-actions button:hover:not(:disabled) { background:color-mix(in srgb,var(--hover) 80%,transparent); }
+.session-context-menu .session-delete-action { color:var(--error); border-top:1px solid var(--border); border-radius:7px; margin-top:3px; padding-top:7px; }
+
+/* Inline names share the same identity as sidebar sessions. */
+.tab-name-editor{display:flex;align-items:center;position:relative;min-width:140px;max-width:260px;padding:3px 6px}
+.tab-name-editor input{width:100%;min-width:100px;padding:3px 6px;font:inherit;line-height:1.4}
+.tab-name-error{flex-shrink:0;background:var(--surface);color:var(--error);border-bottom:1px solid var(--border)}
+.tab-context-menu>summary{display:none}
+.tab-context-menu .toolbar-more-actions{position:fixed;z-index:80;min-width:180px}

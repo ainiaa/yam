@@ -67,8 +67,9 @@ def attribute_sample(bundle, apps, before, after, footprint, owner=None):
         executable = pathlib.Path(background['executable'])
         if executable.name != 'yam-desktop' or executable.parent.name != 'MacOS' or executable.parent.parent.parent.suffix != '.app':
             raise ValueError("Background process is outside a YAM app bundle")
-        if pathlib.Path(runtime['executable']).name != 'yam-terminal' or not pathlib.Path(runtime['executable']).is_relative_to(executable.parent.parent / 'Resources'):
-            raise ValueError("Terminal service is outside its owner bundle")
+        runtime_image = pathlib.Path(runtime['executable'])
+        if not runtime_image.is_absolute():
+            raise ValueError("Authenticated terminal service image is invalid")
         if root and before.get(root['pid'],{}).get('executable') != str(executable):
             raise ValueError("Desktop and background belong to different bundles")
         service_ids = {background['pid'],runtime['pid']}
@@ -175,7 +176,11 @@ def owner_status(descriptor):
 
 def measured_owner(descriptor, rows):
     status=owner_status(descriptor)
-    runtimes=[pid for pid,row in rows.items() if row['parent']==status['pid'] and pathlib.Path(row['executable']).name=='yam-terminal']
+    reported = status.get('runtime_pid')
+    image = pathlib.Path(rows.get(status['pid'],{}).get('executable',''))
+    resources = image.parent.parent / 'Resources'
+    runtimes=[pid for pid,row in rows.items() if row['parent']==status['pid'] and
+              (pid == reported if type(reported) is int else pathlib.Path(row['executable']).name=='yam-terminal' and pathlib.Path(row['executable']).is_relative_to(resources))]
     if len(runtimes)!=1: raise ValueError("Background must own exactly one terminal service")
     return {**status,'runtime_pid':runtimes[0]}
 

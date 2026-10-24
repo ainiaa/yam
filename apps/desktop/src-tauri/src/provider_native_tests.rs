@@ -750,3 +750,81 @@ fn provider_native_codex_inherited_mcp_and_subagent() {
         println!("{scenario}: native inherited tool route verified");
     }
 }
+
+#[test]
+#[cfg(unix)]
+#[ignore = "Opt-in installed headless Codex skill catalog with synthetic shared resources; no inference or desktop app"]
+fn provider_native_codex_shared_skill_catalog() {
+    let fixture = Fixture::new();
+    let source = fixture.root.join("official/.codex");
+    let package = fixture.root.join("skill-package");
+    let skill = package.join("skills/yam-shared-fixture");
+    fs::create_dir_all(&skill).unwrap();
+    fs::create_dir_all(package.join("docs")).unwrap();
+    fs::create_dir_all(source.join("skills")).unwrap();
+    fs::write(skill.join("SKILL.md"), "---\nname: yam-shared-fixture\ndescription: Synthetic skill to verify shared package paths.\n---\nRead ../../docs/standard.md.\n").unwrap();
+    fs::write(package.join("docs/standard.md"), "shared dependency").unwrap();
+    std::os::unix::fs::symlink(&skill, source.join("skills/yam-shared-fixture")).unwrap();
+    fs::write(source.join("config.toml"), "").unwrap();
+    fs::remove_file(fixture.root.join("project/.codex/config.toml")).unwrap();
+    let mut launch: AgentLaunch = serde_json::from_value(serde_json::json!({"adapter":"codex","mode":"interactive","extra_args":"","prompt":null,"provider":{"id":"custom","model":"gateway/main-model","base_url":fixture.url,"api_key_env":null},"codex":{"image_mode":"native"}})).unwrap();
+    crate::codex_context::assign_context(&mut launch).unwrap();
+    let env = fixture.environment(&launch);
+    let script = r#"
+import json, os, pathlib, select, subprocess, sys, time
+p = subprocess.Popen([sys.argv[1], '--no-daemon', 'app-server'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, start_new_session=True)
+def send(value):
+    p.stdin.write(json.dumps(value) + '\n'); p.stdin.flush()
+def response(serial):
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        ready, _, _ = select.select([p.stdout], [], [], max(0, deadline-time.monotonic()))
+        if not ready: break
+        line = p.stdout.readline()
+        if not line: raise AssertionError('Codex app-server exited before skill catalog response')
+        value = json.loads(line)
+        if value.get('id') == serial:
+            assert 'error' not in value, value
+            return value['result']
+    raise AssertionError('Codex skill catalog timed out')
+try:
+    send({'id':1,'method':'initialize','params':{'clientInfo':{'name':'yam-shared-fixture','version':'1'},'capabilities':{'experimentalApi':False}}})
+    response(1); send({'method':'initialized'})
+    send({'id':2,'method':'skills/list','params':{'cwds':[sys.argv[2]],'forceReload':True}})
+    catalog = response(2)
+    matches = [s for row in catalog['data'] for s in row['skills'] if s['name']=='yam-shared-fixture']
+    assert len(matches)==1, catalog
+    path = pathlib.Path(matches[0]['path'])
+    assert path.resolve() == pathlib.Path(sys.argv[3]).resolve(), matches
+    assert (path.parent/'../../docs/standard.md').read_text() == 'shared dependency'
+    print(json.dumps({'skill':matches[0]['name'],'path':str(path),'resolved_path':str(path.resolve()),'dependency':'readable','inference_requests':0}))
+finally:
+    os.killpg(p.pid, 15)
+    try: p.wait(timeout=3)
+    except subprocess.TimeoutExpired: os.killpg(p.pid, 9); p.wait()
+"#;
+    let mut command = Command::new("python3");
+    command
+        .arg("-c")
+        .arg(script)
+        .arg(find_executable("codex").unwrap())
+        .arg(fixture.root.join("project"))
+        .arg(skill.join("SKILL.md"))
+        .env("HOME", fixture.root.join("official"))
+        .env("HTTP_PROXY", "http://127.0.0.1:1")
+        .env("HTTPS_PROXY", "http://127.0.0.1:1")
+        .env("ALL_PROXY", "http://127.0.0.1:1")
+        .env("NO_PROXY", "127.0.0.1,localhost");
+    env.apply_command(&mut command);
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    println!("{}", String::from_utf8_lossy(&output.stdout));
+    assert_eq!(
+        fs::read_to_string(source.join("auth.json")).unwrap(),
+        "official-auth-sentinel"
+    );
+}

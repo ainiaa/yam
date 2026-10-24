@@ -4,6 +4,7 @@ export function unreadCount(agent?:AgentState):number{return agent?.inbox.filter
 export function agentLabel(agent?:AgentState,status="running"):string{
  if(!agent||agent.integration.startsWith('unavailable'))return 'Integration unavailable';
  if(agent.integration==='connecting')return ['starting','running'].includes(status)?'Awaiting trusted hook':'Integration not connected';
+ if(agent.integration!=='connected')return 'Integration unavailable';
  if(agent.phase==='working'&&!['starting','running'].includes(status))return 'Round interrupted';
  return ({idle:'Ready',working:'Working',response_finished:'Response finished',needs_permission:'Permission required',interrupted:'Round interrupted',failed:'Round failed',needs_attention:'Response ready · may continue'} as Record<string,string>)[agent.phase]??'Round status unknown';
 }

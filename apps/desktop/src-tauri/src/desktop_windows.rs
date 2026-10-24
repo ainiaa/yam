@@ -81,13 +81,18 @@ pub(super) struct MoveReceipt {
     target_destroyed: bool,
     accepted: bool,
 }
+struct StartReservation {
+    slot: Slot,
+    epoch: u64,
+    dispatched: bool,
+}
 pub(super) struct Table {
     slots: [WindowSlot; 2],
     initialized: bool,
     owners: HashMap<String, Slot>,
     claims: HashMap<String, Claim>,
     ended: HashSet<String>,
-    starts: HashMap<u64, (Slot, u64)>,
+    starts: HashMap<u64, StartReservation>,
     unknown_starts: HashSet<u64>,
     next_start: u64,
     next_claim: u64,
@@ -646,14 +651,25 @@ impl Table {
         }
     }
     fn start_blocked(&self, slot: Slot, epoch: u64) -> bool {
-        self.unknown_starts
-            .iter()
-            .any(|ticket| self.starts.get(ticket) == Some(&(slot, epoch)))
+        self.unknown_starts.iter().any(|ticket| {
+            self.starts
+                .get(ticket)
+                .is_some_and(|start| start.slot == slot && start.epoch == epoch)
+        })
     }
     fn check_start(&mut self, slot: Slot, epoch: u64, ticket: u64) -> Result<(), String> {
         self.valid(slot, epoch)?;
-        if self.starts.get(&ticket) != Some(&(slot, epoch)) {
+        let start = self.starts.get(&ticket).ok_or(ERROR)?;
+        if start.slot != slot || start.epoch != epoch {
             return Err(ERROR.into());
+        }
+        if start.dispatched {
+            return Err(if self.unknown_starts.contains(&ticket) {
+                "terminal_start_outcome_unknown"
+            } else {
+                ERROR
+            }
+            .into());
         }
         if self.start_blocked(slot, epoch) {
             if !self.unknown_starts.contains(&ticket) {
@@ -661,6 +677,7 @@ impl Table {
             }
             return Err("terminal_start_outcome_unknown".into());
         }
+        self.starts.get_mut(&ticket).ok_or(ERROR)?.dispatched = true;
         Ok(())
     }
     fn reserve(&mut self, slot: Slot, epoch: u64) -> Result<u64, String> {
@@ -673,7 +690,14 @@ impl Table {
         }
         let id = self.next_start.checked_add(1).ok_or(ERROR)?;
         self.next_start = id;
-        self.starts.insert(id, (slot, epoch));
+        self.starts.insert(
+            id,
+            StartReservation {
+                slot,
+                epoch,
+                dispatched: false,
+            },
+        );
         Ok(id)
     }
     fn reserve_reopen(
@@ -719,10 +743,11 @@ impl Table {
         }
     }
     fn created(&mut self, ticket: u64, id: &str) -> Result<(), String> {
-        let (slot, epoch) = self.starts.remove(&ticket).ok_or(ERROR)?;
+        let start = self.starts.remove(&ticket).ok_or(ERROR)?;
+        let (slot, epoch) = (start.slot, start.epoch);
         self.unknown_starts.remove(&ticket);
         if self.owners.contains_key(id) {
-            self.starts.insert(ticket, (slot, epoch));
+            self.starts.insert(ticket, start);
             return Err(ERROR.into());
         }
         self.owners.insert(id.into(), slot);
@@ -1384,7 +1409,7 @@ pub(super) fn reserve_terminal_start<R: tauri::Runtime>(
             resume_from.as_deref(),
         )
 }
-#[tauri::command]
+#[tauri::command(async)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn create_session(
     app: AppHandle,
@@ -1606,7 +1631,7 @@ pub(super) fn resize_session<R: tauri::Runtime>(
         || super::resize_session(manager.clone(), session_id, cols, rows),
     )
 }
-#[tauri::command]
+#[tauri::command(async)]
 pub(super) fn read_terminal_frame<R: tauri::Runtime>(
     app: AppHandle<R>,
     window: Webview<R>,
@@ -1634,7 +1659,7 @@ pub(super) fn read_terminal_frame<R: tauri::Runtime>(
     }
     result
 }
-#[tauri::command]
+#[tauri::command(async)]
 pub(super) fn read_session_snapshot<R: tauri::Runtime>(
     app: AppHandle<R>,
     window: Webview<R>,
@@ -2315,6 +2340,12 @@ pub(super) fn terminal_input_focused<R: tauri::Runtime>(
     session_id: String,
 ) -> Result<bool, String> {
     trusted_slot(&window)?;
+    if !manager
+        .desktop_foreground
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return Ok(false);
+    }
     let table = manager.desktop_windows.lock().map_err(|_| ERROR)?;
     table.valid(Slot::parse(window.label())?, desktop_epoch)?;
     Ok(table.selected().as_deref() == Some(&session_id))
@@ -2654,14 +2685,59 @@ pub(super) fn commit_window_preferences<R: tauri::Runtime>(
     value: Option<String>,
     appearance_action: Option<String>,
 ) -> Result<(), String> {
-    trusted_slot(&window)?;
-    if Slot::parse(window.label())? != Slot::Main
+    let slot = trusted_slot(&window)?;
+    let session_preference = key
+        .strip_prefix("yam.sessionName.")
+        .map(|id| (id, true))
+        .or_else(|| key.strip_prefix("yam.sessionLaunch.").map(|id| (id, false)));
+    if let Some((id, name)) = session_preference {
+        if !id.starts_with("s-")
+            || id.len() < 3
+            || id.len() > 122
+            || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        {
+            return Err(ERROR.into());
+        }
+        let parsed: serde_json::Value =
+            serde_json::from_str(value.as_deref().unwrap_or("null")).map_err(|_| ERROR)?;
+        if name {
+            if !parsed.is_null()
+                && !parsed.as_str().is_some_and(|s| {
+                    !s.trim().is_empty()
+                        && s.chars().count() <= 200
+                        && !s.chars().any(char::is_control)
+                })
+            {
+                return Err(ERROR.into());
+            }
+        } else if !parsed.is_null()
+            && !parsed.as_object().is_some_and(|o| {
+                o.keys().all(|k| {
+                    matches!(
+                        k.as_str(),
+                        "terminal" | "ordinary" | "appearance" | "envRefs"
+                    )
+                }) && o
+                    .get("terminal")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|v| matches!(v, "yam" | "terminal" | "iterm2"))
+            })
+        {
+            return Err(ERROR.into());
+        }
+    }
+    if slot != Slot::Main && session_preference.is_none()
         || !key.starts_with("yam.")
         || key.starts_with("yam.window.")
-        || key.len() > 128
-        || value
-            .as_ref()
-            .is_some_and(|value| value.len() > 1024 * 1024)
+        || key.len() > 150
+        || value.as_ref().is_some_and(|value| {
+            value.len()
+                > if session_preference.is_some() {
+                    65536
+                } else {
+                    1024 * 1024
+                }
+        })
         || appearance_action
             .as_deref()
             .is_some_and(|action| !matches!(action, "apply" | "larger" | "smaller" | "reset"))
@@ -2669,28 +2745,35 @@ pub(super) fn commit_window_preferences<R: tauri::Runtime>(
     {
         return Err(ERROR.into());
     }
-    let revision = {
+    let (revision, main_epoch) = {
         let mut table = manager.desktop_windows.lock().map_err(|_| ERROR)?;
-        table.valid(Slot::Main, desktop_epoch)?;
+        table.valid(slot, desktop_epoch)?;
         table.preference_revision = table
             .preference_revision
             .checked_add(1)
             .filter(|revision| *revision <= 9_007_199_254_740_991)
             .ok_or(ERROR)?;
-        table.preference_revision
+        (table.preference_revision, table.slots[0].epoch)
+    };
+    let shared_session = session_preference.is_some();
+    let commit = PreferenceCommit {
+        source_epoch: main_epoch,
+        revision,
+        key,
+        value,
+        appearance_action,
     };
     app.emit_to(
         Slot::Secondary.label(),
         "terminal-window-preferences",
-        PreferenceCommit {
-            source_epoch: desktop_epoch,
-            revision,
-            key,
-            value,
-            appearance_action,
-        },
+        &commit,
     )
-    .map_err(|_| ERROR.into())
+    .map_err(|_| ERROR)?;
+    if shared_session {
+        app.emit_to(Slot::Main.label(), "terminal-window-preferences", &commit)
+            .map_err(|_| ERROR)?;
+    }
+    Ok(())
 }
 #[tauri::command]
 pub(super) fn request_main_terminal_zoom<R: tauri::Runtime>(

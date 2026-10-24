@@ -24,7 +24,7 @@ SCHEMA = 1
 NODE_BODY_SHA256 = '6b85ee1983d01fa2cdcdd5d1a3053c6221fae41d6a54e43b416bf35969fc4128'
 # Full inventory and source/body qualifications reviewed in third-party-notices/qualification-review.json.
 # Collection never updates this approval; future material changes require separate review.
-APPROVED_MANIFEST_SHA256 = "abce9c3478bac62a4fed6779b6bf39a9831a144a1701a95e4ec7e9e29f8c5919"
+APPROVED_MANIFEST_SHA256 = "d8571697bdb296ae1307510fa196c582e33feb618b2033e27d9d6895fc9b2dc2"
 NPM_EXPECTED = [{'checksum': 'sha512-fUSxFX8VABYe9W9K5ROdEaKVkNUFRcMSRofjruvaxztXA+I0XnQHcYHF8m/a6iExRUxsUf0HsFWhPBuH9IgzJw==', 'name': '@tauri-apps/api', 'source': 'https://registry.npmjs.org/@tauri-apps/api/-/api-2.12.0.tgz', 'version': '2.12.0'}, {'checksum': 'sha512-yomIOIoiiDwXW3Bgy/V5c4frWo9sfWM9WZQew2s7vr7hXtDdbLDCLzvytIMCjMxbnln9O0oJsTI3XdDd2T9XlA==', 'name': '@tauri-apps/plugin-deep-link', 'source': 'https://registry.npmjs.org/@tauri-apps/plugin-deep-link/-/plugin-deep-link-2.6.1.tgz', 'version': '2.6.1'}, {'checksum': 'sha512-/DtE3B62JgpYuWFL5ATXM6KOXUq7pca7cJWOgSqULhZsgyjLk0PWKek1dbRDvhNBW6flNsOfWphsKnb+738Dmw==', 'name': '@tauri-apps/plugin-dialog', 'source': 'https://registry.npmjs.org/@tauri-apps/plugin-dialog/-/plugin-dialog-2.8.1.tgz', 'version': '2.8.1'}, {'checksum': 'sha512-mBorYfVKh9Lt7s4ZFtKbMUTxBw+Y/sVmSlKCtkkoBgMTC/DIbt/kaPm67L/2djAUqDI1wbixy5OHHVmipjuGMw==', 'name': '@tauri-apps/plugin-opener', 'source': 'https://registry.npmjs.org/@tauri-apps/plugin-opener/-/plugin-opener-2.7.0.tgz', 'version': '2.7.0'}, {'checksum': 'sha512-jYcgT6xtVYhnhgxh3QgYDnnNMYTcf8ElbxxFzX0IZo+vabQqSPAjC3c1wJrKB5E19VwQei89QCiZZP86DCPF7g==', 'name': '@xterm/addon-fit', 'source': 'https://registry.npmjs.org/@xterm/addon-fit/-/addon-fit-0.11.0.tgz', 'version': '0.11.0'}, {'checksum': 'sha512-uteyTU1EkrQa2Ux6P/uFl2fzmXI46jy5uoQMKEOM0fKTyiW7cSn0WrFenHm5vO5uEXX/GpwW/FgILvv3r0WbkA==', 'name': '@xterm/addon-serialize', 'source': 'https://registry.npmjs.org/@xterm/addon-serialize/-/addon-serialize-0.14.0.tgz', 'version': '0.14.0'}, {'checksum': 'sha512-5Yj1QINYCyzrZtf8OFIHi47iQtI+0qYFPHmouEfG8dHNxbZ9Tb9YGSuLcsEwj9Z+OL75GJqPyJbyoFer80a2Hw==', 'name': '@xterm/headless', 'source': 'https://registry.npmjs.org/@xterm/headless/-/headless-6.0.0.tgz', 'version': '6.0.0'}, {'checksum': 'sha512-TQwDdQGtwwDt+2cgKDLn0IRaSxYu1tSUjgKarSDkUM0ZNiSRXFpjxEsvc/Zgc5kq5omJ+V0a8/kIM2WD3sMOYg==', 'name': '@xterm/xterm', 'source': 'https://registry.npmjs.org/@xterm/xterm/-/xterm-6.0.0.tgz', 'version': '6.0.0'}, {'checksum': 'sha512-6koYRhnM2N0GGZIdXzSeiNwguv1gt/FAjZOiPl76roBi3xKEXa4WmfpxgQwTTL4KipXjefrnf3oV4IsYhi4JFA==', 'name': 'lucide-react', 'source': 'https://registry.npmjs.org/lucide-react/-/lucide-react-0.468.0.tgz', 'version': '0.468.0'}, {'checksum': 'sha512-E8LUcbtBWt20bbl2YoHfx4ZDBdxVTfOKtCZn9cDSJ4l6/nuoApcpIBcj47t2wZoVX8g2ZHuMHbiShgCR1T5Sog==', 'name': 'react', 'source': 'https://registry.npmjs.org/react/-/react-19.3.0.tgz', 'version': '19.3.0'}, {'checksum': 'sha512-JDk8dgif51OjFoDE70+OT9ICyYr+69HlmihNwp1+Nsfbna3t5sIiCa9ZJktDmQ4/1b/rn26hIAR2uYXDMr5r0Q==', 'name': 'react-dom', 'source': 'https://registry.npmjs.org/react-dom/-/react-dom-19.3.0.tgz', 'version': '19.3.0'}, {'checksum': 'sha512-juorfCmIkIw8tT+p5BXSm6PJjQF/ycEYmKyzURCIt/RaZIhL+PulbQ9Yu2z1HdOJDdqDTlxA1+xKBmHXJsczAw==', 'name': 'scheduler', 'source': 'https://registry.npmjs.org/scheduler/-/scheduler-0.28.0.tgz', 'version': '0.28.0'}, {'checksum': 'sha512-9OeuBFu0/uZJPu+9AHKY6g/w0Czyb/Ut0A5t79I4ULoU4IfU5BEpPFVGQxP4zTTMdfZEYkVIRYbHBX1xWwjeSA==', 'name': '@xterm/addon-search', 'source': 'https://registry.npmjs.org/@xterm/addon-search/-/addon-search-0.16.0.tgz', 'version': '0.16.0'}, {'name': '@babel/runtime', 'version': '7.29.10', 'source': 'https://registry.npmjs.org/@babel/runtime/-/runtime-7.29.10.tgz', 'checksum': 'sha512-NpugTzbKgGrNe45Ui32cN8vCFFMxVtP/9rtfwv0nP5FRDAjvYBxJcLVpYA9mr1jxP6cnIT7x9LUzuDTbWYYNRA=='}, {'name': 'html-parse-stringify', 'version': '4.0.1', 'source': 'https://registry.npmjs.org/html-parse-stringify/-/html-parse-stringify-4.0.1.tgz', 'checksum': 'sha512-0zHsZJrK7S3K2aucXWL6ycoYJ/iNtIcFHC/nYQgFklPtrv5LpJctIiSCroWZWeuoXvuyFdzp6KzjJQ+OT5MfFw=='}, {'name': 'i18next', 'version': '26.5.3', 'source': 'https://registry.npmjs.org/i18next/-/i18next-26.5.3.tgz', 'checksum': 'sha512-6pRwOwJ6lBCBB66fqNZaSoUmvsALHMord7FL6GsDhubT1CrPabTMEJIqddm0nn2YEbKofdI/3VAtGrQPuztY1Q=='}, {'name': 'react-i18next', 'version': '17.1.0', 'source': 'https://registry.npmjs.org/react-i18next/-/react-i18next-17.1.0.tgz', 'checksum': 'sha512-4VouOnTDyvhvqXx6WZ+s3/cgSiaLutILdYkO3P1Ms+4qcKR7At+JP4Vi7IeHkVLyVV+DmN1l23Pn73UcwSGGPA=='}, {'name': 'typescript', 'version': '6.0.3', 'source': 'https://registry.npmjs.org/typescript/-/typescript-6.0.3.tgz', 'checksum': 'sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw=='}, {'name': 'use-sync-external-store', 'version': '1.7.0', 'source': 'https://registry.npmjs.org/use-sync-external-store/-/use-sync-external-store-1.7.0.tgz', 'checksum': 'sha512-6L+EeigHMQhdaIPNIFUKwfWJSwWFQ8gJbJ2DLOs5sDIegTwR9fRxvnM3uciHKjIZhFz+KAv2emhWMRvDmMcY8A=='}]
 
 NPM_INPUTS = {'pnpm_lock': '01b56b4dc19d6c001665e6190bc3d1f40d68e85c8c00e12407b68d61fa86b4f1', 'declarations': 'f101de8351b12ab5d85c06559afee28dc987971814f44a3177750bc5f6c2acb4'}
@@ -1320,18 +1320,25 @@ def prepare(root, mode):
     return content, report
 
 
-def report_for_binary(report, binary):
-    return {**report, "runtime_sha256": digest(read_regular(binary, ARCHIVE_LIMIT))}
+def report_for_binary(report, binary, *, runtime_file=None):
+    if runtime_file is not None and runtime_file != "yam-terminal.cjs":
+        fail()
+    return {**report, "runtime_sha256": digest(read_regular(binary, ARCHIVE_LIMIT)), **({"runtime_file": runtime_file} if runtime_file else {})}
 
 
 def validate_packaged(root, resources):
     resources = Path(resources)
     content, expected_report = prepare(root, "release")
     report = read_json(resources / "THIRD-PARTY-NOTICES.report.json")
-    if not isinstance(report, dict) or set(report) != set(expected_report) | {"runtime_sha256"}:
+    if not isinstance(report, dict):
         fail()
-    binary = resources / ("yam-terminal.exe" if (resources / "yam-terminal.exe").exists() else "yam-terminal")
-    if report != report_for_binary(expected_report, binary) or read_regular(resources / "THIRD-PARTY-NOTICES.txt", SELECTED_LIMIT) != content:
+    runtime_file = report.get("runtime_file")
+    if runtime_file is not None and runtime_file != "yam-terminal.cjs":
+        fail()
+    if set(report) != set(expected_report) | {"runtime_sha256"} | ({"runtime_file"} if runtime_file else set()):
+        fail()
+    binary = resources / (runtime_file or ("yam-terminal.exe" if (resources / "yam-terminal.exe").exists() else "yam-terminal"))
+    if report != report_for_binary(expected_report, binary, runtime_file=runtime_file) or read_regular(resources / "THIRD-PARTY-NOTICES.txt", SELECTED_LIMIT) != content:
         fail()
     return report
 

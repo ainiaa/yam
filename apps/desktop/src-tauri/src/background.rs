@@ -1560,6 +1560,7 @@ fn dispatch_with<'a>(
         )?),
         "memory_processes" => serde_json::to_value(super::memory_processes(&manager)?),
         "background_status" => Ok(serde_json::json!({"pid":std::process::id(),
+            "runtime_pid":manager.terminal_runtime.lock().map_err(|_|"Terminal runtime lock poisoned")?.as_ref().and_then(|r|r.process_id().ok()),
             "desktop_connected":manager.desktop_connected.load(Ordering::Acquire) && manager.desktop_focus.lock().map_err(|_|"Desktop focus lock poisoned")?.0.elapsed() < Duration::from_secs(3),
             "ssh_launch_v1":true,
             "zsh_command_reporting_v1":true,
@@ -1844,9 +1845,27 @@ pub(super) fn attach(app: &tauri::AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .join("background");
     let client = Arc::new(connect_or_start(&root, || {
+        let script = app
+            .path()
+            .resolve(
+                "target/terminal-runtime/yam-terminal.cjs",
+                tauri::path::BaseDirectory::Resource,
+            )
+            .map_err(|e| e.to_string())?;
+        let cache = app
+            .path()
+            .app_data_dir()
+            .map_err(|e| e.to_string())?
+            .join("runtimes/node");
+        let node = super::node_runtime::resolve(&script, &cache, true, |phase| {
+            use tauri::Emitter;
+            let _ = app.emit("terminal-runtime-setup", phase);
+        })?;
         let executable = std::env::current_exe().map_err(|e| e.to_string())?;
         let child = super::terminal_runtime::service_command(&executable)
             .arg("--yam-background")
+            .arg("--yam-terminal-node")
+            .arg(node)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -2100,6 +2119,8 @@ fn configure_owner_app(config: &mut tauri::utils::config::AppConfig) {
     }
 }
 pub(super) fn run() -> Result<(), String> {
+    let selected_node =
+        super::node_runtime::background_node(&std::env::args_os().skip(2).collect::<Vec<_>>())?;
     use tauri::{Listener, Manager};
     #[cfg(target_os = "macos")]
     ignore_platform_window_restoration();
@@ -2144,18 +2165,20 @@ pub(super) fn run() -> Result<(), String> {
             let owner_lock = OwnerLock::acquire(&root)?;
             // Exclusive ownership precedes recovery of interrupted records and all history writes.
             app.state::<super::SessionManager>().history(app.handle())?;
-            let executable = app.path().resolve(
-                if cfg!(windows) {
-                    "target/terminal-runtime/yam-terminal.exe"
-                } else {
-                    "target/terminal-runtime/yam-terminal"
-                },
+            let script = app.path().resolve(
+                "target/terminal-runtime/yam-terminal.cjs",
                 tauri::path::BaseDirectory::Resource,
             )?;
+            let cache = app.path().app_data_dir()?.join("runtimes/node");
+            let node = match selected_node {
+                Some(node) => node,
+                None => super::node_runtime::resolve(&script, &cache, false, |_| {})?,
+            };
             let (send, receive) = std::sync::mpsc::sync_channel::<(String, String)>(64);
             let query_handle = app.handle().clone();
-            let parser = Arc::new(super::terminal_runtime::Runtime::start(
-                &executable,
+            let parser = Arc::new(super::terminal_runtime::Runtime::start_node(
+                &node,
+                &script,
                 move |id, data| {
                     let manager = query_handle.state::<super::SessionManager>();
                     let now = manager.started.elapsed().as_millis().min(u64::MAX as u128) as u64;

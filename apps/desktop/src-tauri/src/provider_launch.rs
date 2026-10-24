@@ -1897,8 +1897,9 @@ model_provider = "old_provider"
         assert_eq!(resumed.home.as_ref(), Some(home));
         assert_eq!(
             std::fs::read_to_string(home.join("AGENTS.md")).unwrap(),
-            "Original instructions"
+            "Changed original"
         );
+        resumed.validate_before_spawn().unwrap();
     }
 }
 

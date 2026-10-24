@@ -4,7 +4,7 @@ export const PROJECT_COLORS={blue:"#60a5fa",green:"#4ade80",orange:"#fb923c",pur
 export function validProjectColor(value:unknown):value is ProjectColor{return typeof value==="string"&&Object.prototype.hasOwnProperty.call(PROJECT_COLORS,value);}
 export function validProjectIcon(value:unknown):value is ProjectIcon{return value==="folder"||value==="terminal"||value==="play";}
 export function projectColor(value:unknown){return validProjectColor(value)?PROJECT_COLORS[value]:"currentColor";}
-export type Project = { path: string; name: string; pinned?:boolean; color?:ProjectColor; icon?:ProjectIcon };
+export type Project = { path: string; name: string; pinned?:boolean; hidden?:boolean; hiddenBefore?:number; color?:ProjectColor; icon?:ProjectIcon };
 
 export function projectKey(path: string) {
   return path.trim().replace(/[\\/]+$/, "") || "/";
@@ -20,11 +20,16 @@ export function groupProjects<T extends { summary: { cwd: string } }>(
   sessions: T[],
 ) {
   const groups = new Map<string, Project & { sessions: T[] }>();
+  const hidden = new Set(projects.filter(project=>project.hidden===true).map(project=>projectKey(project.path)));
   for (const project of [...projects.filter(project=>project.pinned===true),...projects.filter(project=>project.pinned!==true)]) {
+    if (project.hidden===true) continue;
     groups.set(projectKey(project.path), { ...project, sessions: [] });
   }
   for (const session of sessions) {
     const key = projectKey(session.summary.cwd);
+    const project = projects.find(project=>projectKey(project.path)===key);
+    const startedAt=(session as unknown as {started_at?:unknown}).started_at;
+    if (hidden.has(key) || (project?.hiddenBefore !== undefined && typeof startedAt === "number" && startedAt <= project.hiddenBefore)) continue;
     if (!groups.has(key))
       groups.set(key, {
         path: session.summary.cwd,
@@ -54,14 +59,14 @@ export function isProjects(value: unknown): value is Project[] {
     Array.isArray(value) &&
     value.every(
       (item) =>
-        item && typeof item.path === "string" && typeof item.name === "string" && (!Object.prototype.hasOwnProperty.call(item,"pinned")||typeof item.pinned==="boolean")&&(!Object.prototype.hasOwnProperty.call(item,"color")||validProjectColor(item.color))&&(!Object.prototype.hasOwnProperty.call(item,"icon")||validProjectIcon(item.icon)),
+        item && typeof item.path === "string" && typeof item.name === "string" && (!Object.prototype.hasOwnProperty.call(item,"pinned")||typeof item.pinned==="boolean")&&(!Object.prototype.hasOwnProperty.call(item,"hidden")||typeof item.hidden==="boolean")&&(!Object.prototype.hasOwnProperty.call(item,"hiddenBefore")||typeof item.hiddenBefore==="number"&&Number.isFinite(item.hiddenBefore))&&(!Object.prototype.hasOwnProperty.call(item,"color")||validProjectColor(item.color))&&(!Object.prototype.hasOwnProperty.call(item,"icon")||validProjectIcon(item.icon)),
     )
   );
 }
 
 export function validateSessionTitle(value: string): string {
   const title = value.trim();
-  if (!title || [...title].length > 200) throw new Error("Use a session name of 1–200 characters.");
+  if (!title || [...title].length > 200 || /[\x00-\x1f\x7f]/.test(title)) throw new Error("Use a session name of 1–200 characters.");
   return title;
 }
 export function matchesStatus(status: string, filter: string): boolean {
@@ -89,7 +94,7 @@ export function moveProjectAdjacent(projects:Project[],path:string,direction:"up
   if(direction!=="up"&&direction!=="down")return projects;
   const matches=projects.map((project,index)=>({project,index})).filter(row=>projectKey(row.project.path)===projectKey(path));
   if(matches.length!==1||matches[0].project.path!==path)return projects;
-  const index=matches[0].index,group=projects.map((project,index)=>({project,index})).filter(row=>(row.project.pinned===true)===(projects[index].pinned===true)),position=group.findIndex(row=>row.index===index),adjacent=position+(direction==="up"?-1:1);
+  const index=matches[0].index,group=projects.map((project,index)=>({project,index})).filter(row=>row.project.hidden!==true&&(row.project.pinned===true)===(projects[index].pinned===true)),position=group.findIndex(row=>row.index===index),adjacent=position+(direction==="up"?-1:1);
   if(adjacent<0||adjacent>=group.length)return projects;
   const neighbor=group[adjacent].index;
   const next=[...projects];[next[index],next[neighbor]]=[next[neighbor],next[index]];return next;

@@ -152,78 +152,23 @@ fn private_read(path: &Path) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-// Copy resources, never writable links into Desktop's CODEX_HOME. Bound symlink cycles and size.
-fn copy_resource(
-    source: &Path,
-    target: &Path,
-    stack: &mut Vec<PathBuf>,
-    budget: &mut (usize, u64),
-) -> Result<(), String> {
-    let source = source
-        .canonicalize()
-        .map_err(|_| "Inherited Codex resource is unavailable")?;
-    if stack.len() >= 64 || stack.contains(&source) {
-        return Err("Inherited Codex resource contains a symlink cycle".into());
-    }
-    let meta = source
-        .metadata()
-        .map_err(|_| "Cannot inspect inherited Codex resource")?;
-    budget.0 += 1;
-    budget.1 = budget
-        .1
-        .saturating_add(if meta.is_file() { meta.len() } else { 0 });
-    if budget.0 > 100_000 || budget.1 > 2 * 1024 * 1024 * 1024 {
-        return Err("Codex resource snapshot exceeds its copy budget".into());
-    }
-    if meta.is_dir() {
-        crate::background::private_root(target)?;
-        stack.push(source.clone());
-        for entry in
-            std::fs::read_dir(&source).map_err(|_| "Cannot enumerate inherited Codex resource")?
-        {
-            let entry = entry.map_err(|_| "Cannot inspect inherited Codex resource")?;
-            if [
-                ".git",
-                ".claude",
-                ".codex",
-                ".codegraph",
-                ".convergent-delivery",
-                "__pycache__",
-                ".pytest_cache",
-            ]
-            .iter()
-            .any(|name| entry.file_name() == *name)
-            {
-                continue;
-            }
-            copy_resource(
-                &entry.path(),
-                &target.join(entry.file_name()),
-                stack,
-                budget,
-            )?;
-        }
-        stack.pop();
-    } else if meta.is_file() {
-        // copy preserves executable bits for plugin binaries; restrict access to this user afterward.
-        std::fs::copy(&source, target).map_err(|_| "Cannot copy inherited Codex resource")?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(
-                target,
-                std::fs::Permissions::from_mode(if meta.permissions().mode() & 0o111 != 0 {
-                    0o700
-                } else {
-                    0o600
-                }),
-            )
-            .map_err(|_| "Cannot protect Codex resource snapshot")?;
-        }
-    } else {
+// Keep installed package identities: parent-relative skill resources depend on the real directory.
+fn share_resource(source: &Path, target: &Path) -> Result<(), String> {
+    let meta = std::fs::metadata(source).map_err(|_| "Inherited Codex resource is unavailable")?;
+    if !meta.is_dir() && !meta.is_file() {
         return Err("Inherited Codex resource is not a regular file or directory".into());
     }
-    Ok(())
+    #[cfg(unix)]
+    let result = std::os::unix::fs::symlink(source, target);
+    #[cfg(windows)]
+    let result = if meta.is_dir() {
+        std::os::windows::fs::symlink_dir(source, target)
+    } else {
+        std::os::windows::fs::symlink_file(source, target)
+    };
+    result.map_err(|_| {
+        "Cannot reference installed Codex resources; symbolic-link support is required".into()
+    })
 }
 fn resolve(base: &Path, text: &str) -> PathBuf {
     let expanded =
@@ -239,16 +184,9 @@ fn resolve(base: &Path, text: &str) -> PathBuf {
     } else {
         base.join(path)
     };
-    let mut normalized = PathBuf::new();
-    for part in joined.components() {
-        if part == std::path::Component::ParentDir {
-            normalized.pop();
-        } else if part != std::path::Component::CurDir {
-            normalized.push(part);
-        }
-    }
-    normalized
+    joined.components().collect()
 }
+
 fn relative_path(path: &Path, source: &Path) -> Option<PathBuf> {
     path.strip_prefix(source)
         .ok()
@@ -265,19 +203,6 @@ fn map_path(path: &Path, source: &Path, target: &Path) -> PathBuf {
         .map(|relative| target.join(relative))
         .unwrap_or_else(|| path.to_path_buf())
 }
-fn copy_referenced(path: &Path, source: &Path, stage: &Path) -> Result<(), String> {
-    if let Some(relative) = relative_path(path, source).filter(|path| !path.as_os_str().is_empty())
-    {
-        let copied = stage.join(relative);
-        if path.exists() && !copied.exists() {
-            if let Some(parent) = copied.parent() {
-                crate::background::private_root(parent)?;
-            }
-            copy_resource(path, &copied, &mut Vec::new(), &mut (0, 0))?;
-        }
-    }
-    Ok(())
-}
 fn hook_state_paths(config: &mut toml::Value, source: &Path, target: &Path) {
     if let Some(states) = config
         .get_mut("hooks")
@@ -286,6 +211,10 @@ fn hook_state_paths(config: &mut toml::Value, source: &Path, target: &Path) {
     {
         let original = std::mem::take(states);
         for (key, value) in original {
+            // Codex writes native absolute identities; older records may retain a file: prefix.
+            let (scheme, path) = key
+                .strip_prefix("file:")
+                .map_or(("", key.as_str()), |path| ("file:", path));
             let mapped = [
                 source.to_path_buf(),
                 source
@@ -294,12 +223,12 @@ fn hook_state_paths(config: &mut toml::Value, source: &Path, target: &Path) {
             ]
             .into_iter()
             .find_map(|base| {
-                let prefix = format!("file:{}/", base.display());
-                let (file, tail) = key.strip_prefix(&prefix)?.split_once(':')?;
+                let prefix = format!("{}/", base.display());
+                let (file, tail) = path.strip_prefix(&prefix)?.split_once(':')?;
                 if (file == "config.toml" || file == "hooks.json" || file.ends_with(".config.toml"))
                     && Path::new(file).components().count() == 1
                 {
-                    Some(format!("file:{}:{tail}", target.join(file).display()))
+                    Some(format!("{scheme}{}:{tail}", target.join(file).display()))
                 } else {
                     None
                 }
@@ -379,17 +308,11 @@ fn rebase(
                             | "model_catalog_json"
                             | "model_catalog_json_file"
                     ) {
-                        let path = resolve(base, text);
-                        copy_referenced(&path, source, stage)?;
-                        *value = map_path(&path, source, target)
-                            .to_string_lossy()
-                            .into_owned()
-                            .into();
+                        *value = resolve(base, text).to_string_lossy().into_owned().into();
                     } else if key == "CODEX_HOME"
                         && Path::new(text).is_absolute()
                         && relative_path(Path::new(text), source).is_some()
                     {
-                        copy_referenced(Path::new(text), source, stage)?;
                         *value = map_path(Path::new(text), source, target)
                             .to_string_lossy()
                             .into_owned()
@@ -436,7 +359,6 @@ fn snapshot(
         }
         _ => return Err("Cannot read inherited Codex config.toml".into()),
     };
-    let mut budget = (0, 0);
     if source.exists() {
         for entry in std::fs::read_dir(source)
             .map_err(|_| "Cannot enumerate original Codex configuration")?
@@ -461,12 +383,12 @@ fn snapshot(
                     | "AGENTS.override.md"
             ) || text.ends_with(".md")
             {
-                copy_resource(
-                    &entry.path(),
-                    &stage.join(&name),
-                    &mut Vec::new(),
-                    &mut budget,
-                )?;
+                if text == ".credentials.json" {
+                    // MCP refresh tokens remain private so refreshes cannot change Desktop's login state.
+                    write(&stage.join(&name), &read(&entry.path())?)?;
+                } else {
+                    share_resource(&entry.path(), &stage.join(&name))?;
+                }
             }
         }
     }
@@ -540,7 +462,16 @@ fn snapshot(
         } else {
             stage.join("AGENTS.md")
         };
-        let mut instructions = std::fs::read(&path).unwrap_or_default();
+        let mut instructions = match std::fs::read(&path) {
+            Ok(instructions) => instructions,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && matches!(std::fs::symlink_metadata(&path), Err(error) if error.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                Vec::new()
+            }
+            Err(_) => return Err("Cannot read inherited Codex instructions".into()),
+        };
         instructions.extend_from_slice(b"\n\n");
         instructions.extend_from_slice(crate::provider_launch::IMAGE_API_INSTRUCTIONS.as_bytes());
         if path.exists() {
@@ -563,6 +494,9 @@ fn without_ui(mut config: toml::Value) -> toml::Value {
         }
         if let Some(hooks) = table.get_mut("hooks").and_then(toml::Value::as_table_mut) {
             hooks.remove("state");
+            if hooks.is_empty() {
+                table.remove("hooks");
+            }
         }
     }
     config
@@ -621,8 +555,14 @@ impl Prepared {
             home.join("auth.json"),
         ];
         for name in ["AGENTS.md", "AGENTS.override.md"] {
-            if home.join(name).exists() {
-                paths.push(home.join(name));
+            let path = home.join(name);
+            if path.exists()
+                && !std::fs::symlink_metadata(&path)
+                    .map_err(|_| "Cannot inspect inherited Codex instructions")?
+                    .file_type()
+                    .is_symlink()
+            {
+                paths.push(path);
             }
         }
         for entry in std::fs::read_dir(home).map_err(|_| "Cannot inspect Codex profiles")? {
@@ -987,6 +927,177 @@ mod tests {
         }
     }
     #[test]
+    #[cfg(unix)]
+    fn shared_skill_checkout_keeps_real_directory_and_parent_dependencies_live() {
+        let fixture = Fixture::new("native");
+        let package = fixture.root.join("skill-package");
+        let skill = package.join("skills/example");
+        for dir in [
+            &skill,
+            &package.join("scripts"),
+            &package.join("docs"),
+            &fixture.source.join("skills"),
+        ] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "Read ../../docs/standard.md and ../../scripts/impact.py",
+        )
+        .unwrap();
+        std::fs::write(package.join("docs/standard.md"), "standard").unwrap();
+        std::fs::write(package.join("scripts/impact.py"), "print('shared')").unwrap();
+        std::os::unix::fs::symlink(&skill, fixture.source.join("skills/example")).unwrap();
+        std::fs::write(
+            fixture.source.join("config.toml"),
+            "model_instructions_file = 'skills/example/../../docs/standard.md'\n",
+        )
+        .unwrap();
+        let env = fixture.prepare().unwrap();
+        let config =
+            parse(&read(&env.home.as_ref().unwrap().join("config.toml")).unwrap()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(config["model_instructions_file"].as_str().unwrap()).unwrap(),
+            "standard"
+        );
+        let path = env.home.as_ref().unwrap().join("skills/example");
+        assert_eq!(path.canonicalize().unwrap(), skill.canonicalize().unwrap());
+        assert_eq!(
+            std::fs::read_to_string(path.join("../../docs/standard.md")).unwrap(),
+            "standard"
+        );
+        assert_eq!(
+            std::fs::read_to_string(path.join("../../scripts/impact.py")).unwrap(),
+            "print('shared')"
+        );
+        std::fs::write(skill.join("SKILL.md"), "updated installed skill").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(path.join("SKILL.md")).unwrap(),
+            "updated installed skill"
+        );
+        env.validate_before_spawn().unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn shared_resources_keep_identity_while_connection_auth_and_runtime_stay_private() {
+        let fixture = Fixture::new("native");
+        let original = "model = 'desktop-model'\nmodel_instructions_file = 'instructions.txt'\n";
+        std::fs::write(fixture.source.join("config.toml"), original).unwrap();
+        std::fs::write(fixture.source.join("auth.json"), "desktop-auth-sentinel").unwrap();
+        std::fs::write(
+            fixture.source.join("instructions.txt"),
+            "original instructions",
+        )
+        .unwrap();
+        std::fs::write(fixture.source.join("AGENTS.md"), "original agent policy").unwrap();
+        for name in [
+            "skills", "plugins", "rules", "agents", "prompts", "commands", "hooks", "bin",
+        ] {
+            std::fs::create_dir(fixture.source.join(name)).unwrap();
+            std::fs::write(fixture.source.join(name).join("marker"), name).unwrap();
+        }
+        let env = fixture.prepare().unwrap();
+        let home = env.home.as_ref().unwrap();
+        for name in [
+            "skills",
+            "plugins",
+            "rules",
+            "agents",
+            "prompts",
+            "commands",
+            "hooks",
+            "bin",
+            "AGENTS.md",
+        ] {
+            assert_eq!(
+                home.join(name).canonicalize().unwrap(),
+                fixture.source.join(name).canonicalize().unwrap(),
+                "{name} was copied"
+            );
+        }
+        let config = parse(&read(&home.join("config.toml")).unwrap()).unwrap();
+        assert_eq!(
+            config["model_instructions_file"].as_str(),
+            fixture.source.join("instructions.txt").to_str()
+        );
+        std::fs::write(
+            fixture.source.join("instructions.txt"),
+            "changed installed instructions",
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(config["model_instructions_file"].as_str().unwrap()).unwrap(),
+            "changed installed instructions"
+        );
+        assert!(!std::fs::symlink_metadata(home.join("auth.json"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(!std::fs::symlink_metadata(home.join("config.toml"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(fixture.source.join("config.toml")).unwrap(),
+            original
+        );
+        assert_eq!(
+            std::fs::read_to_string(fixture.source.join("auth.json")).unwrap(),
+            "desktop-auth-sentinel"
+        );
+        std::fs::write(fixture.source.join("AGENTS.md"), "updated shared policy").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(home.join("AGENTS.md")).unwrap(),
+            "updated shared policy"
+        );
+        env.validate_before_spawn().unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn failed_private_configuration_cleanup_never_removes_shared_source_resources() {
+        let fixture = Fixture::new("native");
+        std::fs::create_dir_all(fixture.source.join("skills/example")).unwrap();
+        let skill = fixture.source.join("skills/example/SKILL.md");
+        std::fs::write(&skill, "source must survive").unwrap();
+        std::fs::write(fixture.source.join("broken.config.toml"), "invalid = [").unwrap();
+        assert!(fixture.prepare().is_err());
+        assert_eq!(
+            std::fs::read_to_string(&skill).unwrap(),
+            "source must survive"
+        );
+        assert!(!home(&fixture.root, &fixture.launch).unwrap().exists());
+        assert!(!home(&fixture.root, &fixture.launch)
+            .unwrap()
+            .with_extension("pending")
+            .exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn gateway_instruction_read_errors_refuse_instead_of_discarding_inherited_policy() {
+        let fixture = Fixture::new("gateway_api");
+        let instructions = fixture.source.join("AGENTS.md");
+        std::fs::create_dir(&instructions).unwrap();
+        std::fs::write(instructions.join("preserved"), "source must remain intact").unwrap();
+        assert!(
+            fixture
+                .prepare()
+                .err()
+                .is_some_and(|error| error == "Cannot read inherited Codex instructions"),
+            "an unreadable original must not become gateway-only instructions"
+        );
+        assert_eq!(
+            std::fs::read_to_string(instructions.join("preserved")).unwrap(),
+            "source must remain intact"
+        );
+        let home = home(&fixture.root, &fixture.launch).unwrap();
+        assert!(!home.exists());
+        assert!(!home.with_extension("pending").exists());
+    }
+
+    #[test]
     fn child_environment_survives_native_filtering_in_main_profiles_and_roles() {
         let fixture = Fixture::new("native");
         let policy = "[shell_environment_policy]\ninherit='core'\nexclude=['OPENAI*']\ninclude_only=['PATH']\n[shell_environment_policy.set]\nOPENAI_API_KEY='wrong-global-key'\nKEEP='preserved'\n";
@@ -1116,10 +1227,10 @@ mod tests {
         let config = parse(&std::fs::read(home.join("config.toml")).unwrap()).unwrap();
         assert_eq!(
             config["model_instructions_file"].as_str(),
-            home.join("instructions.txt").to_str()
+            fixture.source.join("instructions.txt").to_str()
         );
         assert_eq!(
-            std::fs::read_to_string(home.join("instructions.txt")).unwrap(),
+            std::fs::read_to_string(fixture.source.join("instructions.txt")).unwrap(),
             "private inherited instructions"
         );
         let profile = parse(&std::fs::read(home.join("work.config.toml")).unwrap()).unwrap();
@@ -1144,7 +1255,7 @@ mod tests {
             config["sqlite_home"].as_str(),
             home.join("sqlite_home").to_str()
         );
-        std::fs::write(home.join("instructions.txt"), "private edit").unwrap();
+        assert!(!home.join("instructions.txt").exists());
         assert_eq!(
             std::fs::read_to_string(fixture.source.join("instructions.txt")).unwrap(),
             "private inherited instructions"
@@ -1171,13 +1282,12 @@ mod tests {
         #[cfg(unix)]
         {
             std::fs::write(fixture.source.join("config.toml"), "").unwrap();
-            std::fs::create_dir(fixture.source.join("skills")).unwrap();
             std::os::unix::fs::symlink(
                 fixture.source.join("skills"),
-                fixture.source.join("skills/loop"),
+                fixture.source.join("skills"),
             )
             .unwrap();
-            assert!(fixture.prepare().err().unwrap().contains("cycle"));
+            assert!(fixture.prepare().is_err());
         }
     }
     #[test]
@@ -1201,6 +1311,41 @@ mod tests {
         std::fs::write(&path, config.replace("\\\"", "\"")).unwrap();
         env.validate_before_spawn().unwrap();
     }
+    #[test]
+    fn native_hook_trust_state_survives_reopen_without_changing_global_configuration() {
+        let fixture = Fixture::new("native");
+        let original = b"model = 'original-model'\n";
+        std::fs::write(fixture.source.join("config.toml"), original).unwrap();
+        let env = fixture.prepare().unwrap();
+        let path = env.home.as_ref().unwrap().join("config.toml");
+        let mut config = parse(&std::fs::read(&path).unwrap()).unwrap();
+        let state_key = "/<session-flags>/config.toml:session_start:0:0";
+        let state = toml::Table::from_iter([(
+            "trusted_hash".into(),
+            toml::Value::String(format!("sha256:{}", "a".repeat(64))),
+        )]);
+        config.as_table_mut().unwrap().insert(
+            "hooks".into(),
+            toml::Value::Table(toml::Table::from_iter([(
+                "state".into(),
+                toml::Value::Table(toml::Table::from_iter([(
+                    state_key.into(),
+                    toml::Value::Table(state),
+                )])),
+            )])),
+        );
+        std::fs::write(&path, toml::to_string(&config).unwrap()).unwrap();
+        env.validate_before_spawn().unwrap();
+        fixture.prepare().unwrap().validate_before_spawn().unwrap();
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("trusted_hash"));
+        assert_eq!(
+            std::fs::read(fixture.source.join("config.toml")).unwrap(),
+            original
+        );
+    }
+
     #[test]
     fn readonly_snapshot_lookup_creates_nothing_and_fresh_contexts_are_unique() {
         let fixture = Fixture::new("native");
@@ -1245,7 +1390,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn copies_skill_checkout_resources_without_recursive_repository_metadata() {
+    fn shares_skill_checkout_without_traversing_recursive_repository_metadata() {
         let fixture = Fixture::new("native");
         let skill = fixture.source.join("skills/example");
         std::fs::create_dir_all(skill.join(".claude/skills")).unwrap();
@@ -1259,7 +1404,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Opt-in copies installed Codex resources to a disposable private snapshot; no inference"]
+    #[ignore = "Opt-in references installed Codex resources from a disposable private configuration; no inference"]
     fn installed_codex_resources_are_inherited_without_source_changes() {
         let fixture = Fixture::new("native");
         let source = std::env::var_os("CODEX_HOME")
@@ -1332,6 +1477,58 @@ mod tests {
     }
 
     #[test]
+    fn hook_trust_paths_inherit_native_and_legacy_identities_without_granting_trust() {
+        let fixture = Fixture::new("native");
+        let target = fixture.root.join("private");
+        for scheme in ["", "file:"] {
+            let source_key = format!(
+                "{scheme}{}/hooks.json:session_start:0:0",
+                fixture.source.display()
+            );
+            let target_key = format!("{scheme}{}/hooks.json:session_start:0:0", target.display());
+            let state = toml::Value::Table(toml::map::Map::from_iter([
+                ("trusted_hash".into(), "sha256:already-reviewed".into()),
+                ("enabled".into(), false.into()),
+            ]));
+            let mut config = parse(b"[hooks.state]").unwrap();
+            config["hooks"]["state"]
+                .as_table_mut()
+                .unwrap()
+                .insert(source_key.clone(), state.clone());
+            hook_state_paths(&mut config, &fixture.source, &target);
+            assert!(config["hooks"]["state"].get(&source_key).is_none());
+            assert_eq!(config["hooks"]["state"][&target_key], state);
+        }
+        let keys = [
+            format!(
+                "{}/../hooks.json:session_start:0:0",
+                fixture.source.display()
+            ),
+            format!(
+                "{}-other/hooks.json:session_start:0:0",
+                fixture.source.display()
+            ),
+            format!(
+                "{}/plugins/hook.json:session_start:0:0",
+                fixture.source.display()
+            ),
+            "ponytail@ponytail:hooks/hooks.json:session_start:0:0".into(),
+            "/<session-flags>/config.toml:session_start:0:0".into(),
+        ];
+        let mut config = parse(b"[hooks.state]").unwrap();
+        config["hooks"]["state"] = toml::Value::Table(toml::map::Map::from_iter(
+            keys.into_iter()
+                .map(|key| (key, toml::Value::Table(Default::default()))),
+        ));
+        let original = config.clone();
+        hook_state_paths(&mut config, &fixture.source, &target);
+        assert_eq!(config, original);
+        let mut empty = toml::Value::Table(Default::default());
+        hook_state_paths(&mut empty, &fixture.source, &target);
+        assert!(empty.get("hooks").is_none());
+    }
+
+    #[test]
     fn inherits_mcp_file_credentials_and_remaps_hook_trust_identity() {
         let fixture = Fixture::new("native");
         let key = format!(
@@ -1386,7 +1583,7 @@ mod tests {
         let config = parse(&std::fs::read(home.join("config.toml")).unwrap()).unwrap();
         assert_eq!(
             config["skills"]["config"][0]["path"].as_str(),
-            home.join("skills/example/SKILL.md").to_str()
+            fixture.source.join("skills/example/SKILL.md").to_str()
         );
         assert_eq!(
             config["mcp_servers"]["example"]["command"].as_str(),

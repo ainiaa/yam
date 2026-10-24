@@ -6,6 +6,52 @@ import third_party_notices as notices
 path=pathlib.Path(__file__).with_name('build-terminal-runtime.py')
 spec=importlib.util.spec_from_file_location('terminal_runtime',path);runtime=importlib.util.module_from_spec(spec);spec.loader.exec_module(runtime)
 class RuntimeTests(unittest.TestCase):
+ def test_production_configs_ship_only_script_and_never_build_sea(self):
+  root=path.resolve().parents[1]/'apps/desktop/src-tauri'
+  for name in ['tauri.conf.json','tauri.release.conf.json']:
+   config=json.loads((root/name).read_text());resources=config['bundle']['resources']
+   self.assertIn('target/terminal-runtime/yam-terminal.cjs',resources)
+   self.assertFalse(any(p.endswith(('/yam-terminal','/yam-terminal.exe','/node','/node.exe')) for p in resources))
+   self.assertIn('--script-only',config['build']['beforeBuildCommand'])
+ def test_script_only_build_never_downloads_or_embeds_node(self):
+  with self.mocked_notice_main() as fixture:
+   with mock.patch.object(sys,'argv',[str(path),'--script-only','--output',str(fixture['output'])]):
+    runtime.main()
+   content=fixture['output'].read_text(encoding='utf-8')
+   self.assertIn('const headless=',content)
+   self.assertIn('const serializer=',content)
+   self.assertNotIn("require('@xterm/headless')",content)
+   fixture['url'].assert_not_called()
+   fixture['version'].assert_not_called()
+   fixture['run'].assert_not_called()
+   report=json.loads(fixture['report'].read_text())
+   self.assertEqual(report['runtime_sha256'],hashlib.sha256(fixture['output'].read_bytes()).hexdigest())
+
+ def test_script_only_rejects_wrong_terminal_version_before_promotion(self):
+  with self.mocked_notice_main() as fixture:
+   metadata=fixture['desktop']/'node_modules/@xterm/headless/package.json'
+   fields=json.loads(metadata.read_text());fields['version']='0.0.0';metadata.write_text(json.dumps(fields))
+   with mock.patch.object(sys,'argv',[str(path),'--script-only','--output',str(fixture['output'])]):
+    with self.assertRaises(ValueError):runtime.main()
+   self.assertEqual(fixture['output'].read_bytes(),b'EXISTING_BINARY_FIXTURE')
+   fixture['url'].assert_not_called()
+
+ def test_real_script_bundle_runs_with_existing_node_and_preserves_unicode(self):
+  root=path.resolve().parents[1]/'apps/desktop/src-tauri/target/terminal-runtime'
+  node=root/('node.exe' if os.name=='nt' else 'node')
+  if not node.exists():self.skipTest('Existing isolated Node cache is required')
+  with tempfile.TemporaryDirectory() as directory:
+   output=pathlib.Path(directory)/'yam-terminal.cjs'
+   with mock.patch.object(sys,'argv',[str(path),'--script-only','--output',str(output)]):runtime.main()
+   requests=[{'id':1,'op':'create','session':'script','cols':20,'rows':8},{'id':2,'op':'write','session':'script','data':'5Lit5paHIPCfmIA='},{'id':3,'op':'snapshot','session':'script'}]
+   env={**os.environ,'YAM_TERMINAL_INSTANCE':'e'*64}
+   for key in ['NODE_OPTIONS','NODE_PATH','NODE_SEA_OPTIONS']:env.pop(key,None)
+   result=subprocess.run([str(node),str(output)],input=''.join(json.dumps(r)+'\n' for r in requests),env=env,capture_output=True,text=True,encoding='utf-8',timeout=10,check=True)
+   frames=[json.loads(line) for line in result.stdout.splitlines()]
+   self.assertEqual(frames[0]['type'],'ready')
+   self.assertIn('中文 😀',frames[-1]['data']['data'])
+   self.assertLess(output.stat().st_size,1024*1024)
+
  def test_cached_archive_verification_is_bounded_and_preserves_invalid_files(self):
   with tempfile.TemporaryDirectory() as directory:
    archive=pathlib.Path(directory)/'node.zip';content=b'valid cached archive';archive.write_bytes(content)

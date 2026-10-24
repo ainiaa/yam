@@ -4,6 +4,32 @@ import argparse,hashlib,json,os,pathlib,platform,subprocess,tarfile,urllib.reque
 import third_party_notices as notices
 VERSION='26.10.0'
 
+def bundle_script(desktop):
+    sources=[]
+    for name,package,file,version in [('headless','@xterm/headless','lib-headless/xterm-headless.js','6.0.0'),('serializer','@xterm/addon-serialize','lib/addon-serialize.js','0.14.0')]:
+        module=desktop/'node_modules'/package
+        if json.loads((module/'package.json').read_text(encoding='utf-8')).get('version')!=version:
+            raise ValueError('Terminal source version mismatch')
+        source=(module/file).read_text(encoding='utf-8')
+        sources.append(f'const {name}=(()=>{{const module={{exports:{{}}}};const exports=module.exports;\n{source}\nreturn module.exports;}})();\n')
+    source=(desktop/'terminal-service.cjs').read_text(encoding='utf-8').replace("require('@xterm/headless')",'headless').replace("require('@xterm/addon-serialize')",'serializer')
+    return (''.join(sources)+source).encode('utf-8')
+
+def script_only(desktop,root,destination,mode,notice_content,notice_report):
+    content=bundle_script(desktop)
+    destination=destination.resolve();destination.parent.mkdir(parents=True,exist_ok=True)
+    fd,name=tempfile.mkstemp(prefix=destination.name+'.building-',dir=destination.parent)
+    temporary=pathlib.Path(name)
+    try:
+        with os.fdopen(fd,'wb') as output:output.write(content)
+        report=notices.report_for_binary(notice_report,temporary,runtime_file="yam-terminal.cjs")
+        notice_name='THIRD-PARTY-NOTICES' if mode=='release' else 'DEVELOPER-INCOMPLETE-NOTICES'
+        notices.atomic_write(root/(notice_name+'.txt'),notice_content)
+        temporary.replace(destination)
+        notices.atomic_write(root/(notice_name+'.report.json'),notices.canonical(report))
+        print(json.dumps({'format':'script','script_bytes':len(content),'output':str(destination)}))
+    finally:temporary.unlink(missing_ok=True)
+
 def archive_verified(archive,digest,limit=200*1024*1024):
     hasher=hashlib.sha256();length=0
     try:stream=archive.open('rb')
@@ -55,12 +81,15 @@ def frontend_notices(desktop):
     return licenses
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--output',type=pathlib.Path);parser.add_argument('--notice-mode',choices=['developer','release'],default='developer');args=parser.parse_args()
+    parser=argparse.ArgumentParser();parser.add_argument('--output',type=pathlib.Path);parser.add_argument('--notice-mode',choices=['developer','release'],default='developer');parser.add_argument('--script-only',action='store_true');args=parser.parse_args()
     repo=pathlib.Path(__file__).resolve().parents[1];desktop=repo/'apps/desktop'
     frontend_licenses=frontend_notices(desktop)
     notice_content,notice_report=notices.prepare(repo,args.notice_mode)
     notices.verify_build_sources(repo,frontend_licenses)
     root=desktop/'src-tauri/target/terminal-runtime';root.mkdir(parents=True,exist_ok=True)
+    if args.script_only:
+        script_only(desktop,root,args.output or root/'yam-terminal.cjs',args.notice_mode,notice_content,notice_report)
+        return
     native=platform_name(platform.system(),platform.machine());suffix='.zip' if native.startswith('win-') else '.tar.gz'
     name='node-v'+VERSION+'-'+native+suffix
     digest=json.loads(pathlib.Path(__file__).with_name('node-runtime-checksums.json').read_text(encoding='utf-8'))[name]
@@ -91,14 +120,7 @@ def main():
     env=os.environ.copy()
     for key in ['NODE_OPTIONS','NODE_PATH','NODE_SEA_OPTIONS']:env.pop(key,None)
     assert subprocess.check_output([str(runtime),'--version'],env=env,text=True,encoding='utf-8').strip()=='v'+VERSION
-    sources=[];licenses=[(root/'NODE-LICENSE').read_text(encoding='utf-8')]
-    for name,package,file,version in [('headless','@xterm/headless','lib-headless/xterm-headless.js','6.0.0'),('serializer','@xterm/addon-serialize','lib/addon-serialize.js','0.14.0')]:
-        module=desktop/'node_modules'/package;assert json.loads((module/'package.json').read_text(encoding='utf-8'))['version']==version
-        source=(module/file).read_text(encoding='utf-8');sources.append(f'const {name}=(()=>{{const module={{exports:{{}}}};const exports=module.exports;\n{source}\nreturn module.exports;}})();\n')
-        licenses.append(package+' '+version+'\n'+(desktop/'terminal-licenses/XTERM-LICENSE').read_text(encoding='utf-8'))
-    licenses.extend(frontend_licenses)
-    source=(desktop/'terminal-service.cjs').read_text(encoding='utf-8').replace("require('@xterm/headless')",'headless').replace("require('@xterm/addon-serialize')",'serializer')
-    entry=root/'terminal-entry.cjs';entry.write_text(''.join(sources)+source,encoding='utf-8')
+    entry=root/'terminal-entry.cjs';entry.write_bytes(bundle_script(desktop))
     subprocess.run([str(runtime),'--check',str(entry)],env=env,check=True,capture_output=True)
     destination=(args.output or root/('yam-terminal.exe' if native.startswith('win-') else 'yam-terminal')).resolve()
     destination.parent.mkdir(parents=True,exist_ok=True)

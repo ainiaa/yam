@@ -1,3 +1,4 @@
+import {isSessionPreferenceKey,loadSessionNames,readSessionName} from "../src/session-actions.ts";
 import {englishUiRead} from './fixtures/english-ui-source.mjs';
 const readFileSync=(...args)=>englishUiRead(rawReadFileSync,...args);
 import './fixtures/i18n-test-init.mjs';
@@ -10,7 +11,7 @@ import ts from 'typescript';
 const source=ts.createSourceFile('App.tsx',readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
 const app=source.statements.find(n=>ts.isFunctionDeclaration(n)&&n.name?.text==='App');
 const compile=text=>ts.transpileModule(text,{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText;
-function actual(name,args){const declaration=app.body.statements.find(n=>ts.isFunctionDeclaration(n)&&n.name?.text===name);assert.ok(declaration,`actual ${name} required`);return new Function(...Object.keys(args),compile(declaration.getText(source))+`;return ${name};`)(...Object.values(args));}
+function actual(name,args){args={isSessionPreferenceKey,loadSessionNames,readSessionName,...args};const declaration=app.body.statements.find(n=>ts.isFunctionDeclaration(n)&&n.name?.text===name);assert.ok(declaration,`actual ${name} required`);return new Function(...Object.keys(args),compile(declaration.getText(source))+`;return ${name};`)(...Object.values(args));}
 test('B05a secondary updater mutation routes to main with zero owner mutation',async()=>{
  const calls=[],routes=[];const args={desktopWindow:{slot:'terminal-secondary',epoch:1},isMainWindow:false,openMainSettings:()=>routes.push('main'),updaterIntent:{current:0},setUpdaterBusy(){},updaterMounted:{current:true},updaterController:{current:{action:async(...values)=>{calls.push(values);return null;}}},invoke(){},setUpdaterSnapshot(){},setUpdaterError(){}};
  await actual('runUpdaterAction',args)('check');assert.deepEqual(calls,[]);assert.deepEqual(routes,['main']);
@@ -24,7 +25,7 @@ test('B05a secondary automatic mount collection effect does not overwrite shared
 
 test('B05a actual bootstrap precedes App mount and any layout persistence',async()=>{
  const text=readFileSync(new URL('../src/main.tsx',import.meta.url),'utf8');const file=ts.createSourceFile('main.tsx',text,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);const body=file.statements.filter(n=>!ts.isImportDeclaration(n)).map(n=>n.getText(file)).join('\n');
- const events=[];const React={StrictMode:'StrictMode',createElement:(...args)=>args};const args={React,ReactDOM:{createRoot:()=>({render:()=>events.push('render')})},App(){},document:{getElementById:()=>({textContent:''})},initializeDesktopWindow:async()=>{events.push('bootstrap');},waitNativeWindowEpoch:async()=>1,window:{addEventListener(){},removeEventListener(){}},invoke(){},localStorage:{getItem:()=>null},setWindowContext(){}};
+ const events=[];const React={StrictMode:'StrictMode',createElement:(...args)=>args};const args={React,ReactDOM:{createRoot:()=>({render:()=>events.push('render')})},App(){},document:{getElementById:()=>({textContent:''})},initializeDesktopWindow:async()=>{events.push('bootstrap');},waitNativeWindowEpoch:async()=>1,window:{addEventListener(){},removeEventListener(){}},invoke(){},listen:async()=>()=>{},localStorage:{getItem:()=>null},setWindowContext(){}};
  new Function(...Object.keys(args),ts.transpileModule(body,{compilerOptions:{target:ts.ScriptTarget.ESNext,jsx:ts.JsxEmit.React}}).outputText)(...Object.values(args));await new Promise(setImmediate);assert.deepEqual(events,['bootstrap','render']);
 });
 
@@ -65,7 +66,7 @@ test('B05a secondary pending notification loop consumes zero owner receipts',asy
 });
 
 test('B05a actual main missing native epoch dispatches nothing before ready',async()=>{
- const text=readFileSync(new URL('../src/main.tsx',import.meta.url),'utf8'),file=ts.createSourceFile('main.tsx',text,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX),body=file.statements.filter(n=>!ts.isImportDeclaration(n)).map(n=>n.getText(file)).join('\n');let ready;const events=[];const root={textContent:''};const args={React:{StrictMode:'strict',createElement(){return null;}},ReactDOM:{createRoot:()=>({render:()=>events.push('render')})},App(){},document:{getElementById:()=>root},window:{addEventListener(){},removeEventListener(){}},waitNativeWindowEpoch:()=>new Promise(resolve=>ready=resolve),initializeDesktopWindow:async()=>{events.push('bootstrap');return{};},invoke(){},localStorage:{getItem:()=>null},setWindowContext(){}};
+ const text=readFileSync(new URL('../src/main.tsx',import.meta.url),'utf8'),file=ts.createSourceFile('main.tsx',text,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX),body=file.statements.filter(n=>!ts.isImportDeclaration(n)).map(n=>n.getText(file)).join('\n');let ready;const events=[];const root={textContent:''};const args={React:{StrictMode:'strict',createElement(){return null;}},ReactDOM:{createRoot:()=>({render:()=>events.push('render')})},App(){},document:{getElementById:()=>root},window:{addEventListener(){},removeEventListener(){}},waitNativeWindowEpoch:()=>new Promise(resolve=>ready=resolve),initializeDesktopWindow:async()=>{events.push('bootstrap');return{};},invoke(){},listen:async()=>()=>{},localStorage:{getItem:()=>null},setWindowContext(){}};
  new Function(...Object.keys(args),ts.transpileModule(body,{compilerOptions:{target:ts.ScriptTarget.ESNext,jsx:ts.JsxEmit.React}}).outputText)(...Object.values(args));await new Promise(setImmediate);assert.deepEqual(events,[]);ready(2);await new Promise(setImmediate);assert.deepEqual(events,['bootstrap','render']);
 });
 test('B05a native ready before listener and timeout followed by retry preserve captured epoch',async()=>{
@@ -121,3 +122,21 @@ test('A08b actual secondary appearance commit keeps symbolic system and resolves
  });
 
 test('v5 bootstrap only sends IDs and filters annotations to owner accepted members',async()=>{const {initializeDesktopWindow}=await import('../src/window-context.ts');const appearance={fontFamily:'Saved',fontSize:18,theme:'dark'},raw=JSON.stringify({version:5,root:{kind:'pane',paneId:'p-1',tabs:['s-a-1','s-b-1'],activeIndex:0},focusedPane:'p-1',appearances:{'s-a-1':appearance,'s-b-1':appearance}});const calls=[];const context=await initializeDesktopWindow(async(name,args)=>{calls.push({name,args});return{slot:'main',epoch:1,owned_ids:['s-a-1'],restore_blocked:false};},{getItem:key=>key==='yam.window.main.terminalLayout'?raw:null},1);assert.deepEqual(calls[0].args,{mainIds:['s-a-1','s-b-1'],secondaryIds:[],expectedEpoch:1});assert.deepEqual(context.preference.appearances,{'s-a-1':appearance});});
+
+test('private runtime preparation precedes bootstrap; download failures stay retryable without App mount',async()=>{
+ const text=readFileSync(new URL('../src/main.tsx',import.meta.url),'utf8'),file=ts.createSourceFile('main.tsx',text,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX),body=file.statements.filter(n=>!ts.isImportDeclaration(n)).map(n=>n.getText(file)).join('\n');
+ let finish,phase,retry;const events=[];const root={textContent:'',append(button){retry=button.onclick;}};const args={React:{StrictMode:'strict',createElement(){}},ReactDOM:{createRoot:()=>({render:()=>events.push('render')})},App(){},document:{getElementById:()=>root,createElement:()=>({})},window:{addEventListener(){},removeEventListener(){}},waitNativeWindowEpoch:async()=>1,initializeDesktopWindow:async()=>{events.push('bootstrap');return{};},invoke:async name=>{events.push(name);return new Promise((resolve,reject)=>finish={resolve,reject});},listen:async(_name,callback)=>{phase=callback;return()=>events.push('unlisten');},localStorage:{getItem:()=>null},setWindowContext(){},setLocale(){},resolveLocale(){return'en';},loadAppPreferences(){return{value:{language:'en'}};},applyAppThemeDocument(){},navigator:{languages:['en']},APP_PREFERENCES_KEY:'prefs',t:s=>s};
+ new Function(...Object.keys(args),ts.transpileModule(body,{compilerOptions:{target:ts.ScriptTarget.ESNext,jsx:ts.JsxEmit.React}}).outputText)(...Object.values(args));await new Promise(setImmediate);
+ assert.deepEqual(events,['initialize_background']);phase({payload:'Downloading YAM private terminal runtime…'});assert.match(root.textContent,/Downloading/);
+ finish.reject(Error('offline'));await new Promise(setImmediate);assert.match(root.textContent,/offline/);assert.equal(events.includes('bootstrap'),false);assert.equal(events.includes('render'),false);assert.equal(typeof retry,'function');
+ retry();await new Promise(setImmediate);finish.resolve();await new Promise(setImmediate);assert.deepEqual(events.filter(e=>e==='bootstrap'||e==='render'),['bootstrap','render']);assert.equal(events.filter(e=>e==='unlisten').length,2);
+});
+
+test('both windows can publish only per-session names and launch references, keeping global settings protected',async()=>{
+ const {createWindowStorage,publishWindowPreference}=await import('../src/window-context.ts');
+ const saved=new Map(),calls=[];const store=createWindowStorage({getItem:k=>saved.get(k)??null,setItem:(k,v)=>saved.set(k,v),removeItem:k=>saved.delete(k)},{slot:'terminal-secondary',epoch:2},(k,v)=>calls.push([k,v]));
+ store.setItem('yam.sessionName.s-test-1','"Named"');store.setItem('yam.sessionLaunch.s-test-1','{"terminal":"yam"}');assert.equal(calls.length,2);
+ for(const key of ['yam.terminalSettings','yam.sessionTitles','yam.sessionName.../bad'])assert.throws(()=>store.setItem(key,'bad'));
+ const sent=[];await publishWindowPreference(async(n,a)=>sent.push([n,a]),{slot:'terminal-secondary',epoch:2},'yam.sessionName.s-test-1','"Named"');assert.equal(sent[0][1].desktopEpoch,2);
+ await assert.rejects(publishWindowPreference(async()=>assert.fail(),{slot:'terminal-secondary',epoch:2},'yam.sessionTitles','{}'));
+});

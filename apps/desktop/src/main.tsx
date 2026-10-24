@@ -3,6 +3,7 @@ import {loadAppPreferences,resolveLocale,APP_PREFERENCES_KEY} from "./app-prefer
 import {setLocale,t} from "./i18n";
 import React from "react";
 import ReactDOM from "react-dom/client";
+import {listen} from "@tauri-apps/api/event";
 import {invoke} from "@tauri-apps/api/core";
 import {initializeDesktopWindow,setWindowContext,waitNativeWindowEpoch} from "./window-context";
 import App from "./App";
@@ -16,11 +17,13 @@ async function initializeWindow(){
   try {
     if(root)root.textContent=t("Waiting for native terminal window…");
     const epoch=await waitNativeWindowEpoch(window);
+    const unlisten=await listen<string>("terminal-runtime-setup",event=>{if(root)root.textContent=t(event.payload);});
+    try {if(root)root.textContent=t("Checking terminal runtime…");await invoke("initialize_background");}finally{unlisten();}
     const context=await initializeDesktopWindow(invoke,localStorage,epoch);
     setWindowContext(context);mounted=true;window.removeEventListener("yam-native-window-ready",retryReady);
     ReactDOM.createRoot(root as HTMLElement).render(<React.StrictMode><App /></React.StrictMode>);
-  }catch {
-    if(root){root.textContent=t("Terminal window bootstrap unavailable. Saved layouts and running tasks were preserved. ");const retry=document.createElement("button");retry.textContent=t("Retry initialization");retry.onclick=()=>void initializeWindow();root.append(retry);}
+  }catch(error) {
+    if(root){root.textContent=t("Terminal window bootstrap unavailable. Saved layouts and running tasks were preserved. ")+String(error)+" ";const retry=document.createElement("button");retry.textContent=t("Retry initialization");retry.onclick=()=>void initializeWindow();root.append(retry);}
   }finally {initializing=false;}
 }
 const retryReady=()=>{void initializeWindow();};

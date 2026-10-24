@@ -19,6 +19,7 @@ mod gui_startup;
 mod history;
 mod memory;
 mod native_menu;
+mod node_runtime;
 mod project_config;
 mod provider_catalog;
 mod provider_launch;
@@ -44,8 +45,9 @@ pub fn background_entry() -> bool {
     if std::env::args().nth(1).as_deref() != Some("--yam-background") {
         return false;
     }
-    if std::env::args().count() != 2 {
-        eprintln!("[YAM] Invalid background startup arguments");
+    let args = std::env::args_os().skip(2).collect::<Vec<_>>();
+    if let Err(error) = node_runtime::background_node(&args) {
+        eprintln!("[YAM] {error}");
         return true;
     }
     if let Err(error) = background::run() {
@@ -349,6 +351,18 @@ fn terminal_reopen_launch(
         return Err("This terminal is already running".into());
     }
     validate_working_directory(&record.summary.cwd)?;
+    if record.summary.command.is_none() && record.agent.agent_session_id.is_none() {
+        if let Some(mut launch) = record
+            .summary
+            .launch
+            .clone()
+            .filter(|launch| launch.adapter == "codex" && launch.mode == "interactive")
+        {
+            launch.prompt = None;
+            resume_picker_command(Path::new("codex"), &launch)?;
+            return Ok((Some(launch), None));
+        }
+    }
     if record.summary.command.is_none()
         && record
             .summary
@@ -361,6 +375,21 @@ fn terminal_reopen_launch(
     } else {
         Ok((None, None))
     }
+}
+fn resume_picker_command(
+    executable: &Path,
+    launch: &AgentLaunch,
+) -> Result<CommandBuilder, String> {
+    if launch.adapter != "codex"
+        || launch.mode != "interactive"
+        || launch.prompt.is_some()
+        || (launch.provider.is_none() && !launch.extra_args.trim().is_empty())
+    {
+        return Err("Invalid native history picker request".into());
+    }
+    let mut command = agent_command(executable, launch)?;
+    command.arg("resume");
+    Ok(command)
 }
 fn resume_command(
     executable: &Path,
@@ -730,7 +759,6 @@ struct ResumeClaim {
     id: String,
 }
 impl ResumeClaim {
-    #[cfg(test)]
     fn acquire(
         claims: Arc<Mutex<std::collections::HashSet<String>>>,
         id: &str,
@@ -1368,6 +1396,8 @@ pub struct SessionManager {
     cli_namespace: std::sync::OnceLock<String>,
     background_client: Mutex<Option<Arc<background::Client>>>,
     background_events: Mutex<background::EventPoll>,
+    background_initialized: Mutex<bool>,
+    background_starting: AtomicBool,
     relay: Mutex<background::Relay>,
     input_leases: Mutex<background::InputLeases>,
     started: Instant,
@@ -1397,6 +1427,8 @@ impl Default for SessionManager {
             cli_namespace: std::sync::OnceLock::new(),
             background_client: Mutex::new(None),
             background_events: Mutex::new(background::EventPoll::default()),
+            background_initialized: Mutex::new(false),
+            background_starting: AtomicBool::new(false),
             relay: Mutex::new(background::Relay::default()),
             input_leases: Mutex::new(background::InputLeases::default()),
             started: Instant::now(),
@@ -1658,6 +1690,21 @@ pub(crate) fn route_notification_session<R: tauri::Runtime>(
     session_id: &str,
 ) -> Result<(), String> {
     let manager = app.state::<SessionManager>();
+    // Cold runtime preparation must finish before any GUI command can acquire history ownership.
+    if manager.background_starting.load(Ordering::Acquire)
+        && !manager.background_owner
+        && manager
+            .background_client
+            .lock()
+            .map_err(|_| "Background client lock poisoned")?
+            .is_none()
+    {
+        *manager
+            .notification_selection
+            .lock()
+            .map_err(|_| "Notification selection lock poisoned")? = Some(session_id.into());
+        return desktop_windows::show_slot(app, desktop_windows::Slot::Main);
+    }
     get_session(
         app.clone(),
         app.state::<SessionManager>(),
@@ -4188,6 +4235,11 @@ fn create_session_with_effects<R: tauri::Runtime>(
                     )?
                     .1,
                 )
+            } else if launch.is_some() {
+                Some(ResumeClaim::acquire(
+                    manager.resume_claims.clone(),
+                    &format!("picker:{}", record.summary.session_id),
+                )?)
             } else {
                 None
             };
@@ -4214,8 +4266,9 @@ fn create_session_with_effects<R: tauri::Runtime>(
     } else {
         ssh_builder
     };
+    let resume_picker = reopened.is_some() && launch.is_some() && resume_id.is_none();
     // Resume restores references and credentials from the stored launch before native probes.
-    let provider_environment = if resume_id.is_some() {
+    let provider_environment = if resume_id.is_some() || resume_picker {
         let stored = launch.as_ref().ok_or("Resume launch is missing")?;
         provider_launch::validate_project(
             stored,
@@ -4301,6 +4354,8 @@ fn create_session_with_effects<R: tauri::Runtime>(
                 )?;
             }
             resume_command(&executable, launch, id)?
+        } else if resume_picker {
+            resume_picker_command(&executable, launch)?
         } else {
             agent_command(&executable, launch)?
         }
@@ -4396,7 +4451,10 @@ fn create_session_with_effects<R: tauri::Runtime>(
             })
         })
         .transpose()?;
-    let restored = if let Some(record) = reopened.as_ref().filter(|_| resume_id.is_none()) {
+    let restored = if let Some(record) = reopened
+        .as_ref()
+        .filter(|_| resume_id.is_none() && !resume_picker)
+    {
         let runtime = &terminal
             .as_ref()
             .ok_or("Terminal parser unavailable for restoring history")?
@@ -5732,6 +5790,9 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             gui_startup::ready(app.handle())?;
             updater::initialize(app.handle())?;
+            app.state::<SessionManager>()
+                .background_starting
+                .store(true, Ordering::Release);
             if let Some(window) = app.get_window("main") {
                 record_desktop_focus(
                     &app.state::<SessionManager>(),
@@ -5739,7 +5800,6 @@ pub fn run() {
                     window.is_focused().unwrap_or(false),
                 );
             }
-            background::attach(app.handle())?;
             let handle = app.handle().clone();
             app.deep_link().on_open_url(move |event| {
                 for url in event.urls() {
@@ -5895,7 +5955,8 @@ pub fn run() {
                     codex_conversation::read_codex_conversation,
                     codex_conversation::cancel_codex_conversation,
                     native_menu::native_menu_labels,
-                    desktop_windows::set_notification_locale
+                    desktop_windows::set_notification_locale,
+                    node_runtime::initialize_background,
                 ],
                 |invoke| invoke.resolver.reject("webview_command_forbidden"),
             )
@@ -6966,6 +7027,29 @@ mod tests {
         assert!(!manager.desktop_foreground.load(super::Ordering::Acquire));
     }
     #[test]
+    fn cold_runtime_notification_waits_without_acquiring_history() {
+        use tauri::Manager;
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        tauri::WebviewWindowBuilder::new(&app, "main", tauri::WebviewUrl::App("index.html".into()))
+            .build()
+            .unwrap();
+        let manager = SessionManager::default();
+        manager
+            .background_starting
+            .store(true, super::Ordering::Release);
+        app.manage(manager);
+        crate::route_notification_link(app.handle(), "yam://session/s-cold").unwrap();
+        let manager = app.state::<SessionManager>();
+        assert!(manager.history.lock().unwrap().is_none());
+        assert!(manager.history_owner.lock().unwrap().is_none());
+        assert_eq!(
+            manager.notification_selection.lock().unwrap().as_deref(),
+            Some("s-cold")
+        );
+    }
+    #[test]
     fn notification_selection_survives_startup_and_stale_acknowledgement() {
         let manager = SessionManager::default();
         *manager.notification_selection.lock().unwrap() = Some("s-first".into());
@@ -7663,6 +7747,47 @@ mod tests {
         assert!(super::ResumeClaim::acquire(claims.clone(), "native-other").is_err());
         drop(other);
         assert!(claims.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn codex_missing_hook_identity_opens_native_history_picker_without_replaying_prompt() {
+        let root = std::env::temp_dir().join(next_session_id());
+        let store = HistoryStore::open(root.clone()).unwrap();
+        let summary = SessionSummary {
+            ssh: None,
+            session_id: "picker-source".into(),
+            cwd: root.to_string_lossy().into(),
+            command: None,
+            status: "stopped".into(),
+            launch: Some(super::AgentLaunch {
+                codex: None,
+                provider: None,
+                env_refs: Default::default(),
+                adapter: "codex".into(),
+                mode: "interactive".into(),
+                extra_args: String::new(),
+                prompt: Some("never replay".into()),
+            }),
+        };
+        store.start(&summary).unwrap();
+        let mut record = store.get(&summary.session_id).unwrap();
+        let (launch, id) = super::terminal_reopen_launch(&record)
+            .expect("missing hook identity must allow explicit native picker");
+        assert!(id.is_none());
+        let launch = launch.unwrap();
+        assert!(launch.prompt.is_none());
+        let command = super::resume_picker_command(std::path::Path::new("codex"), &launch).unwrap();
+        assert_eq!(command.get_argv().last().unwrap(), "resume");
+        assert!(!command
+            .get_argv()
+            .iter()
+            .any(|v| v == "--last" || v == "never replay"));
+        record.agent.agent_session_id = Some("--last".into());
+        assert!(super::terminal_reopen_launch(&record).is_err());
+        record.agent.agent_session_id = None;
+        record.status = "running".into();
+        assert!(super::terminal_reopen_launch(&record).is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

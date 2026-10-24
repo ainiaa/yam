@@ -52,7 +52,7 @@ test('primary ended Agent notice describes explicit execution and leaves ordinar
  const shell=record('stopped');shell.summary.launch={adapter:'shell',mode:'interactive',extra_args:''};assert.equal(policy(shell).notice,null);
 });
 test('F1 pure invalid identity provenance and launch boundaries never offer Continue',()=>{
- for(const mutate of [r=>r.agent.generation='',r=>r.agent.agent_session_id='--last',r=>r.agent.agent_session_id=null,r=>r.summary.command='secret',r=>r.summary.launch.mode='task',r=>r.summary.launch.adapter='opencode',r=>r.summary.launch.extra_args='--unknown']){const r=record();mutate(r);assert.equal(policy(r).canContinue,false);}
+ for(const mutate of [r=>r.agent.generation='',r=>r.agent.agent_session_id='--last',r=>r.summary.command='secret',r=>r.summary.launch.mode='task',r=>r.summary.launch.adapter='opencode',r=>r.summary.launch.extra_args='--unknown']){const r=record();mutate(r);assert.equal(policy(r).canContinue,false);}
  for(const status of ['running','starting','unknown','unavailable'])assert.equal(policy(record(status)).canContinue,false);
  assert.equal(policy(record(),'needs_attention','owner_unavailable').canContinue,false);
  assert.equal(policy(record(),'needs_attention','terminal_unavailable').canContinue,false);
@@ -104,7 +104,7 @@ test('F1 actual owner-error listener only marks local availability and never lau
 test('F1 selection policy preserves Claude candidate arguments but default Codex rejects overrides',()=>{
  const r=record('failed');r.summary.launch.adapter='claude';r.summary.launch.extra_args='--model sonnet';assert.equal(policy(r).canContinue,true);
  r.summary.launch.adapter='codex';assert.equal(policy(r).canContinue,false);
- assert.deepEqual(sessionRecovery(null,null,null,'idle',false,'available'),{canContinue:false,canRunAgain:false,notice:null});
+ assert.deepEqual(sessionRecovery(null,null,null,'idle',false,'available'),{canContinue:false,canRunAgain:false,chooseNative:false,notice:null});
 });
 test('F1 actual pending start cannot be duplicated by explicit recovery callbacks',()=>{
  const a=actions(record());a.bindings.starting=true;
@@ -284,3 +284,10 @@ test('A07a old pending parser cannot republish directory after attachment/connec
 });
 
 test('provider managed Codex Continue retains safe native options and stored connection',()=>{const r=record('stopped');r.summary.launch.provider={id:'deepseek',model:'deepseek-flash',base_url:'https://api.deepseek.com',api_key_env:'DEEPSEEK_API_KEY'};r.summary.launch.extra_args='--no-alt-screen';assert.equal(policy(r).canContinue,true);const a=actions(r);a.resume();assert.deepEqual(a.calls,[{resumeFrom:'s-a'}]);});
+
+
+test('stopped Codex without a hook identity offers an explicit native history picker',()=>{
+ const r=record('stopped');r.agent.agent_session_id=null;r.agent.generation='';const result=policy(r);assert.equal(result.canContinue,true);assert.equal(result.chooseNative,true);assert.match(result.notice,/choose.*saved.*conversation/i);
+ const trusted=policy(record('stopped'));assert.equal(trusted.chooseNative,false);
+ const malicious=record('stopped');malicious.agent.agent_session_id='--last';assert.equal(policy(malicious).canContinue,false);
+});

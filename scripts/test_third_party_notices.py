@@ -194,6 +194,22 @@ class NoticeTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 notices.validate_packaged(root, resources)
 
+    def test_script_report_binds_fixed_resource_and_rejects_tamper_or_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=pathlib.Path(directory);records,body=self.fixture(root)
+            manifest=notices.make_manifest(root,records,additional=[{"name":"Node","version":"26.10.0","body":body,"provenance":{"kind":"fixture_archive"}}])
+            (root/"scripts/third-party-notices/manifest.json").write_bytes(notices.canonical(manifest))
+            resources=root/"resources";resources.mkdir();script=resources/"yam-terminal.cjs";script.write_bytes(b"bundled script")
+            content,report=notices.render(root,manifest,mode="release");(resources/"THIRD-PARTY-NOTICES.txt").write_bytes(content)
+            reportfile=resources/"THIRD-PARTY-NOTICES.report.json";bound=notices.report_for_binary(report,script,runtime_file="yam-terminal.cjs");reportfile.write_bytes(notices.canonical(bound))
+            self.assertTrue(notices.validate_packaged(root,resources)["complete"])
+            script.write_bytes(b"tampered")
+            with self.assertRaises(ValueError):notices.validate_packaged(root,resources)
+            script.write_bytes(b"bundled script")
+            for name in ["../yam-terminal.cjs","node","/yam-terminal.cjs"]:
+                reportfile.write_bytes(notices.canonical({**bound,"runtime_file":name}))
+                with self.assertRaises(ValueError):notices.validate_packaged(root,resources)
+
     def test_graph_reader_enforces_real_byte_and_time_budgets(self):
         result = notices.graph_output([sys.executable, "-c", "print('[]')"], limit=100, timeout=1)
         self.assertEqual(json.loads(result), [])
@@ -534,7 +550,7 @@ class ApprovedInventoryTests(unittest.TestCase):
     def test_current_real_554_manifest_material_binding_includes_closed_cohort(self):
         root = pathlib.Path(__file__).resolve().parents[1]
         trusted = notices.read_json(root/"scripts/third-party-notices/manifest.json")
-        approved = "abce9c3478bac62a4fed6779b6bf39a9831a144a1701a95e4ec7e9e29f8c5919"
+        approved = "d8571697bdb296ae1307510fa196c582e33feb618b2033e27d9d6895fc9b2dc2"
         self.assertEqual(notices.digest(notices.canonical(trusted)),approved)
         with mock.patch.object(notices,"APPROVED_MANIFEST_SHA256",approved,create=True):
             content, report = notices.render(root,trusted,mode="developer")
@@ -580,7 +596,7 @@ class ReleaseClosureTests(unittest.TestCase):
         root = pathlib.Path(__file__).resolve().parents[1]
         config = notices.read_json(root / "apps/desktop/src-tauri/tauri.windows.conf.json")
         self.assertEqual(config["bundle"]["resources"], [
-            "target/terminal-runtime/yam-terminal.exe",
+            "target/terminal-runtime/yam-terminal.cjs",
             "target/terminal-runtime/DEVELOPER-INCOMPLETE-NOTICES.txt",
             "target/terminal-runtime/DEVELOPER-INCOMPLETE-NOTICES.report.json",
         ])
@@ -603,7 +619,7 @@ class ReleaseClosureTests(unittest.TestCase):
                 self.assertEqual(code, 7)
                 self.assertEqual(argv[:4], ["pnpm", "tauri", "build", "--config"])
                 config = captured[0]
-                self.assertEqual(config["bundle"]["resources"], ["target/terminal-runtime/yam-terminal" + suffix, "target/terminal-runtime/THIRD-PARTY-NOTICES.txt", "target/terminal-runtime/THIRD-PARTY-NOTICES.report.json"])
+                self.assertEqual(config["bundle"]["resources"], ["target/terminal-runtime/yam-terminal.cjs", "target/terminal-runtime/THIRD-PARTY-NOTICES.txt", "target/terminal-runtime/THIRD-PARTY-NOTICES.report.json"])
                 self.assertIn("--notice-mode release", config["build"]["beforeBuildCommand"])
                 self.assertEqual(argv[5:], extra)
 
@@ -926,7 +942,7 @@ class MaterialBatch01Tests(unittest.TestCase):
       'main': ['a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2',
                'fea1d5bf3dd71605ce5d7d2ff695c1837e914c77195e523a86b5391716477960'],
       'supp': []}]
-    APPROVED = 'abce9c3478bac62a4fed6779b6bf39a9831a144a1701a95e4ec7e9e29f8c5919'
+    APPROVED = 'd8571697bdb296ae1307510fa196c582e33feb618b2033e27d9d6895fc9b2dc2'
 
     def _current(self):
         root = pathlib.Path(__file__).resolve().parents[1]

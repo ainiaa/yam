@@ -1392,6 +1392,14 @@ fn rust85_window_preferences_settings_and_zoom_validate_scope_before_mutation() 
         fixture.session.id()
     )
     .unwrap());
+    crate::record_desktop_focus(&fixture.manager(), "main", false);
+    assert!(!terminal_input_focused(
+        fixture.main.clone(),
+        fixture.manager(),
+        1,
+        fixture.session.id()
+    )
+    .unwrap());
 }
 
 #[test]
@@ -1438,4 +1446,202 @@ fn language_theme_locale_command_updates_only_current_trusted_main_epoch() {
     assert!(fixture.manager().system_entry.lock().unwrap().notification_chinese);
     set_notification_locale(fixture.main.clone(),fixture.manager(),1,"en".into()).unwrap();
     assert!(!fixture.manager().system_entry.lock().unwrap().notification_chinese);
+}
+
+#[test]
+fn session_preferences_allow_secondary_names_but_reject_global_writes_and_stale_epochs() {
+    let fixture = Rust85Windows::new();
+    let publish = |epoch, key: &str, value: &str| commit_window_preferences(
+        fixture.app.handle().clone(), fixture.secondary.clone(), fixture.manager(), epoch,
+        key.into(), Some(value.into()), None,
+    );
+    assert!(publish(fixture.secondary_epoch(), "yam.sessionName.s-test-1", "\"Named\"").is_ok());
+    assert!(publish(fixture.secondary_epoch(), "yam.sessionLaunch.s-test-1", "{\"terminal\":\"yam\"}").is_ok());
+    for (key,value) in [("yam.sessionTitles","{}"),("yam.sessionName.../bad","null"),("yam.sessionName.s-test-1","\"\""),("yam.sessionLaunch.s-test-1","secret")] {
+        assert!(publish(fixture.secondary_epoch(), key, value).is_err());
+    }
+    assert!(publish(0, "yam.sessionName.s-test-1", "\"Named\"").is_err());
+    assert_eq!(fixture.manager().desktop_windows.lock().unwrap().preference_revision,2);
+}
+
+#[test]
+fn startup_ipc_dispatch_returns_while_owner_is_waiting() {
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    };
+    use std::time::Duration;
+    // MockRuntime never creates an OS window or launches a desktop application.
+    for command in ["read_terminal_frame", "read_session_snapshot"] {
+        let mut fixture = crate::tests::Rust85Session::new("exit 0");
+        fixture.session.child.lock().unwrap().wait().unwrap();
+        fixture.parser();
+        let app = tauri::test::mock_builder()
+            .invoke_handler(tauri::generate_handler![
+                read_terminal_frame,
+                read_session_snapshot
+            ])
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        app.manage(SessionManager::default());
+        let manager = app.state::<SessionManager>();
+        manager
+            .sessions
+            .lock()
+            .unwrap()
+            .insert(fixture.id(), fixture.session.clone());
+        *manager.history.lock().unwrap() = Some(fixture.session.history.clone());
+        let window = tauri::WebviewWindowBuilder::new(
+            &app,
+            "main",
+            tauri::WebviewUrl::App("index.html".into()),
+        )
+        .build()
+        .unwrap();
+        let view: Webview<tauri::test::MockRuntime> = window.as_ref().clone();
+        desktop_window_bootstrap(
+            app.handle().clone(),
+            view.clone(),
+            app.state(),
+            vec![fixture.id()],
+            vec![],
+            1,
+        )
+        .unwrap();
+        let generation = claim_terminal_view(
+            app.handle().clone(),
+            view.clone(),
+            app.state(),
+            1,
+            fixture.id(),
+        )
+        .unwrap()
+        .unwrap();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let released = Arc::new(AtomicBool::new(false));
+        let observed = released.clone();
+        let handle = app.handle().clone();
+        let owner = std::thread::spawn(move || {
+            let manager = handle.state::<SessionManager>();
+            let _waiting = manager.background_client.lock().unwrap();
+            ready_tx.send(()).unwrap();
+            let _ = release_rx.recv_timeout(Duration::from_secs(2));
+            observed.store(true, Ordering::Release);
+        });
+        ready_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (response_tx, response_rx) = mpsc::channel();
+        view.clone().on_message(tauri::webview::InvokeRequest {
+            cmd: command.into(), callback: tauri::ipc::CallbackFn(0), error: tauri::ipc::CallbackFn(1),
+            url: view.url().unwrap(),
+            body: tauri::ipc::InvokeBody::Json(serde_json::json!({"desktopEpoch":1,"desktopGeneration":generation,"sessionId":fixture.id()})),
+            headers: Default::default(), invoke_key: tauri::test::INVOKE_KEY.into(),
+        }, Box::new(move |_, _, response, _, _| { response_tx.send(response).unwrap(); }));
+        let blocked_gui = released.load(Ordering::Acquire);
+        let premature_response = response_rx.try_recv().ok();
+        let _ = release_tx.send(());
+        owner.join().unwrap();
+        assert!(
+            !blocked_gui,
+            "{command} blocked the GUI dispatch until owner work finished"
+        );
+        assert!(
+            premature_response.is_none(),
+            "{command} did not reach the delayed owner path"
+        );
+        let response = response_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert!(
+            matches!(response, tauri::ipc::InvokeResponse::Ok(_)),
+            "{command} failed after releasing the owner: {response:?}"
+        );
+    }
+}
+
+#[test]
+fn startup_duplicate_reservation_never_dispatches_twice() {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    };
+    use std::time::Duration;
+    let fixture = Rust85Windows::new();
+    let reservation =
+        reserve_terminal_start(fixture.main.clone(), fixture.manager(), 1, None).unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let app = fixture.app.handle().clone();
+    let window = fixture.main.clone();
+    let first_calls = calls.clone();
+    let first = std::thread::spawn(move || {
+        create_session_with(
+            app.clone(),
+            window,
+            app.state(),
+            1,
+            reservation,
+            None,
+            None,
+            false,
+            closure_t04_arguments(),
+            || {
+                first_calls.fetch_add(1, Ordering::SeqCst);
+                entered_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+                Err("deterministic owner refusal".into())
+            },
+        )
+    });
+    entered_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    let duplicate = create_session_with(
+        fixture.app.handle().clone(),
+        fixture.main.clone(),
+        fixture.manager(),
+        1,
+        reservation,
+        None,
+        None,
+        false,
+        closure_t04_arguments(),
+        || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err("duplicate owner dispatch".into())
+        },
+    );
+    release_tx.send(()).unwrap();
+    assert!(first.join().unwrap().is_err());
+    assert!(duplicate.is_err());
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "same reservation dispatched more than once"
+    );
+    assert!(!fixture
+        .manager()
+        .desktop_windows
+        .lock()
+        .unwrap()
+        .starts
+        .contains_key(&reservation));
+}
+
+#[test]
+fn startup_unknown_result_does_not_release_another_inflight_reservation() {
+    let mut table = Table::default();
+    table.bootstrap(&[], &[], &[]).unwrap();
+    let unknown = table.reserve(Slot::Main, 1).unwrap();
+    let inflight = table.reserve(Slot::Main, 1).unwrap();
+    table.check_start(Slot::Main, 1, unknown).unwrap();
+    table.check_start(Slot::Main, 1, inflight).unwrap();
+    table.start_unknown(unknown);
+    assert!(table.check_start(Slot::Main, 1, inflight).is_err());
+    assert!(table.starts.contains_key(&inflight));
+    assert_eq!(
+        table.check_start(Slot::Main, 1, unknown).unwrap_err(),
+        "terminal_start_outcome_unknown"
+    );
+    table.created(inflight, "s-inflight-1").unwrap();
+    assert_eq!(table.owner("s-inflight-1"), Some(Slot::Main));
+    assert!(!table.starts.contains_key(&inflight));
+    assert!(table.start_blocked(Slot::Main, 1));
 }

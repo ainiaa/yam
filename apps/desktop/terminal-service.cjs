@@ -127,7 +127,7 @@ async function run(){
    await emit({id,ok:true,data});
   }catch(error){await emit({id,ok:false,error:error.message});}
  }
- await emit({type:'ready',version:1,instance,terminal_version:'6.0.0',serialize_version:'0.14.0'});
+ await emit({type:'ready',version:1,instance,terminal_version:'6.0.0',serialize_version:'0.14.0',node_version:process.versions.node,node_arch:process.arch,node_platform:process.platform});
  let pending=Buffer.alloc(0);
  try{
   for await(const bytes of process.stdin){

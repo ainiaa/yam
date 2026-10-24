@@ -112,3 +112,21 @@ test('native resume is an explicit action passing only the YAM history identity'
  const handler=new Function(...Object.keys(bindings),js+';return resumeSelectedSession')(...Object.values(bindings));handler();assert.deepEqual(calls,[{resumeFrom:'source'}]);
  new Function(...Object.keys(bindings),js+';return resumeSelectedSession')(...Object.values({...bindings,session:null,startSession:()=>assert.fail('no selection')}))();
 });
+
+
+test('unknown or disconnected integration cannot advertise a ready or working CLI',()=>{
+ for(const integration of ['unknown','disconnected','future-state',''])for(const phase of ['idle','working','needs_permission']){
+  assert.equal(agentLabel({...agent(phase),integration}),'Integration unavailable');
+ }
+ assert.equal(agentLabel({...agent('idle'),integration:'connected'}),'Ready');
+ assert.equal(agentLabel({...agent('idle'),integration:'connecting'}),'Awaiting trusted hook');
+});
+
+
+test('ended sidebar session labels explicitly identify historical events, not current permission waits',()=>{
+ let label;function visit(n){if(ts.isJsxElement(n)&&n.openingElement.tagName.getText(source)==='small'&&n.getText(source).includes('agentLabel(')&&n.getText(source).includes('record.status'))label=n;ts.forEachChild(n,visit);}visit(source);assert.ok(label);
+ const React={createElement:(_type,_props,...children)=>children.flat(Infinity).filter(x=>x!==false&&x!==null&&x!==undefined).join('')};
+ const render=new Function('React','t','agentLabel','record',ts.transpileModule('const view='+label.getText(source)+';return view;',{compilerOptions:{target:ts.ScriptTarget.ESNext,jsx:ts.JsxEmit.React}}).outputText);
+ for(const status of ['stopped','failed','succeeded'])assert.match(render(React,s=>s,agentLabel,{status,agent:{phase:'needs_permission',integration:'connected',unread_count:0}}),/^Last event: Permission required$/);
+ assert.equal(render(React,s=>s,agentLabel,{status:'running',agent:{phase:'needs_permission',integration:'connected',unread_count:0}}),'Permission required');
+});

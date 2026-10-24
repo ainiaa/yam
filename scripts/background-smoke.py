@@ -81,7 +81,7 @@ def validate_f7_run(app, identifier, receipt_path, *, first_start=True, owner_ho
         if not isinstance(name, str) or not name or Path(name).name != name or name in (".", ".."):
             raise ValueError("Invalid F7 executable declaration")
         executable = unlinked(app / "Contents/MacOS" / name)
-        resource = unlinked(app / "Contents/Resources/target/terminal-runtime/yam-terminal")
+        resource = unlinked((app / "Contents/Resources/target/terminal-runtime/yam-terminal.cjs" if (app / "Contents/Resources/target/terminal-runtime/yam-terminal.cjs").exists() else app / "Contents/Resources/target/terminal-runtime/yam-terminal"))
         if not stat.S_ISREG(executable.lstat().st_mode) or not stat.S_ISREG(resource.lstat().st_mode):
             raise ValueError("F7 executable and runtime must be regular files")
         if info.get("CFBundleIdentifier") != identifier or receipt.get("identifier") != identifier or info.get("LSMinimumSystemVersion") != "13.5" or receipt.get("package_path") != str(app) or receipt.get("executable_path") != str(executable):

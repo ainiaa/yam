@@ -11,9 +11,10 @@ export class TerminalViews<T extends { dispose(): void }> {
  get all() { return [...this.views.values()].map(entry => entry.value); }
  get size() { return this.views.size; }
  get canOpen() { return !this.admission && (this.size < this.limit || [...this.views].some(([id,entry]) => !entry.running && !this.protectedIds.has(id))); }
- reserveAdmission() {
+ reserveAdmission(eligible: (value:T)=>boolean = ()=>true) {
   if(!this.canOpen)return false;
-  const victim=this.size>=this.limit?[...this.views].find(([id,entry])=>!entry.running&&!this.protectedIds.has(id))?.[0]:null;
+  const victim=this.size>=this.limit?[...this.views].find(([id,entry])=>!entry.running&&!this.protectedIds.has(id)&&eligible(entry.value))?.[0]:null;
+  if(this.size>=this.limit&&!victim)return false;
   this.admission={victim:victim??null};return true;
  }
  releaseAdmission() {this.admission=null;}

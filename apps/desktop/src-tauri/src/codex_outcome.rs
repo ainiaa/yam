@@ -1,5 +1,12 @@
 use serde_json::Value;
 
+#[derive(Debug, PartialEq, Eq)]
+enum Outcome {
+    Complete,
+    Failed,
+    Interrupted,
+}
+
 struct Decoder<'a> {
     session: &'a str,
     turn: &'a str,
@@ -8,7 +15,7 @@ struct Decoder<'a> {
     started: bool,
 }
 impl Decoder<'_> {
-    fn line(&mut self, line: &[u8]) -> Result<Option<bool>, &'static str> {
+    fn line(&mut self, line: &[u8]) -> Result<Option<Outcome>, &'static str> {
         let value: Value = serde_json::from_slice(line).map_err(|_| "Invalid outcome record")?;
         let payload = &value["payload"];
         if !self.metadata {
@@ -38,12 +45,75 @@ impl Decoder<'_> {
                 if error.is_some_and(|v| !v.is_object()) {
                     return Err("Unsupported outcome error");
                 }
-                return Ok(Some(payload["type"] == "task_complete" && error.is_some()));
+                return Ok(Some(if payload["type"] == "turn_aborted" {
+                    Outcome::Interrupted
+                } else if error.is_some() {
+                    Outcome::Failed
+                } else {
+                    Outcome::Complete
+                }));
             }
             _ => {}
         }
         Ok(None)
     }
+}
+
+#[cfg(unix)]
+fn large_record(reader: impl std::io::Read) -> Result<Value, &'static str> {
+    use serde::Deserialize;
+    struct ErrorObject;
+    impl<'de> Deserialize<'de> for ErrorObject {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            struct ObjectVisitor;
+            impl<'de> serde::de::Visitor<'de> for ObjectVisitor {
+                type Value = ErrorObject;
+                fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    formatter.write_str("a native error object")
+                }
+                fn visit_map<A: serde::de::MapAccess<'de>>(
+                    self,
+                    mut map: A,
+                ) -> Result<Self::Value, A::Error> {
+                    while map
+                        .next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?
+                        .is_some()
+                    {}
+                    Ok(ErrorObject)
+                }
+            }
+            deserializer.deserialize_map(ObjectVisitor)
+        }
+    }
+    #[derive(Deserialize)]
+    struct Payload {
+        #[serde(rename = "type")]
+        kind: Option<String>,
+        turn_id: Option<String>,
+        error: Option<ErrorObject>,
+    }
+    #[derive(Deserialize)]
+    struct Record {
+        #[serde(rename = "type")]
+        kind: String,
+        payload: Payload,
+    }
+    let record: Record =
+        serde_json::from_reader(reader).map_err(|_| "Invalid large outcome record")?;
+    if record.kind.len() > 128
+        || record.payload.kind.as_ref().is_some_and(|v| v.len() > 128)
+        || record
+            .payload
+            .turn_id
+            .as_ref()
+            .is_some_and(|v| v.len() > 8192)
+    {
+        return Err("Invalid outcome identity");
+    }
+    Ok(serde_json::json!({"type":record.kind,"payload":{
+        "type":record.payload.kind,"turn_id":record.payload.turn_id,
+        "error":record.payload.error.map(|_| serde_json::json!({}))
+    }}))
 }
 
 #[cfg(unix)]
@@ -53,13 +123,12 @@ fn observe(
     decoder: &mut Decoder<'_>,
     timeout: std::time::Duration,
     mut alive: impl FnMut() -> bool,
-) -> Result<Option<bool>, &'static str> {
+) -> Result<Option<Outcome>, &'static str> {
     use std::{
-        io::{BufRead, Read},
+        io::{BufRead, Read, Seek, SeekFrom},
         os::unix::fs::MetadataExt,
         time::{Duration, Instant},
     };
-    const MAX_BYTES: u64 = 128 * 1024 * 1024;
     const MAX_LINE: usize = 2 * 1024 * 1024;
     let relative = path
         .strip_prefix(root)
@@ -74,9 +143,11 @@ fn observe(
     let mut reader = std::io::BufReader::new(file);
     let mut pending = Vec::new();
     let mut seen = 0u64;
-    let deadline = Instant::now() + timeout;
+    let deadline = Instant::now().checked_add(timeout);
+    let mut oversized = false;
+    let mut line_start = 0u64;
     let mut path_checked_at = 0u64;
-    while Instant::now() < deadline && alive() {
+    while deadline.is_none_or(|end| Instant::now() < end) && alive() {
         // Bound path checks by consumed bytes; read_until can refill inside a record.
         if reader.buffer().is_empty()
             || seen.saturating_sub(path_checked_at) >= reader.capacity() as u64
@@ -99,8 +170,8 @@ fn observe(
         if current.nlink() != 1 || current.uid() != metadata.uid() {
             return Err("Invalid outcome file");
         }
-        if current.len() < seen || current.len() > MAX_BYTES {
-            return Err("Outcome file truncated or too large");
+        if current.len() < seen {
+            return Err("Outcome file truncated");
         }
         let count = reader
             .by_ref()
@@ -108,11 +179,27 @@ fn observe(
             .read_until(b'\n', &mut pending)
             .map_err(|_| "Cannot read outcome")?;
         seen += count as u64;
-        if pending.len() > MAX_LINE || seen > MAX_BYTES {
-            return Err("Outcome record too large");
+        if pending.len() > MAX_LINE {
+            if !decoder.metadata {
+                return Err("Outcome metadata too large");
+            }
+            oversized = true;
         }
         if pending.ends_with(b"\n") {
-            if let Some(outcome) = decoder.line(&pending)? {
+            let outcome = if oversized {
+                // Stream past large reply/tool bodies while retaining only the outcome envelope.
+                reader
+                    .seek(SeekFrom::Start(line_start))
+                    .map_err(|_| "Cannot seek outcome")?;
+                let envelope = large_record(reader.by_ref().take(seen - line_start))?;
+                reader
+                    .seek(SeekFrom::Start(seen))
+                    .map_err(|_| "Cannot seek outcome")?;
+                decoder.line(&serde_json::to_vec(&envelope).map_err(|_| "Invalid outcome")?)?
+            } else {
+                decoder.line(&pending)?
+            };
+            if let Some(outcome) = outcome {
                 let current = crate::file_preview::open_beneath(&root, relative)?
                     .metadata()
                     .map_err(|_| "Outcome unavailable")?;
@@ -122,19 +209,22 @@ fn observe(
                 {
                     return Err("Outcome file replaced");
                 }
-                if current.len() < seen || current.len() > MAX_BYTES {
-                    return Err("Outcome file truncated or too large");
+                if current.len() < seen {
+                    return Err("Outcome file truncated");
                 }
-                if !alive() || Instant::now() >= deadline {
+                if !alive() || deadline.is_some_and(|end| Instant::now() >= end) {
                     return Ok(None);
                 }
                 return Ok(Some(outcome));
             }
             pending.clear();
-        } else {
-            std::thread::sleep(
-                Duration::from_millis(20).min(deadline.saturating_duration_since(Instant::now())),
-            );
+            oversized = false;
+            line_start = seen;
+        } else if count == 0 {
+            std::thread::sleep(Duration::from_millis(20));
+        } else if oversized {
+            // Retain only a bounded chunk until the full JSON record is available.
+            pending.clear();
         }
     }
     Ok(None)
@@ -303,11 +393,16 @@ pub(crate) fn run(raw: &str) -> Result<Option<crate::agent_events::AgentEvent>, 
         &request.root,
         &request.path,
         &mut decoder,
-        std::time::Duration::from_secs(3600),
+        std::time::Duration::MAX,
         || request.process.alive(),
     )?;
-    if result == Some(true) {
-        request.event.kind = "TurnFailed".into();
+    if let Some(outcome) = result {
+        request.event.kind = match outcome {
+            Outcome::Complete => "TurnComplete",
+            Outcome::Failed => "TurnFailed",
+            Outcome::Interrupted => "Interrupt",
+        }
+        .into();
         request.event.permission_key = None;
         request.event.source = None;
         return Ok(Some(request.event));
@@ -331,7 +426,7 @@ mod tests {
             started: false,
         }
     }
-    fn feed(d: &mut Decoder<'_>, value: Value) -> Result<Option<bool>, &'static str> {
+    fn feed(d: &mut Decoder<'_>, value: Value) -> Result<Option<Outcome>, &'static str> {
         d.line(&serde_json::to_vec(&value).unwrap())
     }
     fn meta() -> Value {
@@ -346,13 +441,38 @@ mod tests {
         assert_eq!(feed(&mut d, event("task_started", "turn-1")).unwrap(), None);
         d
     }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn single_start_observer_reports_success_failure_and_abort_without_notify_override() {
+        for (kind, error, expected) in [
+            ("task_complete", Value::Null, "TurnComplete"),
+            ("task_complete", json!({"message":"private"}), "TurnFailed"),
+            ("turn_aborted", Value::Null, "Interrupt"),
+        ] {
+            let (root, path) = fixture();
+            let mut value = event(kind, "turn-1");
+            value["payload"]["error"] = error;
+            writeln!(
+                fs::OpenOptions::new().append(true).open(&path).unwrap(),
+                "{value}"
+            )
+            .unwrap();
+            let pid = std::process::id();
+            let info = process(pid).unwrap();
+            let request=Request{event:serde_json::from_value(json!({"kind":"UserPromptSubmit","agent_session_id":"thread-1","turn_id":"turn-1"})).unwrap(),cwd:"/project".into(),root:root.clone(),path,process:NativeProcess{pid,start:[info.pbi_start_tvsec,info.pbi_start_tvusec]}};
+            let result = run(&serde_json::to_string(&request).unwrap()).unwrap();
+            fs::remove_dir_all(root).unwrap();
+            assert_eq!(result.unwrap().kind, expected);
+        }
+    }
+
     #[test]
     fn native_api_failure_is_a_terminal_failure_without_error_text() {
         let mut d = started();
         let mut v = event("task_complete", "turn-1");
         v["payload"]["error"] =
             json!({"message":"SECRET provider response","codex_error_info":"other"});
-        assert_eq!(feed(&mut d, v).unwrap(), Some(true));
+        assert_eq!(feed(&mut d, v).unwrap(), Some(Outcome::Failed));
     }
     #[test]
     fn codex_0163_observed_outcomes_keep_failure_success_abort_and_identity_distinct() {
@@ -361,7 +481,11 @@ mod tests {
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
-        for (index, expected) in [(2, Some(true)), (3, Some(false)), (4, Some(false))] {
+        for (index, expected) in [
+            (2, Some(Outcome::Failed)),
+            (3, Some(Outcome::Complete)),
+            (4, Some(Outcome::Interrupted)),
+        ] {
             let mut d = Decoder {
                 session: "thread-0163",
                 turn: "turn-0163",
@@ -387,9 +511,13 @@ mod tests {
             Value::Null,
         ] {
             for (kind, error, expected) in [
-                ("task_complete", json!({"message":"PRIVATE"}), true),
-                ("task_complete", Value::Null, false),
-                ("turn_aborted", Value::Null, false),
+                (
+                    "task_complete",
+                    json!({"message":"PRIVATE"}),
+                    Outcome::Failed,
+                ),
+                ("task_complete", Value::Null, Outcome::Complete),
+                ("turn_aborted", Value::Null, Outcome::Interrupted),
             ] {
                 let mut d = decoder();
                 let mut metadata = meta();
@@ -415,12 +543,19 @@ mod tests {
     fn success_and_abort_stop_observation_without_synthesizing_failure() {
         for kind in ["task_complete", "turn_aborted"] {
             let mut d = started();
-            assert_eq!(feed(&mut d, event(kind, "turn-1")).unwrap(), Some(false));
+            assert_eq!(
+                feed(&mut d, event(kind, "turn-1")).unwrap(),
+                Some(if kind == "turn_aborted" {
+                    Outcome::Interrupted
+                } else {
+                    Outcome::Complete
+                })
+            );
         }
         let mut d = started();
         let mut v = event("task_complete", "turn-1");
         v["payload"]["error"] = Value::Null;
-        assert_eq!(feed(&mut d, v).unwrap(), Some(false));
+        assert_eq!(feed(&mut d, v).unwrap(), Some(Outcome::Complete));
     }
     #[test]
     fn wrong_identity_unknown_format_and_missing_start_fail_closed() {
@@ -446,7 +581,7 @@ mod tests {
         assert_eq!(feed(&mut d, json!({"type":"response_item","payload":{"type":"message","error":{"message":"error"}}})).unwrap(), None);
         assert_eq!(
             feed(&mut d, event("task_complete", "turn-1")).unwrap(),
-            Some(false)
+            Some(Outcome::Complete)
         );
     }
     #[test]
@@ -459,7 +594,7 @@ mod tests {
         }
         assert_eq!(
             feed(&mut d, event("task_complete", "turn-1")).unwrap(),
-            Some(false)
+            Some(Outcome::Complete)
         );
     }
     #[cfg(unix)]
@@ -502,7 +637,7 @@ mod tests {
                 true
             })
             .unwrap(),
-            Some(true)
+            Some(Outcome::Failed)
         );
         thread.join().unwrap();
         fs::remove_dir_all(root).unwrap();
@@ -567,8 +702,44 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn observer_rejects_oversized_records_files_and_hard_links() {
-        use std::io::{Seek, SeekFrom};
+    fn large_native_output_does_not_hide_the_root_outcome() {
+        let (root, path) = fixture();
+        let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        f.write_all(b"{\"type\":\"response_item\",\"payload\":{\"text\":\"")
+            .unwrap();
+        let block = vec![b'a'; 1024 * 1024];
+        for _ in 0..129 {
+            f.write_all(&block).unwrap();
+        }
+        f.write_all(b"\"}}\n").unwrap();
+        writeln!(f, "{}", event("task_complete", "turn-1")).unwrap();
+        let result = observe(
+            &root,
+            &path,
+            &mut decoder(),
+            Duration::from_secs(60),
+            || true,
+        );
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(result.unwrap(), Some(Outcome::Complete));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn large_final_reply_still_reports_the_validated_root_outcome() {
+        let (root, path) = fixture();
+        let mut value = event("task_complete", "turn-1");
+        value["payload"]["last_agent_message"] = "x".repeat(3 * 1024 * 1024).into();
+        let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(f, "{value}").unwrap();
+        let result = observe(&root, &path, &mut decoder(), Duration::from_secs(1), || {
+            true
+        });
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(result.unwrap(), Some(Outcome::Complete));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn observer_rejects_oversized_metadata_and_hard_links() {
         let (root, path) = fixture();
         let alias = root.join("hard-link.jsonl");
         fs::hard_link(&path, &alias).unwrap();
@@ -579,17 +750,7 @@ mod tests {
             .is_err()
         );
         fs::remove_file(alias).unwrap();
-        let mut f = fs::OpenOptions::new().write(true).open(&path).unwrap();
-        f.set_len(129 * 1024 * 1024).unwrap();
-        assert!(
-            observe(&root, &path, &mut decoder(), Duration::from_secs(1), || {
-                true
-            })
-            .is_err()
-        );
-        f.set_len(0).unwrap();
-        f.seek(SeekFrom::Start(0)).unwrap();
-        f.write_all(&vec![b'a'; 2 * 1024 * 1024 + 1]).unwrap();
+        fs::write(&path, vec![b'a'; 2 * 1024 * 1024 + 1]).unwrap();
         assert!(
             observe(&root, &path, &mut decoder(), Duration::from_secs(1), || {
                 true
@@ -727,7 +888,7 @@ mod tests {
                 let result = observe(&root, &path, &mut d, Duration::from_secs(15), || true);
                 let elapsed = start.elapsed();
                 fs::remove_dir_all(root).unwrap();
-                assert_eq!(result.unwrap(), Some(worker % 3 == 0), "worker {worker} must ignore foreign terminal records and finish within 15 seconds");
+                assert_eq!(result.unwrap(), Some(match worker % 3 { 0 => Outcome::Failed, 1 => Outcome::Complete, _ => Outcome::Interrupted }), "worker {worker} must ignore foreign terminal records and finish within 15 seconds");
                 assert!(elapsed < Duration::from_secs(15));
                 elapsed.as_secs_f64()
             })
@@ -743,7 +904,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn observer_rechecks_size_before_committing_buffered_terminal_records() {
+    fn observer_rejects_truncation_but_allows_growth_before_buffered_outcomes() {
         for oversize in [false, true] {
             let (root, path) = fixture();
             let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
@@ -757,10 +918,14 @@ mod tests {
                 }
                 true
             });
-            assert!(
-                result.is_err(),
-                "buffered terminal records must not bypass a changed file size: {result:?}"
-            );
+            if oversize {
+                assert_eq!(result.unwrap(), Some(Outcome::Failed));
+            } else {
+                assert!(
+                    result.is_err(),
+                    "truncated records must be rejected: {result:?}"
+                );
+            }
             fs::remove_dir_all(root).unwrap();
         }
     }

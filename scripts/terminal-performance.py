@@ -184,7 +184,7 @@ def validate_package_receipt(app, receipt):
         raise ValueError("Frozen product source changed")
     actual = {"package_sha256": digest(app), "info_sha256": digest(info_path),
               "binary_sha256": digest(app / "Contents/MacOS" / info["CFBundleExecutable"]),
-              "terminal_resource_sha256": digest(app / "Contents/Resources/target/terminal-runtime/yam-terminal")}
+              "terminal_resource_sha256": digest((app / "Contents/Resources/target/terminal-runtime/yam-terminal.cjs" if (app / "Contents/Resources/target/terminal-runtime/yam-terminal.cjs").exists() else app / "Contents/Resources/target/terminal-runtime/yam-terminal"))}
     if any(receipt.get(key) != value for key, value in actual.items()):
         raise ValueError("Frozen package hash mismatch")
 

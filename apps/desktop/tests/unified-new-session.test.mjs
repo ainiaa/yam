@@ -16,13 +16,13 @@ import {zshCommandReportingEligible} from '../src/zsh-command-reporting.ts';
 
 const source=ts.createSourceFile('App.tsx',readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
 function nodes(predicate,root=source){const found=[];function visit(n){if(predicate(n))found.push(n);ts.forEachChild(n,visit);}visit(root);return found;}
-function actual(name,bindings){bindings={sessionTerminal:"yam",setLaunchWorktreeAttempt(){},...bindings};const fn=nodes(n=>ts.isFunctionDeclaration(n)&&n.name?.text===name)[0];assert.ok(fn,name);return new Function(...Object.keys(bindings),ts.transpile(fn.getText(source),{target:ts.ScriptTarget.ES2022})+`;return ${name};`)(...Object.values(bindings));}
+function actual(name,bindings){bindings={terminalSettingsRef:{current:{fontFamily:"Menlo",fontSize:13,theme:"app"}},sessionCopy:null,copyName:"",sessionCopyIntent:{current:0},setSessionCopy(){},setCopyName(){},ordinaryLaunchSnapshot:{current:undefined},saveSessionLaunchSettings(){},sessionTerminal:"yam",setLaunchWorktreeAttempt(){},...bindings};const fn=nodes(n=>ts.isFunctionDeclaration(n)&&n.name?.text===name)[0];assert.ok(fn,name);return new Function(...Object.keys(bindings),ts.transpile(fn.getText(source),{target:ts.ScriptTarget.ES2022})+`;return ${name};`)(...Object.values(bindings));}
 
 test('the primary new-session button opens the same session dialog',()=>{
  const buttons=nodes(n=>ts.isJsxElement(n)&&n.openingElement.tagName.getText(source)==='button');
  assert.equal(buttons.filter(n=>n.getText(source).includes('newTerminal(')).length,0,'no generic button starts a shell directly');
  const entries=buttons.filter(n=>n.openingElement.attributes.properties.some(a=>a.name?.getText(source)==='onClick'&&a.initializer?.getText(source).includes('newSession(')));
- assert.equal(entries.length,1,'one visible primary entry');
+ assert.equal(entries.length,2,'one primary entry plus the project action');
  for(const entry of entries){
   const click=entry.openingElement.attributes.properties.find(a=>a.name?.getText(source)==='onClick').initializer.expression;
   const calls=[];new Function('newSession','project',ts.transpile('return ('+click.getText(source)+');',{target:ts.ScriptTarget.ES2022}))(path=>calls.push(path),{path:'/project'})();

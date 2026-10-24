@@ -1,3 +1,4 @@
+import {sessionActionBindings} from './fixtures/session-action-bindings.mjs';
 import {englishUiRead} from './fixtures/english-ui-source.mjs';
 import './fixtures/i18n-test-init.mjs';
 import {nativeSettings} from './fixtures/native-settings.mjs';
@@ -17,7 +18,7 @@ test('A02 palette discovers profile management separately from ordinary new term
  assert.equal(paletteEntries('New session',[],false)[0]?.action,'new');
 });
 
-function actual(name,bindings){bindings={isMainWindow:true,desktopWindow:{slot:"main",epoch:1,main_epoch:1,restore_blocked:false},windowPreferenceKey:name=>windowContext.windowPreferenceKey("main",name),...bindings};let found;function visit(n){if(ts.isFunctionDeclaration(n)&&n.name?.text===name)found=n.getText(tree);ts.forEachChild(n,visit);}visit(tree);assert.ok(found);return new Function(...Object.keys(bindings),ts.transpile(found,{target:ts.ScriptTarget.ES2022})+';return '+name)(...Object.values(bindings));}
+function actual(name,bindings){bindings={...sessionActionBindings(),...bindings};bindings={isMainWindow:true,desktopWindow:{slot:"main",epoch:1,main_epoch:1,restore_blocked:false},windowPreferenceKey:name=>windowContext.windowPreferenceKey("main",name),...bindings};let found;function visit(n){if(ts.isFunctionDeclaration(n)&&n.name?.text===name)found=n.getText(tree);ts.forEachChild(n,visit);}visit(tree);assert.ok(found);return new Function(...Object.keys(bindings),ts.transpile(found,{target:ts.ScriptTarget.ES2022})+';return '+name)(...Object.values(bindings));}
 function nodes(root){const all=[];function visit(n){if(n&&typeof n==='object'){all.push(n);for(const c of n.children??[])Array.isArray(c)?c.forEach(visit):visit(c);}}visit(root);return all;}
 function component(stateHook=initial=>[typeof initial==='function'?initial():initial,()=>{}]){const source=englishUiRead(fs.readFileSync,new URL('../src/TerminalProfiles.tsx',import.meta.url),'utf8'),parsed=ts.createSourceFile('TerminalProfiles.tsx',source,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);const fn=parsed.statements.find(n=>ts.isFunctionDeclaration(n)&&n.name?.text==='TerminalProfiles');assert.ok(fn);return new Function('React','useRef','useEffect','useState','profileEnvRefsFromRows','const Select="select",EditableCombo="input";'+ts.transpile(fn.getText(parsed).replace('export ',''),{target:ts.ScriptTarget.ES2022,jsx:ts.JsxEmit.React})+';return TerminalProfiles')({createElement:(type,props,...children)=>({type,props:props??{},children})},value=>({current:value}),()=>{},stateHook,profileEnvRefsFromRows);}
 test('opening an untouched empty profile draft does not demand discard confirmation',()=>{

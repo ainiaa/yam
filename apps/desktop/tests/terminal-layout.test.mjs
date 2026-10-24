@@ -27,13 +27,13 @@ function visit(node){
 }
 visit(source);
 const transpile=s=>ts.transpileModule(s,{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText;
-function actual(name,args){args={isMainWindow:true,desktopWindow:{slot:"main",epoch:1,main_epoch:1,restore_blocked:false},windowPreferenceKey:name=>windowContext.windowPreferenceKey("main",name),...args};
+function actual(name,args){args={sessionCopyIntent:{current:0},setSessionCopy(){},setCopyName(){},ordinaryLaunchSnapshot:{current:undefined},...args};args={isMainWindow:true,desktopWindow:{slot:"main",epoch:1,main_epoch:1,restore_blocked:false},windowPreferenceKey:name=>windowContext.windowPreferenceKey("main",name),...args};
  assert.ok(functions.has(name),`Actual App ${name} callback is required`);
  const dependencies=['terminalReopenCurrent','rememberHiddenTerminal','recoverRevealedTerminals','claimWindowView','reconcileTerminalLayoutSelection','refreshTerminalScroll','cancelLayoutRestore','finishLayoutRestore','syncViewSize','fitTerminalViews','setTerminalPaneZoom','terminalPaneVisible','terminalPaneHasSize','terminalHasInputFocus','syncNotificationContext','showTerminalLayout','focusTerminalPane','pollTerminalFrames','renderFrame','requestTerminalLayoutFit','cancelTerminalLayoutFit','canSwapTerminalPanes','applyTerminalTabMove','requestTerminalTabFocus'];
  const text=[...new Set(dependencies.filter(n=>functions.has(n)).concat(['moveTerminalSession','selectTerminalTab','commitTerminalTabDrag'].includes(name)?['claimWindowView','openHistory','openTerminal']:[],name))].map(n=>functions.get(n)).join('\n');
  return new Function(...Object.keys(args),transpile(text)+`;return ${name}`)(...Object.values(args));
 }
-function callback(text,args){args={validatePendingTerminalPaste(){},...args};assert.ok(text,'Actual App callback is required');const deps=['terminalReopenCurrent','rememberHiddenTerminal','recoverRevealedTerminals','claimWindowView','reconcileTerminalLayoutSelection','refreshTerminalScroll','cancelLayoutRestore','finishLayoutRestore','syncViewSize','fitTerminalViews','setTerminalPaneZoom','terminalPaneVisible','terminalPaneHasSize','terminalHasInputFocus','syncNotificationContext','showTerminalLayout','focusTerminalPane','pollTerminalFrames','renderFrame','requestTerminalLayoutFit','cancelTerminalLayoutFit','canSwapTerminalPanes','applyTerminalTabMove','requestTerminalTabFocus'].filter(n=>functions.has(n)).map(n=>functions.get(n)).join('\n');return new Function(...Object.keys(args),transpile(deps+`\nconst callback=${text}`)+';return callback')(...Object.values(args));}
+function callback(text,args){args={sessionCopyIntent:{current:0},setSessionCopy(){},setCopyName(){},ordinaryLaunchSnapshot:{current:undefined},...args};args={validatePendingTerminalPaste(){},...args};assert.ok(text,'Actual App callback is required');const deps=['terminalReopenCurrent','rememberHiddenTerminal','recoverRevealedTerminals','claimWindowView','reconcileTerminalLayoutSelection','refreshTerminalScroll','cancelLayoutRestore','finishLayoutRestore','syncViewSize','fitTerminalViews','setTerminalPaneZoom','terminalPaneVisible','terminalPaneHasSize','terminalHasInputFocus','syncNotificationContext','showTerminalLayout','focusTerminalPane','pollTerminalFrames','renderFrame','requestTerminalLayoutFit','cancelTerminalLayoutFit','canSwapTerminalPanes','applyTerminalTabMove','requestTerminalTabFocus'].filter(n=>functions.has(n)).map(n=>functions.get(n)).join('\n');return new Function(...Object.keys(args),transpile(deps+`\nconst callback=${text}`)+';return callback')(...Object.values(args));}
 function actualWithLegacy(name,args,legacy){
  const dependencies=['terminalReopenCurrent','rememberHiddenTerminal','recoverRevealedTerminals','claimWindowView','reconcileTerminalLayoutSelection','refreshTerminalScroll','cancelLayoutRestore','finishLayoutRestore','syncViewSize','fitTerminalViews','setTerminalPaneZoom','terminalPaneVisible','terminalPaneHasSize','terminalHasInputFocus','syncNotificationContext','showTerminalLayout','focusTerminalPane','pollTerminalFrames','renderFrame','requestTerminalLayoutFit','cancelTerminalLayoutFit','canSwapTerminalPanes','applyTerminalTabMove','requestTerminalTabFocus'].filter(n=>functions.has(n)).map(n=>functions.get(n)).join('\n');
  const body=functions.get(name)??legacy;return new Function(...Object.keys(args),transpile(dependencies+`\n${body};return ${name}`))(...Object.values(args));
@@ -50,7 +50,7 @@ function harness(ids=['a','b'],invoke=async(name,args)=>name==='read_terminal_fr
  const document={hidden:false,activeElement:{name:'form'},body:{},hasFocus:()=>true};
  const make=id=>{
   const textarea={id},element={dataset:{sessionId:id},style:{},inert:false,contains:node=>node===textarea,getBoundingClientRect:()=>({width:600,height:400})};
-  const instance={options:{scrollback:TERMINAL_SCROLLBACK_LINES},_core:{_inputHandler:{_activeBuffer:{x:0}}},cols:100,rows:40,textarea,hasSelection:()=>false,reset(){},resize(cols,rows){this.cols=cols;this.rows=rows;},scrollToLine(){},write(data,done){writes.push({id,data});done?.()},focus(){document.activeElement=textarea;}};
+  const instance={options:{scrollback:TERMINAL_SCROLLBACK_LINES},_core:{_inputHandler:{_activeBuffer:{x:0}}},cols:100,rows:40,textarea,hasSelection:()=>false,reset(){},refresh(){},resize(cols,rows){this.cols=cols;this.rows=rows;},scrollToLine(){},write(data,done){writes.push({id,data});done?.()},focus(){document.activeElement=textarea;}};
   return {desktopGeneration:1,record:record(id),element,instance,fit:{fit(){}},cursor:null,ready:false,writable:false,firstAttachment:false,replayVersion:0,parsing:null,finishReplay:null,live:true,status:'running',projection:false,frameInstance:null,frameRevision:-1,lifecycleRevision:0,viewportRevision:0,dirty:true,updating:false,selecting:false,projecting:false,persisted:false,disposed:false,resizing:false,resizePending:null,dispose(){this.disposed=true;}};
  };
  const args={refreshSelectedAgent(){},isMainWindow:true,desktopWindow:{slot:"main",epoch:1,main_epoch:1,restore_blocked:false,requested_session:null,owned_ids:[]},windowPreferenceKey:name=>windowContext.windowPreferenceKey("main",name),terminalTabFocus:{current:null},zoomedPaneIdRef:{current:null},terminalPaneZoomIntent:{current:0},setZoomedPaneId(){},...layoutOperations,createTerminalScroll,updateTerminalScroll,setRecoveryRevision(){},layoutRestore:{current:{version:0,pending:false,adoptable:false,queued:false}},setLayoutRestoreReady(){},layoutPreferenceLoad:{present:false,splitPercent:50,layout:{mode:"single",panes:[null],focused:0,revision:0},warning:null},splitPercent:50,splitPercentRef:{current:50},setSplitPercent(){},...refs,document,window:{},active:true,paneHosts:{current:new Map()},terminalHost:{current:null},pausedRef:{current:false},notificationContextVersion:{current:0},notificationContextFlight:{current:{sending:false,pending:null}},terminalMounted:{current:true},terminalWindowClaim:()=>1,assignTerminalPane,removeTerminalPane,changeTerminalLayout,swapTerminalPanes:layoutOperations.swapTerminalPanes,isTerminalProtocolResponse,queueTerminalResize,applyTerminalFrame,terminalReportedCwd,terminalReportedCommand,terminalClearDisplayVersion,terminalReportedPromptNavigation,validateTerminalFrame,invoke:async(name,args)=>{calls.push({name,...args});return name==='claim_terminal_view'?1:name==='terminal_input_focused'?false:invoke(name,args);},createTerminalView:make,setTerminalLayout(next){refs.terminalLayoutRef.current=typeof next==='function'?next(refs.terminalLayoutRef.current):next;},setSession(){},setActiveProject(){},setSessionStatus(){},setSelectedAgent(){},setTerminalNotice(){},setAgentPhase(){},updateAgentPhase(){},setError:reason=>errors.push(reason),terminalStatuses:new Set(['succeeded','failed','stopped','needs_attention']),replayOutput:s=>({data:s.data??'',nextOffset:s.end_offset??0}),requestAnimationFrame:fn=>raf.push(fn),cancelAnimationFrame(){},applyStateEvent(){}};
@@ -95,6 +95,21 @@ test('T14 actual App fit ignores hidden and zero-sized panes and preserves indep
  b.element.getBoundingClientRect=()=>({width:0,height:0});
  actual('fitTerminalViews',h.args)();await turn();
  assert.deepEqual(fits,['a']);assert.equal(a.viewportRevision,1);assert.equal(b.viewportRevision,0);assert.equal(hidden.viewportRevision,0);assert.deepEqual(h.calls.map(v=>v.sessionId),['a']);
+});
+for(const transition of ['unchanged','revision','mode','cancel','unmount'])test('layout fit coalescing preserves latest activation: '+transition,()=>{
+ const h=harness(['a']),fits=[];
+ for(const id of ['a','b'])h.add(id).fit.fit=()=>fits.push(id);
+ let next=0;h.args.requestAnimationFrame=fn=>{h.raf.push(fn);return ++next;};
+ const request=actual('requestTerminalLayoutFit',h.args);
+ request();
+ if(transition==='revision'||transition==='mode')h.refs.terminalLayoutRef.current={...h.refs.terminalLayoutRef.current,panes:['b'],revision:1,...(transition==='mode'?{mode:'vertical'}:{})};
+ request();request();assert.equal(h.raf.length,1,'one fit per animation frame');
+ if(transition==='cancel')actual('cancelTerminalLayoutFit',h.args)();
+ if(transition==='unmount')h.args.terminalMounted.current=false;
+ h.raf.shift()();
+ assert.deepEqual(fits,transition==='cancel'||transition==='unmount'?[]:transition==='unchanged'?['a']:['b'],'the latest visible scene must fit without another tab switch');
+ assert.equal(h.refs.terminalLayoutFitFrame.current,null);
+ assert.deepEqual(h.calls,[],'layout fitting must not create, stop, write or take over a task');
 });
 test('T14 actual App close pane only hides membership; no stop, disposal or input takeover',()=>{
  const h=harness();const a=h.add('a'),b=h.add('b');actual('closeTerminalPane',h.args)(0);
@@ -387,7 +402,7 @@ test('F2 actual component clamps pointer drag, cancels to committed geometry and
 });
 test('F2 App fit scheduling coalesces frames and cancels stale mode intents',()=>{
  let next=0,fits=0;const scheduled=new Map(),cancelled=[],layout={mode:'horizontal',panes:['a','b'],focused:0,revision:1};
- const view={instance:{},element:{dataset:{sessionId:'a'},getBoundingClientRect:()=>({width:600,height:400})},fit:{fit(){fits++;}},viewportRevision:0,resizePending:null,live:false,ready:false,writable:false,cursor:null,disposed:false};
+ const view={instance:{rows:40,refresh(){}},element:{dataset:{sessionId:'a'},getBoundingClientRect:()=>({width:600,height:400})},fit:{fit(){fits++;}},viewportRevision:0,resizePending:null,live:false,ready:false,writable:false,cursor:null,disposed:false};
  const args={isMainWindow:true,desktopWindow:{slot:"main",epoch:1,main_epoch:1,restore_blocked:false,requested_session:null,owned_ids:[]},windowPreferenceKey:name=>windowContext.windowPreferenceKey("main",name),terminalTabFocus:{current:null},zoomedPaneIdRef:{current:null},terminalLayoutFitFrame:{current:null},terminalLayoutFitIntent:{current:0},terminalLayoutRef:{current:layout},terminalMounted:{current:true},terminalViews:{current:{all:[view]}},requestAnimationFrame:callback=>{const id=++next;scheduled.set(id,callback);return id;},cancelAnimationFrame:id=>{cancelled.push(id);scheduled.delete(id);}};
  const request=actual('requestTerminalLayoutFit',args),cancel=actual('cancelTerminalLayoutFit',args);
  request();request();assert.equal(scheduled.size,1,'pointer previews share one pending frame');
@@ -492,7 +507,7 @@ test('T14 review protected ended capacity refuses create before allocating an un
 });
 test('T14 review pending legal start retains admission through ended selection layout and warm focus',async()=>{
  let release;const h=harness(['live0','live1','live2','ended0'],async(name,args)=>name==='create_session'?new Promise(resolve=>release=resolve):name==='read_terminal_frame'?{...frame(args.sessionId,1,args.sessionId.startsWith('ended')?'succeeded':'running'),persisted:false}:null);fillCapacity(h);
- for(let i=0;i<3;i++)h.refs.terminalViews.current.get('ended'+i).persisted=false;
+ for(let i=0;i<3;i++)h.refs.terminalViews.current.get('ended'+i).persisted=i===1;
  const loading=actual('startSession',launchArgs(h))({cwd:'/fixture',command:'fixture'});await turn();assert.equal(h.calls.filter(v=>v.name==='create_session').length,1);
  actual('changeLayoutMode',h.args)('horizontal');actual('changeLayoutMode',h.args)('grid');
  await h.open({...record('ended0'),status:'succeeded'},false,3);
@@ -619,7 +634,7 @@ test('B02a actual split focuses empty leaf and preserves warm views and input ow
 
 test('B02a committed root resize replaces a queued stale fit with a fresh frame',()=>{
  let next=0,fits=0;const scheduled=new Map();const state=layoutOperations.splitTerminalPane(layoutOperations.createTerminalLayout(),'horizontal');
- const view={instance:{},element:{dataset:{sessionId:'a'},getBoundingClientRect:()=>({width:600,height:400})},fit:{fit(){fits++;}},viewportRevision:0,live:false,ready:false,disposed:false};state.panes[0]='a';state.root.first.sessionId='a';
+ const view={instance:{rows:40,refresh(){}},element:{dataset:{sessionId:'a'},getBoundingClientRect:()=>({width:600,height:400})},fit:{fit(){fits++;}},viewportRevision:0,live:false,ready:false,disposed:false};state.panes[0]='a';state.root.first.sessionId='a';
  const args={isMainWindow:true,desktopWindow:{slot:"main",epoch:1,main_epoch:1,restore_blocked:false,requested_session:null,owned_ids:[]},windowPreferenceKey:name=>windowContext.windowPreferenceKey("main",name),terminalTabFocus:{current:null},zoomedPaneIdRef:{current:null},terminalPaneZoomIntent:{current:0},setZoomedPaneId(){},...layoutOperations,terminalLayoutFitFrame:{current:null},terminalLayoutFitIntent:{current:0},terminalLayoutRef:{current:state},terminalMounted:{current:true},terminalViews:{current:{all:[view]}},splitPercentRef:{current:50},setSplitPercent(){},setTerminalLayout(){},requestAnimationFrame:callback=>{const id=++next;scheduled.set(id,callback);return id;},cancelAnimationFrame:id=>scheduled.delete(id)};
  actual('requestTerminalLayoutFit',args)();const stale=scheduled.get(1);actual('commitTerminalSplit',args)(63);stale();
  const fresh=[...scheduled.entries()].filter(([id])=>id!==1);assert.equal(fresh.length,1,'root revision must schedule replacement fit');fresh[0][1]();assert.equal(fits,1);
@@ -979,3 +994,58 @@ test('B02d late new-pane host mount after first RAF still consumes pending input
 });
 
 test('Reopen actual toolbar remains reachable with last empty tab and guards disabled activation',()=>{const props={layout:{mode:'single',panes:[null],focused:0,revision:0},labels:[null],splitPercent:50,swapDisabled:false,onHost(){},onFocus(){},onClose(){},onMode(){},onSplitChange(){},onSplitPreview(){},onSwap(){},onCancelFit(){}};let calls=0;let tree=layoutTree({...props,onReopen:()=>calls++});let button=nodes(tree,n=>n.type==='button'&&n.props['aria-label']==='Reopen last hidden tab')[0];assert.ok(button);assert.equal(button.props.disabled,true);button.props.onClick();assert.equal(calls,0);tree=layoutTree({...props,canReopen:true,onReopen:()=>calls++});button=nodes(tree,n=>n.type==='button'&&n.props['aria-label']==='Reopen last hidden tab')[0];assert.equal(button.props.disabled,false);button.props.onClick();assert.equal(calls,1);});
+
+for(const state of ['ready','hidden','unmounted','form','owner'])test(`window surface restoration handles ${state} without task creation or focus theft`,()=>{
+ const h=harness(['s-a-1']),view=h.add('s-a-1');let fits=0;
+ Object.assign(view,{ready:true,projection:true,writable:false});view.fit.fit=()=>fits++;
+ h.args.terminalTabFocus={current:null};h.document.activeElement=h.document.body;h.document.hidden=state==='hidden';h.document.hasFocus=()=>true;
+ h.args.paneHosts.current.set('p-0',{append(element){element.parentElement=this;}});
+ if(state==='unmounted')h.args.terminalMounted.current=false;
+ if(state==='owner')h.refs.ownerConnectionAvailable.current.available=false;
+ if(state==='form')h.document.activeElement={name:'settings input'};
+ const origin=h.document.activeElement;actual('restoreTerminalSurface',h.args)();
+ while(h.raf.length)h.raf.shift()();
+ if(['hidden','unmounted','owner'].includes(state))assert.equal(fits,0);
+ else assert.equal(fits,1,'a newly visible surface must fit its current pane');
+ if(state==='ready')assert.equal(h.document.activeElement,view.instance.textarea);
+ else assert.equal(h.document.activeElement,origin);
+ assert.deepEqual(h.calls.filter(c=>['create_session','stop_session','resume_session','write_session'].includes(c.name)),[]);
+});
+test('surface restoration hooks are removed together on unmount',()=>{
+ const text=source.getFullText();
+ for(const [target,event]of [['window','focus'],['document','visibilitychange']]){
+  assert.ok(text.includes(`${target}.addEventListener("${event}",surfaceChanged)`));
+  assert.ok(text.includes(`${target}.removeEventListener("${event}",surfaceChanged)`));
+ }
+});
+
+test('tab double-click edits its own title, Enter saves, Esc cancels, failed save retains input',async()=>{
+ const layout=layoutOperations.assignTerminalPane(layoutOperations.createTerminalLayout(),0,'s-tab-1');
+ const calls=[];let fail=false;const props={layout,labels:['Before'],tabLabel:()=> 'Before',onRenameTab:async(id,title)=>{if(fail)throw Error('storage');calls.push([id,title]);},onDuplicateTab:id=>calls.push(['copy',id]),onFocus(){},onHost(){},splitPercent:50,swapDisabled:false};
+ let tree=layoutTree(props);let tab=nodes(tree,n=>n.props?.role==='tab')[0];assert.equal(typeof tab.props.onDoubleClick,'function');
+ tab.props.onDoubleClick({preventDefault(){},stopPropagation(){}});tree=tree.rerender(props);let input=nodes(tree,n=>n.type==='input'&&n.props['aria-label']==='Session name')[0];assert.ok(input);
+ input.props.onChange({target:{value:'After'}});tree=tree.rerender(props);input=nodes(tree,n=>n.type==='input')[0];await input.props.onKeyDown({key:'Enter',preventDefault(){},stopPropagation(){}});tree=tree.rerender(props);assert.deepEqual(calls,[['s-tab-1','After']]);assert.equal(nodes(tree,n=>n.type==='input').length,0);
+ nodes(tree,n=>n.props?.role==='tab')[0].props.onDoubleClick({preventDefault(){},stopPropagation(){}});tree=tree.rerender(props);await nodes(tree,n=>n.type==='input')[0].props.onKeyDown({key:'Escape',preventDefault(){},stopPropagation(){}});tree=tree.rerender(props);assert.equal(nodes(tree,n=>n.type==='input').length,0);assert.equal(calls.length,1);
+ nodes(tree,n=>n.props?.role==='tab')[0].props.onDoubleClick({preventDefault(){},stopPropagation(){}});tree=tree.rerender(props);fail=true;await nodes(tree,n=>n.type==='input')[0].props.onKeyDown({key:'Enter',preventDefault(){},stopPropagation(){}});tree=tree.rerender(props);assert.equal(nodes(tree,n=>n.type==='input').length,1);assert.equal(nodes(tree,n=>n.props?.role==='alert').length,1);const strip=nodes(tree,n=>n.props?.role==='tablist')[0];assert.equal(nodes(strip,n=>n.props?.role==='alert').length,0,'error stays outside the clipped tab strip');
+});
+
+test('inline rename leaves Enter and Escape to IME composition before saving the committed name',async()=>{
+ const layout=layoutOperations.assignTerminalPane(layoutOperations.createTerminalLayout(),0,'s-ime-1'),calls=[];
+ const props={layout,labels:['Before'],tabLabel:()=> 'Before',onRenameTab:async(id,title)=>calls.push([id,title]),onFocus(){},onHost(){},splitPercent:50,swapDisabled:false};
+ let tree=layoutTree(props);nodes(tree,n=>n.props?.role==='tab')[0].props.onDoubleClick({preventDefault(){},stopPropagation(){}});tree=tree.rerender(props);
+ let input=nodes(tree,n=>n.type==='input')[0];input.props.onChange({target:{value:'中文名称'}});tree=tree.rerender(props);input=nodes(tree,n=>n.type==='input')[0];
+ for(const key of ['Enter','Escape'])for(const flags of [{nativeEvent:{isComposing:true}},{nativeEvent:{isComposing:false},keyCode:229}]){
+  await input.props.onKeyDown({key,...flags,stopPropagation(){},preventDefault:()=>assert.fail('composition must retain its key')});tree=tree.rerender(props);input=nodes(tree,n=>n.type==='input')[0];assert.ok(input);assert.equal(input.props.value,'中文名称');assert.deepEqual(calls,[]);
+ }
+ assert.equal(typeof input.props.onCompositionStart,'function');input.props.onCompositionStart();
+ for(const key of ['Enter','Escape'])await input.props.onKeyDown({key,nativeEvent:{isComposing:false},keyCode:13,stopPropagation(){},preventDefault:()=>assert.fail('active composition must retain its key')});
+ input.props.onCompositionEnd();await input.props.onKeyDown({key:'Enter',nativeEvent:{isComposing:false},keyCode:13,stopPropagation(){},preventDefault(){}});tree=tree.rerender(props);assert.deepEqual(calls,[['s-ime-1','中文名称']]);assert.equal(nodes(tree,n=>n.type==='input').length,0);
+});
+
+ test('native CLI exit input is forwarded unchanged and never creates a process',async()=>{
+ const h=harness();const view=h.add('a');Object.assign(view,{ready:true,cursor:10,projection:true});h.document.activeElement=view.instance.textarea;
+ const handler=callback(input,{...h.args,view,id:'a'});
+ for(const data of ['\x03','\x04','/exit\r']){handler(data);await turn();}
+ assert.deepEqual(h.calls.filter(v=>v.name==='write_session').map(v=>v.data),['\x03','\x04','/exit\r']);
+ assert.equal(h.calls.some(v=>v.name==='create_session'),false);
+ });

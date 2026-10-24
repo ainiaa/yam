@@ -126,7 +126,7 @@ test('T05 cancel invalidates an outstanding preview and a late IPC response stay
 });
 test('T05 App does not clear unrelated last-session or title preferences on partial completion',async()=>{
  let titles={'s-one':'Deleted','s-two':'Still pending','s-other':'Selected'};const removed=[];
- const clear=retentionAction('clearDeletedSessionNames',cleanupState({setSessionTitles:update=>titles=update(titles),sessionId:{current:'s-other'},localStorage:{getItem:()=> 's-other',removeItem:key=>removed.push(key)}}),'App.tsx');
+ const clear=retentionAction('clearDeletedSessionNames',cleanupState({setSessionTitles:update=>titles=update(titles),sessionId:{current:'s-other'},localStorage:{getItem:key=>key==='yam.window.main.lastSession'?'s-other':null,removeItem:key=>removed.push(key)}}),'App.tsx');
  await clear(['s-one']);assert.deepEqual(titles,{'s-two':'Still pending','s-other':'Selected'});assert.deepEqual(removed,[]);
  const tree=source('App.tsx');let onDeleted;
  const visit=node=>{if(ts.isJsxSelfClosingElement(node)&&node.tagName.getText(tree)==='HistoryArchive')onDeleted=node.attributes.properties.find(prop=>ts.isJsxAttribute(prop)&&prop.name.getText(tree)==='onDeleted');ts.forEachChild(node,visit);};visit(tree);
@@ -143,7 +143,7 @@ test('T05 committed deletion disposes only its ended cached view and invalidates
 });
 test('T05 review F1 partial recovery uses the same token and cleans the final actual App IDs',async()=>{
  let recovered=false;let titles={'s-one':'First','s-two':'Second','s-other':'Keep'};const removed=[],disposed=[];
- const app=cleanupState({setSessionTitles:update=>titles=update(titles),sessionId:{current:'s-two'},previousSession:{current:'s-two'},selectedRecord:{current:{summary:{session_id:'s-two'}}},localStorage:{getItem:()=> 's-two',removeItem:key=>removed.push(key)}});
+ const app=cleanupState({setSessionTitles:update=>titles=update(titles),sessionId:{current:'s-two'},previousSession:{current:'s-two'},selectedRecord:{current:{summary:{session_id:'s-two'}}},localStorage:{getItem:key=>key==='yam.window.main.lastSession'?'s-two':null,removeItem:key=>removed.push(key)}});
  app.terminalViews.current.open('s-two',false,()=>({dispose:()=>disposed.push('s-two')}));
  const cleanup=retentionAction('clearDeletedSessionNames',app,'App.tsx');
  const invoke=async command=>{
@@ -160,7 +160,7 @@ test('T05 review F1 partial recovery uses the same token and cleans the final ac
 });
 test('T05 review F1 closing after a lost response lets the actual shared App refresh consume recovered IDs',async()=>{
  let closed=0;const commands=[],errors=[];let titles={'s-one':'First','s-two':'Second','s-other':'Keep'};const disposed=[],removed=[];
- const app=cleanupState({setSessionTitles:update=>titles=update(titles),sessionId:{current:'s-two'},previousSession:{current:'s-two'},selectedRecord:{current:{summary:{session_id:'s-two'}}},localStorage:{getItem:()=> 's-two',removeItem:key=>removed.push(key)}});
+ const app=cleanupState({setSessionTitles:update=>titles=update(titles),sessionId:{current:'s-two'},previousSession:{current:'s-two'},selectedRecord:{current:{summary:{session_id:'s-two'}}},localStorage:{getItem:key=>key==='yam.window.main.lastSession'?'s-two':null,removeItem:key=>removed.push(key)}});
  app.terminalViews.current.open('s-two',false,()=>({dispose:()=>disposed.push('s-two')}));
  const cleanup=retentionAction('clearDeletedSessionNames',app,'App.tsx');
  const h=deletionHarness(async command=>{commands.push(command);if(command==='confirm_archive_deletion')throw Error('committed response lost');return null;},exactPreview);
@@ -291,4 +291,12 @@ test('T04 review F3: App supplies its existing titleFor to the archive component
  const tree=source('App.tsx');let bound;
  const visit=node=>{if(ts.isJsxSelfClosingElement(node)&&node.tagName.getText(tree)==='HistoryArchive')bound=node.attributes.properties.find(attribute=>ts.isJsxAttribute(attribute)&&attribute.name.getText(tree)==='titleFor');ts.forEachChild(node,visit);};visit(tree);
  assert.ok(bound,'actual archive component receives App titleFor');assert.equal(bound.initializer.expression.getText(tree),'titleFor');
+});
+
+
+test('per-session copy and name metadata deletion touches confirmed IDs only',()=>{
+ const data=new Map([['yam.sessionName.s-one','"One"'],['yam.sessionLaunch.s-one','{"terminal":"yam"}'],['yam.sessionName.s-other','"Other"']]);
+ const state=cleanupState({sessionId:{current:null},setSessionTitles:update=>update({}),localStorage:{getItem:key=>data.get(key)??null,setItem:(key,value)=>data.set(key,value),removeItem:key=>data.delete(key)}});
+ retentionAction('clearDeletedSessionNames',state,'App.tsx')(['s-one']);
+ assert.equal(data.has('yam.sessionName.s-one'),false);assert.equal(data.has('yam.sessionLaunch.s-one'),false);assert.equal(data.get('yam.sessionName.s-other'),'"Other"');
 });

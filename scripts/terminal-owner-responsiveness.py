@@ -76,6 +76,20 @@ def environment(root, launcher, python):
             "SHELL": str(launcher), "YAM_OUTPUT_STAGE_DIAGNOSTICS": "1", "PATH": str(python.parent), "LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8"}
 
 
+def owner_command(app, executable, terminal_node=None):
+    command = [str(executable), '--yam-background']
+    if terminal_node is None and not (app / 'Contents/Resources/target/terminal-runtime/yam-terminal.cjs').is_file():
+        return command
+    selected = terminal_node if terminal_node is not None else shutil.which('node')
+    if selected is None:
+        raise ValueError('Node unavailable: pass --terminal-node with an installed or YAM private Node path')
+    node = Path(selected)
+    if not node.is_absolute() or not node.is_file() or not os.access(node, os.X_OK):
+        raise ValueError('Invalid --terminal-node executable')
+    # The owner verifies Node version and the real parser protocol before any fixture task.
+    return command + ['--yam-terminal-node', str(node.resolve())]
+
+
 NATIVE_STAGE_PREFIX = b'YAM_OUTPUT_STAGES_V1 '
 
 
@@ -377,12 +391,18 @@ def write_result(path, value):
 
 
 
+def parser_image(row, resources, authenticated_pid=None):
+    image=Path(row['executable'])
+    legacy=image.name=='yam-terminal' and image.is_relative_to(resources)
+    return legacy or (row['pid']==authenticated_pid and image.is_absolute())
+
+
 def verify_identities(owner, parser_pid, ready, nonce, resources, python, inspect):
     if owner.poll() is not None or len(ready) != 2:
         raise ValueError("Incomplete owned process gate")
     root = inspect(owner.pid)
     parser = inspect(parser_pid)
-    if not root or not parser or parser['parent'] != owner.pid or Path(parser['executable']).name != 'yam-terminal' or not Path(parser['executable']).is_relative_to(resources):
+    if not root or not parser or parser['parent'] != owner.pid or not parser_image(parser, resources, parser_pid):
         raise ValueError("Parser identity unavailable")
     result = {owner.pid: root, parser_pid: parser}
     if {r.get('mode') for r in ready} != {'fixture-echo', 'fixture-flood'}:
@@ -683,10 +703,10 @@ def wait_file(path, deadline, run):
     raise ValueError('Fixture readiness deadline reached')
 
 
-def parser_identity(owner, resources):
+def parser_identity(owner, resources, authenticated_pid=None):
     result = subprocess.run(['/usr/bin/pgrep', '-P', str(owner.pid)], capture_output=True, text=True, timeout=1)
     rows = [inspect_process(int(value)) for value in result.stdout.split() if value.isdecimal()]
-    candidates = [r for r in rows if r and Path(r['executable']).name == 'yam-terminal' and Path(r['executable']).is_relative_to(resources)]
+    candidates = [r for r in rows if r and r['parent']==owner.pid and parser_image(r, resources, authenticated_pid) and (authenticated_pid is None or r['pid']==authenticated_pid)]
     if len(candidates) != 1: raise ValueError('Owned parser identity unavailable')
     return candidates[0]
 
@@ -714,6 +734,7 @@ def execute(args):
     owner_home = args.root / "home"
     validated = smoke.validate_f7_run(args.app, args.identifier, args.receipt, owner_home=owner_home)
     executable = validated["executable"]
+    command = owner_command(args.app, executable, getattr(args, 'terminal_node', None))
     data_root = validated["root"]
     if data_root != owner_home / "Library/Application Support" / args.identifier:
         raise ValueError("Unexpected private owner namespace")
@@ -750,7 +771,7 @@ def execute(args):
     try:
         if time.monotonic() >= start + 15: raise ValueError('Artifact validation exceeded startup budget')
         if inspect_process(os.getpid()) != self_identity: raise ValueError('Native Python identity changed')
-        run.owner = subprocess.Popen([str(executable), '--yam-background'], env=environment(args.root, launcher, python),
+        run.owner = subprocess.Popen(command, env=environment(args.root, launcher, python),
                                      stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         owner_row = inspect_process(run.owner.pid)
         if owner_row is None: raise ValueError('Owned owner identity unavailable')
@@ -783,7 +804,7 @@ def execute(args):
         run.call('set_agent_notification_context', {'selected': None, 'paused': True})
         resources = args.app / 'Contents/Resources'
         stage = 'parser_identity'
-        parser = parser_identity(run.owner, resources)
+        parser = parser_identity(run.owner, resources, status.get("runtime_pid"))
         run.identities[parser['pid']] = parser
         run.parser_pid = parser['pid']
         ready = []
@@ -883,6 +904,7 @@ def main(argv=None):
     for name in ('app', 'receipt', 'artifact-gate', 'root', 'output'):
         parser.add_argument('--' + name, type=Path, required=True)
     parser.add_argument('--identifier', required=True)
+    parser.add_argument('--terminal-node', type=Path, help='Absolute installed or YAM private Node; defaults to the caller PATH, never downloads')
     args = parser.parse_args(argv)
     for name in ('app','receipt','artifact_gate','root','output'):
         smoke.unlinked(getattr(args, name))

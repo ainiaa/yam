@@ -31,6 +31,12 @@ test("existing sessions group by full directory, preserving distinct projects wi
   assert.equal(projects[2].sessions[0].id, "three");
 });
 
+test("re-adding a removed project does not resurface sessions that predate its removal",()=>{
+ const sessions=[{started_at:10,summary:{cwd:"/work/app"}},{started_at:30,summary:{cwd:"/work/app"}}];
+ const projects=[{path:"/work/app",name:"App",hiddenBefore:20}];
+ assert.deepEqual(groupProjects(projects,sessions)[0].sessions,[sessions[1]]);
+});
+
 test("directory labels support POSIX roots and Windows paths", () => {
   assert.equal(projectName("/"), "/");
   assert.equal(projectName("/work/app/"), "app");
@@ -119,4 +125,9 @@ test('project drag target invalid identities self and pin fences retain exact ar
  const {moveProjectToTarget:move}=await import('../src/workspaces.ts');assert.equal(typeof move,'function');const a={path:'/a',name:'A'},b={path:'/b',name:'B'},rows=[a,b];
  for(const [items,from,to] of [[rows,'/a','/a'],[rows,'/missing','/b'],[rows,'/a','/missing'],[rows,'/a/','/b'],[rows,'/a','/b/'],[[a,{...a,path:'/a/'},b],'/a','/b'],[[a,b,{...b,path:'/b/'}],'/a','/b'],[[a,{...b,pinned:true}],'/a','/b'],[[], '/a','/b']])assert.equal(move(items,from,to),items);
  for(const path of ['/','C:\\work\\api\\','/work/api/']){const first={path,name:'Root'},items=[first,b];assert.deepEqual(move(items,path,'/b'),[b,first]);}
+});
+
+import {validateSessionTitle} from '../src/workspaces.ts';
+test('session names reject embedded control characters',()=>{
+ for(const name of ['bad\nname','bad\tname','bad\x00name'])assert.throws(()=>validateSessionTitle(name));
 });

@@ -361,9 +361,12 @@ fn execute(command: &Command, key: &mut Option<String>) -> Result<serde_json::Va
     let root = owner_root()?;
     let allow_start = matches!(command,Command::Start(options) if options.start_owner);
     let client = connect_owner(&root, allow_start, || {
+        let node = super::node_runtime::prepare_cli(&root)?;
         let executable = std::env::current_exe().map_err(|_| "cli_executable")?;
         owner_command(&executable)
             .arg("--yam-background")
+            .arg("--yam-terminal-node")
+            .arg(node)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

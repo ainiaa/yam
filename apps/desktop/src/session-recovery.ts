@@ -16,7 +16,10 @@ export function sessionRecovery(record:RecoveryRecord|null, selected:string|null
   const available = matches && availability === "available" && status !== "unavailable";
   const launch = record?.summary.launch;
   const nativeId = record?.agent?.agent_session_id;
-  const canContinue = !!(available && !starting && ended.has(record!.status) && ended.has(status)
+  const chooseNative = !!(available && !starting && ended.has(record!.status) && ended.has(status)
+    && record!.summary.command === null && launch?.adapter === "codex" && launch.mode === "interactive"
+    && (launch.provider || launch.extra_args.trim() === "") && nativeId == null);
+  const canContinue = chooseNative || !!(available && !starting && ended.has(record!.status) && ended.has(status)
     && record!.summary.command === null && launch?.mode === "interactive"
     && ["codex", "claude", "gemini"].includes(launch.adapter)
     && (launch.adapter !== "codex" || !!launch.provider || launch.extra_args.trim() === "")
@@ -33,9 +36,10 @@ export function sessionRecovery(record:RecoveryRecord|null, selected:string|null
       ? "The background owner restarted; the previous terminal process cannot be reattached. Review recorded output and choose an explicit action."
       : "This task needs attention. Review its recorded output and choose an explicit action.";
   } else if (matches && ended.has(record!.status) && ended.has(status) && ["claude", "codex"].includes(launch?.adapter ?? "")) {
-    notice = canContinue
+    notice = chooseNative ? "Recorded output only. Choose a saved conversation in the native CLI to continue."
+      : canContinue
       ? "Recorded output only. Choose Continue to resume the saved conversation, or Run again to start a new task."
       : "Recorded output only. Choose Run again to start a new task.";
   }
-  return {canContinue, canRunAgain, notice};
+  return {canContinue, canRunAgain, chooseNative, notice};
 }

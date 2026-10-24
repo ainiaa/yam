@@ -1,3 +1,4 @@
+import {sessionActionBindings} from './fixtures/session-action-bindings.mjs';
 import {englishUiRead} from './fixtures/english-ui-source.mjs';
 const readFileSync=(...args)=>englishUiRead(rawReadFileSync,...args);
 import './fixtures/i18n-test-init.mjs';
@@ -7,7 +8,7 @@ import assert from 'node:assert/strict';
 import {readFileSync as rawReadFileSync} from 'node:fs';
 import ts from 'typescript';
 const source=ts.createSourceFile('App.tsx',readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
-function actual(bindings){let fn;function visit(n){if(ts.isFunctionDeclaration(n)&&n.name?.text==='startNewSession')fn=n;ts.forEachChild(n,visit);}visit(source);return new Function(...Object.keys(bindings),ts.transpile(fn.getText(source),{target:ts.ScriptTarget.ES2022})+';return startNewSession;')(...Object.values(bindings));}
+function actual(bindings){bindings={...sessionActionBindings(),...bindings};let fn;function visit(n){if(ts.isFunctionDeclaration(n)&&n.name?.text==='startNewSession')fn=n;ts.forEachChild(n,visit);}visit(source);return new Function(...Object.keys(bindings),ts.transpile(fn.getText(source),{target:ts.ScriptTarget.ES2022})+';return startNewSession;')(...Object.values(bindings));}
 function fixture(terminal='iterm2',result={session_id:'s-1-2',launch:null}){
  const calls=[],errors=[];return {calls,errors,start:actual({sessionTerminal:terminal,isMainWindow:true,formAdapter:'shell',formLaunch:{command:null,provider:null},useProjectSettings:false,launchWorktreeAttempt:undefined,launchDirectoryOverride:'/fixture',launchTerminalProfile:undefined,newTerminal:async(...args)=>{calls.push(['start',...args]);return result;},invoke:async(name,args)=>{calls.push([name,args]);if(terminal==='failed')throw Error('SECRET');},setLaunchWorktreeAttempt(){},localStorage:{setItem(){}},setError:e=>errors.push(e)})};
 }
