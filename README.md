@@ -6,6 +6,8 @@ A desktop workspace for Codex, Claude Code, OpenCode and other local CLI session
 
 ## Status
 
+**Current support: macOS only. Windows/Linux support, CI jobs and installation packages are paused.** Published packages currently target Apple Silicon.
+
 YAM is in active development. The [current capability matrix](docs/yam-capability-matrix.md) is the single reference for supported behavior, degraded operation, unimplemented features, platform acceptance and resource budgets. Release baseline: [`0.1.10`](docs/releases/0.1.10.md) (unnotarized macOS Apple Silicon build); historical reports retain their original commits and limits.
 
 The app groups sessions by project, supports single-task and interactive modes, and keeps PTYs and terminal state in an independent background owner. Closing the desktop preserves active tasks; reconnecting, opening history and clicking notifications do not relaunch them. **Stop all tasks and quit** explicitly stops tasks. An owner with no active tasks exits after 60 seconds without a client request. Lost background/parser state is reported explicitly.
@@ -49,6 +51,6 @@ rtk python3 -m unittest discover -s scripts -p 'test_*.py'
 rtk pnpm --dir apps/desktop tauri build --debug
 ```
 
-CI builds/tests on macOS, Windows and Linux. Actual isolated package lifecycle checks exist for all three; CI does not substitute for real notification, input or signed installation acceptance. See the [desktop notes](apps/desktop/README.md), [roadmap](docs/PLAN.md), [continuity record](docs/yam-session-continuity-plan.md) and [notification history](docs/notification-acceptance.md).
+CI builds/tests and packages macOS only. Pull requests run once; pushes run on `main`, and newer commits cancel superseded checks. Actual isolated package lifecycle checks exist for all three; CI does not substitute for real notification, input or signed installation acceptance. See the [desktop notes](apps/desktop/README.md), [roadmap](docs/PLAN.md), [continuity record](docs/yam-session-continuity-plan.md) and [notification history](docs/notification-acceptance.md).
 
 开发产物的保留与归档约定见[开发产物归档规则](docs/development-artifacts.md)。

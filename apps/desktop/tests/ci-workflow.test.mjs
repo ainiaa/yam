@@ -5,7 +5,7 @@ import {execFileSync} from 'node:child_process';
 import {test} from 'node:test';
 
 const root=new URL('../../../',import.meta.url);
-test('CI generates native permission schemas before frontend tests in every platform job',()=>{
+test('CI generates native permission schemas before macOS frontend tests',()=>{
  const workflow=readFileSync(new URL('.github/workflows/ci.yml',root),'utf8');
  const runtime=workflow.indexOf('- run: pnpm build:terminal');
  const schema=workflow.indexOf('- run: cargo check --manifest-path src-tauri/Cargo.toml --locked');
@@ -51,7 +51,18 @@ test('MSVC test executables receive the same Common Controls v6 manifest as the 
  assert.match(xml,/Microsoft\.Windows\.Common-Controls/);assert.match(xml,/version="6\.0\.0\.0"/);
 });
 
-test('Linux CI installs the real Zsh needed by shell integration regressions',()=>{const workflow=readFileSync(new URL('.github/workflows/ci.yml',root),'utf8');assert.match(workflow,/apt-get install -y[^\n]*\bzsh\b/);});
+test('CI supports macOS only while retaining coverage and package lifecycle checks',()=>{
+ const workflow=readFileSync(new URL('.github/workflows/ci.yml',root),'utf8');
+ assert.match(workflow,/runs-on: macos-latest/);
+ assert.doesNotMatch(workflow,/ubuntu-|windows-latest|matrix\.|apt-get|xvfb|--bundles nsis|--bundles deb/);
+ for(const command of ['pnpm test:coverage','cargo test --manifest-path','cargo llvm-cov --manifest-path','--fail-under-lines=85','--bundles app','background-platform-smoke.py --desktop','codesign --force --deep'])assert.ok(workflow.includes(command),command);
+});
+test('CI runs PRs once and cancels superseded checks',()=>{
+ const workflow=readFileSync(new URL('.github/workflows/ci.yml',root),'utf8').replace(/\r\n/g,'\n');
+ assert.match(workflow,/on:\n  push:\n    branches: \[main\]\n  pull_request:/);
+ assert.match(workflow,/concurrency:[\s\S]*group:.*github\.event\.pull_request\.number.*github\.ref/);
+ assert.match(workflow,/cancel-in-progress: true/);
+});
 
 test('native CI gives cold builds enough time and selects the Zsh fixture environment',()=>{const workflow=readFileSync(new URL('.github/workflows/ci.yml',root),'utf8');assert.match(workflow,/timeout-minutes: 45/);assert.match(workflow,/SHELL=\/bin\/zsh/);});
 

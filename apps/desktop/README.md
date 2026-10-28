@@ -1,5 +1,7 @@
 # YAM Desktop
 
+**Current support: macOS only. Windows/Linux support, automated platform checks and installation packaging are paused; their implementation remains for future work. Published packages currently target Apple Silicon.**
+
 Use **Edit project…** in the main-window sidebar to rename a saved project and choose one of six fixed icon colors or the built-in Folder, Terminal and Play icons. Folder keeps its expanded/collapsed appearance. Default removes saved appearance fields; Reset changes only the draft, and Save applies after persistence succeeds. Existing directory identity, pinning and ordering remain intact. This bounded built-in appearance slice does not add emoji, images or arbitrary icons; native GUI acceptance remains pending. See the [B01d receipt](../../docs/superpowers/plans/2026-10-09-yam-cmux-b01d.md).
 
 Saved projects in the main window now offer **Pin / Unpin**. Pinned projects form a stable group before ordinary projects; pinning adds to its end, unpinning does not remember an old position, and Up / Down stays within each group. Changes apply after saving succeeds. Renaming and an Add operation awaiting directory validation preserve the latest pin metadata; the second window refreshes without echoing a write. This is a source/test delivery, with native GUI acceptance still pending. See the [B01c receipt](../../docs/superpowers/plans/2026-10-09-yam-cmux-b01c.md).
