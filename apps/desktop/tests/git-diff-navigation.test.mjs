@@ -31,3 +31,9 @@ test('R2A overlapping or out-of-order hunks fall back on either side without bre
  assert.equal(parseUnifiedDiff('diff --git a/a b/a\n@@ -10 +10 @@\n-a\n+b\ndiff --git a/b b/b\n@@ -1 +1 @@\n-c\n+d\n'),null,'multiple files cannot share one selected-file line jump');
  assert.equal(parseUnifiedDiff('diff --git a/a b/a\nold mode 100644\nnew mode 100755\ndiff --git a/b b/b\n@@ -1 +1 @@\n-a\n+b\n'),null,'metadata-only first file must not hide a second file');
 });
+
+test('diff editor targets stay inside the selected local project without guessing removed-side lines',async()=>{
+ const {relativeProjectFile}=await import('../src/project-files.ts');
+ assert.equal(relativeProjectFile('/repo','/repo/src/a.ts'),'src/a.ts');assert.equal(relativeProjectFile('/repo/','/repo/a.ts'),'a.ts');
+ for(const name of ['/repository/a.ts','/repo/../outside','/repo/.git/config','/repo/bad\nname'])assert.equal(relativeProjectFile('/repo',name),null);
+});

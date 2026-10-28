@@ -48,7 +48,11 @@ test('one restored snapshot plus split raw deltas preserve buffers, modes, queri
 });
 
 const chrome = process.env.CHROME_BIN ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-test('incremental TUI updates keep the real browser renderer nonblank and focused', {skip:!existsSync(chrome) && 'Set CHROME_BIN to an installed Chromium browser'}, async () => {
+// Headless Chrome can still display macOS keychain dialogs; installation is not test consent.
+const chromeSkip = process.env.YAM_TEST_HEADLESS_CHROME !== '1'
+  ? 'Set YAM_TEST_HEADLESS_CHROME=1 to explicitly run isolated local-browser tests'
+  : !existsSync(chrome) && 'Set CHROME_BIN to an installed Chromium browser';
+test('incremental TUI updates keep the real browser renderer nonblank and focused', {skip:chromeSkip}, async () => {
   const directory = mkdtempSync(join(tmpdir(), 'yam-stream-render-'));
   const source = terminal();
   try {
@@ -96,7 +100,7 @@ test('incremental TUI updates keep the real browser renderer nonblank and focuse
       });
       const timer = setTimeout(() => { failure = Error('Browser stream timed out'); child?.kill('SIGKILL'); }, 15000);
       server.listen(0, '127.0.0.1', () => {
-        child = spawn(chrome, ['--headless','--disable-gpu','--disable-background-networking','--no-first-run','--no-default-browser-check','--user-data-dir='+join(directory,'profile'),'http://127.0.0.1:'+server.address().port], {stdio:'ignore'});
+        child = spawn(chrome, ['--headless','--disable-gpu','--disable-background-networking','--use-mock-keychain','--disable-features=DialMediaRouteProvider','--no-first-run','--no-default-browser-check','--user-data-dir='+join(directory,'profile'),'http://127.0.0.1:'+server.address().port], {stdio:'ignore'});
         child.on('error', error => { clearTimeout(timer); server.close(); reject(error); });
         child.on('close', () => { clearTimeout(timer); server.close(); if (failure || !completed) reject(failure ?? Error('Browser exited without result')); else resolve(completed); });
       });

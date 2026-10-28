@@ -16,6 +16,8 @@ pub struct AgentState {
     #[serde(default)]
     pub cli_version: Option<String>,
     #[serde(default)]
+    pub cli_path: Option<String>,
+    #[serde(default)]
     pub cli_platform: Option<String>,
     pub agent_session_id: Option<String>,
     pub turn_id: Option<String>,
@@ -34,6 +36,7 @@ impl Default for AgentState {
         Self {
             generation: String::new(),
             cli_version: None,
+            cli_path: None,
             cli_platform: None,
             agent_session_id: None,
             turn_id: None,
@@ -343,18 +346,20 @@ impl super::HistoryStore {
     }
     #[cfg(test)]
     pub(super) fn configure_agent(&self, id: &str, generation: &str) -> Result<(), String> {
-        self.configure_agent_version(id, generation, None)
+        self.configure_agent_version(id, generation, None, None)
     }
     pub(super) fn configure_agent_version(
         &self,
         id: &str,
         generation: &str,
         cli_version: Option<&str>,
+        cli_path: Option<&str>,
     ) -> Result<(), String> {
         self.edit_agent(id, |state| {
             *state = AgentState {
                 generation: generation.into(),
                 cli_version: cli_version.map(str::to_string),
+                cli_path: cli_path.map(str::to_string),
                 cli_platform: Some(std::env::consts::OS.into()),
                 integration: "connecting".into(),
                 ..Default::default()
@@ -491,6 +496,8 @@ impl super::HistoryStore {
                         && record.agent.integration != "connected"
                 } else {
                     record.status == status
+                        && !(status == "stopped"
+                            && record.reason.as_deref() == Some("Stopped by user"))
                 }
             }
             NativeSource::Round(expected) => {
@@ -702,6 +709,83 @@ mod tests {
         state.apply(&other).unwrap();
         assert_eq!(state.agent_session_id.as_deref(), Some("main-thread"));
         assert_eq!(state.phase, "working");
+    }
+
+    #[test]
+    fn user_stops_are_silent_while_completion_failure_and_unexpected_stops_notify() {
+        let root = std::env::temp_dir().join(format!(
+            "yam-quiet-stop-{}",
+            super::super::next_session_id()
+        ));
+        let history = super::super::HistoryStore::open(root.clone()).unwrap();
+        for (id, status, reason, notify) in [
+            ("manual", "stopped", Some("Stopped by user"), false),
+            ("complete", "succeeded", None, true),
+            ("error", "failed", Some("Process failed"), true),
+            (
+                "unexpected",
+                "stopped",
+                Some("Terminal owner disconnected"),
+                true,
+            ),
+            ("unexplained", "stopped", None, true),
+        ] {
+            history
+                .start(&super::super::SessionSummary {
+                    ssh: None,
+                    session_id: id.into(),
+                    cwd: "/tmp".into(),
+                    command: None,
+                    status: "running".into(),
+                    launch: None,
+                })
+                .unwrap();
+            history
+                .update(id, status, None, reason.map(str::to_owned), None)
+                .unwrap();
+            let record = history
+                .list()
+                .unwrap()
+                .into_iter()
+                .find(|r| r.summary.session_id == id)
+                .unwrap();
+            assert_eq!(record.notification_pending, notify, "{id}: pending receipt");
+            let mut sent = false;
+            assert_eq!(
+                history
+                    .native_delivery(id, NativeSource::Lifecycle(status), |_| {
+                        sent = true;
+                        Ok(())
+                    })
+                    .unwrap(),
+                notify,
+                "{id}: native eligibility"
+            );
+            assert_eq!(sent, notify);
+        }
+        // Old releases persisted a pending receipt for manually stopped tasks.
+        history
+            .records
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|r| r.summary.session_id == "manual")
+            .unwrap()
+            .notification_pending = true;
+        let pending = history.pending(200, None).unwrap();
+        assert!(!pending.items.iter().any(|r| r.session_id == "manual"));
+        assert_eq!(pending.items.len(), 4);
+        assert!(!history
+            .native_delivery("manual", NativeSource::Lifecycle("stopped"), |_| panic!(
+                "old manual stop must remain silent"
+            ))
+            .unwrap());
+        history.recover_running().unwrap();
+        assert!(!history.get("manual").unwrap().notification_pending);
+        assert!(history.get("unexpected").unwrap().notification_pending);
+        let reopened = super::super::HistoryStore::open(root.clone()).unwrap();
+        assert!(!reopened.get("manual").unwrap().notification_pending);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1508,6 +1592,73 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
+    fn runtime_info_records_cli_without_hooks_for_task_and_gemini() {
+        for (adapter, mode) in [("codex", "task"), ("gemini", "interactive")] {
+            let root = std::env::temp_dir().join(format!(
+                "yam-runtime-info-{}",
+                super::super::next_session_id()
+            ));
+            let history = super::super::HistoryStore::open(root.clone()).unwrap();
+            let summary = super::super::SessionSummary {
+                ssh: None,
+                session_id: "s-one".into(),
+                cwd: "/tmp".into(),
+                command: None,
+                status: "starting".into(),
+                launch: Some(super::super::AgentLaunch {
+                    adapter: adapter.into(),
+                    mode: mode.into(),
+                    extra_args: String::new(),
+                    prompt: Some("fixture".into()),
+                    codex: None,
+                    claude_context: None,
+                    provider: None,
+                    env_refs: Default::default(),
+                }),
+            };
+            history
+                .start_continuation_with_cli(&summary, None, Some("/fixture/bin/agent"))
+                .unwrap();
+            history
+                .unavailable_agent("s-one", "fixture unsupported hooks")
+                .unwrap();
+            let saved = super::super::HistoryStore::open(root.clone())
+                .unwrap()
+                .list()
+                .unwrap()
+                .remove(0);
+            assert_eq!(saved.agent.cli_path.as_deref(), Some("/fixture/bin/agent"));
+            assert_eq!(
+                saved.agent.cli_platform.as_deref(),
+                Some(std::env::consts::OS)
+            );
+            assert!(saved.agent.agent_session_id.is_none());
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn runtime_info_cli_path_is_additive_and_preserved_by_native_events() {
+        let mut legacy = serde_json::to_value(AgentState::default()).unwrap();
+        legacy.as_object_mut().unwrap().remove("cli_path");
+        let old: AgentState = serde_json::from_value(legacy).unwrap();
+        assert!(old.cli_path.is_none());
+        let mut state = AgentState {
+            generation: "generation".into(),
+            cli_path: Some("/fixture/bin/codex".into()),
+            ..Default::default()
+        };
+        state.apply(&event("SessionStart", None)).unwrap();
+        state
+            .apply(&event("UserPromptSubmit", Some("one")))
+            .unwrap();
+        assert_eq!(state.cli_path.as_deref(), Some("/fixture/bin/codex"));
+        let restored: AgentState =
+            serde_json::from_value(serde_json::to_value(state).unwrap()).unwrap();
+        assert_eq!(restored.cli_path.as_deref(), Some("/fixture/bin/codex"));
+    }
+
+    #[test]
     fn launch_cli_facts_are_additive_and_survive_native_event_updates() {
         let mut legacy = serde_json::to_value(AgentState::default()).unwrap();
         legacy.as_object_mut().unwrap().remove("cli_version");
@@ -1530,7 +1681,7 @@ mod tests {
     }
 
     #[test]
-    fn owner_configures_and_persists_cli_facts_per_launch_generation() {
+    fn runtime_info_owner_configures_and_persists_cli_facts_per_launch_generation() {
         let root =
             std::env::temp_dir().join(format!("yam-cli-facts-{}", super::super::next_session_id()));
         let history = super::super::HistoryStore::open(root.clone()).unwrap();
@@ -1545,7 +1696,12 @@ mod tests {
             })
             .unwrap();
         history
-            .configure_agent_version("s-one", "generation", Some("codex-cli 0.162.1"))
+            .configure_agent_version(
+                "s-one",
+                "generation",
+                Some("codex-cli 0.162.1"),
+                Some("/fixture/bin/codex"),
+            )
             .unwrap();
         history
             .ingest_agent("s-one", "generation", &event("SessionStart", None))
@@ -1554,8 +1710,10 @@ mod tests {
         let saved = &reopened.list().unwrap()[0].agent;
         assert_eq!(saved.cli_version.as_deref(), Some("codex-cli 0.162.1"));
         assert_eq!(saved.cli_platform.as_deref(), Some(std::env::consts::OS));
+        assert_eq!(saved.cli_path.as_deref(), Some("/fixture/bin/codex"));
         reopened.configure_agent("s-one", "new-generation").unwrap();
         assert!(reopened.list().unwrap()[0].agent.cli_version.is_none());
+        assert!(reopened.list().unwrap()[0].agent.cli_path.is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1584,7 +1742,12 @@ mod tests {
                 })
                 .unwrap();
             history
-                .configure_agent_version(&id, &format!("g-{worker}"), Some("codex-cli 0.162.1"))
+                .configure_agent_version(
+                    &id,
+                    &format!("g-{worker}"),
+                    Some("codex-cli 0.162.1"),
+                    None,
+                )
                 .unwrap();
         }
         let barrier = Arc::new(Barrier::new(WORKERS + 1));

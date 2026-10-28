@@ -269,10 +269,19 @@ impl HistoryStore {
             .cloned()
             .unwrap_or(original))
     }
+    #[cfg(test)]
     pub(crate) fn start_continuation(
         &self,
         summary: &SessionSummary,
         source: Option<&str>,
+    ) -> Result<(), String> {
+        self.start_continuation_with_cli(summary, source, None)
+    }
+    pub(crate) fn start_continuation_with_cli(
+        &self,
+        summary: &SessionSummary,
+        source: Option<&str>,
+        cli_path: Option<&str>,
     ) -> Result<(), String> {
         let mut records = self.lock_records()?;
         let conversation_id = source
@@ -316,7 +325,11 @@ impl HistoryStore {
             ended_at: None,
             output_end_offset: 0,
             notification_pending: false,
-            agent: agent_events::AgentState::default(),
+            agent: agent_events::AgentState {
+                cli_path: cli_path.map(str::to_string),
+                cli_platform: cli_path.map(|_| std::env::consts::OS.into()),
+                ..Default::default()
+            },
         });
         self.save_locked(&updated)?;
         *records = updated;
@@ -346,7 +359,8 @@ impl HistoryStore {
         }
         if is_terminal(status) {
             record.ended_at = Some(unix_timestamp());
-            record.notification_pending = true;
+            record.notification_pending =
+                !(status == "stopped" && record.reason.as_deref() == Some("Stopped by user"));
         }
         self.save_locked(&updated)?;
         *records = updated;
@@ -386,6 +400,13 @@ impl HistoryStore {
         let mut changed = false;
         let mut updated = records.clone();
         for record in updated.iter_mut() {
+            if record.status == "stopped"
+                && record.reason.as_deref() == Some("Stopped by user")
+                && record.notification_pending
+            {
+                record.notification_pending = false;
+                changed = true;
+            }
             if matches!(record.status.as_str(), "starting" | "running") {
                 record.status = "needs_attention".to_string();
                 record.summary.status = "needs_attention".to_string();
@@ -810,7 +831,9 @@ impl HistoryStore {
         let mut pending = records
             .iter()
             .filter(|r| {
-                r.notification_pending && after.as_ref().is_none_or(|after| key(r) > *after)
+                r.notification_pending
+                    && !(r.status == "stopped" && r.reason.as_deref() == Some("Stopped by user"))
+                    && after.as_ref().is_none_or(|after| key(r) > *after)
             })
             .collect::<Vec<_>>();
         pending.sort_by_key(|r| key(r));
@@ -4254,6 +4277,7 @@ mod tests {
             record.summary.cwd = history.root.to_string_lossy().into();
             record.summary.command = None;
             record.summary.launch = Some(super::super::AgentLaunch {
+                claude_context: None,
                 codex: None,
                 provider: None,
                 env_refs: Default::default(),
@@ -4805,6 +4829,7 @@ mod tests {
         let mut agent = record;
         agent.summary.command = None;
         agent.summary.launch = Some(super::super::AgentLaunch {
+            claude_context: None,
             codex: None,
             adapter: "codex".into(),
             mode: "interactive".into(),
@@ -5161,6 +5186,7 @@ mod tests {
             let mut records = store.records.lock().unwrap();
             records[0].summary.command = None;
             records[0].summary.launch = Some(super::super::AgentLaunch {
+                claude_context: None,
                 codex: None,
                 provider: None,
                 env_refs: Default::default(),
@@ -5206,6 +5232,7 @@ mod tests {
         {
             let mut records = store.records.lock().unwrap();
             records[0].summary.launch = Some(super::super::AgentLaunch {
+                claude_context: None,
                 codex: None,
                 provider: None,
                 env_refs: Default::default(),

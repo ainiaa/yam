@@ -37,7 +37,7 @@ class BuildReleaseTests(unittest.TestCase):
     config=Path(root)/'release.json';config.write_text(json.dumps({'bundle':{'resources':[]}}));opened=[];seen=[]
     def temporary(*args,**kwargs):
      item=factory(*args,**kwargs);opened.append(item);return item
-    def call(argv):
+    def call(argv, **kwargs):
      path=Path(argv[argv.index('--config')+1]);seen.append(path)
      self.assertTrue(all(item.closed for item in opened),'Windows child must not reopen a still-open temporary config')
      data=subprocess.check_output([sys.executable,'-c','import pathlib,sys;print(pathlib.Path(sys.argv[1]).read_text())',str(path)],timeout=10)
@@ -53,7 +53,7 @@ class BuildReleaseTests(unittest.TestCase):
   for target,windows in [([],False),(['--target','x86_64-pc-windows-msvc'],True)]:
    with tempfile.TemporaryDirectory() as root:
     config=Path(root)/'release.json';config.write_text(json.dumps({'$schema':'literal $HOME $(danger)','build':{'beforeBuildCommand':'literal $value'},'bundle':{'resources':['target/terminal-runtime/yam-terminal','notice.txt']}}));seen=[]
-    def call(argv):
+    def call(argv, **kwargs):
      path=Path(argv[argv.index('--config')+1]);self.assertTrue(path.is_file());value=json.loads(path.read_text());seen.append(path);self.assertEqual(value['$schema'],'literal $HOME $(danger)');self.assertEqual(value['build']['beforeBuildCommand'],'literal $value');self.assertEqual(value['bundle']['resources'][0],'target/terminal-runtime/yam-terminal'+('.exe' if windows else ''));self.assertEqual(argv[-len(target):] if target else [],target);return 7
     with patch.object(module.platform,'system',return_value='Linux'),patch.object(module.subprocess,'call',side_effect=call):self.assertEqual(module.main([str(config),*target]),7)
     self.assertTrue(seen);self.assertFalse(seen[0].exists())
@@ -61,7 +61,26 @@ class BuildReleaseTests(unittest.TestCase):
   for identity in ['', 'Developer ID Application: Fixture']:
    with tempfile.TemporaryDirectory() as root:
     path=Path(root)/'release.json';path.write_text(json.dumps({'bundle':{'resources':[]}}))
-    def call(argv):
+    def call(argv, **kwargs):
      value=json.loads(Path(argv[argv.index('--config')+1]).read_text());self.assertEqual(value['bundle'].get('macOS',{}).get('signingIdentity'),identity or '-');return 0
     with patch.object(module.platform,'system',return_value='Darwin'),patch.dict(os.environ,{'APPLE_SIGNING_IDENTITY':identity}),patch.object(module.subprocess,'call',side_effect=call):self.assertEqual(module.main([str(path),*(['--preview'] if not identity else [])]),0)
+
+class HelperBuildPathTests(unittest.TestCase):
+ def test_explicit_macos_target_passes_the_matching_binary_to_the_bundle_hook(self):
+  with tempfile.TemporaryDirectory() as root:
+   config=Path(root)/'release.json';config.write_text(json.dumps({'bundle':{'resources':[]}}));seen=[]
+   def call(argv,**kwargs):
+    seen.append(kwargs['env']['YAM_BUILD_BINARY']);return 0
+   with patch.object(module.platform,'system',return_value='Darwin'),patch.dict(os.environ,{'APPLE_SIGNING_IDENTITY':''}),patch.object(module.subprocess,'call',side_effect=call):
+    module.main([str(config),'--preview','--target','x86_64-apple-darwin'])
+   self.assertTrue(seen[0].endswith('/target/x86_64-apple-darwin/release/yam-desktop'))
+ def test_short_debug_flag_selects_debug_helper(self):
+  with tempfile.TemporaryDirectory() as root:
+   config=Path(root)/'release.json';config.write_text(json.dumps({'bundle':{'resources':[]}}));seen=[]
+   def call(argv,**kwargs):seen.append(kwargs['env']['YAM_BUILD_BINARY']);return 0
+   with patch.object(module.platform,'system',return_value='Darwin'),patch.dict(os.environ,{'APPLE_SIGNING_IDENTITY':''}),patch.object(module.subprocess,'call',side_effect=call):
+    module.main([str(config),'--preview','-d'])
+   self.assertTrue(seen[0].endswith('/target/debug/yam-desktop'))
+
+
 if __name__=='__main__':unittest.main()

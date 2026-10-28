@@ -1,3 +1,4 @@
+import {startupTimings} from '../src/startup-timings.ts';
 import {englishUiRead} from './fixtures/english-ui-source.mjs';
 const readFileSync=(...args)=>englishUiRead(rawReadFileSync,...args);
 import './fixtures/i18n-test-init.mjs';
@@ -15,13 +16,13 @@ function handler(invoke) {
  assert.ok(callback,'diagnostics export action must exist');
  const busy={current:false}, states=[], messages=[];
  const js=ts.transpileModule(callback,{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText;
- const run=new Function('invoke','diagnosticsBusy','setDiagnosticsExporting','setDiagnosticsMessage',js+';return exportDiagnostics;')(invoke,busy,v=>states.push(v),v=>messages.push(v));
+ const run=new Function('invoke','diagnosticsBusy','setDiagnosticsExporting','setDiagnosticsMessage','startupTimings',js+';return exportDiagnostics;')(invoke,busy,v=>states.push(v),v=>messages.push(v),startupTimings);
  return {run,busy,states,messages};
 }
 
 test('diagnostics export succeeds without session data and uses only the native export command',async()=>{
  const calls=[];const h=handler(async(...args)=>{calls.push(args);return true;});
- await h.run();assert.deepEqual(calls,[['export_diagnostics']]);
+ await h.run();assert.deepEqual(calls,[['export_diagnostics',{startup:{create_ms:[],view_ready_ms:[]}}]]);
  assert.deepEqual(h.states,[true,false]);assert.equal(h.busy.current,false);
  assert.equal(h.messages.at(-1),'Diagnostics saved.');
 });

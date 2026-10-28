@@ -215,7 +215,7 @@ pub(super) fn session_metadata(
         .launch
         .as_ref()
         .map(|launch| launch.adapter.as_str())
-        .filter(|value| ["codex", "claude", "gemini", "opencode", "custom"].contains(value))
+        .filter(|value| ["codex", "claude", "gemini", "opencode", "pi", "custom"].contains(value))
         .unwrap_or("unknown");
     let mode = record
         .summary
@@ -255,13 +255,14 @@ pub(super) fn owner_start(
         .get("adapter")
         .and_then(serde_json::Value::as_str)
         .ok_or("cli_invalid_adapter")?;
-    if !["codex", "claude", "gemini", "opencode"].contains(&adapter) {
+    if !["codex", "claude", "gemini", "opencode", "pi"].contains(&adapter) {
         return Err("cli_invalid_adapter".into());
     }
     let executable = resolve_agent(adapter)
         .filter(|path| path.is_absolute())
         .ok_or("cli_missing_agent")?;
     let launch = super::AgentLaunch {
+        claude_context: None,
         codex: (adapter == "codex").then(Default::default),
         provider: None,
         env_refs: Default::default(),
@@ -363,6 +364,9 @@ fn execute(command: &Command, key: &mut Option<String>) -> Result<serde_json::Va
     let client = connect_owner(&root, allow_start, || {
         let node = super::node_runtime::prepare_cli(&root)?;
         let executable = std::env::current_exe().map_err(|_| "cli_executable")?;
+        #[cfg(target_os = "macos")]
+        let executable =
+            super::mac_app::background_executable(&executable).map_err(|_| "cli_executable")?;
         owner_command(&executable)
             .arg("--yam-background")
             .arg("--yam-terminal-node")

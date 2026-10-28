@@ -1,0 +1,3 @@
+// Author: Jeff.Liu. Durations are observations, never a claim of native CLI readiness.
+import test from 'node:test';import assert from 'node:assert/strict';import {startupTimings} from '../src/startup-timings.ts';
+test('startup diagnostics include only bounded numeric observations and percentiles',()=>{const rows=[{name:'yam.start.create',duration:40},{name:'yam.start.create',duration:80},{name:'yam.start.frame',duration:300},{name:'/private/secret',duration:123},{name:'yam.start.create',duration:NaN},{name:'yam.start.create',duration:-1}];assert.deepEqual(startupTimings(rows),{create_ms:[40,80],view_ready_ms:[300]});assert.equal(startupTimings(Array.from({length:100},()=>rows[0])).create_ms.length,32);});

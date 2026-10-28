@@ -8,6 +8,7 @@ import {readFileSync as rawReadFileSync} from 'node:fs';
 import ts from 'typescript';
 import {providerChoice} from '../src/provider-config.ts';
 import * as providers from '../src/provider-config.ts';
+import {sessionRuntimeInfo} from '../src/session-runtime-info.ts';
 
 const app=readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8');
 const source=ts.createSourceFile('App.tsx',app,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
@@ -16,7 +17,7 @@ function nodes(tree){const all=[];const visit=node=>{if(node&&typeof node==='obj
 function text(node){return (node?.children??[]).map(child=>typeof child==='string'?child:Array.isArray(child)?child.map(text).join(''):text(child)).join('');}
 function renderConnection(launch,agent){
  let component;const visit=node=>{if(ts.isFunctionDeclaration(node)&&node.name?.text==='SessionConnection')component=node.getText(source);ts.forEachChild(node,visit);};visit(source);assert.ok(component,'actual session connection disclosure exists');
- return new Function('React','connectionDetails','ChevronDown',ts.transpile(component,{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2022})+';return SessionConnection;')(React,providers.connectionDetails,()=>null)({launch,agent});
+ return new Function('React','connectionDetails','ChevronDown','sessionRuntimeInfo',ts.transpile(component,{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2022})+';return SessionConnection;')(React,providers.connectionDetails,()=>null,sessionRuntimeInfo)({launch,agent});
 }
 test('T3 real connection disclosure shows the selected launch snapshot and unverified runtime boundary',()=>{
  const launch={adapter:'codex',provider:{id:'custom',model:'gateway/model',base_url:'http://127.0.0.1:3425',api_key_env:null}};
@@ -44,9 +45,9 @@ test('T3 native launch options describe inherited CLI settings without subscript
 
 test('primary agents provider form explains the actual protocol and safe owner environment refresh',()=>{
  let fieldset;const visit=node=>{if(ts.isJsxElement(node)&&node.openingElement.tagName.getText(source)==='fieldset'&&node.children.some(child=>ts.isJsxElement(child)&&child.openingElement.tagName.getText(source)==='legend'&&child.getText(source).includes('Provider connection')))fieldset=node;ts.forEachChild(node,visit);};visit(source);assert.ok(fieldset);
- const render=new Function('React','formLaunch','formAdapter','changeProviderFields','ProviderPortCheck','ProviderCatalog','invoke','providerChoice',ts.transpile('return ('+fieldset.getText(source)+');',{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2022}));
+ const render=new Function('isMainWindow','launchTemplateActionError','React','formLaunch','formAdapter','changeProviderFields','ProviderPortCheck','ProviderCatalog','invoke','providerChoice',ts.transpile('return ('+fieldset.getText(source)+');',{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2022}));
  for(const [adapter,protocol] of [['codex',/Responses API/],['claude',/Anthropic Messages API/]]){
-  const tree=render(React,{provider:{model:'selected-model',base_url:'https://api.example.test',api_key_env:'PROVIDER_TOKEN'}},adapter,()=>{},()=>null,()=>null,()=>{},providerChoice);
+  const tree=render(false,null,React,{provider:{model:'selected-model',base_url:'https://api.example.test',api_key_env:'PROVIDER_TOKEN'}},adapter,()=>{},()=>null,()=>null,()=>{},providerChoice);
   assert.match(text(tree),protocol);
   assert.match(text(tree),/reopening a window does not reload/);
   assert.match(text(tree),/Finish tasks before restarting the owner/);
@@ -99,4 +100,9 @@ test('owner preparation reuses the executable resolved for the native launch',()
  assert.ok(start>=0&&end>start);
  const setup=rust.slice(start,end);
  assert.equal((setup.match(/lookup_executable\(&launch\.adapter\)/g)??[]).length,1,'one executable resolution is shared by launch and hook/version preparation');
+});
+
+test('runtime disclosure exposes native identity and safe credential source while refusing effective model claims',()=>{
+ const tree=renderConnection({adapter:'codex',extra_args:'--config token=do-not-show',provider:{id:'custom',model:'default-model',base_url:'http://127.0.0.1:3425',api_key_env:'TEST_KEY'}},{cli_path:'/fixture/bin/codex',agent_session_id:'native-original',integration:'connected'});
+ assert.match(text(tree),/\/fixture\/bin\/codex/);assert.match(text(tree),/native-original/);assert.match(text(tree),/TEST_KEY/);assert.match(text(tree),/Not confirmed by the CLI/);assert.match(text(tree),/Trusted callback received/);assert.doesNotMatch(text(tree),/do-not-show/);
 });

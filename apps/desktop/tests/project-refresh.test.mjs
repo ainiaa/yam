@@ -1,0 +1,6 @@
+// Author: Jeff.Liu. Deterministic scheduler; no desktop application is started.
+import test from 'node:test';import assert from 'node:assert/strict';
+import {watchProjectRefresh} from '../src/project-refresh.ts';
+function fixture(action){let pending,visible=true,cleared=0;const stop=watchProjectRefresh(action,()=>visible,{setTimeout(fn,delay){assert.equal(delay,5000);pending=fn;return 1;},clearTimeout(){cleared++;}});return{stop,tick:async()=>{const fn=pending;pending=null;await fn();},hide:()=>visible=false,show:()=>visible=true,pending:()=>pending,cleared:()=>cleared};}
+test('refresh pauses while hidden, waits for each read, and stops after cleanup',async()=>{let reads=0,release;const f=fixture(async()=>{reads++;await new Promise(r=>release=r);});f.hide();await f.tick();assert.equal(reads,0);f.show();const flight=f.tick();assert.equal(reads,1);assert.equal(f.pending(),null);f.stop();release();await flight;assert.equal(f.pending(),null);assert.equal(f.cleared(),1);});
+test('failed refresh schedules a later retry without leaking an unhandled rejection',async()=>{let reads=0;const f=fixture(async()=>{reads++;throw Error('offline');});await f.tick();assert.equal(reads,1);assert.equal(typeof f.pending(),'function');f.stop();});

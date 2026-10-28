@@ -438,15 +438,6 @@ pub(crate) fn safe_config(bytes: &[u8]) -> Result<String, String> {
         let entry = std::str::from_utf8(entry).map_err(|_| "git_query_failed")?;
         let (key, value) = entry.split_once('\n').ok_or("git_query_failed")?;
         let key = key.to_ascii_lowercase();
-        if key.starts_with("filter.")
-            && (key.ends_with(".clean") || key.ends_with(".process"))
-            && !value.trim().is_empty()
-        {
-            return Err("git_external_filter".into());
-        }
-        if key == "core.excludesfile" && !value.is_empty() {
-            return Err("git_conversion_unsupported".into());
-        }
         if key == "core.attributesfile" && !value.trim().is_empty() {
             return Err("git_conversion_unsupported".into());
         }
@@ -461,7 +452,7 @@ pub(crate) fn safe_config(bytes: &[u8]) -> Result<String, String> {
             return Err("git_conversion_unsupported".into());
         }
         let valid = match key.as_str() {
-            "core.excludesfile" => value.is_empty(),
+            "core.excludesfile" => continue,
             "core.autocrlf" => ["true", "false", "input"].contains(&value),
             "core.eol" => ["lf", "crlf", "native"].contains(&value),
             "core.filemode" | "core.symlinks" | "core.ignorecase" => {
@@ -480,6 +471,63 @@ pub(crate) fn safe_config(bytes: &[u8]) -> Result<String, String> {
     }
     Ok(safe)
 }
+// Git resolves scope precedence, tilde and installation-prefix expansion; only bytes are copied.
+fn excludes_path(
+    path: &Path,
+    git: &Path,
+    env: &[(OsString, OsString)],
+    budget: &mut Budget,
+    cancel: Option<&AtomicBool>,
+) -> Result<Option<PathBuf>, String> {
+    let result = git_command_cancel(
+        cancel,
+        git,
+        path,
+        env,
+        budget,
+        &["config", "--null", "--path", "--get", "core.excludesfile"],
+    )?;
+    let selected = match result.status.code() {
+        Some(0) => {
+            let raw = result.stdout.strip_suffix(&[0]).ok_or("git_query_failed")?;
+            let value = std::str::from_utf8(raw).map_err(|_| "git_query_failed")?;
+            if value.is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(value))
+            }
+        }
+        Some(1) if result.stdout.is_empty() => {
+            let value = |key: &str| {
+                env.iter()
+                    .rev()
+                    .find(|(k, _)| k == key)
+                    .map(|(_, v)| v.clone())
+                    .or_else(|| std::env::var_os(key))
+                    .filter(|v| !v.is_empty())
+            };
+            value("XDG_CONFIG_HOME")
+                .map(PathBuf::from)
+                .or_else(|| value("HOME").map(|home| PathBuf::from(home).join(".config")))
+                .map(|home| home.join("git/ignore"))
+        }
+        _ => return Err("git_query_failed".into()),
+    };
+    selected
+        .map(|value| {
+            if value.as_os_str().len() > 4096
+                || value.to_string_lossy().chars().any(char::is_control)
+            {
+                return Err("git_invalid_path".into());
+            }
+            Ok(if value.is_absolute() {
+                value
+            } else {
+                path.join(value)
+            })
+        })
+        .transpose()
+}
 fn query_impl(
     path: &Path,
     git: &Path,
@@ -495,9 +543,21 @@ fn query_snapshot(
     changed: impl FnOnce(),
     cleanup: bool,
 ) -> Result<(GitContext, Option<CleanupSnapshot>), String> {
-    let (context, snapshot, _) =
-        query_snapshot_changes(path, git, env, changed, cleanup, None, None)?;
+    let (context, snapshot, _) = query_snapshot_changes(
+        path,
+        git,
+        env,
+        changed,
+        cleanup,
+        QueryOutput::default(),
+        None,
+    )?;
     Ok((context, snapshot))
+}
+#[derive(Default)]
+struct QueryOutput<'a> {
+    changes: Option<(&'a str, Option<(&'a str, &'a str)>)>,
+    inventory: Option<&'a mut TrackedInventory>,
 }
 fn query_snapshot_changes(
     path: &Path,
@@ -505,9 +565,10 @@ fn query_snapshot_changes(
     env: Vec<(OsString, OsString)>,
     changed: impl FnOnce(),
     cleanup: bool,
-    changes: Option<(&str, Option<(&str, &str)>)>,
+    output: QueryOutput<'_>,
     cancel: Option<&AtomicBool>,
 ) -> Result<(GitContext, Option<CleanupSnapshot>, Option<GitChanges>), String> {
+    let QueryOutput { changes, inventory } = output;
     check_cancel(cancel)?;
     let _query = QUERY_GATE.try_lock().map_err(|_| "git_busy")?;
     let mut budget = Budget {
@@ -536,6 +597,22 @@ fn query_snapshot_changes(
         return Err("git_query_failed".into());
     }
     let safe = safe_config(&config.stdout)?;
+    // Destructive cleanup retains the original strict driver policy.
+    if cleanup
+        && config.stdout.split(|byte| *byte == 0).any(|entry| {
+            let Some(split) = entry.iter().position(|byte| *byte == b'\n') else {
+                return false;
+            };
+            let key = String::from_utf8_lossy(&entry[..split]).to_ascii_lowercase();
+            key.starts_with("filter.")
+                && (key.ends_with(".clean") || key.ends_with(".process"))
+                && !String::from_utf8_lossy(&entry[split + 1..])
+                    .trim()
+                    .is_empty()
+        })
+    {
+        return Err("git_external_filter".into());
+    }
     if cleanup
         && config.stdout.split(|b| *b == 0).any(|entry| {
             let Some(split) = entry.iter().position(|b| *b == b'\n') else {
@@ -743,8 +820,18 @@ fn query_snapshot_changes(
     // Build the final component without rev-parse canonicalization so NOFOLLOW sees links.
     let exclude = PathBuf::from(parts[1]).join("info/exclude");
     let original_exclude = read_regular(&exclude, &mut budget)?;
+    let global_exclude = excludes_path(&root, git, &env, &mut budget, cancel)?;
+    let original_global_exclude = global_exclude
+        .as_ref()
+        .map(|file| read_regular(file, &mut budget))
+        .transpose()?
+        .flatten();
     let shadow = Shadow::new()?;
     shadow.write("config", safe.as_bytes())?;
+    shadow.write(
+        "global-exclude",
+        original_global_exclude.as_deref().unwrap_or_default(),
+    )?;
     shadow.write(
         "HEAD",
         format!(
@@ -773,6 +860,12 @@ fn query_snapshot_changes(
         ("GIT_DIR".into(), shadow.0.as_os_str().to_owned()),
         ("GIT_WORK_TREE".into(), root.as_os_str().to_owned()),
         ("GIT_OBJECT_DIRECTORY".into(), OsString::from(parts[4])),
+        ("GIT_CONFIG_COUNT".into(), "1".into()),
+        ("GIT_CONFIG_KEY_0".into(), "core.excludesFile".into()),
+        (
+            "GIT_CONFIG_VALUE_0".into(),
+            shadow.0.join("global-exclude").into_os_string(),
+        ),
     ];
     if cleanup {
         // Check the exact private index used by status; never clear flags in the original.
@@ -804,7 +897,7 @@ fn query_snapshot_changes(
         }
     }
     let mut attribute_args = vec!["check-attr", "--all", "-z", "--"];
-    attribute_args.extend(tracked_paths);
+    attribute_args.extend(tracked_paths.iter().copied());
     // Metadata-only lookup: it does not perform clean/process conversion. Compare effective
     // rules instead of guessing the installed Git's compiled system-attribute prefix.
     let effective_attributes = if attribute_args.len() > 4 {
@@ -816,6 +909,22 @@ fn query_snapshot_changes(
         }
         if original.stdout != isolated.stdout {
             return Err("git_attributes_unsupported".into());
+        }
+        // Unused driver registrations are inert; applied filters remain unsupported.
+        if !original.stdout.is_empty() {
+            let raw = original
+                .stdout
+                .strip_suffix(&[0])
+                .ok_or("git_query_failed")?;
+            let fields: Vec<_> = raw.split(|byte| *byte == 0).collect();
+            for attribute in fields.chunks(3) {
+                if attribute.len() != 3 {
+                    return Err("git_query_failed".into());
+                }
+                if attribute[1] == b"filter" {
+                    return Err("git_external_filter".into());
+                }
+            }
         }
         Some(original.stdout)
     } else {
@@ -832,7 +941,7 @@ fn query_snapshot_changes(
             "status",
             "--porcelain=v1",
             "-z",
-            if cleanup || changes.is_some() {
+            if cleanup || changes.is_some() || inventory.is_some() {
                 "--untracked-files=all"
             } else {
                 "--untracked-files=normal"
@@ -986,6 +1095,16 @@ fn query_snapshot_changes(
     {
         return Err("git_context_changed".into());
     }
+    if excludes_path(&root, git, &env, &mut budget, cancel)? != global_exclude
+        || global_exclude
+            .as_ref()
+            .map(|file| read_regular(file, &mut budget))
+            .transpose()?
+            .flatten()
+            != original_global_exclude
+    {
+        return Err("git_context_changed".into());
+    }
     if read_regular(&exclude, &mut budget)? != original_exclude {
         return Err("git_context_changed".into());
     }
@@ -1044,6 +1163,7 @@ fn query_snapshot_changes(
             &config.stdout,
             &original_index,
             &original_exclude,
+            &original_global_exclude,
             attrs,
             &oid,
         ))
@@ -1065,6 +1185,20 @@ fn query_snapshot_changes(
         serde_json::to_vec(result).map_or(true, |bytes| bytes.len() > MAX_QUERY_BYTES)
     }) {
         return Err("git_output_limit".into());
+    }
+    if let Some(inventory) = inventory {
+        *inventory = TrackedInventory {
+            root: root.clone(),
+            tracked: tracked_paths
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect(),
+            untracked: parse_change_rows(&status.stdout)?
+                .into_iter()
+                .filter(|row| row.untracked)
+                .map(|row| row.path)
+                .collect(),
+        };
     }
     Ok((
         GitContext {
@@ -1653,6 +1787,7 @@ mod tests {
         let _serial = serial_query_test();
         let repo = Repo::new();
         repo.commit();
+        fs::write(repo.0.join(".gitattributes"), "file.txt filter=fixture\n").unwrap();
         let source = repo.0.join("external.conf");
         fs::write(
             &source,
@@ -1943,43 +2078,177 @@ mod tests {
         assert_eq!(query(&linked).unwrap().dirty, Some(false));
     }
     #[test]
-    fn t12_review_configured_excludes_are_explicitly_unsupported() {
+    fn ignore_fix_effective_global_patterns_preserve_diff_inventory_and_original_files() {
+        let _serial = serial_query_test();
+        let repo = Repo::new();
+        repo.commit();
+        let source = repo.0.join(".git/global ignore \"file");
+        fs::write(&source, "*.secret\nfile.txt\n!visible.secret\n").unwrap();
+        let global = repo.0.join(".git/test-global-config");
+        repo.git(&[
+            "config",
+            "--file",
+            global.to_str().unwrap(),
+            "core.excludesfile",
+            source.to_str().unwrap(),
+        ]);
+        let marker = repo.0.join("filter-must-not-run");
+        repo.git(&[
+            "config",
+            "--file",
+            global.to_str().unwrap(),
+            "filter.lfs.clean",
+            &format!("touch '{}'", marker.display()),
+        ]);
+        repo.git(&[
+            "config",
+            "--file",
+            global.to_str().unwrap(),
+            "filter.lfs.process",
+            &format!("touch '{}'", marker.display()),
+        ]);
+        fs::write(repo.0.join("hidden.secret"), "ignored").unwrap();
+        fs::write(repo.0.join("visible.secret"), "visible").unwrap();
+        fs::write(repo.0.join("file.txt"), "changed\n").unwrap();
+        let config = fs::read(&global).unwrap();
+        let patterns = fs::read(&source).unwrap();
+        let index = fs::read(repo.0.join(".git/index")).unwrap();
+        let env = vec![
+            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+            ("GIT_CONFIG_GLOBAL".into(), global.as_os_str().to_owned()),
+        ];
+        let mut inventory = TrackedInventory::default();
+        let (_, _, changes) = query_snapshot_changes(
+            &repo.0,
+            &crate::find_executable("git").unwrap(),
+            env.clone(),
+            || {},
+            false,
+            QueryOutput {
+                changes: Some(("ignore-test", Some(("file.txt", "worktree")))),
+                inventory: Some(&mut inventory),
+            },
+            None,
+        )
+        .unwrap();
+        assert!(inventory.untracked.contains(&"visible.secret".to_string()));
+        assert!(!inventory.untracked.contains(&"hidden.secret".to_string()));
+        assert!(changes
+            .unwrap()
+            .patch
+            .unwrap()
+            .text
+            .unwrap()
+            .contains("+changed"));
+        assert_eq!(fs::read(&source).unwrap(), patterns);
+        assert_eq!(fs::read(&global).unwrap(), config);
+        assert_eq!(fs::read(repo.0.join(".git/index")).unwrap(), index);
+        repo.git(&["config", "core.excludesFile", ""]);
+        let (_, _, _) = query_snapshot_changes(
+            &repo.0,
+            &crate::find_executable("git").unwrap(),
+            env,
+            || {},
+            false,
+            QueryOutput {
+                inventory: Some(&mut inventory),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        assert!(inventory.untracked.contains(&"hidden.secret".to_string()));
+        assert!(!marker.exists());
+    }
+    #[test]
+    fn ignore_fix_cleanup_snapshot_binds_global_ignore_contents() {
+        let _serial = serial_query_test();
+        let repo = Repo::new();
+        repo.commit();
+        let source = repo.0.join(".git/global-ignore");
+        fs::write(&source, "not-present-one\n").unwrap();
+        repo.git(&["config", "core.excludesfile", source.to_str().unwrap()]);
+        let snapshot = || {
+            query_snapshot(
+                &repo.0,
+                &crate::find_executable("git").unwrap(),
+                config_environment().unwrap(),
+                || {},
+                true,
+            )
+            .unwrap()
+            .1
+            .unwrap()
+        };
+        let before = snapshot();
+        fs::write(&source, "not-present-two\n").unwrap();
+        let after = snapshot();
+        assert_ne!(before.bytes, after.bytes);
+    }
+    #[test]
+    fn ignore_fix_git_path_expansion_and_default_xdg_ignore() {
+        let _serial = serial_query_test();
+        let repo = Repo::new();
+        repo.commit();
+        let home = repo.0.join(".git/home");
+        let xdg = repo.0.join(".git/xdg");
+        fs::create_dir_all(xdg.join("git")).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        fs::write(xdg.join("git/ignore"), "ignored.txt\n").unwrap();
+        fs::write(home.join("patterns"), "ignored.txt\n").unwrap();
+        fs::write(repo.0.join("ignored.txt"), "ignore").unwrap();
+        let env = vec![
+            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+            ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+            ("HOME".into(), home.as_os_str().to_owned()),
+            ("XDG_CONFIG_HOME".into(), xdg.as_os_str().to_owned()),
+        ];
+        let git = crate::find_executable("git").unwrap();
+        assert_eq!(
+            query_impl(&repo.0, &git, env.clone(), || {}).unwrap().dirty,
+            Some(false)
+        );
+        repo.git(&["config", "core.excludesfile", "~/patterns"]);
+        assert_eq!(
+            query_impl(&repo.0, &git, env.clone(), || {}).unwrap().dirty,
+            Some(false)
+        );
+        repo.git(&["config", "core.excludesfile", ""]);
+        assert_eq!(
+            query_impl(&repo.0, &git, env, || {}).unwrap().dirty,
+            Some(true)
+        );
+    }
+    #[test]
+    fn ignore_fix_relative_missing_changed_and_unsafe_sources() {
         let _serial = serial_query_test();
         let repo = Repo::new();
         repo.commit();
         let source = repo.0.join(".git/fixture-ignore");
-        fs::write(&source, "ignored-only.txt\n").unwrap();
-        fs::write(repo.0.join("ignored-only.txt"), "fixture").unwrap();
-        for path in [
-            source.to_str().unwrap(),
-            ".git/fixture-ignore",
-            "~/fixture-ignore",
-            "%(prefix)/fixture-ignore",
-        ] {
-            repo.git(&["config", "core.excludesFile", path]);
-            assert_eq!(query(&repo.0).unwrap_err(), "git_conversion_unsupported");
-        }
-        repo.git(&["config", "--unset", "core.excludesFile"]);
+        fs::write(&source, "ignored.txt\n").unwrap();
+        fs::write(repo.0.join("ignored.txt"), "ignore").unwrap();
+        repo.git(&["config", "core.excludesfile", ".git/fixture-ignore"]);
+        assert_eq!(query(&repo.0).unwrap().dirty, Some(false));
         assert_eq!(
-            query_env(
-                &repo.0,
-                &[
-                    ("GIT_CONFIG_COUNT", "1"),
-                    ("GIT_CONFIG_KEY_0", "core.excludesFile"),
-                    ("GIT_CONFIG_VALUE_0", source.to_str().unwrap())
-                ]
-            )
+            query_changed(&repo.0, || {
+                fs::write(&source, "different\n").unwrap();
+            })
             .unwrap_err(),
-            "git_conversion_unsupported"
+            "git_context_changed"
         );
-        repo.git(&["config", "extensions.worktreeConfig", "true"]);
-        repo.git(&[
-            "config",
-            "--worktree",
-            "core.excludesFile",
-            source.to_str().unwrap(),
-        ]);
-        assert_eq!(query(&repo.0).unwrap_err(), "git_conversion_unsupported");
+        fs::remove_file(&source).unwrap();
+        assert_eq!(query(&repo.0).unwrap().dirty, Some(true));
+        fs::write(&source, vec![b'x'; MAX_QUERY_BYTES + 1]).unwrap();
+        assert_eq!(query(&repo.0).unwrap_err(), "git_output_limit");
+        fs::remove_file(&source).unwrap();
+        fs::create_dir(&source).unwrap();
+        assert_eq!(query(&repo.0).unwrap_err(), "git_query_failed");
+        #[cfg(unix)]
+        {
+            fs::remove_dir(&source).unwrap();
+            std::os::unix::fs::symlink(repo.0.join("file.txt"), &source).unwrap();
+            assert_eq!(query(&repo.0).unwrap_err(), "git_query_failed");
+        }
     }
     #[test]
     fn t12_review_info_exclude_limit_and_change() {
@@ -2548,7 +2817,10 @@ pub(crate) fn query_changes(
         config_environment()?,
         || {},
         false,
-        Some((token, selected)),
+        QueryOutput {
+            changes: Some((token, selected)),
+            ..Default::default()
+        },
         Some(&admission.flag),
     )?;
     finish_changes(changes.ok_or("git_query_failed")?, path)
@@ -2569,4 +2841,32 @@ fn finish_changes(mut value: GitChanges, path: &Path) -> Result<GitChanges, Stri
 #[cfg(test)]
 pub(crate) fn f3_serial_query_test() -> std::sync::MutexGuard<'static, ()> {
     tests::serial_query_test()
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct TrackedInventory {
+    pub root: PathBuf,
+    pub tracked: Vec<String>,
+    pub untracked: Vec<String>,
+}
+pub(crate) fn tracked_inventory(path: &Path) -> Result<TrackedInventory, String> {
+    let git = crate::find_executable("git").ok_or("git_missing")?;
+    let fixed = fixed_git(&git, path)?;
+    let mut inventory = TrackedInventory::default();
+    let (context, _, _) = query_snapshot_changes(
+        path,
+        &fixed,
+        config_environment()?,
+        || {},
+        false,
+        QueryOutput {
+            inventory: Some(&mut inventory),
+            ..Default::default()
+        },
+        None,
+    )?;
+    if context.root.is_none() {
+        return Err("git_not_repository".into());
+    }
+    Ok(inventory)
 }

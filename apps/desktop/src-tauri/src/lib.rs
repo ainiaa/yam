@@ -2,6 +2,7 @@ mod agent_bridge;
 mod agent_events;
 mod background;
 mod browser_window;
+mod claude_context;
 mod claude_resume;
 mod cli;
 mod codex_context;
@@ -20,12 +21,16 @@ mod history;
 mod memory;
 mod native_menu;
 mod node_runtime;
+mod pi_router;
+mod preferences_backup;
 mod project_config;
+mod project_files;
 mod provider_catalog;
 mod provider_launch;
 #[cfg(test)]
 mod provider_native_tests;
 mod provider_probe;
+mod run_changes;
 mod session_logs;
 mod shell_command_report;
 mod shell_cwd;
@@ -42,7 +47,13 @@ pub fn agent_helper_entry() -> bool {
     agent_bridge::helper_entry()
 }
 pub fn background_entry() -> bool {
-    if std::env::args().nth(1).as_deref() != Some("--yam-background") {
+    let background_flag = std::env::args().nth(1).as_deref() == Some("--yam-background");
+    #[cfg(target_os = "macos")]
+    let cold_helper = std::env::args_os().nth(1).is_none()
+        && std::env::current_exe().is_ok_and(|exe| mac_app::is_helper(&exe));
+    #[cfg(not(target_os = "macos"))]
+    let cold_helper = false;
+    if !background_flag && !cold_helper {
         return false;
     }
     let args = std::env::args_os().skip(2).collect::<Vec<_>>();
@@ -106,6 +117,8 @@ use tauri_plugin_dialog::DialogExt;
 #[cfg(any(target_os = "linux", test))]
 mod linux_notifications;
 #[cfg(target_os = "macos")]
+mod mac_app;
+#[cfg(target_os = "macos")]
 mod mac_notifications;
 #[cfg(any(windows, test))]
 mod windows_notifications;
@@ -130,6 +143,8 @@ pub struct HealthReport {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AgentLaunch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_context: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex: Option<codex_context::Options>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -189,6 +204,9 @@ fn parse_agent_args(input: &str) -> Result<Vec<String>, String> {
 
 fn agent_command(executable: &Path, launch: &AgentLaunch) -> Result<CommandBuilder, String> {
     codex_context::validate(launch)?;
+    if launch.adapter == "pi" {
+        return pi_router::command(executable, launch, false);
+    }
     if let Some(provider) = &launch.provider {
         provider.validate(&launch.adapter, &launch.extra_args)?;
     }
@@ -200,7 +218,11 @@ fn agent_command(executable: &Path, launch: &AgentLaunch) -> Result<CommandBuild
         return Err("Unknown agent or launch mode".into());
     }
     if launch.adapter == "gemini" {
-        agent_bridge::validate_interactive_args("gemini", &parse_agent_args(&launch.extra_args)?)?;
+        provider_launch::validate_launch_args(
+            "gemini",
+            &parse_agent_args(&launch.extra_args)?,
+            launch.provider.is_some(),
+        )?;
     }
     let prompt = launch
         .prompt
@@ -212,6 +234,29 @@ fn agent_command(executable: &Path, launch: &AgentLaunch) -> Result<CommandBuild
     if prompt.is_some_and(|prompt| prompt.contains('\0') || prompt.len() > 1024 * 1024) {
         return Err("Invalid agent prompt".into());
     }
+    let extra_args = parse_agent_args(&launch.extra_args)?;
+    let explicit_model = extra_args.iter().enumerate().any(|(index, arg)| {
+        let name = arg.split('=').next().unwrap_or_default();
+        if matches!(name, "--model" | "-m") || (arg.starts_with("-m") && !arg.starts_with("--")) {
+            return true;
+        }
+        if launch.adapter != "codex" {
+            return false;
+        }
+        if matches!(name, "--profile" | "-p") || (arg.starts_with("-p") && !arg.starts_with("--")) {
+            return true;
+        }
+        let config = if matches!(arg.as_str(), "-c" | "--config") {
+            extra_args.get(index + 1).map(String::as_str)
+        } else {
+            arg.strip_prefix("--config=")
+                .or_else(|| arg.strip_prefix("-c="))
+                .or_else(|| arg.strip_prefix("-c").filter(|_| !arg.starts_with("--")))
+        };
+        config.is_some_and(|value| {
+            provider_launch::config_override_path(value).is_ok_and(|path| path == ["model"])
+        })
+    });
     let mut builder = CommandBuilder::new(executable);
     #[cfg(windows)]
     if executable.extension().is_some_and(|extension| {
@@ -244,11 +289,24 @@ fn agent_command(executable: &Path, launch: &AgentLaunch) -> Result<CommandBuild
     }
     builder.env("PATH", agent_path());
     if let Some(provider) = &launch.provider {
-        builder.args(if launch.adapter == "codex" && launch.codex.is_some() {
+        let mut defaults = if launch.adapter == "codex" && launch.codex.is_some() {
             codex_context::command_overrides(provider)?
         } else {
             provider.command_overrides(&launch.adapter)?
-        });
+        };
+        if explicit_model {
+            if launch.adapter == "codex" {
+                if let Some(index) = defaults
+                    .windows(2)
+                    .position(|pair| pair[0] == "-c" && pair[1].starts_with("model="))
+                {
+                    defaults.drain(index..index + 2);
+                }
+            } else {
+                defaults.clear();
+            }
+        }
+        builder.args(defaults);
     }
     if launch.mode == "task" {
         if launch.adapter == "codex" {
@@ -261,7 +319,7 @@ fn agent_command(executable: &Path, launch: &AgentLaunch) -> Result<CommandBuild
             builder.args(["run", "--format", "json"]);
         }
     }
-    builder.args(parse_agent_args(&launch.extra_args)?);
+    builder.args(extra_args);
     if let Some(prompt) = prompt {
         if launch.adapter == "gemini" {
             builder.arg(format!(
@@ -312,23 +370,24 @@ fn resume_record_source(record: SessionRecord) -> Result<(String, AgentLaunch, S
         .launch
         .ok_or("This history has no supported Agent conversation")?;
     if record.summary.command.is_some()
-        || !matches!(launch.adapter.as_str(), "codex" | "claude" | "gemini")
+        || !matches!(
+            launch.adapter.as_str(),
+            "codex" | "claude" | "gemini" | "pi"
+        )
         || launch.mode != "interactive"
-        || (launch.adapter == "codex"
-            && launch.provider.is_none()
-            && !launch.extra_args.trim().is_empty())
     {
         return Err(
-            "Native resume supports default Codex and validated Claude / Gemini interactive sessions".into(),
+            "Native resume supports validated Codex / Claude / Gemini interactive sessions".into(),
         );
     }
     if let Some(provider) = &launch.provider {
         provider.validate(&launch.adapter, &launch.extra_args)?;
     }
-    if matches!(launch.adapter.as_str(), "claude" | "gemini") {
-        agent_bridge::validate_interactive_args(
+    if matches!(launch.adapter.as_str(), "codex" | "claude" | "gemini") {
+        provider_launch::validate_launch_args(
             &launch.adapter,
             &parse_agent_args(&launch.extra_args)?,
+            launch.provider.is_some(),
         )?;
     }
     let id = record
@@ -352,12 +411,9 @@ fn terminal_reopen_launch(
     }
     validate_working_directory(&record.summary.cwd)?;
     if record.summary.command.is_none() && record.agent.agent_session_id.is_none() {
-        if let Some(mut launch) = record
-            .summary
-            .launch
-            .clone()
-            .filter(|launch| launch.adapter == "codex" && launch.mode == "interactive")
-        {
+        if let Some(mut launch) = record.summary.launch.clone().filter(|launch| {
+            matches!(launch.adapter.as_str(), "codex" | "claude") && launch.mode == "interactive"
+        }) {
             launch.prompt = None;
             resume_picker_command(Path::new("codex"), &launch)?;
             return Ok((Some(launch), None));
@@ -380,15 +436,23 @@ fn resume_picker_command(
     executable: &Path,
     launch: &AgentLaunch,
 ) -> Result<CommandBuilder, String> {
-    if launch.adapter != "codex"
+    if !matches!(launch.adapter.as_str(), "codex" | "claude")
         || launch.mode != "interactive"
         || launch.prompt.is_some()
-        || (launch.provider.is_none() && !launch.extra_args.trim().is_empty())
     {
         return Err("Invalid native history picker request".into());
     }
+    provider_launch::validate_launch_args(
+        &launch.adapter,
+        &parse_agent_args(&launch.extra_args)?,
+        launch.provider.is_some(),
+    )?;
     let mut command = agent_command(executable, launch)?;
-    command.arg("resume");
+    command.arg(if launch.adapter == "claude" {
+        "--resume"
+    } else {
+        "resume"
+    });
     Ok(command)
 }
 fn resume_command(
@@ -397,21 +461,27 @@ fn resume_command(
     id: &str,
 ) -> Result<CommandBuilder, String> {
     if !valid_resume_id(id)
-        || !matches!(launch.adapter.as_str(), "codex" | "claude" | "gemini")
+        || !matches!(
+            launch.adapter.as_str(),
+            "codex" | "claude" | "gemini" | "pi"
+        )
         || launch.mode != "interactive"
-        || (launch.adapter == "codex"
-            && launch.provider.is_none()
-            && !launch.extra_args.trim().is_empty())
         || launch.prompt.is_some()
     {
         return Err("Invalid native resume request".into());
     }
-    let mut command = agent_command(executable, launch)?;
-    if matches!(launch.adapter.as_str(), "claude" | "gemini") {
-        agent_bridge::validate_interactive_args(
+    if matches!(launch.adapter.as_str(), "codex" | "claude" | "gemini") {
+        provider_launch::validate_launch_args(
             &launch.adapter,
             &parse_agent_args(&launch.extra_args)?,
+            launch.provider.is_some(),
         )?;
+    }
+    if launch.adapter == "pi" {
+        return pi_router::command(executable, launch, true);
+    }
+    let mut command = agent_command(executable, launch)?;
+    if matches!(launch.adapter.as_str(), "claude" | "gemini") {
         command.args(["--resume", id]);
     } else {
         command.args(["resume", id]);
@@ -1644,6 +1714,7 @@ impl SessionManager {
             id,
             &prepared.generation,
             prepared.cli_version.as_deref(),
+            builder.get_argv().first().and_then(|path| path.to_str()),
         )?;
         bridge.register(id, &prepared.token, &prepared.generation)?;
         prepared.install(builder, bridge.address)
@@ -1715,13 +1786,16 @@ pub(crate) fn route_notification_session<R: tauri::Runtime>(
         .lock()
         .map_err(|_| "Notification selection lock poisoned".to_string())? = Some(session_id.into());
     if manager.background_owner {
-        std::process::Command::new(std::env::current_exe().map_err(|e| e.to_string())?)
-            .arg(format!("yam://session/{session_id}"))
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|e| format!("Cannot reopen desktop: {e}"))?;
+        system_entry::desktop_launch_command_with_link(
+            &std::env::current_exe().map_err(|e| e.to_string())?,
+            Some(&format!("yam://session/{session_id}")),
+        )
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("Cannot reopen desktop: {e}"))?;
+        return Ok(());
     }
     let slot = desktop_windows::owning_slot(app, session_id);
     desktop_windows::show_slot(app, slot)?;
@@ -2193,6 +2267,7 @@ fn cold_gui_path_finds_user_cli_and_preserves_existing_precedence() {
     let command = agent_command(
         Path::new("codex"),
         &AgentLaunch {
+            claude_context: None,
             codex: None,
             provider: None,
             env_refs: Default::default(),
@@ -2219,6 +2294,7 @@ fn agent_adapters() -> Vec<AgentAdapter> {
         ("claude", "Claude Code", Some("claude")),
         ("gemini", "Gemini CLI", Some("gemini")),
         ("opencode", "OpenCode", Some("opencode")),
+        ("pi", "Pi 自动路由", Some("pi")),
     ]
     .into_iter()
     .map(|(id, label, executable)| {
@@ -4150,11 +4226,11 @@ fn create_session_with_effects<R: tauri::Runtime>(
             &|key| std::env::var(key).ok(),
         )?);
     }
-    if let Some(launch) = &launch {
-        provider_launch::validate_project(launch, &initial_cwd)?;
-    }
     if let Some(launch) = &mut launch {
         codex_context::assign_context(launch)?;
+    }
+    if let Some(launch) = &launch {
+        provider_launch::validate_project(launch, &initial_cwd)?;
     }
     let provider_environment = launch
         .as_ref()
@@ -4320,6 +4396,16 @@ fn create_session_with_effects<R: tauri::Runtime>(
         })
         .map(|_| gemini_resume::new_id())
         .transpose()?;
+    let pi_identity = launch
+        .as_ref()
+        .filter(|l| l.adapter == "pi")
+        .map(|_| {
+            resume_id
+                .clone()
+                .map(Ok)
+                .unwrap_or_else(gemini_resume::new_id)
+        })
+        .transpose()?;
     let mut launch_executable = None;
     let mut builder = if let Some(builder) = ssh_builder {
         builder
@@ -4344,6 +4430,8 @@ fn create_session_with_effects<R: tauri::Runtime>(
                 } else {
                     gemini_resume::validate(&config, directory, id)?;
                 }
+            } else if launch.adapter == "pi" {
+                pi_router::validate_session(&history.root, id, directory)?;
             } else {
                 agent_bridge::validate_resume(
                     &executable,
@@ -4364,6 +4452,29 @@ fn create_session_with_effects<R: tauri::Runtime>(
     } else {
         shell_command(command.as_deref())
     };
+    if let Some(native_id) = &pi_identity {
+        builder.env(
+            "YAM_PI_CONTROL_FILE",
+            pi_router::control_file(&history.root, &id)?,
+        );
+        background::private_root(&history.root.join("pi-sessions"))?;
+        let entry = pi_router::stage(&history.root)?;
+        let file = pi_router::session_file(&history.root, native_id)?;
+        let index = builder
+            .get_argv()
+            .iter()
+            .position(|a| a == "--")
+            .unwrap_or(builder.get_argv().len());
+        builder.get_argv_mut().splice(
+            index..index,
+            [
+                std::ffi::OsString::from("--extension"),
+                entry.into_os_string(),
+                std::ffi::OsString::from("--session"),
+                file.into_os_string(),
+            ],
+        );
+    }
     #[cfg(unix)]
     configure_terminal_environment(&mut builder);
     if let Some(id) = &gemini_identity {
@@ -4403,6 +4514,11 @@ fn create_session_with_effects<R: tauri::Runtime>(
                 })
         });
 
+    if launch.as_ref().is_some_and(|l| l.adapter == "pi") {
+        if let Some(Err(reason)) = &integration {
+            return Err(format!("Pi routing preflight failed: {reason}"));
+        }
+    }
     let summary = SessionSummary {
         ssh: ssh.clone(),
         session_id: id,
@@ -4494,7 +4610,11 @@ fn create_session_with_effects<R: tauri::Runtime>(
         environment.validate_before_spawn()?;
     }
     log.begin_commit();
-    history.start_continuation(&summary, resume_from.as_deref())?;
+    history.start_continuation_with_cli(
+        &summary,
+        resume_from.as_deref(),
+        launch_executable.as_ref().and_then(|path| path.to_str()),
+    )?;
     let log = log.commit();
     if restored_offset > 0 {
         history.update(
@@ -4508,6 +4628,9 @@ fn create_session_with_effects<R: tauri::Runtime>(
     if let Some(integration) = integration {
         match integration {
             Ok(prepared) => {
+                if pi_identity.is_some() {
+                    builder.env("YAM_PI_GENERATION", &prepared.generation);
+                }
                 if let Err(reason) = connect_agent(
                     &app,
                     history.clone(),
@@ -4521,7 +4644,11 @@ fn create_session_with_effects<R: tauri::Runtime>(
             Err(reason) => history.unavailable_agent(&summary.session_id, &reason)?,
         }
     }
-    if let Some(native_id) = resume_id.as_deref().or(gemini_identity.as_deref()) {
+    if let Some(native_id) = resume_id
+        .as_deref()
+        .or(gemini_identity.as_deref())
+        .or(pi_identity.as_deref())
+    {
         history.bind_resume_identity(&summary.session_id, native_id)?;
     }
     #[allow(unused_mut)]
@@ -4997,7 +5124,14 @@ async fn notify_session(
                     let body = record.reason.clone().unwrap_or_else(|| {
                         system_entry::notification_status(&record.status, chinese)
                     });
-                    send_native_notification(app, session_id.clone(), title, body)
+                    send_native_notification(
+                        app,
+                        session_id.clone(),
+                        &record.summary.cwd,
+                        title,
+                        body,
+                        &expected_status,
+                    )
                 },
             )
             .map(|_| ())
@@ -5005,16 +5139,67 @@ async fn notify_session(
     .await
     .map_err(|error| format!("Notification worker failed: {error}"))?
 }
+fn notification_test_content(session_id: &str, chinese: bool) -> Result<(String, String), String> {
+    if session_id_from_link(&format!("yam://session/{session_id}")).as_deref() != Some(session_id) {
+        return Err("Invalid notification session ID".into());
+    }
+    Ok(if chinese {
+        (
+            "YAM 通知测试".into(),
+            "这是一条测试通知。点击可返回所选会话。".into(),
+        )
+    } else {
+        (
+            "YAM notification test".into(),
+            "This is a test notification. Click to return to the selected session.".into(),
+        )
+    })
+}
+#[tauri::command]
+async fn test_notification(
+    app: AppHandle,
+    manager: State<'_, SessionManager>,
+    session_id: String,
+) -> Result<(), String> {
+    proxy!(
+        manager,
+        "test_notification",
+        serde_json::json!({"session_id":session_id})
+    );
+    let record = get_session(
+        app.clone(),
+        app.state::<SessionManager>(),
+        session_id.clone(),
+    )?;
+    let (title, body) =
+        notification_test_content(&session_id, system_entry::notification_chinese(&app))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        send_native_notification(app, session_id, &record.summary.cwd, title, body, "test")
+    })
+    .await
+    .map_err(|_| "Notification test worker failed".to_string())?
+}
 fn send_native_notification(
     app: AppHandle,
     session_id: String,
+    project: &str,
     title: String,
     body: String,
+    kind: &str,
 ) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        mac_notifications::send(app, session_id, title, body)
+        mac_notifications::send(
+            app,
+            session_id,
+            project.to_owned(),
+            title,
+            body,
+            kind.to_owned(),
+        )
     }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (project, kind);
     #[cfg(windows)]
     {
         windows_notifications::send(app, session_id, title, body)
@@ -5173,6 +5358,60 @@ fn list_session_summaries<R: tauri::Runtime>(
         serde_json::json!({"request":request})
     );
     manager.history(&app)?.page(request)
+}
+#[tauri::command]
+fn get_pi_routing(
+    app: AppHandle,
+    manager: State<'_, SessionManager>,
+    session_id: String,
+) -> Result<serde_json::Value, String> {
+    proxy!(
+        manager,
+        "get_pi_routing",
+        serde_json::json!({"session_id":session_id})
+    );
+    let history = manager.history(&app)?;
+    pi_router::read_state(&history.root, &history.get(&session_id)?)
+}
+#[tauri::command]
+async fn pi_routing_control(
+    app: AppHandle,
+    manager: State<'_, SessionManager>,
+    session_id: String,
+    generation: String,
+    request: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    proxy!(
+        manager,
+        "pi_routing_control",
+        serde_json::json!({"session_id":session_id,"generation":generation,"request":request})
+    );
+    let history = manager.history(&app)?;
+    let record = history.get(&session_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        pi_router::control_request(&history.root, &record, &generation, request)
+    })
+    .await
+    .map_err(|_| "Pi control worker failed")?
+}
+#[tauri::command]
+async fn pi_routing_catalog(
+    app: AppHandle,
+    manager: State<'_, SessionManager>,
+    cwd: String,
+    gateway: Option<String>,
+) -> Result<serde_json::Value, String> {
+    proxy!(
+        manager,
+        "pi_routing_catalog",
+        serde_json::json!({"cwd":cwd,"gateway":gateway})
+    );
+    let root = manager.history(&app)?.root.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        pi_router::catalog(&root, gateway.as_deref(), Path::new(&cwd))
+    })
+    .await
+    .map_err(|_| "Pi catalog worker failed")?
 }
 #[tauri::command]
 fn get_session<R: tauri::Runtime>(
@@ -5414,15 +5653,45 @@ fn search_retained_logs(
 }
 
 #[tauri::command]
-async fn export_diagnostics(app: AppHandle) -> Result<bool, String> {
+async fn export_diagnostics(
+    app: AppHandle,
+    startup: Option<diagnostics::StartupTimings>,
+) -> Result<bool, String> {
     let source = app.clone();
     export_diagnostics_with(
-        move || diagnostics::report(&source.state::<SessionManager>()),
+        move || {
+            diagnostics::with_startup(
+                diagnostics::report(&source.state::<SessionManager>())?,
+                startup,
+            )
+        },
         move || {
             let Some(destination) = app
                 .dialog()
                 .file()
                 .set_file_name("yam-diagnostics.json")
+                .add_filter("JSON", &["json"])
+                .blocking_save_file()
+            else {
+                return Ok(None);
+            };
+            destination
+                .into_path()
+                .map(Some)
+                .map_err(|_| "invalid_destination")
+        },
+    )
+    .await
+}
+#[tauri::command]
+async fn export_preferences(app: AppHandle, backup: String) -> Result<bool, String> {
+    export_diagnostics_with(
+        move || preferences_backup::encode(&backup),
+        move || {
+            let Some(destination) = app
+                .dialog()
+                .file()
+                .set_file_name("yam-preferences.json")
                 .add_filter("JSON", &["json"])
                 .blocking_save_file()
             else {
@@ -5955,8 +6224,21 @@ pub fn run() {
                     codex_conversation::read_codex_conversation,
                     codex_conversation::cancel_codex_conversation,
                     native_menu::native_menu_labels,
+                    native_menu::native_close_window,
                     desktop_windows::set_notification_locale,
                     node_runtime::initialize_background,
+                    export_preferences,
+                    test_notification,
+                    run_changes::get_run_baseline_info,
+                    run_changes::capture_run_baseline,
+                    run_changes::compare_run_baseline,
+                    run_changes::clear_run_baseline,
+                    project_files::list_project_files,
+                    project_files::read_project_text,
+                    project_files::save_project_text,
+                    get_pi_routing,
+                    pi_routing_control,
+                    pi_routing_catalog,
                 ],
                 |invoke| invoke.resolver.reject("webview_command_forbidden"),
             )
@@ -7202,12 +7484,13 @@ mod tests {
     #[test]
     fn built_in_adapters_include_shell_and_agent_entries() {
         let adapters = agent_adapters();
-        assert_eq!(adapters.len(), 5);
+        assert_eq!(adapters.len(), 6);
         assert_eq!(adapters[0].id, "shell");
         assert!(adapters[0].available);
         assert!(adapters.iter().any(|adapter| adapter.id == "codex"));
         assert!(adapters.iter().any(|adapter| adapter.id == "claude"));
         assert!(adapters.iter().any(|adapter| adapter.id == "gemini"));
+        assert!(adapters.iter().any(|adapter| adapter.id == "pi"));
     }
 
     #[test]
@@ -7750,6 +8033,126 @@ mod tests {
     }
 
     #[test]
+    fn fidelity_resume_native_arguments_keep_identity_and_picker() {
+        let root = std::env::temp_dir().join(next_session_id());
+        let store = HistoryStore::open(root.clone()).unwrap();
+        let native = "01a0f6ec-5463-78c3-a404-5a7ad3b933fe";
+        let args = "--model native-model --profile review -c 'model_reasoning_effort=\"high\"' --enable multi_agent --no-alt-screen";
+        let summary = SessionSummary { ssh:None, session_id:"fidelity-resume".into(), cwd:root.to_string_lossy().into(), command:None, status:"stopped".into(), launch:Some(serde_json::from_value(serde_json::json!({"adapter":"codex","mode":"interactive","extra_args":args,"prompt":"do not replay"})).unwrap()) };
+        store.start(&summary).unwrap();
+        store
+            .configure_agent(&summary.session_id, "trusted-generation")
+            .unwrap();
+        store.records.lock().unwrap()[0].agent.agent_session_id = Some(native.into());
+        let (cwd, launch, id) = super::resume_source(&store, &summary.session_id).unwrap();
+        assert_eq!(cwd, summary.cwd);
+        assert_eq!(id, native);
+        assert_eq!(launch.extra_args, args);
+        assert!(launch.prompt.is_none());
+        let command = super::resume_command(std::path::Path::new("codex"), &launch, &id).unwrap();
+        let actual: Vec<_> = command
+            .get_argv()
+            .iter()
+            .map(|v| v.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(&actual[actual.len() - 2..], &["resume", native]);
+        for value in super::parse_agent_args(args).unwrap() {
+            assert!(actual.contains(&value));
+        }
+        assert!(!actual.iter().any(|v| v == "--last" || v == "do not replay"));
+        let mut record = store.get(&summary.session_id).unwrap();
+        record.agent.agent_session_id = None;
+        let (picker, id) = super::terminal_reopen_launch(&record).unwrap();
+        assert!(id.is_none());
+        let picker = picker.unwrap();
+        assert_eq!(picker.extra_args, args);
+        assert!(picker.prompt.is_none());
+        assert_eq!(
+            super::resume_picker_command(std::path::Path::new("codex"), &picker)
+                .unwrap()
+                .get_argv()
+                .last()
+                .unwrap(),
+            "resume"
+        );
+        record.summary.launch.as_mut().unwrap().adapter = "claude".into();
+        record.summary.launch.as_mut().unwrap().extra_args =
+            "--settings native.json --setting-sources user,project".into();
+        let (picker, native_id) = super::terminal_reopen_launch(&record).unwrap();
+        assert!(native_id.is_none());
+        let picker = picker.unwrap();
+        assert!(picker.prompt.is_none());
+        assert_eq!(
+            super::resume_picker_command(std::path::Path::new("claude"), &picker)
+                .unwrap()
+                .get_argv()
+                .last()
+                .unwrap(),
+            "--resume"
+        );
+        record.agent.agent_session_id = Some(native.into());
+        let (_, launch, id) = super::resume_record_source(record).unwrap();
+        assert_eq!(id, native);
+        assert!(super::resume_command(std::path::Path::new("claude"), &launch, &id).is_ok());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fidelity_resume_rejects_identity_directory_and_mode_overrides() {
+        let id = "01a0f6ec-5463-78c3-a404-5a7ad3b933fe";
+        for args in [
+            "--remote ws://127.0.0.1:1",
+            "--cd /tmp",
+            "-C/tmp",
+            "--worktree",
+            "resume other",
+            "exec task",
+            "--resume other",
+            "--session-id other",
+            "--continue",
+            "-rUUID",
+        ] {
+            let launch:super::AgentLaunch = serde_json::from_value(serde_json::json!({"adapter":"codex","mode":"interactive","extra_args":args,"prompt":null})).unwrap();
+            assert!(
+                super::resume_command(std::path::Path::new("codex"), &launch, id).is_err(),
+                "{args}"
+            );
+            assert!(
+                super::resume_picker_command(std::path::Path::new("codex"), &launch).is_err(),
+                "{args}"
+            );
+        }
+    }
+
+    #[test]
+    fn fidelity_claude_resume_rejects_print_mode_and_replayed_tasks() {
+        for args in [
+            "-p 'repeat task'",
+            "-prepeat",
+            "--print 'repeat task'",
+            "--print=repeat",
+            "--resume other",
+            "-rOTHER",
+            "--session-id other",
+        ] {
+            let launch:super::AgentLaunch = serde_json::from_value(serde_json::json!({"adapter":"claude","mode":"interactive","extra_args":args,"prompt":null})).unwrap();
+            assert!(
+                super::resume_command(
+                    std::path::Path::new("claude"),
+                    &launch,
+                    "01a0f6ec-5463-78c3-a404-5a7ad3b933fe"
+                )
+                .is_err(),
+                "{args}"
+            );
+            assert!(
+                super::resume_picker_command(std::path::Path::new("claude"), &launch).is_err(),
+                "{args}"
+            );
+        }
+    }
+
+    #[test]
     fn codex_missing_hook_identity_opens_native_history_picker_without_replaying_prompt() {
         let root = std::env::temp_dir().join(next_session_id());
         let store = HistoryStore::open(root.clone()).unwrap();
@@ -7760,6 +8163,7 @@ mod tests {
             command: None,
             status: "stopped".into(),
             launch: Some(super::AgentLaunch {
+                claude_context: None,
                 codex: None,
                 provider: None,
                 env_refs: Default::default(),
@@ -7802,6 +8206,7 @@ mod tests {
             command: None,
             status: "stopped".into(),
             launch: Some(super::AgentLaunch {
+                claude_context: None,
                 codex: None,
                 provider: None,
                 env_refs: Default::default(),
@@ -7886,7 +8291,7 @@ mod tests {
         for (adapter, mode, args) in [
             ("unknown", "interactive", ""),
             ("codex", "task", ""),
-            ("codex", "interactive", "--model custom"),
+            ("codex", "interactive", "--resume other"),
         ] {
             let mut records = store.records.lock().unwrap();
             let launch = records[0].summary.launch.as_mut().unwrap();
@@ -7907,6 +8312,7 @@ mod tests {
     #[test]
     fn opencode_uses_native_prompt_options_without_shell_interpretation() {
         let mut launch = super::AgentLaunch {
+            claude_context: None,
             codex: None,
             provider: None,
             env_refs: Default::default(),
@@ -7955,6 +8361,7 @@ mod tests {
     fn claude_resume_preserves_safe_options_and_never_replays_the_prompt() {
         let id = "446cd50d-099d-4a12-bcbc-5ab13ffa6944";
         let mut launch = super::AgentLaunch {
+            claude_context: None,
             codex: None,
             provider: None,
             env_refs: Default::default(),
@@ -7975,7 +8382,7 @@ mod tests {
         );
         for args in [
             "--resume another",
-            "--settings arbitrary",
+            "--print repeat",
             "--continue",
             "--session-id arbitrary",
         ] {
@@ -7991,6 +8398,7 @@ mod tests {
     fn agent_launch_passes_prompt_as_one_literal_argument() {
         let prompt = "fix C:\\work & echo unsafe | 'quote' \"double\" %PATH%";
         let launch = super::AgentLaunch {
+            claude_context: None,
             codex: None,
             provider: None,
             env_refs: Default::default(),
@@ -8028,6 +8436,7 @@ mod tests {
         assert!(super::parse_agent_args("--model 'broken").is_err());
         assert!(super::parse_agent_args("bad\0arg").is_err());
         let launch = super::AgentLaunch {
+            claude_context: None,
             codex: None,
             provider: None,
             env_refs: Default::default(),
@@ -9239,6 +9648,7 @@ mod a01a_home_tests {
         let fixture = Fixture::new();
         fixture.home(Err("must not query home".into()));
         let launch = || AgentLaunch {
+            claude_context: None,
             codex: None,
             provider: None,
             env_refs: Default::default(),
@@ -9584,6 +9994,7 @@ mod a01b_shell_tests {
             let before = SESSION_ID_ALLOCATIONS.with(|count| count.get());
             let command = (index == 0).then(String::new);
             let launch = (index == 1).then(|| AgentLaunch {
+                claude_context: None,
                 codex: None,
                 provider: None,
                 env_refs: Default::default(),
@@ -9893,6 +10304,7 @@ mod a02b_profile_env_tests {
             T09_ALLOCATION_BOUNDARY.with(|v| v.set(0));
             let command = (index == 0).then(String::new);
             let launch = (index == 1).then(|| AgentLaunch {
+                claude_context: None,
                 codex: None,
                 provider: None,
                 env_refs: Default::default(),
@@ -10396,4 +10808,31 @@ mod native_reopen_tests {
             assert!(!manager.shutting_down.load(Ordering::Acquire));
         }
     }
+}
+
+#[cfg(test)]
+mod experience_notification_tests {
+    #[test]
+    fn notification_test_validates_target_and_uses_fixed_content() {
+        assert!(super::notification_test_content("../secret", false).is_err());
+        let (title, body) = super::notification_test_content("s-abc-1", true).unwrap();
+        assert_eq!(title, "YAM 通知测试");
+        assert!(!body.contains("s-abc-1"));
+        assert!(super::notification_test_content("s-abc-1", false)
+            .unwrap()
+            .1
+            .contains("test"));
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn preference_export_rejects_unknown_keys_and_credentials() {
+    for raw in [
+        r#"{"version":1,"settings":{"auth.json":"secret"},"connections":[]}"#,
+        r#"{"version":1,"settings":{},"connections":[{"name":"x","adapter":"codex","provider":{"id":"custom","model":"m","base_url":"http://127.0.0.1","api_key_env":null,"key":"secret"}}]}"#,
+    ] {
+        assert!(preferences_backup::encode(raw).is_err());
+    }
+    assert!(preferences_backup::encode(r#"{"version":1,"settings":{},"connections":[]}"#).is_ok());
 }

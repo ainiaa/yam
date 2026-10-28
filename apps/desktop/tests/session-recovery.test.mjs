@@ -49,7 +49,7 @@ test('primary ended Agent notice describes explicit execution and leaves ordinar
   assert.match(policy(r).notice,/Continue|Run again/);
   assert.equal(policy(r,'running').notice,null);
  }
- const shell=record('stopped');shell.summary.launch={adapter:'shell',mode:'interactive',extra_args:''};assert.equal(policy(shell).notice,null);
+ const shell=record('stopped');shell.summary.launch={adapter:'shell',mode:'interactive',extra_args:''};assert.match(policy(shell).notice,/new terminal/);
 });
 test('F1 pure invalid identity provenance and launch boundaries never offer Continue',()=>{
  for(const mutate of [r=>r.agent.generation='',r=>r.agent.agent_session_id='--last',r=>r.summary.command='secret',r=>r.summary.launch.mode='task',r=>r.summary.launch.adapter='opencode',r=>r.summary.launch.extra_args='--unknown']){const r=record();mutate(r);assert.equal(policy(r).canContinue,false);}
@@ -104,7 +104,7 @@ test('F1 actual owner-error listener only marks local availability and never lau
 test('F1 selection policy preserves Claude candidate arguments but default Codex rejects overrides',()=>{
  const r=record('failed');r.summary.launch.adapter='claude';r.summary.launch.extra_args='--model sonnet';assert.equal(policy(r).canContinue,true);
  r.summary.launch.adapter='codex';assert.equal(policy(r).canContinue,false);
- assert.deepEqual(sessionRecovery(null,null,null,'idle',false,'available'),{canContinue:false,canRunAgain:false,chooseNative:false,notice:null});
+ assert.deepEqual(sessionRecovery(null,null,null,'idle',false,'available'),{canContinue:false,canRunAgain:false,canOpenTerminal:false,chooseNative:false,notice:null});
 });
 test('F1 actual pending start cannot be duplicated by explicit recovery callbacks',()=>{
  const a=actions(record());a.bindings.starting=true;

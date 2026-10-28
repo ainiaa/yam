@@ -1,3 +1,4 @@
+import {defaultTerminalTitle} from '../src/workspaces.ts';
 import {englishUiRead} from './fixtures/english-ui-source.mjs';
 const readFileSync=(...args)=>englishUiRead(rawReadFileSync,...args);
 import './fixtures/i18n-test-init.mjs';
@@ -276,7 +277,7 @@ function actualAppTitleFor(titles) {
  const visit=node=>{if(ts.isVariableDeclaration(node)&&node.name.getText(tree)==='titleFor')initializer=node.initializer.getText(tree);ts.forEachChild(node,visit);};visit(tree);
  assert.ok(initializer,'existing App titleFor is available');
  const js=ts.transpileModule(`const titleFor=${initializer};`,{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText;
- return new Function('sessionTitles',`${js};return titleFor;`)(titles);
+ return new Function('sessionTitles','defaultTerminalTitle',`${js};return titleFor;`)(titles,defaultTerminalTitle);
 }
 for(const section of ['Sessions available to archive','Archived history'])test(`T04 review F3: ${section} uses the custom title in the actual JSX label`,()=>{
  const titleFor=actualAppTitleFor({'s-custom':'自定义任务 😀'});

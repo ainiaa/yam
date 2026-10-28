@@ -254,6 +254,38 @@ fn linked(metadata: &std::fs::Metadata) -> bool {
     metadata.file_type().is_symlink()
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct StartupTimings {
+    pub create_ms: Vec<u32>,
+    pub view_ready_ms: Vec<u32>,
+}
+pub(super) fn with_startup(
+    bytes: Vec<u8>,
+    startup: Option<StartupTimings>,
+) -> Result<Vec<u8>, &'static str> {
+    let Some(startup) = startup else {
+        return Ok(bytes);
+    };
+    if startup.create_ms.len() > 32
+        || startup.view_ready_ms.len() > 32
+        || startup
+            .create_ms
+            .iter()
+            .chain(&startup.view_ready_ms)
+            .any(|n| *n > 3_600_000)
+    {
+        return Err("invalid_report");
+    }
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|_| "invalid_report")?;
+    let report = value.as_object_mut().ok_or("invalid_report")?;
+    report.insert(
+        "frontend_startup".into(),
+        serde_json::to_value(startup).map_err(|_| "encode_failed")?,
+    );
+    bounded_json(&value)
+}
 pub(super) fn report(manager: &super::SessionManager) -> Result<Vec<u8>, &'static str> {
     let client = manager
         .background_client
@@ -864,4 +896,31 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(outside).unwrap();
     }
+}
+
+#[cfg(test)]
+#[test]
+fn startup_diagnostics_accept_only_bounded_numeric_fields() {
+    assert!(serde_json::from_value::<StartupTimings>(
+        serde_json::json!({"create_ms":[],"view_ready_ms":[],"secret":"key"})
+    )
+    .is_err());
+    let valid = StartupTimings {
+        create_ms: vec![42],
+        view_ready_ms: vec![310],
+    };
+    let out = with_startup(b"{}".to_vec(), Some(valid)).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&out).unwrap()["frontend_startup"]["create_ms"]
+            [0],
+        42
+    );
+    assert!(with_startup(
+        b"{}".to_vec(),
+        Some(StartupTimings {
+            create_ms: vec![1; 33],
+            view_ready_ms: vec![]
+        })
+    )
+    .is_err());
 }

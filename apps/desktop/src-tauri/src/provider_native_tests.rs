@@ -48,7 +48,11 @@ impl Fixture {
         for name in [".codex", ".claude", ".gemini"] {
             fs::create_dir(root.join("project").join(name)).unwrap();
         }
-        fs::write(root.join("project/.codex/config.toml"), "model_provider = \"wrong_project\"\n[model_providers.wrong_project]\nname = \"wrong\"\nbase_url = \"http://127.0.0.1:1\"\nwire_api = \"responses\"\n").unwrap();
+        fs::write(
+            root.join("project/.codex/config.toml"),
+            "model_reasoning_summary = 'auto'\n",
+        )
+        .unwrap();
         fs::write(
             root.join("project/.claude/settings.json"),
             r#"{"permissions":{"deny":["Bash"]},"env":{"PROJECT_VALUE":"kept"}}"#,
@@ -61,7 +65,7 @@ impl Fixture {
         .unwrap();
         fs::write(
             root.join("official/.codex/config.toml"),
-            "official-config-sentinel",
+            "model_reasoning_effort = 'low'\n",
         )
         .unwrap();
         fs::write(
@@ -96,15 +100,24 @@ impl Fixture {
         provider_launch::validate_project(launch, &self.root.join("project")).unwrap();
         let mut environment =
             provider_launch::prepare(&self.root.join("private"), launch, &|name| {
-                if launch.codex.is_some() && name == "CODEX_HOME" {
+                if name == "CODEX_HOME" {
                     Some(
                         self.root
                             .join("official/.codex")
                             .to_string_lossy()
                             .into_owned(),
                     )
+                } else if name == "HOME" {
+                    Some(self.root.join("official").to_string_lossy().into_owned())
+                } else if name == "CLAUDE_CONFIG_DIR" {
+                    Some(
+                        self.root
+                            .join("official/.claude")
+                            .to_string_lossy()
+                            .into_owned(),
+                    )
                 } else {
-                    panic!("No real credentials are used")
+                    None
                 }
             })
             .unwrap();
@@ -264,7 +277,7 @@ fn continuity_with_image_mode(
     let original_config = if image_mode.is_some() {
         "model_reasoning_effort = 'low'\n[shell_environment_policy]\ninherit = 'core'\nexclude = ['OPENAI*']\ninclude_only = ['PATH']\n[shell_environment_policy.set]\nOPENAI_API_KEY = 'wrong-global-key'\n[features]\nmulti_agent = true\n"
     } else {
-        "official-config-sentinel"
+        "model_reasoning_effort = 'low'\n"
     };
     if image_mode.is_some() {
         fs::write(
@@ -326,7 +339,31 @@ fn continuity_with_image_mode(
     let history = HistoryStore::open(root).unwrap();
     let (cwd, resumed, stored_id) = resume_source(&history, "initial").unwrap();
     assert_eq!(stored_id, id);
+    let refreshed_config = if adapter == "codex" {
+        let updated = original_config.replace(
+            "model_reasoning_effort = 'low'",
+            "model_reasoning_effort = 'high'",
+        );
+        fs::write(fixture.root.join("official/.codex/config.toml"), &updated).unwrap();
+        updated
+    } else {
+        original_config.to_string()
+    };
     let restored_environment = fixture.environment(&resumed);
+    if adapter == "codex" {
+        let current: toml::Value = toml::from_str(
+            &fs::read_to_string(
+                restored_environment
+                    .home
+                    .as_ref()
+                    .unwrap()
+                    .join("config.toml"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(current["model_reasoning_effort"].as_str(), Some("high"));
+    }
     assert_eq!(environment.home, restored_environment.home);
     match adapter {
         "codex" => agent_bridge::validate_resume(
@@ -412,7 +449,7 @@ fn continuity_with_image_mode(
     }
     assert_eq!(
         fs::read_to_string(fixture.root.join("official/.codex/config.toml")).unwrap(),
-        original_config
+        refreshed_config
     );
     assert_eq!(
         fs::read_to_string(fixture.root.join("official/.codex/auth.json")).unwrap(),
@@ -507,7 +544,7 @@ fn tool_roundtrip(adapter: &str, provider: &str, subtask: bool) {
     }
     assert_eq!(
         fs::read_to_string(fixture.root.join("official/.codex/config.toml")).unwrap(),
-        "official-config-sentinel"
+        "model_reasoning_effort = 'low'\n"
     );
     assert_eq!(
         fs::read_to_string(fixture.root.join("official/.codex/auth.json")).unwrap(),
@@ -573,7 +610,7 @@ fn image_sdk_with_mode(image_mode: Option<&str>) {
         let original_config = if image_mode.is_some() {
             "model_reasoning_effort = 'low'\n[shell_environment_policy]\ninherit = 'core'\nexclude = ['OPENAI*']\ninclude_only = ['PATH']\n[shell_environment_policy.set]\nOPENAI_API_KEY = 'wrong-global-key'\n[features]\nmulti_agent = true\n"
         } else {
-            "official-config-sentinel"
+            "model_reasoning_effort = 'low'\n"
         };
         if image_mode.is_some() {
             fs::write(
@@ -827,4 +864,125 @@ finally:
         fs::read_to_string(source.join("auth.json")).unwrap(),
         "official-auth-sentinel"
     );
+}
+
+#[test]
+#[ignore = "Explicit opt-in: official CLIs with synthetic credentials and loopback API only"]
+fn transparency_native_cli_model_precedence_matches_direct_cli() {
+    for (adapter, inherited, extra, expected) in [
+        ("codex", true, "--model native-explicit", "native-explicit"),
+        (
+            "codex",
+            false,
+            "-c='model=\"native-explicit\"'",
+            "native-explicit",
+        ),
+        ("codex", true, "--profile review", "profile-model"),
+        (
+            "claude",
+            false,
+            "--model native-explicit",
+            "native-explicit",
+        ),
+    ] {
+        let fixture = Fixture::new();
+        fs::write(
+            fixture.root.join("official/.codex/config.toml"),
+            "model_reasoning_effort='low'\n",
+        )
+        .unwrap();
+        fs::write(
+            fixture.root.join("official/.codex/review.config.toml"),
+            "model='profile-model'\nmodel_reasoning_effort='high'\n",
+        )
+        .unwrap();
+        let exe = find_executable(adapter).expect("Install the official CLI for this opt-in check");
+        let prompt = format!(
+            "Remember and reply with {}. Do not use tools.",
+            fixture.token
+        );
+        let mut launch:AgentLaunch=serde_json::from_value(serde_json::json!({"adapter":adapter,"mode":"interactive","extra_args":extra,"prompt":prompt,"provider":{"id":"custom","model":"yam-default","base_url":fixture.url,"api_key_env":null}})).unwrap();
+        if inherited {
+            crate::codex_context::assign_context(&mut launch).unwrap();
+        }
+        let environment = fixture.environment(&launch);
+        let mut direct = vec![exe.as_os_str().to_owned()];
+        if adapter == "codex" {
+            direct.push("--no-daemon".into());
+        }
+        direct.extend(
+            crate::parse_agent_args(extra)
+                .unwrap()
+                .into_iter()
+                .map(Into::into),
+        );
+        direct.extend(["--".into(), prompt.clone().into()]);
+        let control = fixture.run(
+            &headless(direct, adapter, false, &prompt),
+            &environment,
+            "direct",
+        );
+        assert!(control.contains(&fixture.token));
+        let count = fixture.receipts().len();
+        let command = agent_command(&exe, &launch).unwrap();
+        let candidate = fixture.run(
+            &headless(command.get_argv().to_vec(), adapter, false, &prompt),
+            &environment,
+            "yam",
+        );
+        assert!(candidate.contains(&fixture.token));
+        let receipts = fixture.receipts();
+        for requests in [&receipts[..count], &receipts[count..]] {
+            assert!(!requests.is_empty());
+            assert!(
+                requests.iter().all(|row| row["model"] == expected),
+                "native model precedence changed: {requests:?}"
+            );
+        }
+        let id = native_id(&candidate);
+        let mut resumed = launch.clone();
+        resumed.prompt = None;
+        let resumed_command = resume_command(&exe, &resumed, &id).unwrap();
+        let followup = "YAM_FOLLOWUP: Repeat the codeword. Do not use tools.";
+        let continued = fixture.run(
+            &headless(resumed_command.get_argv().to_vec(), adapter, true, followup),
+            &environment,
+            "resume",
+        );
+        assert_eq!(native_id(&continued), id);
+        assert!(continued.contains(&fixture.token));
+    }
+}
+
+#[test]
+#[ignore = "Opt-in installed Claude + isolated loopback API; no vendor calls or desktop apps"]
+#[cfg(unix)]
+fn repair_file_settings_native_plugin_delivers_hooks() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    let exe = find_executable("claude").expect("Install Claude CLI before opting into this test");
+    let helper = f.root.join("capture-hook");
+    let log = f.root.join("hooks.jsonl");
+    fs::write(&helper, format!("#!/bin/sh\ncat >> '{}'\n", log.display())).unwrap();
+    fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+    let settings = f.root.join("project/extra.json");
+    let original = r#"{"effortLevel":"high","permissions":{"deny":["Read(./relative-secret)"]}}"#;
+    fs::write(&settings, original).unwrap();
+    let launch: AgentLaunch = serde_json::from_value(serde_json::json!({"adapter":"claude","mode":"interactive","extra_args":format!("--settings '{}'",settings.display()),"prompt":f.token,"provider":{"id":"claude","model":"sonnet","base_url":f.url,"api_key_env":null}})).unwrap();
+    let environment = f.environment(&launch);
+    let plugin =
+        agent_bridge::claude_hook_plugin(helper.to_str().unwrap(), &f.root.join("private"))
+            .unwrap();
+    let mut argv = agent_command(&exe, &launch).unwrap().get_argv().to_vec();
+    argv.splice(1..1, plugin.iter().map(std::ffi::OsString::from));
+    let output = f.run(
+        &headless(argv, "claude", false, &f.token),
+        &environment,
+        "plugin-hooks",
+    );
+    assert!(output.contains(&f.token));
+    let hooks = fs::read_to_string(&log).expect("official plugin loader must run hooks");
+    assert!(hooks.contains("SessionStart"));
+    assert!(hooks.contains("Stop"));
+    assert_eq!(fs::read_to_string(settings).unwrap(), original);
 }

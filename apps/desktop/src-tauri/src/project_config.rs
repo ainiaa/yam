@@ -148,7 +148,10 @@ fn validate_settings(value: &Value, template: bool) -> Result<(), String> {
                 return Err(code("project_config_invalid"));
             }
             if key == "adapter"
-                && !["shell", "custom", "codex", "claude", "gemini", "opencode"].contains(&text)
+                && ![
+                    "shell", "custom", "codex", "claude", "gemini", "opencode", "pi",
+                ]
+                .contains(&text)
             {
                 return Err(code("project_config_invalid"));
             }
@@ -553,6 +556,7 @@ pub(crate) fn prepare(
             .filter(|path| path.is_file())
             .ok_or_else(|| code("project_config_cli_missing"))?;
         let launch = crate::AgentLaunch {
+            claude_context: None,
             codex: if adapter == "codex" {
                 Some(
                     settings

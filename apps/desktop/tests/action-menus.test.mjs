@@ -14,3 +14,20 @@ test('enabled actions close their menu, disabled actions do not, Escape restores
 test('select triggers inside action menus stay open while choosing, then close on native selection',()=>{const f=fixture(),a=f.menu();a.open=true;f.emit('click',{target:{closest:()=>({disabled:false,getAttribute:()=>"combobox",closest:()=>a})}});assert.equal(a.open,true);f.emit('change',{target:{tagName:'SELECT',closest:()=>a}});assert.equal(a.open,false);});
 
 test('non-menu disclosures, inside focus, non-action clicks and handled Escape retain state',()=>{const f=fixture(),a=f.menu();a.open=true;f.emit('toggle',{target:{matches:()=>false,open:true}});f.emit('focusin',{target:{menu:a}});f.emit('click',{target:{}});f.emit('change',{target:{tagName:'INPUT'}});f.emit('keydown',{key:'Tab'});f.emit('keydown',{key:'Escape',defaultPrevented:true});assert.equal(a.open,true);a.open=false;f.emit('keydown',{key:'Escape',defaultPrevented:false});f.stop();assert.equal(f.listeners.size,0);});
+
+function navigationFixture(){
+ const listeners=new Map(),doc={activeElement:null,addEventListener:(name,fn)=>listeners.set(name,fn),removeEventListener:name=>listeners.delete(name),querySelectorAll:()=>menu.open?[menu]:[]};
+ const menu={open:false,contains:node=>node?.menu===menu,matches:()=>true,querySelector:()=>summary,querySelectorAll:()=>items};
+ const summary={menu,tagName:'SUMMARY',parentElement:menu,focus(){doc.activeElement=this;},closest(selector){return selector==='details.toolbar-more'?menu:selector==='summary'?this:null;}};
+ const button=(name,disabled=false,visible=true)=>({name,menu,tagName:'BUTTON',disabled,getClientRects:()=>visible?[{}]:[],focus(){doc.activeElement=this;},closest(selector){return selector==='details.toolbar-more'?menu:selector==='button'?this:null;}});
+ const items=[button('first'),button('disabled',true),button('hidden',false,false),button('last')];doc.activeElement=summary;installActionMenus(doc);
+ const key=(key,extra={})=>{let prevented=false;listeners.get('keydown')({key,target:doc.activeElement,defaultPrevented:false,preventDefault(){prevented=true;},stopPropagation(){},...extra});return prevented;};
+ return {doc,menu,summary,items,key};
+}
+test('keyboard menu navigation opens from its summary, skips unavailable actions and wraps',()=>{
+ const f=navigationFixture();assert.equal(f.key('ArrowDown'),true);assert.equal(f.menu.open,true);assert.equal(f.doc.activeElement,f.items[0]);f.key('ArrowDown');assert.equal(f.doc.activeElement,f.items[3]);f.key('ArrowDown');assert.equal(f.doc.activeElement,f.items[0]);f.key('ArrowUp');assert.equal(f.doc.activeElement,f.items[3]);f.key('Home');assert.equal(f.doc.activeElement,f.items[0]);f.key('End');assert.equal(f.doc.activeElement,f.items[3]);f.key('Escape');assert.equal(f.menu.open,false);assert.equal(f.doc.activeElement,f.summary);
+});
+test('arrow-up opens at the last action and composition, modifiers and form controls retain their keys',()=>{
+ const f=navigationFixture();assert.equal(f.key('ArrowUp'),true);assert.equal(f.doc.activeElement,f.items[3]);assert.equal(f.key('Escape',{isComposing:true}),false);assert.equal(f.menu.open,true);assert.equal(f.key('Home',{ctrlKey:true}),false);
+ const input={menu:f.menu,closest:selector=>selector==='details.toolbar-more'?f.menu:selector.includes('input')?input:null};f.doc.activeElement=input;assert.equal(f.key('ArrowDown'),false);assert.equal(f.doc.activeElement,input);
+});

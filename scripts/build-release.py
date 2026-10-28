@@ -32,6 +32,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("-t", "--target")
     parser.add_argument("--preview", action="store_true")
+    parser.add_argument("-d", "--debug", action="store_true")
     args, _ = parser.parse_known_args(argv[1:])
     validate_versions()
     windows = "windows" in args.target if args.target else platform.system() == "Windows"
@@ -50,7 +51,16 @@ def main(argv=None):
     with tempfile.TemporaryDirectory(prefix="yam-release-") as directory:
         temporary = pathlib.Path(directory) / "config.json"
         temporary.write_text(json.dumps(config), encoding="utf-8")
-        return subprocess.call([shutil.which("pnpm") or "pnpm", "tauri", "build", "--config", str(temporary), *[value for value in argv[1:] if value != "--preview"]])
+        environment = os.environ.copy()
+        if macos:
+            native = ROOT / "apps/desktop/src-tauri"
+            target = pathlib.Path(environment.get("CARGO_TARGET_DIR", str(native / "target")))
+            if not target.is_absolute():
+                target = native / target
+            if args.target:
+                target = target / args.target
+            environment["YAM_BUILD_BINARY"] = str(target / ("debug" if args.debug else "release") / "yam-desktop")
+        return subprocess.call([shutil.which("pnpm") or "pnpm", "tauri", "build", "--config", str(temporary), *[value for value in argv[1:] if value != "--preview"]], env=environment)
 
 
 if __name__ == "__main__":

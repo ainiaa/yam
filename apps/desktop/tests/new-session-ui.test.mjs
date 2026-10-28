@@ -112,7 +112,7 @@ test('remembered CLI is saved only after success, and storage failure does not r
 });
 
 test('project management binds both Git and worktree controls to its own selected project',()=>{
- const tools=nodes(n=>ts.isJsxElement(n)&&n.openingElement.tagName.getText(file)==='dialog'&&attribute(n,'aria-labelledby')?.text==='project-tools-title')[0];
+ const tools=nodes(n=>ts.isJsxElement(n)&&n.openingElement.tagName.getText(file)==='ProjectWorkspace')[0];
  assert.ok(tools);
  for(const [tag,property] of [['GitChanges','path'],['WorktreeControls','root']]){
   const control=nodes(n=>ts.isJsxSelfClosingElement(n)&&n.tagName.getText(file)===tag,tools)[0];assert.ok(control);assert.equal(attribute(control,property).expression.getText(file),'projectToolsPath');

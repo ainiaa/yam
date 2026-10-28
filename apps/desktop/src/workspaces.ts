@@ -118,3 +118,21 @@ export function moveProjectToTarget(projects:Project[],sourcePath:string,targetP
  group.splice(from,1);group.splice(to,0,source[0]);
  let index=0;return projects.map(project=>(project.pinned===true)===(source[0].pinned===true)?group[index++]:project);
 }
+
+// Keep project order intact; folding is presentation only and never archives history.
+export function sidebarSessions<T extends {summary:{session_id:string};status:string;agent?:{unread_count?:number}}>(sessions:readonly T[],selected:string|null,pinned:readonly string[],revealAll=false){
+  const current:T[]=[],ended:T[]=[],pins=new Set(pinned);
+  for(const record of sessions){
+    const id=record.summary.session_id;
+    if(revealAll||!["succeeded","stopped"].includes(record.status)||id===selected||pins.has(id)||(record.agent?.unread_count??0)>0)current.push(record);
+    else ended.push(record);
+  }
+  return {current,ended};
+}
+export function defaultTerminalTitle(sessionId:string,label:string,at?:Date){
+  const parts=/^s-([0-9a-f]+)-([0-9a-f]+)$/i.exec(sessionId);
+  if(!parts)return label;
+  const created=at??new Date(Number.parseInt(parts[1],16));
+  const clock=Number.isFinite(created.getTime())?[created.getHours(),created.getMinutes()].map(value=>String(value).padStart(2,"0")).join(":"):null;
+  return `${label}${clock?` ${clock}`:""} · ${parts[2]}`;
+}

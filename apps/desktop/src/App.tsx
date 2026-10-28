@@ -1,3 +1,9 @@
+import {ProjectWorkspace} from './ProjectWorkspace';
+import {PiRoutingConfig,PiRoutingBar} from './PiRouting';
+import DataSettings from './DataSettings';
+import {createPreferencesBackup,preferencesImportWrites,applyPreferencesImport,type PreferencesBackup} from './preferences-backup';
+import {startupTimings} from './startup-timings';
+import {connectionTemplate} from './saved-connections';
 import {duplicateSessionDraft,readSessionLaunchSettings,saveSessionLaunchSettings,readSessionName,saveSessionName,loadSessionNames,isSessionPreferenceKey,type SessionLaunchSettings} from "./session-actions";
 import {SettingsNavigation,type SettingsPage} from "./SettingsNavigation";
 import {applyAppThemeDocument,applyAppTerminalTheme} from "./app-themes";
@@ -38,6 +44,12 @@ import {TerminalFindController,FindWorker,createFindWorker} from "./terminal-fin
 import {TerminalFindBar} from "./TerminalFind";
 import {createTerminalScroll,updateTerminalScroll,type TerminalScrollState} from "./terminal-scroll";
 import {GitChanges} from "./GitChanges";
+import {ProjectFiles} from "./ProjectFiles";
+import {RunChanges} from "./RunChanges";
+import {ReviewFeedback} from "./ReviewFeedback";
+import {reviewOrigin,reviewReady,deliverReviewFeedback,type ReviewOrigin,type ReviewLocation} from "./review-feedback";
+import {relativeProjectFile,type ProjectFileRequest} from "./project-files";
+import type {DiffTarget} from "./git-diff-navigation";
 import {ProviderCatalog} from "./ProviderCatalog";
 import UpdaterSettings from "./UpdaterSettings";
 import {UpdaterController,loadUpdaterPreference,saveUpdaterPreference,updaterAutomaticAction,UPDATE_CHECK_INTERVAL_MS,updaterBusy,type UpdaterSnapshot} from "./updater";
@@ -48,7 +60,7 @@ import {TerminalLayout} from "./TerminalLayout";
 import {createTerminalLayout,changeTerminalLayout,assignTerminalPane,replaceTerminalSession,removeTerminalPane,isTerminalProtocolResponse,resizeTerminalNode,clampSplitPercent,swapTerminalPanes,terminalPaneId,terminalPaneIndex,terminalLeaves,terminalLayoutRoot,splitTerminalPane,terminalTabs,terminalMembers,terminalSessionPane,removeTerminalTab,splitAndMoveTerminalTab,type TerminalPaneEdge,moveTerminalTab,terminalDirectionPane,type TerminalPaneDirection,type TerminalPaneRect,type TerminalLayoutMode} from "./terminal-layout";
 import {GitContextPolling,gitContextLabel,type GitContext} from "./git-context";
 import {historyRequest,capacityLevel,type HistoryItem,type HistoryCursor,type HistoryPage,type HistoryOverview,type InboxItem,type PendingKey,type HistoryCapacity} from "./history";
-import { useEffect, useRef, useState, type DragEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type DragEvent } from "react";
 import {memoryLabel, startMemoryPolling, type MemorySample} from "./memory";
 import { open as openDirectoryDialog } from "@tauri-apps/plugin-dialog";
 import { invoke as nativeInvoke } from "@tauri-apps/api/core";
@@ -79,9 +91,12 @@ import {
   Bell,
   BellOff,
   LogOut,
+  ListFilter,
+  Settings,
+  Pin, PinOff, ArrowUp, ArrowDown, Trash2, Archive, HardDrive, GitBranch,
 } from "lucide-react";
 import {
-  groupProjects,
+  groupProjects, sidebarSessions, defaultTerminalTitle,
   validateProjectName, moveProjectAdjacent, moveProjectToTarget, setProjectPinned, validProjectColor, validProjectIcon, projectColor, PROJECT_COLORS,
   validateSessionTitle,
   selectProjectDirectory,
@@ -115,6 +130,7 @@ import {sessionRecovery,type SessionAvailability} from "./session-recovery";
 import {AttentionCard} from "./AttentionCard";
 import {captureAttention,isCurrentAttention} from "./attention-actions";
 import {agentLabel,type AgentState,type AgentReceipt} from "./agent-events";
+import {sessionRuntimeInfo} from "./session-runtime-info";
 import { NotificationQueue, inferAgentPhase, discardAttentionRetries, terminalStatuses } from "./notifications";
 import "@xterm/xterm/css/xterm.css";
 import "./App.css";
@@ -164,7 +180,7 @@ type SessionStateEvent = {
   reason: string | null;
 };
 
-type TerminalView = {inputQueue?:{write:Promise<void>|null;version:number;length:number;count:number};agentRefreshVersion?:number;recordedOnly?:boolean;clearDisplayVersion?:1|null;clearPending?:boolean; reportedPromptNavigation?:ReturnType<typeof terminalReportedPromptNavigation>;promptNavigationPending?:boolean; moving?:boolean;moveDisposal?:boolean;moveListenerRevision?:number;refreshMoveListeners?:()=>void; desktopGeneration:number; reportedCommand:ReturnType<typeof terminalReportedCommand>;reportedCommandSequence:number;reportedCommandPair:string|null; reportedCwd:string|null;reportedCwdSequence:number; appearance:TerminalSettings;appearanceRevision:number;appearanceFitPending?:()=>boolean; find?:TerminalFindController; scroll?:TerminalScrollState;scrollReturnPending?:boolean;scrollReturnIntent?:number; availability?:SessionAvailability; record?:SessionRecord; attachVersion?:number; attaching?:boolean; instance: Terminal; fit: FitAddon; element: HTMLDivElement; cursor: number | null; ready: boolean; replayVersion:number; firstAttachment:boolean; parsing:Promise<void>|null; finishReplay:(()=>void)|null; live: boolean; status:string|null; notice: string | null; persisted:boolean; projection:boolean; frameRevision:number; frameInstance:string|null; dirty:boolean; updating:boolean; selecting:boolean; lifecycleRevision:number; projecting:boolean; viewportRevision:number; resizing:boolean;resizePending:{cols:number;rows:number}|null;disposed:boolean;writable:boolean; dispose(): void };
+type TerminalView = {continuation?:{chunks:{data:string;paste:boolean}[];length:number;cancelled:boolean};inputQueue?:{write:Promise<void>|null;version:number;length:number;count:number};agentRefreshVersion?:number;recordedOnly?:boolean;clearDisplayVersion?:1|null;clearPending?:boolean; reportedPromptNavigation?:ReturnType<typeof terminalReportedPromptNavigation>;promptNavigationPending?:boolean; moving?:boolean;moveDisposal?:boolean;moveListenerRevision?:number;refreshMoveListeners?:()=>void; desktopGeneration:number; reportedCommand:ReturnType<typeof terminalReportedCommand>;reportedCommandSequence:number;reportedCommandPair:string|null; reportedCwd:string|null;reportedCwdSequence:number; appearance:TerminalSettings;appearanceRevision:number;appearanceFitPending?:()=>boolean; find?:TerminalFindController; scroll?:TerminalScrollState;scrollReturnPending?:boolean;scrollReturnIntent?:number; availability?:SessionAvailability; record?:SessionRecord; attachVersion?:number; attaching?:boolean; instance: Terminal; fit: FitAddon; element: HTMLDivElement; cursor: number | null; ready: boolean; replayVersion:number; firstAttachment:boolean; parsing:Promise<void>|null; finishReplay:(()=>void)|null; live: boolean; status:string|null; notice: string | null; persisted:boolean; projection:boolean; frameRevision:number; frameInstance:string|null; dirty:boolean; updating:boolean; selecting:boolean; lifecycleRevision:number; projecting:boolean; viewportRevision:number; resizing:boolean;resizePending:{cols:number;rows:number}|null;disposed:boolean;writable:boolean; dispose(): void };
 
 type AgentPhase = "idle" | "working" | "waiting";
 
@@ -193,18 +209,24 @@ function ProviderPortCheck({endpoint}:{endpoint:string}) {
 }
 
 function SessionConnection({launch,agent}:{launch:AgentLaunch|null|undefined;agent?:AgentState}) {
-  const connection=connectionDetails(launch);
-  return <details className="toolbar-more session-connection" onKeyDown={event=>{if(event.key==="Escape"){event.preventDefault();event.stopPropagation();event.currentTarget.open=false;event.currentTarget.querySelector("summary")?.focus();}}}>
+  const connection=connectionDetails(launch),runtime=sessionRuntimeInfo(launch,agent);
+  return <details className="toolbar-more session-connection" onKeyDown={event=>{if(event.key==="Escape"&&!event.nativeEvent?.isComposing&&event.keyCode!==229){event.preventDefault();event.stopPropagation();event.currentTarget.open=false;event.currentTarget.querySelector("summary")?.focus();}}}>
     <summary aria-label={t("Connection details")}>{t("Connection")+" "}<ChevronDown size={12} aria-hidden="true"/></summary>
     <div className="toolbar-more-actions">
       <strong>{t("Launch connection")}</strong>
       <dl>
         <dt>{t("CLI")}</dt><dd>{connection.cli}</dd>
+        <dt>{t("CLI executable at launch")}</dt><dd>{runtime.executable}</dd>
+        <dt>{t("Native session ID")}</dt><dd>{runtime.nativeSession}</dd>
+        <dt>{t("Trusted hooks")}</dt><dd>{t(runtime.hooks)}</dd>
         <dt>{t("CLI version at launch")}</dt><dd>{agent?.cli_version??t("Unknown")}</dd>
         <dt>{t("Launch platform")}</dt><dd>{agent?.cli_platform??t("Unknown")}</dd>
         {launch?.mode==='interactive'&&launch.adapter==='codex'&&<><dt>{t("Failure fallback")}</dt><dd>{agent?.integration!=="connected"&&agent?.cli_version?t("Not connected; trusted hooks required"):agent?.integration==="connected"&&agent.cli_platform==="macos"?t("Event validation enabled; trusted hooks and readable native transcript required"):t("Unverified platform or connection")}</dd></>}
         <dt>{t("Configuration")}</dt><dd>{t(connection.source)}</dd>
         <dt>{t("Configured model")}</dt><dd>{connection.model}</dd>
+        <dt>{t("Effective model")}</dt><dd>{t(runtime.effectiveModel)}</dd>
+        <dt>{t("Reasoning parameters")}</dt><dd>{t(runtime.reasoning)}</dd>
+        <dt>{t("Credential source")}</dt><dd>{t(runtime.credentialSource)}</dd>
         <dt>{t("Configured endpoint")}</dt><dd>{connection.endpoint}</dd>
         {launch?.adapter==="codex"&&launch.codex&&<><dt>{t("Image generation")}</dt><dd>{launch.codex.image_mode==="gateway_api"?t("Gateway image API (imagegen skill)"):t("Codex default")}</dd><dt>{t("Inherited configuration")}</dt><dd>{launch.provider?t("Private snapshot of original Codex configuration; session connection override"):t("Existing Codex configuration")}</dd></>}
       </dl>
@@ -277,6 +299,7 @@ function App() {
   const updaterMounted=useRef(false);
   const updaterIntent=useRef(0);
   const [updaterOpen,setUpdaterOpen]=useState(false);
+  const [dataSettingsOpen,setDataSettingsOpen]=useState(false);
   const [updaterSnapshot,setUpdaterSnapshot]=useState<UpdaterSnapshot|null>(null);
   const [updaterAutomatic,setUpdaterAutomatic]=useState(updaterPreferenceLoad.automatic);
   const updaterAutomaticRef=useRef(updaterAutomatic);updaterAutomaticRef.current=updaterAutomatic;
@@ -496,19 +519,39 @@ function App() {
   useEffect(()=>()=>{const pending=filePending.current;filePending.current=null;pending?.selection?.dispose();},[]);
   function terminalLinkIdentity(id:string,view:TerminalView):string|null{if(view.disposed||terminalViews.current.get(id)!==view||!terminalPaneVisible(id)||!view.element.isConnected||view.element.inert||view.element.style.visibility==="hidden"||!document.hasFocus()||document.querySelector('dialog[open],[role="dialog"][aria-modal="true"],.modal-backdrop'))return null;const layout=terminalLayoutRef.current;return JSON.stringify([view.frameInstance,view.attachVersion,view.lifecycleRevision,view.frameRevision,view.viewportRevision,view.appearanceRevision,ownerConnectionAvailable.current.version,selectionVersion.current,layout.revision,layout.focused,layout.panes,view.instance.cols,view.instance.rows]);}
   function terminalPasteTarget(id:string,view:TerminalView):TerminalPasteTarget<TerminalView,Terminal>{const layout=terminalLayoutRef.current;return{sessionId:id,view,instance:view.instance,frameInstance:view.frameInstance,attachVersion:view.attachVersion,lifecycleRevision:view.lifecycleRevision,connectionVersion:ownerConnectionAvailable.current.version,paneId:terminalPaneId(layout,layout.focused),selectionVersion:selectionVersion.current,layoutRevision:layout.revision};}
-  function terminalPasteCurrent(pending:PendingTerminalPaste<TerminalView,Terminal>){const target=pending.target,view=terminalViews.current.get(target.sessionId),layout=terminalLayoutRef.current;return view===target.view&&sessionId.current===target.sessionId&&layout.panes[layout.focused]===target.sessionId&&terminalPaneVisible(target.sessionId)&&terminalPasteInputEligible(target.view,ownerConnectionAvailable.current.available)&&sameTerminalPasteTarget(target,terminalPasteTarget(target.sessionId,target.view));}
+  function terminalPasteCurrent(pending:PendingTerminalPaste<TerminalView,Terminal>){const target=pending.target,view=terminalViews.current.get(target.sessionId),layout=terminalLayoutRef.current;return view===target.view&&sessionId.current===target.sessionId&&layout.panes[layout.focused]===target.sessionId&&terminalPaneVisible(target.sessionId)&&(terminalPasteInputEligible(target.view,ownerConnectionAvailable.current.available)||canContinueTerminalInput(target.sessionId,target.view))&&sameTerminalPasteTarget(target,terminalPasteTarget(target.sessionId,target.view));}
   function cancelTerminalPaste(restoreFocus=true){const pending=pastePending.current;pastePending.current=null;pasteDialog.current?.close();setPastePreview(null);if(restoreFocus&&pending&&terminalPasteCurrent(pending))pending.target.instance.focus();}
-  function confirmTerminalPaste(){const pending=pastePending.current;pastePending.current=null;if(!pending)return;pasteDialog.current?.close();setPastePreview(null);if(!terminalPasteCurrent(pending)){setError("Paste target changed or is unavailable. Nothing was sent.");return;}pending.target.instance.focus();if(!terminalPasteCurrent(pending)||!terminalHasInputFocus(pending.target.sessionId)){setError("The original terminal could not receive focus. Nothing was sent.");return;}pending.target.instance.paste(pending.content.text);}
+  async function fillReviewInOriginalTerminal(origin:ReviewOrigin,location:ReviewLocation,text:string){
+    const view=terminalViews.current.get(origin.sessionId);
+    if(!isMainWindow||!terminalMounted.current||!view||sessionId.current!==origin.sessionId)throw "review_target_unavailable";
+    const target=terminalPasteTarget(origin.sessionId,view);
+    try{
+      await deliverReviewFeedback(origin,location,text,()=>invoke<SessionRecord>("get_session",{sessionId:origin.sessionId}),async formatted=>{
+        const pending={target,content:inspectTerminalPaste(formatted)};
+        const eligible=()=>terminalMounted.current&&terminalPasteCurrent(pending)&&view.ready&&!view.moving&&!view.persisted&&!view.attaching&&!view.parsing&&!view.projecting&&!view.resizing&&!view.clearPending&&view.instance.modes.bracketedPasteMode;
+        if(!eligible()||view.inputQueue?.write||view.inputQueue?.count||view.inputQueue?.length||pastePending.current||fileDropPending.current)throw "review_target_unavailable";
+        setProjectToolsOpen(false);view.instance.focus();
+        if(!eligible()||!terminalHasInputFocus(origin.sessionId))throw "review_target_unavailable";
+        const version=view.inputQueue?.version??0;
+        view.instance.paste(pending.content.text);
+        const write=view.inputQueue?.write;if(!write)throw "review_delivery_unknown";
+        try{await write;}catch{throw "review_delivery_unknown";}
+        if(!terminalPasteCurrent(pending)||view.inputQueue?.version!==version||!view.writable)throw "review_delivery_unknown";
+        setTerminalNotice("Feedback was filled into the original CLI. Check the input and press Enter there to submit.");
+      });
+    }catch(reason){setError(reason==="review_target_unavailable"?"The original CLI cannot receive this feedback now. Nothing was filled.":reason==="review_invalid_feedback"?"Choose a diff location and use up to 16 KiB of text without terminal controls.":"Delivery could not be confirmed. Check the original terminal before retrying.");throw reason;}
+  }
+  function confirmTerminalPaste(){const pending=pastePending.current;pastePending.current=null;if(!pending)return;pasteDialog.current?.close();setPastePreview(null);if(!terminalPasteCurrent(pending)){setError("Paste target changed or is unavailable. Nothing was sent.");return;}pending.target.instance.focus();if(!terminalPasteCurrent(pending)||!terminalHasInputFocus(pending.target.sessionId)){setError("The original terminal could not receive focus. Nothing was sent.");return;}if(canContinueTerminalInput(pending.target.sessionId,pending.target.view))continueTerminalInput(pending.target.sessionId,pending.target.view,pending.content.text,true);else pending.target.instance.paste(pending.content.text);}
   function validatePendingTerminalPaste(){const pending=pastePending.current;if(pending&&!terminalPasteCurrent(pending))cancelTerminalPaste(false);}
   function captureTerminalPaste(id:string,view:TerminalView,event:ClipboardEvent){
     if(event.target!==view.instance.textarea||!event.clipboardData||!Array.from(event.clipboardData.types).includes("text/plain"))return;
     const stop=()=>{event.preventDefault();event.stopImmediatePropagation();};
     if(pastePending.current){stop();setError("Confirm or cancel the current paste preview first.");return;}
-    if(!terminalPasteInputEligible(view,ownerConnectionAvailable.current.available)||!terminalHasInputFocus(id)){stop();setError("This terminal cannot receive pasted text. Nothing was sent.");return;}
+    if(!(terminalPasteInputEligible(view,ownerConnectionAvailable.current.available)||canContinueTerminalInput(id,view))||!terminalHasInputFocus(id)){stop();setError("This terminal cannot receive pasted text. Nothing was sent.");return;}
     let text:string;try{text=event.clipboardData.getData("text/plain");}catch{stop();setError("Pasted text is invalid. Nothing was sent.");return;}
     let content:TerminalPasteText;try{content=inspectTerminalPaste(text);}catch(reason){stop();setError(reason instanceof Error?reason.message:"Pasted text is invalid. Nothing was sent.");return;}
     if(content.text===""){stop();return;}
-    if(pasteModeRef.current==="never"||(pasteModeRef.current==="risky"&&!content.risky))return;
+    if(pasteModeRef.current==="never"||(pasteModeRef.current==="risky"&&!content.risky)){if(canContinueTerminalInput(id,view)){stop();continueTerminalInput(id,view,content.text,true);}return;}
     stop();pastePending.current={target:terminalPasteTarget(id,view),content};setPastePreview(content);
   }
   useEffect(()=>{validatePendingTerminalPaste();});
@@ -614,6 +657,15 @@ function App() {
   const [terminalNotice, setTerminalNotice] = useState<string | null>(null);
   const [,setRecoveryRevision]=useState(0);
   const [error, setError] = useState<string | null>(()=>desktopWindow.conflict?"A saved session belonged to both windows. Main keeps it.":null);
+  const notificationTestBusy=useRef(false);
+  const [notificationTestStatus,setNotificationTestStatus]=useState<string|null>(null);
+  async function testNotification(){
+    const id=sessionId.current;if(!id||notificationTestBusy.current)return;
+    notificationTestBusy.current=true;setNotificationTestStatus("Sending test notification…");
+    try{await invoke("test_notification",{sessionId:id});setNotificationTestStatus("System accepted the test notification. If no banner appears, check Focus and screen-sharing notification settings.");}
+    catch{setNotificationTestStatus("Notification test failed. Check system notification permission and try again.");}
+    finally{notificationTestBusy.current=false;}
+  }
   const [notificationError, setNotificationError] = useState<string | null>(null);
   const [cwd, setCwd] = useState("");
   const [launchDirectoryOverride,setLaunchDirectoryOverride]=useState<string|undefined>(undefined);
@@ -623,9 +675,26 @@ function App() {
   const [adapters, setAdapters] = useState<AgentAdapter[]>([]);
   const [globalLaunchDefaults,setGlobalLaunchDefaults]=useState<LaunchDefaults>(launchDraft);
   const launchSettingsDialog=useRef<HTMLDialogElement>(null);
-  const projectToolsDialog=useRef<HTMLDialogElement>(null);
   const [projectToolsPath,setProjectToolsPath]=useState("");
   const [projectToolsOpen,setProjectToolsOpen]=useState(false);
+  const projectToolsOpenRef=useRef(projectToolsOpen);projectToolsOpenRef.current=projectToolsOpen;
+  const [projectToolsTab,setProjectToolsTab]=useState<"files"|"changes"|"worktrees">("changes");
+  function closeProjectTools(){
+    const id=sessionId.current,origin=document.activeElement;projectToolsOpenRef.current=false;setProjectToolsOpen(false);
+    requestAnimationFrame(()=>{requestTerminalLayoutFit();if(!projectToolsOpenRef.current&&sessionId.current===id&&(document.activeElement===origin||document.activeElement===document.body)&&!document.querySelector('dialog[open],[role="dialog"][aria-modal="true"]')){showConversation(false);focusTerminalPane(terminalLayoutRef.current.focused,true);}});
+  }
+  const projectFileSequence=useRef(0);
+  const [projectFileRequest,setProjectFileRequest]=useState<ProjectFileRequest|null>(null);
+  const [reviewLocation,setReviewLocation]=useState<ReviewLocation|null>(null);
+  function diffProjectPath(target:DiffTarget):string|null{
+    if(!session||session.ssh||sessionId.current!==target.sessionId||session.session_id!==target.sessionId)return null;
+    const path=relativeProjectFile(session.cwd,target.absolutePath);
+    if(!path)setError("This file is outside the selected session project. Open it from the local file list instead.");
+    return path;
+  }
+  function openDiffFile(target:DiffTarget){const path=diffProjectPath(target);if(path){setProjectToolsTab("files");setProjectFileRequest({id:++projectFileSequence.current,sessionId:target.sessionId,path,line:target.side==="new"&&target.basis!=="staged"?target.line:null});}}
+  function reviewDiffFile(target:DiffTarget){const path=diffProjectPath(target);if(path){setProjectToolsTab("changes");setReviewLocation({sessionId:target.sessionId,path,line:target.line,side:target.side,basis:target.basis});}}
+
   const [launchDefaultsNotice,setLaunchDefaultsNotice]=useState<string|null>(null);
   const projectSelection=useRef(new ProjectConfigSelection());
   const projectConfigVersion=useRef(0);
@@ -639,6 +708,8 @@ function App() {
   useEffect(()=>{projectConfigVersion.current++;projectSelection.current.cancel();setProjectPreview(null);setUseProjectSettings(false);setProjectTemplate("");setProjectConfigBusy(false);},[cwd]);
   const projectDefaults=projectPreview?.config?{...projectPreview.config.defaults,...projectPreview.config.templates?.find(item=>item.name===projectTemplate)}:null;
   const formLaunch={...(useProjectSettings&&projectPreview?.trusted?resolveLaunchDefaults(globalLaunchDefaults,projectDefaults,projectLaunchEdits):launchDraft),mode:"interactive"};
+  const [piValidation,setPiValidation]=useState({valid:false,scope:""});
+  const piFormValid=piValidation.valid&&piValidation.scope===JSON.stringify([cwd,formLaunch.extra_args]);
   const formAdapter=formLaunch.adapter==="custom"?"shell":formLaunch.adapter;
   const selectedAdapter=formAdapter,command=formLaunch.command??"",prompt=formLaunch.prompt??"",adapterArgs=formLaunch.extra_args,providerConfig=formLaunch.provider??null;
   function editLaunch(fields:Partial<LaunchDefaults>){
@@ -683,7 +754,7 @@ function App() {
       const to=providerPreset(adapter==='claude'?'deepseek-claude':'deepseek').provider;
       if(current.base_url===from?.base_url&&to)provider={...current,base_url:to.base_url};
     }
-    editLaunch({adapter,...(provider!==current?{provider}:{}),...(adapter!=="shell"&&formAdapter==="shell"?{command:null}:{})});
+    editLaunch({adapter,...(provider!==current?{provider}:{}),...(adapter!=="shell"&&formAdapter==="shell"?{command:null}:{}),...(adapter!==formAdapter&&(adapter==="pi"||formAdapter==="pi")?{extra_args:adapter==="pi"?"--yam-gateway http://127.0.0.1:3425 --yam-small yam-gateway/codex/gpt-6-luna --yam-strong yam-gateway/codex/gpt-6.1-sol":""}:{})});
     if(adapter!==formAdapter&&!useProjectSettings&&!launchWorktreeAttempt&&launchDirectoryOverride===undefined){
       try{setCwd(adapter==="shell"?terminalDirectory(undefined,launchTerminalProfile):currentProject?.path||session?.cwd||activeProject||"");}
       catch(reason){setError(reason instanceof Error?reason.message:"Terminal profile is unavailable.");}
@@ -692,6 +763,8 @@ function App() {
   const [launchTemplateCollection]=useState(()=>{const storage={getItem:(key:string)=>localStorage.getItem(key),setItem:(key:string,value:string)=>localStorage.setItem(key,value)};const collection=new LaunchTemplateCollection(storage);collection.load();return collection;});
   const [,setLaunchTemplateRevision]=useState(0);
   const [launchTemplateName,setLaunchTemplateName]=useState("");
+  const [connectionName,setConnectionName]=useState("");
+  function saveConnection(){if(!isMainWindow||!formLaunch.provider)return;try{launchTemplateCollection.save(connectionName,connectionTemplate(formAdapter,formLaunch.provider));setConnectionName("");setLaunchTemplateActionError(null);refreshLaunchTemplateUi();}catch(reason){handleLaunchTemplateError(reason);}}
   const [launchTemplateActionError,setLaunchTemplateActionError]=useState<string|null>(null);
   function refreshLaunchTemplateUi(){setLaunchTemplateRevision(revision=>revision+1);}
   function handleLaunchTemplateError(reason:unknown){setLaunchTemplateActionError(launchTemplateCollection.writeError?null:String(reason));refreshLaunchTemplateUi();}
@@ -748,6 +821,8 @@ function App() {
   const capacityVersion=useRef(0);
   const [archiveOpen,setArchiveOpen]=useState(false);
   const [capacityOpen,setCapacityOpen]=useState(false);
+  const capacityDialog=useRef<HTMLDialogElement>(null);
+  useEffect(()=>{if(capacityOpen)capacityDialog.current?.showModal();},[capacityOpen]);
   const [capacity,setCapacity]=useState<HistoryCapacity|null>(null);
   const [capacityBusy,setCapacityBusy]=useState(false);
   const [capacityError,setCapacityError]=useState<string|null>(null);
@@ -960,7 +1035,7 @@ function App() {
     if(diagnosticsBusy.current)return;
     diagnosticsBusy.current=true;setDiagnosticsExporting(true);setDiagnosticsMessage(null);
     try {
-      const saved=await invoke<boolean>("export_diagnostics");
+      const saved=await invoke<boolean>("export_diagnostics",{startup:startupTimings(performance.getEntriesByType("measure"))});
       setDiagnosticsMessage(saved?"Diagnostics saved.":"Export cancelled.");
     } catch(reason) {
       const messages:Record<string,string>={
@@ -982,12 +1057,18 @@ function App() {
         notifications.current.clearFailure(oldKey);
     }
     const key = `${event.session_id}:${event.status}`;
+    const discardMissing=(reason:unknown)=>{
+      if(!/^(?:Error: )?(?:Unknown notification session|Unknown session)$/.test(String(reason)))return false;
+      retryNotifications.current.delete(key);notifications.current.clearFailure(key);notifications.current.suppress(key);
+      if(!retryNotifications.current.size)setNotificationError(null);
+      return true;
+    };
     if(pausedRef.current){retryNotifications.current.set(key,event);return;}
     if (!notifications.current.canRetry(key)) return;
     if (terminalHasInputFocus(event.session_id)||await invoke<boolean>("terminal_input_focused",{sessionId:event.session_id})) {
       notifications.current.suppress(key);
       try { await invoke("acknowledge_notification", {sessionId: event.session_id, expectedStatus: event.status}); retryNotifications.current.delete(key); notifications.current.clearFailure(key); if (!retryNotifications.current.size) setNotificationError(null); }
-      catch (reason) { retryNotifications.current.set(key, event); setNotificationError(notifications.current.recordFailure(key, reason)); }
+      catch (reason) { if(!discardMissing(reason)){retryNotifications.current.set(key, event); setNotificationError(notifications.current.recordFailure(key, reason));} }
       return;
     }
     retryNotifications.current.set(key, event);
@@ -1013,6 +1094,7 @@ function App() {
         if (!retryNotifications.current.size) setNotificationError(null);
       }
     } catch (reason) {
+      if(discardMissing(reason))return;
       if (retryNotifications.current.has(key))
         setNotificationError(notifications.current.recordFailure(key, reason));
     }
@@ -1090,6 +1172,7 @@ function App() {
         if(view.desktopGeneration!==generation||(view.moveListenerRevision??0)!==listenerRevision)return;
         const protocol=isTerminalProtocolResponse(data);
         const connected=ownerConnectionAvailable.current.available&&view.availability!=="owner_unavailable";
+        if(!view.live&&!protocol){continueTerminalInput(id,view,data);return;}
         if (!view.disposed && !view.moving && connected && !(view.projection&&protocol) && view.live && (view.projection || (view.cursor !== null && (view.ready || view.firstAttachment)))
           && (terminalHasInputFocus(id) || (!view.projection && protocol))){
           const owner=view.frameInstance,attachment=view.attachVersion,connectionVersion=ownerConnectionAvailable.current.version;
@@ -1184,7 +1267,7 @@ function App() {
       void refreshHistory();
       for(let pane=0;pane<terminalLayoutRef.current.panes.length;pane++){const id=terminalLayoutRef.current.panes[pane],record=id?terminalViews.current.get(id)?.record:null;if(record)void openHistory(record,false,pane);}
     }).then(unlisten => { if (active) extraListeners.push(unlisten); else unlisten(); });
-    async function selectNotificationSession(id: string) {
+    async function selectNotificationSession(id: string, restoreOnFailure=false) {
       cancelLayoutRestore(true,false);
       let intent=layoutRestore.current.version;
       let version=++detailVersion.current;
@@ -1192,8 +1275,10 @@ function App() {
         const record = await invoke<SessionRecord>("get_session",{sessionId:id});
         if (!active||intent!==layoutRestore.current.version) return;
         const pending = await invoke<string | null>("pending_notification_selection");
-        if (!active || pending !== id || version!==detailVersion.current || intent!==layoutRestore.current.version) return;
+        if (!active || version!==detailVersion.current || intent!==layoutRestore.current.version) return;
+        if(pending!==id){if(restoreOnFailure)throw Error("Pending notification changed. Restoring saved terminals.");return;}
         if (!record) throw new Error("Notification refers to an unknown session");
+        setDataSettingsOpen(false);
         launchDialog.current?.close();
         projectDialog.current?.close();
         renameDialog.current?.close();
@@ -1202,7 +1287,12 @@ function App() {
         if (active && intent===layoutRestore.current.version && version===detailVersion.current && sessionId.current === receipt.view.record?.summary.session_id && outputCursor.current !== null) {
           await invoke("acknowledge_notification_selection", { sessionId: id });
         }
-      } catch (reason) { if (active&&intent===layoutRestore.current.version&&version===detailVersion.current) setError(String(reason)); }
+      } catch (reason) {
+        if(active&&intent===layoutRestore.current.version&&version===detailVersion.current){
+          setError(String(reason));
+          if(restoreOnFailure){const fallback=++layoutRestore.current.version;layoutRestore.current.pending=true;layoutRestore.current.adoptable=false;setLayoutRestoreReady(false);await restoreSavedLayout(fallback);}
+        }
+      }
     }
     void listen<string>("terminal-window-selection",event=>{void openSession(event.payload);}).then(unlisten=>{if(active)extraListeners.push(unlisten);else unlisten();}).catch(()=>{});
     if(isMainWindow)void listen<{previous:string;next:string}>("terminal-reopened",event=>{
@@ -1272,15 +1362,14 @@ function App() {
       .then(async unlisten => {
         if (!active) { unlisten(); return; }
         extraListeners.push(unlisten);
-        const pending = desktopWindow.requested_session??await invoke<string | null>("pending_notification_selection");
+        const pending = desktopWindow.requested_session??await invoke<string | null>("pending_notification_selection").catch(()=>null);
         if(!startupPending||!startupValid())return;
-        if(pending){if(desktopWindow.owned_ids.includes(pending)||isMainWindow) {await selectNotificationSession(pending);return;}}
+        if(pending){if(desktopWindow.owned_ids.includes(pending)||isMainWindow) {await selectNotificationSession(pending,true);return;}}
         await restoreSavedLayout(startupVersion);
-      }).catch(()=>{
+      }).catch(async()=>{
         if(startupValid()){
-          desktopWindow.restore_blocked=true;
-          setError("Terminal layout preferences unavailable. Using a single pane.");
-          finishLayoutRestore(startupVersion);
+          await restoreSavedLayout(startupVersion);
+          if(active&&!desktopWindow.restore_blocked)setError("Notification click events are unavailable. Use the sidebar to open sessions.");
         }
       });
     let unlistenOutput: UnlistenFn | undefined;
@@ -1440,11 +1529,12 @@ function App() {
       setError("Select this worktree before starting its reserved session.");
       return;
     }
-    projectToolsDialog.current?.close();
+    setProjectToolsOpen(false);
     newSession(record.target,undefined,record.attempt);
   }
   async function startNewSession(quickCopy?:ReturnType<typeof duplicateSessionDraft>){
     const launchAdapter=quickCopy?.draft.adapter??formAdapter,launch=quickCopy?.draft??formLaunch;
+    if(launchAdapter==="pi"&&!quickCopy&&!piFormValid){setError("Check the connection and available Pi models.");return;}
     const projectSettings=!quickCopy&&useProjectSettings,worktree=quickCopy?undefined:launchWorktreeAttempt;
     const ordinaryTerminal=launchAdapter==="shell"&&!launch.command?.trim()&&!launch.provider&&!projectSettings&&!worktree;
     const copy=quickCopy??sessionCopy,outputTerminal=quickCopy?.settings.terminal??sessionTerminal,name=quickCopy?"":copy?copyName.trim():"";
@@ -1494,6 +1584,11 @@ function App() {
     creatingSession.current = true;
     setStarting(true);
     setError(null);
+    const clickStarted=performance.now();
+    const dialog=launchDialog.current,focusOrigin=dialog?.open?document.activeElement:null,restoreFocus=dialog?.open&&dialog.contains?.(focusOrigin),launchWasOpen=dialog?.open;
+    let revealed=false;
+    const reveal=()=>{if(!revealed){revealed=true;dialog?.close();}};
+    if(dialog?.open)reveal();
     try {
       const argumentsForStart = overrides?.ssh ? {cwd:workingDirectory||null,command:null,launch:null,ssh:{...overrides.ssh},...(overrides.retainedLines!==undefined&&overrides.retainedLines!==2000?{retainedLines:overrides.retainedLines}:{})} : overrides?.resumeFrom ? {resumeFrom:overrides.resumeFrom,cwd:null,command:null,launch:null} : projectStart ? {cwd:null,command:null,launch:null,projectConfig:{root:projectPreview!.root,template:projectTemplate||null,overrides:{...projectLaunchEdits,mode:"interactive"}}} : {
         cwd: workingDirectory || null,
@@ -1518,6 +1613,8 @@ function App() {
         endedView.moveDisposal=true;
       }else if(!endedView&&terminalViews.current.size>=16)throw Error("Terminal views are active, visible, or still being saved. Close an ended tab and wait for its output to finish saving.");
       const reply = await invoke<SessionSummary & {directory_reporting_warning?:string;command_reporting_warning?:string}>("create_session", worktreeAttempt ? {...argumentsForStart,worktreeAttempt} : argumentsForStart);
+      if(performance.getEntriesByName("yam.start.create").length>=32)performance.clearMeasures("yam.start.create");
+      performance.measure("yam.start.create",{start:clickStarted,end:performance.now()});
       const {directory_reporting_warning,command_reporting_warning,...next}=reply;
       setActiveProject(next.cwd);
       setCollapsedProjects((previous) => {
@@ -1530,20 +1627,18 @@ function App() {
         ...previous,
         [next.session_id]:
           next.ssh ? sshTitle(next.ssh) : overrides?.resumeFrom ? previous[next.session_id] || previous[overrides.resumeFrom] || `Continue ${next.launch?.adapter ?? "conversation"}` : next.launch?.prompt?.trim() ||
-            next.command || adapters.find((item) => item.id === next.launch?.adapter)?.label ||
-            (!overrides && !projectStart ? adapter?.label : null) || "Interactive shell",
+            next.command || adapters.find((item) => item.id === next.launch?.adapter && item.id !== "shell")?.label ||
+            (!overrides && !projectStart && adapter?.id!=="shell" ? adapter?.label : null) || defaultTerminalTitle(next.session_id,t("Terminal")),
       }));
       if(overrides?.ssh)setSshOpen(false);
       // Select the new view before closing; its first frame may arrive later.
       let attached:Awaited<ReturnType<typeof openHistory>>=undefined,attachmentFailed=false;
-      const dialog=launchDialog.current,focusOrigin=dialog?.open?document.activeElement:null,restoreFocus=dialog?.open&&dialog.contains(focusOrigin);
-      let revealed=false;
-      const reveal=()=>{if(!revealed){revealed=true;dialog?.close();}};
       try{attached=await openHistory({summary:next, status:next.status, exit_code:null, reason:null, started_at:Date.now()/1000, ended_at:null},true,undefined,undefined,undefined,initialAppearance,undefined,undefined,undefined,reveal);}
       catch{attachmentFailed=true;}
       const focusCurrent=restoreFocus&&(dialog?.open?dialog.contains(document.activeElement):document.activeElement===focusOrigin||document.activeElement===document.body);
       reveal();
       if(restoreFocus&&focusCurrent&&!dialog?.open&&attached?.view?.ready&&!attached.view.disposed&&sessionId.current===next.session_id)attached.view.instance.focus();
+      if(attached?.view?.ready){if(performance.getEntriesByName("yam.start.frame").length>=32)performance.clearMeasures("yam.start.frame");performance.measure("yam.start.frame",{start:clickStarted,end:performance.now()});}
       if(attachmentFailed)setError("The session was created, but YAM could not attach its view. Open the existing session from history; do not start it again.");
       else if(directory_reporting_warning&&command_reporting_warning)setError("Directory reporting and command status reporting are unavailable for this terminal. The shell is running with its original startup.");
       else if(directory_reporting_warning)setError("Zsh directory reporting is unavailable for this terminal.");
@@ -1554,6 +1649,7 @@ function App() {
       const failure=reason instanceof Error?reason.message:String(reason);
       if(failure==="terminal_view_limit"){setError("The 16-view limit is shared by both windows. Close an ended tab in either window and wait for its output to finish saving.");return;}
       const unknownStart=failure==="terminal_start_outcome_unknown";
+      if(launchWasOpen&&!unknownStart&&!dialog?.open&&(document.activeElement===focusOrigin||document.activeElement===document.body)&&!document.querySelector?.('dialog[open]'))dialog?.showModal();
       const message=unknownStart?"Start outcome unknown. New starts in the current window are paused. Check existing sessions; do not retry automatically.":overrides?.ssh?"SSH start unavailable. Check the terminal owner and macOS OpenSSH. The start outcome may be unknown; do not retry automatically.":overrides?.commandReporting?"Command status reporting could not be started. Update the terminal owner before trying again.":overrides?.directoryReporting?"Zsh directory reporting could not be started. Check terminal owner compatibility.":overrides?.envRefs&&Object.keys(overrides.envRefs).length?"Terminal environment references could not be applied. Check the profile and terminal owner compatibility.":overrides?.shell?shellStartError(reason):reason instanceof Error?reason.message:String(reason);
       setError(message);
     } finally {
@@ -2108,7 +2204,7 @@ function App() {
       if(path!==(view.reportedCwd??null)){view.reportedCwd=path;setRecoveryRevision(revision=>revision+1);}
     }
     view.element.inert=!terminalPaneVisible(id)||!view.ready;
-    view.notice=view.live?null:"Saved terminal scene. The process has ended; input is disabled.";
+    view.notice=view.live?null:view.record?.summary.ssh?"Saved terminal scene. Reconnect SSH to continue.":"The previous process ended. Type to open a new terminal here; the previous task will not be rerun.";
     terminalViews.current.setRunning(id,view.live);
     if(sessionId.current===id){outputCursor.current=view.cursor;setSessionStatus(view.status??frame.status);setTerminalNotice(view.notice);}
   }
@@ -2300,11 +2396,37 @@ function App() {
     }
   }
 
+  function canContinueTerminalInput(id:string,view:TerminalView){
+    return terminalMounted.current&&ownerConnectionAvailable.current.available&&terminalViews.current.get(id)===view&&sessionId.current===id&&terminalPaneVisible(id)&&view.ready&&!view.live&&!view.disposed&&!view.moving&&!view.attaching&&view.availability==="available"&&!!view.record&&terminalStatuses.has(view.status??view.record.status)&&!view.record.summary.ssh;
+  }
+  function continueTerminalInput(id:string,view:TerminalView,data:string,paste=false){
+    if(!canContinueTerminalInput(id,view)||!terminalHasInputFocus(id)||!data)return;
+    const existing=view.continuation;
+    const pending=existing??{chunks:[],length:0,cancelled:false};
+    if(pending.length+data.length>262144||pending.chunks.length>=256){pending.cancelled=true;pending.chunks=[];setError("Too much pending terminal input. Unsent input was discarded; check the prompt before typing again.");return;}
+    pending.chunks.push({data,paste});pending.length+=data.length;
+    if(existing)return;
+    view.continuation=pending;
+    const origin=view.instance.textarea;
+    void (async()=>{
+      const next=await newTerminal(view.record!.summary.cwd,null,view.appearance);
+      const target=next?terminalViews.current.get(next.session_id):undefined;
+      if(!next||!target?.ready||!target.live||target.disposed||pending.cancelled||sessionId.current!==next.session_id||document.activeElement!==origin&&document.activeElement!==target.instance.textarea&&document.activeElement!==document.body){setError("Terminal input was not sent. Check the current terminal before typing again.");return;}
+      target.instance.focus();
+      if(!terminalHasInputFocus(next.session_id)){setError("Terminal input was not sent. Check the current terminal before typing again.");return;}
+      for(const chunk of pending.chunks){if(chunk.paste)target.instance.paste(chunk.data);else target.instance.input(chunk.data,true);}
+      const write=target.inputQueue?.write;
+      if(!write){setError("Terminal input was not sent. Check the current terminal before typing again.");return;}
+      await write;
+    })().catch(()=>setError("Terminal input was not sent. Check the current terminal before typing again.")).finally(()=>{pending.chunks=[];if(view.continuation===pending)view.continuation=undefined;});
+  }
+
   function selectedRecovery() {
     return sessionRecovery(selectedRecord.current, sessionId.current, session?.session_id ?? null,
       sessionStatus, starting, ownerConnectionAvailable.current.available
         ? terminalViews.current.get(sessionId.current ?? "")?.availability ?? "available" : "owner_unavailable");
   }
+  function openSelectedTerminal(){if(session&&selectedRecovery().canOpenTerminal)void newTerminal(session.cwd,null);}
   function resumeSelectedSession(){if(session && selectedRecovery().canContinue)void startSession({resumeFrom:session.session_id});}
 
   async function connectSsh(ssh:SshLaunch) {
@@ -2339,9 +2461,14 @@ function App() {
     return () => { active = false; clearInterval(timer); gitPolling.current.cancel(); };
   }, [gitProjectPath, gitOwner]);
   const visibleGitContext = gitContext?.path === gitProjectPath && gitContext.owner === gitOwner ? gitContext.value : null;
+  useEffect(()=>{if(projectToolsOpen)setProjectToolsPath(visibleGitContext?.root||gitProjectPath);},[projectToolsOpen,gitProjectPath,visibleGitContext?.root]);
   worktreeContextRef.current={root:projectToolsPath,owner:gitOwner};
-  const titleFor = (summary: SessionSummary | HistoryItem["summary"]) =>
-    sessionTitles[summary.session_id] || ("title" in summary?summary.title:summary.ssh?sshTitle(summary.ssh):summary.launch?.prompt || summary.command || (summary.launch ? `${summary.launch.adapter} · ${summary.launch.mode}` : "Interactive shell"));
+  const titleFor = (summary: SessionSummary | HistoryItem["summary"]) => {
+    if(sessionTitles[summary.session_id])return sessionTitles[summary.session_id];
+    if("title" in summary)return summary.title;
+    if(summary.ssh)return sshTitle(summary.ssh);
+    return summary.launch?.prompt||summary.command||(summary.launch?`${summary.launch.adapter} · ${summary.launch.mode}`:defaultTerminalTitle(summary.session_id,t("Terminal")));
+  };
   const normalizedQuery = historyQuery.trim().toLowerCase();
   const visibleProjects = projectGroups;
 
@@ -2494,7 +2621,7 @@ function App() {
   function closeCommandPalette(){paletteVersion.current++;setPaletteOpen(false);}
   const recovery=selectedRecovery();
   const canContinue=recovery.canContinue;
-  const recoveryNotice=recovery.notice ?? terminalNotice;
+  const recoveryNotice=ownerConnectionAvailable.current.available?(recovery.notice ?? terminalNotice):null;
   const commandEntries=paletteEntries(paletteQuery,orderedHistory.map(record=>({id:record.summary.session_id,title:titleFor(record.summary),status:record.status})),canContinue,{new:shortcutHint(shortcuts.terminal,shortcutMac),previous:shortcutHint(shortcuts.previous,shortcutMac),search:shortcutHint(shortcuts.search,shortcutMac),"clear-display":shortcutHint(shortcuts["clear-display"],shortcutMac)},canReopenTerminalTab());
   function clearEntryAdmission(){return !starting&&!terminalReopenFlight.current&&!layoutRestore.current.pending&&!desktopWindow.restore_blocked&&!creatingSession.current&&!terminalMoveTaskRef.current&&!terminalMoveIncomingRef.current&&!terminalMoveOperationRef.current;}
   function queuePaletteClear(version:number){
@@ -2546,7 +2673,7 @@ function App() {
     const available=adapters.filter(item=>item.available||item.id==="shell");
     const preferred=readPreference("yam.lastSessionCli",defaults.adapter==="custom"?"shell":defaults.adapter,(value):value is string=>typeof value==="string"&&available.some(item=>item.id===value));
     const adapter=profileId!==undefined?"shell":available.some(item=>item.id===preferred)?preferred:available.find(item=>item.id!=="shell")?.id??"shell";
-    setLaunchDraft({...defaults,adapter,mode:"interactive",...(defaults.provider&&!supportsProvider(adapter,defaults.provider)?{provider:null}:{}),...(adapter!=="shell"||!isMainWindow?{command:null}:{}),...(profileId!==undefined?{command:null,provider:null,prompt:null,extra_args:""}:{})});
+    setLaunchDraft({...defaults,adapter,mode:"interactive",...(adapter==="pi"&&defaults.adapter!=="pi"?{extra_args:"--yam-gateway http://127.0.0.1:3425 --yam-small yam-gateway/codex/gpt-6-luna --yam-strong yam-gateway/codex/gpt-6.1-sol"}:{}),...(defaults.provider&&!supportsProvider(adapter,defaults.provider)?{provider:null}:{}),...(adapter!=="shell"||!isMainWindow?{command:null}:{}),...(profileId!==undefined?{command:null,provider:null,prompt:null,extra_args:""}:{})});
     let directory=path??currentProject?.path??session?.cwd??activeProject??"";
     if(adapter==="shell"&&!worktreeAttempt)try{directory=terminalDirectory(path,profileId);}catch(reason){setError(reason instanceof Error?reason.message:"Terminal profile is unavailable.");}
     setCwd(directory);
@@ -2554,6 +2681,8 @@ function App() {
     launchDialog.current?.showModal();
   }
   const currentAgent=selectedAgent;
+  const reviewRecord=session?{summary:session,status:sessionStatus,agent:currentAgent}:null;
+  const currentReviewOrigin=reviewOrigin(reviewRecord);
   const unreadTotal=historyOverview.unread_receipts;
   async function openReceipt(record:HistoryItem,entry:AgentReceipt,agent?:AgentState){
     const action=captureAttention(record,entry,agent),focusOrigin=document.activeElement;
@@ -2612,8 +2741,12 @@ function App() {
   const nativeMenuHandler=useRef<(action:unknown)=>void>(()=>{});
   nativeMenuHandler.current=action=>{
     const blocked=!!document.querySelector('dialog[open],[role="dialog"][aria-modal="true"],.modal-backdrop');
+    if(action==="support"){if(!blocked)openSettingsSection("support");return;}
+    const fileWorkspace=document.activeElement?.closest('.project-workspace');
+    if((action==="hide"||action==="close")&&!blocked&&fileWorkspace){const closeFile=fileWorkspace.querySelector<HTMLButtonElement>('.project-tools-panel:not([hidden]) [data-close-active-file="true"]');if(closeFile)closeFile.click();else closeProjectTools();return;}
     dispatchNativeMenu(action,{
       new:()=>newSession(),"second-window":()=>void openSecondWindow(),project:()=>addProject(),ssh:()=>{if(isMainWindow){setSshError(null);setSshOpen(true);}else openMainSettings("updates");},
+      close:()=>void nativeInvoke("native_close_window").catch(()=>setError("Window could not be closed.")),
       hide:()=>{const layout=terminalLayoutRef.current,id=layout.panes[layout.focused];if(id)closeTerminalTab(layout.focused,id);},reopen:()=>void reopenTerminalTab(),sidebar:()=>setSidebarOpen(value=>!value),palette:()=>openCommandPalette(),find:()=>openTerminalFind(),
       larger:()=>zoomTerminal("larger"),smaller:()=>zoomTerminal("smaller"),reset:()=>zoomTerminal("reset"),"split-horizontal":()=>splitFocusedTerminalPane("horizontal"),"split-vertical":()=>splitFocusedTerminalPane("vertical"),zoom:()=>toggleTerminalPaneZoom(),
       previous:()=>{if(previousSession.current)void openSession(previousSession.current);},attention:()=>void jumpToAttention(),logs:()=>setLogSearchOpen(true),appearance:()=>(isMainWindow?setAppearanceOpen(true):openMainSettings("appearance")),settings:()=>(isMainWindow?setTerminalSettingsOpen(true):openMainSettings("settings")),profiles:()=>(isMainWindow?setTerminalProfilesOpen(true):openMainSettings("profiles")),"keyboard-shortcuts":()=>(isMainWindow?setKeyboardShortcutsOpen(true):openMainSettings("keyboard-shortcuts")),updates:()=>{if(isMainWindow){setUpdaterOpen(true);const current=updaterController.current.snapshot;if(current?.configured&&!updaterBusy(current.state)&&current.state!=="verified")void runUpdaterAction("check");}else openMainSettings("updates");}
@@ -2748,7 +2881,8 @@ function App() {
     const actions=menu.querySelector<HTMLElement>('.toolbar-more-actions');if(!actions)return;
     const rect=menu.getBoundingClientRect(),width=actions.offsetWidth,height=actions.offsetHeight;
     actions.style.left=Math.max(8,Math.min(rect.right-width,window.innerWidth-width-8))+"px";
-    actions.style.top=Math.max(8,Math.min(rect.bottom,window.innerHeight-height-8))+"px";
+    const top=rect.bottom+6+height<=window.innerHeight-8?rect.bottom+6:rect.top-height-6;
+    actions.style.top=Math.max(8,Math.min(top,window.innerHeight-height-8))+"px";
   }
   function beginSessionDeletion(record:HistoryItem|SessionRecord|null=selectedRecord.current){
     if(!isMainWindow||sessionDeleteBusyRef.current||!record)return;
@@ -2844,11 +2978,32 @@ function App() {
     if(!isMainWindow){openMainSettings(page);return;}
     if(starting||systemEntryBusy)return;
     if(terminalProfilesOpen){if(terminalProfileCollection.selectedId)selectTerminalProfile(terminalProfileCollection.selectedId);else newTerminalProfile();}
-    setAppearanceOpen(false);setTerminalSettingsOpen(false);setTerminalProfilesOpen(false);setKeyboardShortcutsOpen(false);setPasteSettingsOpen(false);setUpdaterOpen(false);setSystemEntryOpen(false);setDirectoryReportingOpen(false);setCommandReportingOpen(false);launchSettingsDialog.current?.close();
-    const pages:Record<SettingsPage,()=>void>={appearance:()=>setAppearanceOpen(true),settings:()=>setTerminalSettingsOpen(true),profiles:()=>setTerminalProfilesOpen(true),"keyboard-shortcuts":()=>setKeyboardShortcutsOpen(true),"paste-settings":()=>setPasteSettingsOpen(true),updates:()=>setUpdaterOpen(true),"system-entry":()=>{setSystemEntryOpen(true);void refreshSystemEntry();},"directory-reporting":()=>setDirectoryReportingOpen(true),"command-reporting":()=>setCommandReportingOpen(true),"launch-settings":()=>{setLaunchDefaultsNotice(null);requestAnimationFrame(()=>launchSettingsDialog.current?.showModal());}};
+    setDataSettingsOpen(false);setAppearanceOpen(false);setTerminalSettingsOpen(false);setTerminalProfilesOpen(false);setKeyboardShortcutsOpen(false);setPasteSettingsOpen(false);setUpdaterOpen(false);setSystemEntryOpen(false);setDirectoryReportingOpen(false);setCommandReportingOpen(false);launchSettingsDialog.current?.close();
+    const pages:Record<SettingsPage,()=>void>={support:()=>setDataSettingsOpen(true),appearance:()=>setAppearanceOpen(true),settings:()=>setTerminalSettingsOpen(true),profiles:()=>setTerminalProfilesOpen(true),"keyboard-shortcuts":()=>setKeyboardShortcutsOpen(true),"paste-settings":()=>setPasteSettingsOpen(true),updates:()=>setUpdaterOpen(true),"system-entry":()=>{setSystemEntryOpen(true);void refreshSystemEntry();},"directory-reporting":()=>setDirectoryReportingOpen(true),"command-reporting":()=>setCommandReportingOpen(true),"launch-settings":()=>{setLaunchDefaultsNotice(null);requestAnimationFrame(()=>launchSettingsDialog.current?.showModal());}};
     pages[page]();
   }
+  async function exportPreferences(){return invoke<boolean>("export_preferences",{backup:createPreferencesBackup(key=>window.localStorage.getItem(key),launchTemplateCollection.templates,shortcutMac)});}
+  async function importPreferences(backup:PreferencesBackup){
+    const writes=preferencesImportWrites(backup,launchTemplateCollection.templates,undefined,launchTemplateCollection.loadError,appPreferences);
+    // Commit local preferences before publishing them; no task or CLI configuration is touched.
+    applyPreferencesImport(window.localStorage,writes);
+    const appearance=loadAppPreferences(()=>window.localStorage.getItem(APP_PREFERENCES_KEY));if(!appearance.error)applyAppPreferences(appearance.value,false);
+    if(writes["yam.terminalSettings"]){const defaults=loadTerminalSettings(()=>window.localStorage.getItem("yam.terminalSettings"));terminalSettingsRef.current=defaults.settings;setTerminalSettings(defaults.settings);}
+    if(writes["yam.terminalLineHeight.v1"]){const next=loadTerminalLineHeight(()=>window.localStorage.getItem("yam.terminalLineHeight.v1"));terminalLineHeightRef.current=next.lineHeight;setTerminalLineHeight(next.lineHeight);}
+    if(writes["yam.terminalCursor.v1"]){const next=loadTerminalCursor(()=>window.localStorage.getItem("yam.terminalCursor.v1"));terminalCursorRef.current=next.cursor;setTerminalCursor(next.cursor);}
+    if(writes["yam.appShortcuts.v1"]){const keyboard=loadAppShortcuts(key=>window.localStorage.getItem(key),shortcutMac);shortcutsRef.current=keyboard.bindings;setShortcuts(keyboard.bindings);}
+    launchTemplateCollection.load();refreshLaunchTemplateUi();
+    for(const [key,value]of Object.entries(writes))await publishWindowPreference(nativeInvoke,desktopWindow,key,value);
+  }
   function settingsNavigation(page:SettingsPage){return (dirty:boolean)=><SettingsNavigation current={page} dirty={dirty} blocked={starting||systemEntryBusy} onSelect={openSettingsSection}/>;}
+  const settingsOpen=appearanceOpen||terminalSettingsOpen||terminalProfilesOpen||keyboardShortcutsOpen||pasteSettingsOpen||updaterOpen||systemEntryOpen||directoryReportingOpen||commandReportingOpen||dataSettingsOpen||capacityOpen;
+  const settingsOrigin=useRef<HTMLElement|null>(null);
+  useLayoutEffect(()=>{
+    if(settingsOpen){settingsOrigin.current=document.activeElement instanceof HTMLElement&&document.activeElement!==document.body?document.activeElement:null;return;}
+    const origin=settingsOrigin.current;settingsOrigin.current=null;if(!origin)return;
+    const frame=requestAnimationFrame(()=>{if(origin.isConnected&&document.activeElement===document.body&&!document.querySelector('dialog[open],[role="dialog"][aria-modal="true"]'))origin.focus();});
+    return()=>cancelAnimationFrame(frame);
+  },[settingsOpen]);
 
   const newSessionButton = <button className="new-session-button" onClick={() => newSession()}>
           <Plus aria-hidden="true" />
@@ -2857,9 +3012,10 @@ function App() {
   const showScrollControl=scrollView?.scroll?.held&&scrollView.projection&&!!scrollView.frameInstance&&!scrollView.disposed&&scrollView.ready&&(scrollView.live||scrollView.persisted);
 
   return (
-    <div className={`app-shell ${sidebarOpen ? "" : "sidebar-collapsed"}`}>
+    <div className={`app-shell ${sidebarOpen ? "" : "sidebar-collapsed"} ${projectToolsOpen?"project-tools-open":""}`}>
       {!conversationOpen&&scrollView?.find?.state.visible&&<TerminalFindBar key={session!.session_id} controller={scrollView.find} onClose={()=>closeTerminalFind(scrollView,session!.session_id)} onLogSearch={()=>setLogSearchOpen(true)}/>}
       {terminalSettingsError&&<p role="alert" className="terminal-preference-error">{t(terminalSettingsError)}</p>}
+      {dataSettingsOpen&&<DataSettings navigation={settingsNavigation("support")} mac={shortcutMac} onClose={()=>setDataSettingsOpen(false)} onExport={exportPreferences} onImport={importPreferences} onDiagnostics={()=>void exportDiagnostics()} diagnosticsStatus={diagnosticsMessage} diagnosticsBusy={diagnosticsExporting} onNotification={()=>void testNotification()} notificationStatus={notificationTestStatus} canNotify={!!session&&!notificationTestBusy.current}/>}
       {updaterOpen&&<UpdaterSettings navigation={settingsNavigation("updates")} snapshot={updaterSnapshot} automatic={updaterAutomatic} busy={updaterBusyAction} error={updaterError} onAutomatic={value=>void changeUpdaterAutomatic(value)} onAction={action=>void runUpdaterAction(action)} onClose={closeUpdaterSettings}/>}
       {systemEntryOpen&&<dialog ref={systemEntryDialog} className="app-dialog system-entry-dialog settings-surface" aria-label={t("System entry")} onCancel={event=>{event.preventDefault();if(!systemEntryBusy)setSystemEntryOpen(false);}}><header className="dialog-header"><h2>{t("System entry")}</h2></header>{settingsNavigation("system-entry")(false)}<div className="settings-page-body"><SystemEntrySettings showTitle={false} enabled={systemEntry.global_shortcut_enabled} registered={systemEntry.global_shortcut_registered} available={systemEntry.shortcut_available} busy={systemEntryBusy} warning={systemEntry.warning} onChange={enabled=>void setGlobalShortcut(enabled)}/></div><footer className="dialog-actions"><button type="button" disabled={systemEntryBusy} onClick={()=>setSystemEntryOpen(false)}>{t("Close")}</button></footer></dialog>}
       {isMainWindow&&browserOpen&&<BrowserWindowDialog snapshot={browserControls.current.snapshot} busy={browserControls.current.busy} error={browserControls.current.error} onAction={(action,url)=>void browserAction(action,url)} onRefresh={()=>void openBrowserDialog()} onClose={closeBrowserDialog}/>}
@@ -2875,6 +3031,20 @@ function App() {
       {terminalSettingsOpen&&<TerminalSettingsDialog navigation={settingsNavigation("settings")} settingsError={terminalSettingsError} fonts={terminalFonts} fontError={fontCatalogError} lineHeight={terminalLineHeight} lineHeightError={terminalLineHeightError} onLineHeightApply={applyTerminalLineHeight} retention={terminalRetention} retentionError={terminalRetentionError} onRetentionApply={applyTerminalRetention} cursor={terminalCursor} cursorError={terminalCursorError} onCursorApply={applyTerminalCursor} settings={terminalSettings} shell={shellLaunch} shellWindows={shellWindows} shellError={shellLaunchError} onDirectoryReporting={()=>{setTerminalSettingsOpen(false);setDirectoryReportingOpen(true);}} onCommandReporting={()=>{setTerminalSettingsOpen(false);setCommandReportingOpen(true);}} onShellApply={applyShellPreferences} onApply={applyTerminalPreferences} onClose={()=>setTerminalSettingsOpen(false)}/>}
       {keyboardShortcutsOpen&&<KeyboardShortcutSettings navigation={settingsNavigation("keyboard-shortcuts")} bindings={shortcuts} mac={shortcutMac} warning={shortcutError} onSave={saveKeyboardShortcuts} onClose={()=>setKeyboardShortcutsOpen(false)}/>}
       {paletteOpen&&<CommandPalette query={paletteQuery} onQuery={setPaletteQuery} entries={commandEntries} onChoose={entry=>void choosePaletteEntry(entry)} onClose={closeCommandPalette}/>}
+      {capacityOpen&&<dialog ref={capacityDialog} className="app-dialog history-capacity-dialog" aria-label={t("History capacity management")} onCancel={event=>{event.preventDefault();setCapacityOpen(false);}}>
+        <header className="dialog-header"><h2>{t("History capacity management")}</h2><button type="button" className="icon-button" aria-label={t("Close")} onClick={()=>setCapacityOpen(false)}><X aria-hidden="true"/></button></header>
+        <div className="history-capacity-controls">
+          <p role="status">{history.length} {t("loaded ·")+" "}{historyOverview.total} {t("sessions ·")+" "}{historyOverview.active} {t("active")}</p>
+          {historyCursor&&<button type="button" disabled={historyLoading} onClick={()=>void loadMoreHistory()}>{t("Load more sessions")}</button>}
+          {historyOverview.metadata_bytes!=null&&capacityLevel(historyOverview.metadata_bytes)!=="normal"&&<p role="status">{t("History metadata")+" "}{capacityLevel(historyOverview.metadata_bytes)==="protected"?t("has reached its 32 MiB protection limit"):t("is near its 32 MiB limit")}</p>}
+            <p>{t("No history is deleted automatically. Browse archived sessions to restore saved history.")}</p>
+            {capacity&&<><dl>{([['Metadata',capacity.metadata_bytes],['Logs',capacity.log_bytes],['Scenes',capacity.scene_bytes],['Backups',capacity.backup_bytes],['Archive',capacity.archive_bytes],['Other',capacity.other_bytes]] as const).map(([name,bytes])=><div key={name}><dt>{t(name)}</dt><dd>{(bytes/1024/1024).toFixed(2)} {t("MiB")}</dd></div>)}</dl><p>{capacity.complete?t("Complete scan"):t("Partial scan")} · {capacity.scanned_entries} {t("entries")}</p>{capacity.issues.length>0&&<p>{t("Some entries could not be scanned. Totals may be incomplete.")}</p>}</>}
+            {capacityError&&<p role="alert">{t(capacityError)}</p>}
+            <button type="button" className="secondary-button" disabled={capacityBusy} onClick={()=>void scanCapacity()}>{t("Refresh capacity")}</button>
+            {capacityBusy&&<button type="button" onClick={()=>void cancelCapacity()}>{t("Cancel scan")}</button>}
+        </div>
+        <footer className="dialog-actions"><button type="button" className="secondary-button" onClick={()=>{setCapacityOpen(false);setArchiveOpen(true);}}>{t("Browse archived sessions")}</button><button type="button" className="secondary-button" onClick={()=>setCapacityOpen(false)}>{t("Close")}</button></footer>
+      </dialog>}
       {archiveOpen&&<HistoryArchive titleFor={titleFor} history={history} onDeleted={clearDeletedSessionNames} onClose={()=>{setArchiveOpen(false);void refreshHistory();}} onChanged={async()=>{await refreshHistory();if(capacityOpen)await scanCapacity();}} onSelect={async id=>{if(!await openSession(id))throw Error("Session selection was superseded or unavailable");}}/>}
       {logSearchOpen&&<SessionLogSearch sessions={history.map(record=>({id:record.summary.session_id,title:titleFor(record.summary),cwd:record.summary.cwd}))} selected={session?.session_id??null} onClose={()=>setLogSearchOpen(false)} onSelect={async id=>{if(!await openSession(id))throw Error("Session selection was superseded or unavailable");}}/>}
       {logExportOpen&&session&&<SessionLogExport sessionId={session.session_id} title={titleFor(session)} onClose={()=>setLogExportOpen(false)}/>}
@@ -2899,6 +3069,7 @@ function App() {
         </header>
         {sidebarOpen&&newSessionButton}
         {isMainWindow&&updaterSnapshot&&["available","downloading","verified","installing","restarting"].includes(updaterSnapshot.state)&&<button type="button" className="update-badge" onClick={()=>setUpdaterOpen(true)}>{updaterSnapshot.state==="verified"?t("Update ready · ")+updaterSnapshot.release?.version:updaterSnapshot.state==="installing"||updaterSnapshot.state==="restarting"?t("Installing update…"):updaterSnapshot.state==="downloading"?t("Downloading update…"):t("Update available · ")+updaterSnapshot.release?.version}</button>}
+        <div className="sidebar-search">
         <div className="search-field">
           <Search aria-hidden="true" />
           <input
@@ -2924,8 +3095,21 @@ function App() {
             </button>
           )}
         </div>
-        {unreadTotal>0&&<button type="button" className="secondary-button inbox-toggle" onClick={()=>setInboxOpen(value=>!value)} aria-expanded={inboxOpen}>{t("Inbox ·")+" "}{unreadTotal} {t("unread")}</button>}
-        {historyOverview.attention_sessions>0&&<button type="button" className="secondary-button inbox-toggle" onClick={jumpToAttention} title={shortcutHint(shortcuts.attention,shortcutMac)||undefined}>{t("Next attention")}</button>}
+        <details className="toolbar-more session-filter-tools" onKeyDown={event=>{if(event.key==="Escape"&&!event.nativeEvent?.isComposing&&event.keyCode!==229){event.preventDefault();event.stopPropagation();event.currentTarget.open=false;event.currentTarget.querySelector("summary")?.focus();}}}>
+          <summary className="icon-button small" aria-label={t("Filter sessions by status")} title={t("Filter sessions by status")}><ListFilter aria-hidden="true"/>{statusFilter!=="all"&&<span className="filter-active"/>}</summary>
+          <div className="toolbar-more-actions">
+        <Select aria-label={t("Filter sessions by status")} value={statusFilter} onChange={event => setStatusFilter(event.target.value)}>
+          <option value="all">{t("All sessions")}</option><option value="active">{t("Active")}</option>
+          <option value="attention">{t("Needs attention")}</option><option value="succeeded">{t("Completed")}</option><option value="stopped">{t("Stopped")}</option>
+        </Select>
+          <button type="button" onClick={openCommandPalette}>{t("Find session")}</button>
+          </div>
+        </details>
+        </div>
+        {(unreadTotal>0||historyOverview.attention_sessions>0)&&<div className="sidebar-attention">
+          {unreadTotal>0&&<button type="button" className="inbox-toggle" onClick={()=>setInboxOpen(value=>!value)} aria-expanded={inboxOpen}><Bell size={14} aria-hidden="true"/>{t("Inbox ·")+" "}{unreadTotal} {t("unread")}</button>}
+          {historyOverview.attention_sessions>0&&<button type="button" className={unreadTotal>0?"icon-button small":"inbox-toggle"} onClick={jumpToAttention} aria-label={t("Next attention")} title={t("Next attention")+(shortcutHint(shortcuts.attention,shortcutMac)?" · "+shortcutHint(shortcuts.attention,shortcutMac):"")}>{unreadTotal>0?<ChevronRight aria-hidden="true"/>:t("Next attention")}</button>}
+        </div>}
         {inboxOpen && <section className="agent-inbox" aria-label={t("Agent round inbox")}>
           {inbox.map(({session:record,receipt:entry})=>{
             const agent=sessionId.current===record.summary.session_id?currentAgent:undefined;
@@ -2934,32 +3118,6 @@ function App() {
           {inboxCursor&&<button type="button" onClick={()=>void refreshInbox(true)}>{t("Load more unread rounds")}</button>}
           {!unreadTotal && <p>{t("No unread rounds")}</p>}
         </section>}
-        <details className="toolbar-more sidebar-more" onKeyDown={event=>{if(event.key==="Escape"){event.preventDefault();event.stopPropagation();event.currentTarget.open=false;event.currentTarget.querySelector("summary")?.focus();}}}><summary>{t("Manage workspace")}</summary><div className="toolbar-more-actions">
-        <Select aria-label={t("Filter sessions by status")} value={statusFilter} onChange={event => setStatusFilter(event.target.value)}>
-          <option value="all">{t("All sessions")}</option><option value="active">{t("Active")}</option>
-          <option value="attention">{t("Needs attention")}</option><option value="succeeded">{t("Completed")}</option><option value="stopped">{t("Stopped")}</option>
-        </Select>
-        <button type="button" className="secondary-button inbox-toggle" onClick={()=>setInboxOpen(value=>!value)} aria-expanded={inboxOpen}>{t("Inbox ·")+" "}{unreadTotal} {t("unread")}</button>
-        <button type="button" className="secondary-button inbox-toggle" onClick={jumpToAttention} disabled={!historyOverview.attention_sessions} title={shortcutHint(shortcuts.attention,shortcutMac)||undefined}>{t("Next attention")}</button>
-        <button type="button" className="secondary-button" onClick={()=>openSettingsSection("appearance")}>{t("Settings")}</button>
-        <button type="button" className="secondary-button" disabled={!gitProjectPath} onClick={()=>{if(!isMainWindow){openMainSettings();return;}setProjectToolsPath(visibleGitContext?.root||gitProjectPath);setProjectToolsOpen(true);projectToolsDialog.current?.showModal();}}>{t("Project Git and worktrees")}</button>
-        {shortcutError&&<p role="alert">{t(shortcutError)}</p>}
-        <div className="history-capacity-controls">
-          <p role="status">{history.length} {t("loaded ·")+" "}{historyOverview.total} {t("sessions ·")+" "}{historyOverview.active} {t("active")}</p>
-          {historyCursor&&<button type="button" disabled={historyLoading} onClick={()=>void loadMoreHistory()}>{t("Load more sessions")}</button>}
-          <button type="button" aria-label={t("Browse archived sessions")} onClick={()=>setArchiveOpen(true)}>{t("Browse archived sessions")}</button>
-          <button type="button" onClick={()=>{setCapacityOpen(value=>!value);if(!capacityOpen)void scanCapacity();}}>{t("Manage history capacity")}</button>
-          {historyOverview.metadata_bytes!=null&&capacityLevel(historyOverview.metadata_bytes)!=="normal"&&<p role="status">{t("History metadata")+" "}{capacityLevel(historyOverview.metadata_bytes)==="protected"?t("has reached its 32 MiB protection limit"):t("is near its 32 MiB limit")}{t(". Open capacity management.")}</p>}
-          {capacityOpen&&<section aria-label={t("History capacity management")}>
-            <p>{t("No history is deleted automatically. Browse archived sessions to restore saved history.")}</p>
-            {capacity&&<><dl>{([['Metadata',capacity.metadata_bytes],['Logs',capacity.log_bytes],['Scenes',capacity.scene_bytes],['Backups',capacity.backup_bytes],['Archive',capacity.archive_bytes],['Other',capacity.other_bytes]] as const).map(([name,bytes])=><div key={name}><dt>{t(name)}</dt><dd>{(bytes/1024/1024).toFixed(2)} {t("MiB")}</dd></div>)}</dl><p>{capacity.complete?t("Complete scan"):t("Partial scan")} · {capacity.scanned_entries} {t("entries")}</p>{capacity.issues.map(issue=><p key={issue}>{issue.replace(/_/g,' ')}</p>)}</>}
-            {capacityError&&<p role="alert">{t(capacityError)}</p>}
-            <button type="button" disabled={capacityBusy} onClick={()=>void scanCapacity()}>{t("Refresh capacity")}</button>
-            {capacityBusy&&<button type="button" onClick={()=>void cancelCapacity()}>{t("Cancel scan")}</button>}
-          </section>}
-        </div>
-        <details className="workspace-application"><summary>{t("Application")}</summary><button type="button" disabled={stopAllBusy} onClick={()=>void stopAllAndQuit()}><LogOut/> {t("Stop all tasks and quit YAM")}</button></details>
-        </div></details>
         <div className="section-label">
           <span>{t("Projects")}</span>
           <button
@@ -2974,7 +3132,34 @@ function App() {
         <nav className="project-list" aria-label={t("Projects")}>
           {visibleProjects.map((project) => {
             const key = projectKey(project.path);
-            const expanded = !collapsedProjects.has(key) || !!normalizedQuery;
+            const expanded = !collapsedProjects.has(key) || !!normalizedQuery || statusFilter!=="all";
+            const grouped=sidebarSessions(project.sessions,session?.session_id??null,pinnedSessions,!!normalizedQuery||statusFilter!=="all");
+            const renderSession=(record:HistoryItem)=>(
+<div className="session-item" key={record.summary.session_id}><button
+                        className={`session-row ${session?.session_id === record.summary.session_id ? "selected" : ""}`}
+                        key={record.summary.session_id}
+                        aria-current={
+                          session?.session_id === record.summary.session_id
+                            ? "page"
+                            : undefined
+                        }
+                        title={`${titleFor(record.summary)}\n${t(statusLabels[record.status] ?? record.status)}${record.summary.mode==="interactive"?" · "+(!["starting","running"].includes(record.status)?t("Last event: "):"")+t(agentLabel({phase:record.agent.phase,integration:record.agent.integration,agent_session_id:null,inbox:[]},record.status)):""}`}
+                        onContextMenu={event=>{event.preventDefault();openSessionMenu(event.currentTarget,event.clientX,event.clientY);}}
+                        onKeyDown={event=>{if(event.key==="ContextMenu"||event.shiftKey&&event.key==="F10"){event.preventDefault();const rect=event.currentTarget.getBoundingClientRect();openSessionMenu(event.currentTarget,rect.left,rect.bottom);}}}
+                        onClick={() => void openSession(record.summary.session_id)}
+                      >
+                        <span
+                          className={`session-dot status-${record.status}`}
+                          aria-label={
+                            t(statusLabels[record.status] ?? record.status)
+                          }
+                        />
+                        <span className="session-title">
+                          {titleFor(record.summary)}
+                        </span>
+                        {record.agent?.unread_count>0&&<span className="session-unread" aria-label={t("{{value0}} unread",{value0:record.agent.unread_count})}>{record.agent.unread_count}</span>}
+                      </button><details className="toolbar-more session-context-menu" onKeyDown={event=>{if(event.key==="Escape"&&!event.nativeEvent?.isComposing&&event.keyCode!==229){event.preventDefault();event.stopPropagation();event.currentTarget.open=false;const target=event.currentTarget.parentElement?.querySelector<HTMLButtonElement>(".session-row")??event.currentTarget.querySelector("summary");target?.focus();}}}><summary className="sr-only" tabIndex={-1} onFocus={event=>event.currentTarget.closest(".session-item")?.querySelector<HTMLButtonElement>(".session-row")?.focus()}>{t("Session actions")}</summary><div className="toolbar-more-actions" role="menu" aria-label={t("Session actions")}><button type="button" role="menuitem" disabled={starting} onClick={()=>void duplicateSession(record.summary.session_id,true)}>{t("New with these settings")}</button><button type="button" role="menuitem" onClick={()=>void duplicateSession(record.summary.session_id)}>{t("Duplicate session…")}</button><button type="button" role="menuitem" onClick={()=>beginRename(record.summary.session_id,titleFor(record.summary))}>{t("Rename session")}</button><button type="button" role="menuitem" onClick={()=>toggleSessionPin(record.summary.session_id)}>{pinnedSessions.includes(record.summary.session_id)?t("Unpin"):t("Pin")}</button>{isMainWindow&&<button type="button" role="menuitem" className="session-delete-action" disabled={!["succeeded","failed","stopped"].includes(record.status)} onClick={()=>beginSessionDeletion(record)}>{t("Delete")}</button>}</div></details>{!!record.previous_runs?.length&&<details className="session-runs"><summary>{t("Previous runs (")}{record.previous_runs.length})</summary>{record.previous_runs.map((id,index)=><button key={id} type="button" onClick={()=>void openSession(id,undefined,undefined,true)}>{t("Open run")+" "}{record.previous_runs!.length-index}</button>)}</details>}</div>
+            );
             return (
               <div className="project-group" key={key}>
                 <div
@@ -3011,52 +3196,24 @@ function App() {
                       {project.sessions.length}
                     </span>
                   </button>
-                  {isMainWindow&&<details className="toolbar-more project-more" onToggle={event=>positionProjectMenu(event.currentTarget)} onKeyDown={event=>{if(event.key==="Escape"){event.preventDefault();event.stopPropagation();event.currentTarget.open=false;event.currentTarget.querySelector("summary")?.focus();}}}><summary aria-label={t("Actions for project {{value0}}", {value0:project.name})} title={t("Project actions")}>⋯</summary><div className="toolbar-more-actions">
-                  <button type="button" className="secondary-button" onClick={()=>newSession(project.path)}>{t("New session in {{value0}}",{value0:project.name})}</button>
-                  <button type="button" className="secondary-button" onClick={()=>deleteProject(project)}>{t("Delete project")}</button>
-                  {isMainWindow&&canRenameProject(project)&&<button type="button" className="secondary-button" aria-label={t("Edit project {{value0}}", {value0:project.name})} onClick={()=>beginProjectRename(project)}>{t("Edit project…")}</button>}{isMainWindow&&canRenameProject(project)&&<button type="button" className="secondary-button" aria-label={`${project.pinned?t("Unpin project"):t("Pin project")} ${project.name}`} onClick={()=>pinProject(project.path,project.pinned!==true)}>{project.pinned?t("Unpin project"):t("Pin project")}</button>}{isMainWindow&&canRenameProject(project)&&<><button type="button" className="secondary-button" aria-label={t("Move project {{value0}} up", {value0:project.name})} title={t("Move project {{value0}} up", {value0:project.name})} disabled={!canMoveProject(project.path,"up")} onClick={()=>moveProject(project.path,"up")}>{t("Move up")}</button><button type="button" className="secondary-button" aria-label={t("Move project {{value0}} down", {value0:project.name})} title={t("Move project {{value0}} down", {value0:project.name})} disabled={!canMoveProject(project.path,"down")} onClick={()=>moveProject(project.path,"down")}>{t("Move down")}</button></>}
+                  {isMainWindow&&<details className="toolbar-more project-more" onToggle={event=>positionProjectMenu(event.currentTarget)} onKeyDown={event=>{if(event.key==="Escape"&&!event.nativeEvent?.isComposing&&event.keyCode!==229){event.preventDefault();event.stopPropagation();event.currentTarget.open=false;event.currentTarget.querySelector("summary")?.focus();}}}><summary aria-label={t("Actions for project {{value0}}", {value0:project.name})} title={t("Project actions")}>⋯</summary><div className="toolbar-more-actions desktop-menu">
+                  <button type="button" className="secondary-button" onClick={()=>newSession(project.path)}><Plus aria-hidden="true"/><span>{t("New session")}</span></button>
+                  {isMainWindow&&canRenameProject(project)&&<>
+                    <div className="menu-separator" role="separator"/>
+                    <button type="button" className="secondary-button" aria-label={t("Edit project {{value0}}", {value0:project.name})} onClick={()=>beginProjectRename(project)}><Pencil aria-hidden="true"/><span>{t("Edit project…")}</span></button>
+                    <button type="button" className="secondary-button" aria-label={`${project.pinned?t("Unpin project"):t("Pin project")} ${project.name}`} onClick={()=>pinProject(project.path,project.pinned!==true)}>{project.pinned?<PinOff aria-hidden="true"/>:<Pin aria-hidden="true"/>}<span>{project.pinned?t("Unpin project"):t("Pin project")}</span></button>
+                    <button type="button" className="secondary-button" aria-label={t("Move project {{value0}} up", {value0:project.name})} disabled={!canMoveProject(project.path,"up")} onClick={()=>moveProject(project.path,"up")}><ArrowUp aria-hidden="true"/><span>{t("Move up")}</span></button>
+                    <button type="button" className="secondary-button" aria-label={t("Move project {{value0}} down", {value0:project.name})} disabled={!canMoveProject(project.path,"down")} onClick={()=>moveProject(project.path,"down")}><ArrowDown aria-hidden="true"/><span>{t("Move down")}</span></button>
+                  </>}
+                  <div className="menu-separator" role="separator"/>
+                  <button type="button" className="secondary-button menu-danger" onClick={()=>deleteProject(project)}><Trash2 aria-hidden="true"/><span>{t("Delete project")}</span></button>
                   </div></details>}
                 </div>
                 {expanded && (
                   <div className="session-list">
-                    {project.sessions.map((record) => (
-                      <div className="session-item" key={record.summary.session_id}><button
-                        className={`session-row ${session?.session_id === record.summary.session_id ? "selected" : ""}`}
-                        key={record.summary.session_id}
-                        aria-current={
-                          session?.session_id === record.summary.session_id
-                            ? "page"
-                            : undefined
-                        }
-                        title={`${titleFor(record.summary)}\n${t(statusLabels[record.status] ?? record.status)}`}
-                        onContextMenu={event=>{event.preventDefault();openSessionMenu(event.currentTarget,event.clientX,event.clientY);}}
-                        onKeyDown={event=>{if(event.key==="ContextMenu"||event.shiftKey&&event.key==="F10"){event.preventDefault();const rect=event.currentTarget.getBoundingClientRect();openSessionMenu(event.currentTarget,rect.left,rect.bottom);}}}
-                        onClick={() => void openSession(record.summary.session_id)}
-                      >
-                        <span
-                          className={`session-dot status-${record.status}`}
-                          aria-label={
-                            t(statusLabels[record.status] ?? record.status)
-                          }
-                        />
-                        <span className="session-title">
-                          {titleFor(record.summary)}
-                          {record.summary.mode==="interactive" && <small title={record.agent?.integration}>{!["starting","running"].includes(record.status)&&t("Last event: ")}{t(agentLabel({phase:record.agent.phase,integration:record.agent.integration,agent_session_id:null,inbox:[]},record.status))}{record.agent.unread_count>0?t(" · {{value0}} unread", {value0:record.agent.unread_count}):""}</small>}
-                        </span>
-                        <time
-                          dateTime={new Date(
-                            record.started_at * 1000,
-                          ).toISOString()}
-                        >
-                          {new Date(
-                            record.started_at * 1000,
-                          ).toLocaleDateString(i18n.language, {
-                            month: "short",
-                            day: "numeric",
-                          })}
-                        </time>
-                      </button><details className="toolbar-more session-context-menu" onKeyDown={event=>{if(event.key==="Escape"){event.preventDefault();event.stopPropagation();event.currentTarget.open=false;const target=event.currentTarget.parentElement?.querySelector<HTMLButtonElement>(".session-row")??event.currentTarget.querySelector("summary");target?.focus();}}}><summary className="sr-only" tabIndex={-1} onFocus={event=>event.currentTarget.closest(".session-item")?.querySelector<HTMLButtonElement>(".session-row")?.focus()}>{t("Session actions")}</summary><div className="toolbar-more-actions" role="menu" aria-label={t("Session actions")} onKeyDown={event=>{if(event.key!=="ArrowDown"&&event.key!=="ArrowUp")return;event.preventDefault();const items=Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')),index=items.indexOf(document.activeElement as HTMLButtonElement);items[(index+(event.key==="ArrowDown"?1:items.length-1))%items.length]?.focus();}}><button type="button" role="menuitem" disabled={starting} onClick={()=>void duplicateSession(record.summary.session_id,true)}>{t("New with these settings")}</button><button type="button" role="menuitem" onClick={()=>void duplicateSession(record.summary.session_id)}>{t("Duplicate session…")}</button><button type="button" role="menuitem" onClick={()=>beginRename(record.summary.session_id,titleFor(record.summary))}>{t("Rename session")}</button><button type="button" role="menuitem" onClick={()=>toggleSessionPin(record.summary.session_id)}>{pinnedSessions.includes(record.summary.session_id)?t("Unpin"):t("Pin")}</button>{isMainWindow&&<button type="button" role="menuitem" className="session-delete-action" disabled={!["succeeded","failed","stopped"].includes(record.status)} onClick={()=>beginSessionDeletion(record)}>{t("Delete")}</button>}</div></details>{!!record.previous_runs?.length&&<details className="session-runs"><summary>{t("Previous runs (")}{record.previous_runs.length})</summary>{record.previous_runs.map((id,index)=><button key={id} type="button" onClick={()=>void openSession(id,undefined,undefined,true)}>{t("Open run")+" "}{record.previous_runs!.length-index}</button>)}</details>}</div>
-                    ))}
+                    {grouped.current.map(renderSession)}
+                    {grouped.ended.length>0&&<details className="project-ended-sessions"><summary>{t("Ended sessions ({{value0}})",{value0:grouped.ended.length})}</summary>{grouped.ended.map(renderSession)}</details>}
+
                   </div>
                 )}
               </div>
@@ -3068,8 +3225,23 @@ function App() {
             </div>
           )}
         </nav>
+        <div className="sidebar-footer">
+        <button type="button" className="sidebar-settings" onClick={()=>openSettingsSection("appearance")}><Settings size={15} aria-hidden="true"/>{t("Settings")}</button>
+        <details className="toolbar-more sidebar-more" onToggle={event=>positionProjectMenu(event.currentTarget)} onKeyDown={event=>{if(event.key==="Escape"&&!event.nativeEvent?.isComposing&&event.keyCode!==229){event.preventDefault();event.stopPropagation();event.currentTarget.open=false;event.currentTarget.querySelector("summary")?.focus();}}}><summary className="icon-button small" aria-label={t("Manage workspace")} title={t("Manage workspace")}><Ellipsis aria-hidden="true"/></summary><div className="toolbar-more-actions desktop-menu">
+          <button type="button" className="secondary-button inbox-toggle" onClick={()=>setInboxOpen(value=>!value)} aria-expanded={inboxOpen}><Bell aria-hidden="true"/><span>{t("Inbox")}</span><span className="menu-meta">{unreadTotal}</span></button>
+          <button type="button" className="secondary-button inbox-toggle" onClick={jumpToAttention} disabled={!historyOverview.attention_sessions} title={shortcutHint(shortcuts.attention,shortcutMac)||undefined}><ArrowDown aria-hidden="true"/><span>{t("Next attention")}</span></button>
+          <div className="menu-separator" role="separator"/>
+          <button type="button" className="secondary-button" disabled={!gitProjectPath} onClick={()=>{if(!isMainWindow){openMainSettings();return;}setProjectToolsPath(visibleGitContext?.root||gitProjectPath);setProjectToolsOpen(true);}}><GitBranch aria-hidden="true"/><span>{t("Project Git and worktrees")}</span></button>
+          <button type="button" aria-label={t("Browse archived sessions")} onClick={()=>setArchiveOpen(true)}><Archive aria-hidden="true"/><span>{t("Browse archived sessions")}</span></button>
+          <button type="button" onClick={()=>{setCapacityOpen(true);void scanCapacity();}}><HardDrive aria-hidden="true"/><span>{t("Manage history capacity")}</span></button>
+          <div className="menu-separator" role="separator"/>
+          <button type="button" className="menu-danger" disabled={stopAllBusy} onClick={()=>void stopAllAndQuit()}><LogOut aria-hidden="true"/><span>{t("Stop all tasks and quit YAM")}</span></button>
+        </div></details>
+        </div>
       </aside>
       <main className="main-panel">
+        {starting&&<div className="session-start-progress" role="status">{t("Starting session…")}</div>}
+
         <header className="topbar">
           {!sidebarOpen && (
             <button
@@ -3093,20 +3265,20 @@ function App() {
               </>
             )}
           </div>
-          {visibleGitContext?.kind==="repository"&&visibleGitContext.branch&&<div className="git-context" role="status"><span title={gitContextLabel(visibleGitContext,t)}>{gitContextLabel(visibleGitContext,t)}</span></div>}
           <div className="toolbar">
-            {session && <SessionConnection launch={session.launch} agent={currentAgent}/>}
-            {session?.launch?.mode==="interactive" && <span className="round-status" role="status" title={t("Last confirmed CLI event; missing hooks can leave this status stale.")}>{!isRunning&&t("Last event: ")}{t(agentLabel(currentAgent,sessionStatus))}</span>}
             {session && (
               <span
                 className={`session-status status-${sessionStatus}`}
                 role="status"
+                data-phase={isRunning&&session.launch?.mode==="interactive"?currentAgent?.phase:undefined}
+                data-integration={isRunning&&session.launch?.mode==="interactive"?currentAgent?.integration??"unavailable":undefined}
+                title={session.launch?.mode==="interactive"?t("Last confirmed CLI event; missing hooks can leave this status stale."):undefined}
               >
                 <span className="session-dot" />
-                {t(statusLabels[sessionStatus] ?? sessionStatus)}
+                {isRunning&&session.launch?.mode==="interactive"?t(agentLabel(currentAgent,sessionStatus)):isRunning&&agentPhase==="waiting"?t("Waiting for input"):t(statusLabels[sessionStatus] ?? sessionStatus)}
               </span>
             )}
-            <details className="toolbar-more" onKeyDown={event=>{if(event.key==="Escape"){event.preventDefault();event.stopPropagation();event.currentTarget.open=false;event.currentTarget.querySelector("summary")?.focus();}}}>
+            <details className="toolbar-more" onKeyDown={event=>{if(event.key==="Escape"&&!event.nativeEvent?.isComposing&&event.keyCode!==229){event.preventDefault();event.stopPropagation();event.currentTarget.open=false;event.currentTarget.querySelector("summary")?.focus();}}}>
               <summary className="icon-button" aria-label={t("More actions")} title={t("More actions")}><Ellipsis aria-hidden="true" /></summary>
               <div className="toolbar-more-actions">
                 <strong>{t("Session actions")}</strong>
@@ -3127,7 +3299,7 @@ function App() {
               disabled={!recovery.canRunAgain}
               onClick={rerunSelectedSession}
             >
-              <RotateCcw /> {session?.ssh?t("Reconnect SSH"):t("Run again")}
+              <RotateCcw /> {session?.ssh?t("Reconnect SSH"):t("Run again (new task)")}
             </button>
             {session?.launch?.mode==='interactive' && <button type="button" className="icon-button" aria-label={t("Continue conversation")} title={t("Continue original Agent conversation (new process)")} disabled={!canContinue} onClick={resumeSelectedSession}><Play/> {t(recovery.chooseNative?"Choose saved conversation…":"Continue conversation")}</button>}
             <button type="button" disabled={!session||starting} onClick={()=>{if(session)void duplicateSession(session.session_id,true);}}>{t("New with these settings")}</button>
@@ -3180,6 +3352,7 @@ function App() {
                 <button type="button" aria-label={t("Search session logs")} onClick={event=>{const menu=event.currentTarget.closest("details");if(menu)menu.open=false;setLogSearchOpen(true);}}>{t("Search session logs")}</button>
                 <button type="button" aria-label={t("Command palette")} title={shortcutHint(shortcuts.palette,shortcutMac)||undefined} onClick={event=>{const menu=event.currentTarget.closest("details");if(menu)menu.open=false;openCommandPalette();}}>{t("Command palette")}</button>
                 <strong>{t("Session details")}</strong>
+                {session&&<><SessionConnection launch={session.launch} agent={currentAgent}/><span className="session-directory" title={session.cwd}>{t("Directory")+": "}{session.cwd}</span><span>{t("Terminal")+": "}{t(statusLabels[sessionStatus]??sessionStatus)}</span>{session.launch?.mode==="interactive"&&<span>{t("Last event: ")}{t(agentLabel(currentAgent,sessionStatus))}</span>}</>}
           {visibleGitContext && <div className="git-context" role="status">
             <span title={gitContextLabel(visibleGitContext,t)}>{gitContextLabel(visibleGitContext,t)}</span>
             {visibleGitContext.root && <span title={visibleGitContext.root}>{t("Worktree:")+" "}{visibleGitContext.root}</span>}
@@ -3191,6 +3364,7 @@ function App() {
             {scrollView?.reportedCommand?.last_exit!==null&&scrollView?.reportedCommand?.last_exit!==undefined&&scrollView.ready&&!scrollView.disposed&&!scrollView.moving&&scrollView.live&&!scrollView.persisted&&scrollView.availability==="available"&&ownerConnectionAvailable.current.available&&terminalPaneVisible(session.session_id)&&<span>{t("Last reported exit code:")+" "}{scrollView.reportedCommand.last_exit}</span>}
                 </>}
                 <details className="session-diagnostics"><summary>{t("Diagnostics")}</summary>
+
         <div className="engine-details">
           <span
             className={`session-dot ${health?.status === "ready" ? "status-running" : ""}`}
@@ -3205,6 +3379,8 @@ function App() {
         <div className="diagnostics-details">
           <button type="button" aria-label={t("Export diagnostics")} title={t("Save version, connection and aggregate counts; excludes session content and paths")} disabled={diagnosticsExporting} onClick={()=>void exportDiagnostics()}>{diagnosticsExporting?t("Exporting…"):t("Export diagnostics")}</button>
           {diagnosticsMessage&&<span role="status">{t(diagnosticsMessage)}</span>}
+          <button type="button" disabled={!session||notificationTestBusy.current} onClick={()=>void testNotification()}>{t("Send test notification")}</button>
+          {notificationTestStatus&&<span role="status">{t(notificationTestStatus)}</span>}
             <span>{session ? session.session_id : t("No session selected")}</span>
 
           <span>{session ? t("Terminal") : (health?.platform ?? t("Local"))}</span>
@@ -3213,7 +3389,7 @@ function App() {
               </details>
               </div>
             </details>
-            <button
+            {isRunning&&<button
               className="icon-button stop-button"
               title={t("Stop session")}
               aria-label={t("Stop session")}
@@ -3221,43 +3397,42 @@ function App() {
               onClick={() => void stopSession()}
             >
               <Square />
-            </button>
+            </button>}
           </div>
         </header>
-          <div className="session-info workspace-footer">
-            <span className="memory-usage" title={memory
-              ? t("{{value0}}: YAM desktop, WebKit, background and terminal parser. Tasks: PTY/Agent processes. Per-process sum; shared pages are not deduplicated. Refreshes every 5 seconds.", {value0:memory.metric})
-              : t("Memory sampling unavailable or incomplete. Refreshes every 5 seconds while visible.")}>
-              {memoryLabel(memory,Date.now(),t)}
-            </span>
-            {session && <>
-            <span className="session-directory" title={session.cwd}>
-              <Folder aria-hidden="true" />
-              {session.cwd}
-            </span>
-            <div className="terminal-tools">
-              <button type="button" aria-pressed={!conversationOpen} onClick={()=>showConversation(false)}>{t("Terminal")}</button><button type="button" aria-pressed={conversationOpen} onClick={()=>showConversation(true)}>{t("Conversation")}</button>
-              <button type="button" className="secondary-button terminal-find-button" aria-label={t("Find in terminal")} title={t("Find in terminal ({{value0}}). Scroll: {{value1}}+PageUp/PageDown; {{value2}}+End returns to live/bottom.", {value0:shortcutHint({key:"f",shift:false},shortcutMac),value1:shortcutMac?"Command":"Ctrl+Shift",value2:shortcutMac?"Command":"Ctrl+Shift"})} disabled={conversationOpen||!scrollView?.ready||!!scrollView.disposed} onClick={openTerminalFind}><Search aria-hidden="true" /><span className="sr-only">{t("Find in terminal")}</span></button>
-              {showScrollControl&&<span className="terminal-scroll-status">
-                {scrollView.scroll?.newOutput&&<span role="status">{t("New output")}</span>}
-                <button type="button" disabled={scrollView.scrollReturnPending||scrollView.attaching||!!scrollView.parsing||scrollView.availability==="owner_unavailable"||scrollView.availability==="terminal_unavailable"||!ownerConnectionAvailable.current.available} onClick={()=>void returnTerminalToLive()}>{scrollView.live?t("Return to live"):t("Return to bottom")}</button>
-              </span>}
-
-              {isRunning && session.launch?.mode !== "interactive" && agentPhase !== "idle" && (
-                <span className="agent-phase">
-                  {agentPhase === "working" ? t("Working") : t("Waiting for input")}
-                </span>
-              )}
-            </div>
-            </>}
+        {session&&<div className="workspace-viewbar">
+          <div className="terminal-tools" role="group" aria-label={t("Session view")}>
+            <button type="button" aria-pressed={!conversationOpen} onClick={()=>showConversation(false)}>{t("Terminal")}</button><button type="button" aria-pressed={conversationOpen} onClick={()=>showConversation(true)}>{t("Conversation")}</button>
+            <button type="button" className="icon-button small terminal-find-button" aria-label={t("Find in terminal")} title={t("Find in terminal")} disabled={conversationOpen||!scrollView?.ready||!!scrollView.disposed} onClick={openTerminalFind}><Search aria-hidden="true"/><span className="sr-only">{t("Find in terminal")}</span></button>
           </div>
+          {session.launch?.mode==="interactive"&&<span className="session-agent">{session.launch.adapter}</span>}
+          <div className="workspace-actions">
+            {isMainWindow&&session&&!session.ssh&&<button type="button" onClick={()=>{setProjectToolsTab("files");setProjectToolsPath(visibleGitContext?.root||session.cwd);setProjectToolsOpen(true);}}>{t("Files")}</button>}
+            {session&&visibleGitContext?.branch&&<button type="button" className="workspace-changes" title={gitContextLabel(visibleGitContext,t)} onClick={()=>{if(!isMainWindow){openMainSettings();return;}setProjectToolsTab("changes");setProjectToolsPath(visibleGitContext.root||gitProjectPath);setProjectToolsOpen(true);}}>{t("Changes")}{visibleGitContext.dirty&&<span className="changes-dot" aria-label={t("Uncommitted changes")}/>}</button>}
+          </div>
+        </div>}
+        <footer className="statusbar workspace-footer" aria-label={t("Status bar")}>
+          <span className="statusbar-engine" title={health?.status==="ready"?t("Local engine ready"):t("Connecting...")}><span className={`session-dot ${health?.status==="ready"?"status-running":""}`}/><span>{health?.status==="ready"?t("Local engine ready"):t("Connecting...")}</span></span>
+          <span className="statusbar-directory" title={session?.cwd||currentProject?.path||t("No session selected")}><Folder aria-hidden="true"/><span>{session?.cwd||currentProject?.path||t("No session selected")}</span></span>
+          {visibleGitContext?.branch&&<span className="statusbar-branch" title={visibleGitContext.branch}><GitBranch aria-hidden="true"/><span>{visibleGitContext.branch}</span></span>}
+          {session&&history.filter(record=>record.summary.cwd===session.cwd&&["starting","running"].includes(record.status)).length>1&&<span className="parallel-directory-warning" title={t("Another loaded session uses this directory.")}>{t("Shared directory")}</span>}
+          {showScrollControl&&<span className="terminal-scroll-status">
+            {scrollView.scroll?.newOutput&&<span role="status">{t("New output")}</span>}
+            <button type="button" disabled={scrollView.scrollReturnPending||scrollView.attaching||!!scrollView.parsing||scrollView.availability==="owner_unavailable"||scrollView.availability==="terminal_unavailable"||!ownerConnectionAvailable.current.available} onClick={()=>void returnTerminalToLive()}>{scrollView.live?t("Return to live"):t("Return to bottom")}</button>
+          </span>}
+                  <span className="memory-usage" title={memory
+                    ? t("{{value0}}: YAM desktop, WebKit, background and terminal parser. Tasks: PTY/Agent processes. Per-process sum; shared pages are not deduplicated. Refreshes every 5 seconds.", {value0:memory.metric})
+                    : t("Memory sampling unavailable or incomplete. Refreshes every 5 seconds while visible.")}>{memoryLabel(memory,Date.now(),t)}</span>
+        </footer>
+
+        {session?.launch?.adapter==="pi"&&<PiRoutingBar key={`${session.session_id}:${currentAgent?.generation??''}`} sessionId={session.session_id} generation={currentAgent?.generation??''} active={isRunning} available={ownerConnectionAvailable.current.available} invoke={invoke}/>}
         <section
           className={`terminal-area ${terminalLayout.panes.some(Boolean) ? "" : "terminal-empty"} ${terminalLayout.mode==="single"&&!terminalLayout.panes.some(Boolean)?"terminal-whole-empty":""}`}
           aria-label={t("Terminal")}
           hidden={conversationOpen} inert={conversationOpen}
         >
           <div className="terminal-host terminal-cache-host" ref={terminalHost} aria-hidden="true" />
-          <TerminalLayout onRenameTab={renameTab} onDuplicateTab={id=>void duplicateSession(id)} canReopen={canReopenTerminalTab()} onReopen={()=>void reopenTerminalTab()} ownerVersion={ownerConnectionAvailable.current.version} onTabDragStart={beginTerminalTabDrag} onTabDragCancel={cancelTerminalTabDrag} onTabDrop={commitTerminalTabDrag} onReorderTab={reorderTerminalSession} zoomedPaneId={zoomedPaneId} zoomRevision={terminalPaneZoomIntent.current} onDirection={focusTerminalPaneDirection} onZoom={toggleTerminalPaneZoom} tabLabel={id=>titleFor(terminalViews.current.get(id)?.record?.summary??{session_id:id,cwd:"",command:null,status:"unknown"})} onTab={selectTerminalTab} onHideTab={closeTerminalTab} onMoveTab={moveTerminalSession} onSplit={splitFocusedTerminalPane} layout={terminalLayout} labels={terminalLayout.panes.map(id=>id?titleFor(terminalViews.current.get(id)?.record?.summary??{session_id:id,cwd:"",command:null,status:"unknown"}):null)} splitPercent={splitPercent} swapDisabled={target=>!canSwapTerminalPanes(target)} onMode={changeLayoutMode} onFocus={focusTerminalPane} onClose={closeTerminalPane} onHost={mountTerminalPane} onSplitChange={commitTerminalSplit} onSplitPreview={value=>previewTerminalSplit(value,paneZoomGeneration)} onNodeSplitChange={(nodeId,value)=>commitTerminalNodeSplit(nodeId,value,paneZoomGeneration)} onSwap={swapTerminalPane} onCancelFit={()=>cancelTerminalLayoutFit(paneZoomGeneration)} />
+          <TerminalLayout tabAttention={id=>(history.find(record=>record.summary.session_id===id)?.agent?.unread_count??0)>0} onRenameTab={renameTab} onDuplicateTab={id=>void duplicateSession(id)} canReopen={canReopenTerminalTab()} onReopen={()=>void reopenTerminalTab()} ownerVersion={ownerConnectionAvailable.current.version} onTabDragStart={beginTerminalTabDrag} onTabDragCancel={cancelTerminalTabDrag} onTabDrop={commitTerminalTabDrag} onReorderTab={reorderTerminalSession} zoomedPaneId={zoomedPaneId} zoomRevision={terminalPaneZoomIntent.current} onDirection={focusTerminalPaneDirection} onZoom={toggleTerminalPaneZoom} tabLabel={id=>titleFor(terminalViews.current.get(id)?.record?.summary??{session_id:id,cwd:"",command:null,status:"unknown"})} onTab={selectTerminalTab} onHideTab={closeTerminalTab} onMoveTab={moveTerminalSession} onSplit={splitFocusedTerminalPane} layout={terminalLayout} labels={terminalLayout.panes.map(id=>id?titleFor(terminalViews.current.get(id)?.record?.summary??{session_id:id,cwd:"",command:null,status:"unknown"}):null)} splitPercent={splitPercent} swapDisabled={target=>!canSwapTerminalPanes(target)} onMode={changeLayoutMode} onFocus={focusTerminalPane} onClose={closeTerminalPane} onHost={mountTerminalPane} onSplitChange={commitTerminalSplit} onSplitPreview={value=>previewTerminalSplit(value,paneZoomGeneration)} onNodeSplitChange={(nodeId,value)=>commitTerminalNodeSplit(nodeId,value,paneZoomGeneration)} onSwap={swapTerminalPane} onCancelFit={()=>cancelTerminalLayoutFit(paneZoomGeneration)} />
           {!terminalLayout.panes.some(Boolean) && terminalLayout.mode==="single" && (
             <div className="empty-state">
               <TerminalSquare className="empty-icon" aria-hidden="true" />
@@ -3281,7 +3456,7 @@ function App() {
         </section>
         <ConversationView onTerminal={()=>showConversation(false)} roundRevision={conversationRoundRevision(currentAgent)} visible={conversationOpen} available={ownerConnectionAvailable.current.available} scope={JSON.stringify([ownerConnectionAvailable.current.version,session?.session_id,currentAgent?.generation,currentAgent?.agent_session_id,session?.cwd,session?.launch])} target={session?.launch?.adapter==="codex"&&!session.ssh&&currentAgent?.generation&&currentAgent.agent_session_id?{sessionId:session.session_id,threadId:currentAgent.agent_session_id,generation:currentAgent.generation}:null} invoke={invoke}/>
         {!ownerConnectionAvailable.current.available&&<div className="terminal-notice" role="alert">{t("Background connection unavailable. Tasks were not restarted.")}<button type="button" disabled={reconnecting} onClick={()=>void reconnectBackground()}>{t("Reconnect background")}</button></div>}
-        {recoveryNotice && <div className="terminal-notice" role="status"><span>{t(recoveryNotice)}</span>{session&&!isRunning&&<div className="session-ended-actions">{canContinue&&<button type="button" onClick={resumeSelectedSession}>{t(recovery.chooseNative?"Choose saved conversation…":"Continue conversation")}</button>}{recovery.canRunAgain&&<button type="button" aria-label={session.ssh?t("Reconnect SSH"):t("Run again")} disabled={!recovery.canRunAgain} onClick={rerunSelectedSession}>{session.ssh?t("Reconnect SSH"):t("Run again")}</button>}</div>}</div>}
+        {recoveryNotice && <div className="terminal-notice" role="status"><span>{t(recoveryNotice)}</span>{session&&!isRunning&&<div className="session-ended-actions">{canContinue&&<button type="button" onClick={resumeSelectedSession}>{t(recovery.chooseNative?"Choose saved conversation…":"Continue conversation")}</button>}{recovery.canOpenTerminal&&<button type="button" onClick={openSelectedTerminal}>{t("Open new terminal")}</button>}{recovery.canRunAgain&&(session.ssh||session.command||session.launch&&session.launch.adapter!=="shell")&&<button type="button" aria-label={session.ssh?t("Reconnect SSH"):t("Run again (new task)")} title={session.ssh?t("Reconnect SSH (new connection)"):t("Run again (new task)")} disabled={!recovery.canRunAgain} onClick={rerunSelectedSession}>{session.ssh?t("Reconnect SSH"):t("Run again (new task)")}</button>}</div>}</div>}
         {directoryReportingError&&<div className="terminal-notice" role="alert">{t(directoryReportingError)}<button type="button" onClick={()=>(isMainWindow?setDirectoryReportingOpen(true):void openMainSettings("directory-reporting"))}>{t("Zsh directory reporting settings")}</button></div>}
         {commandReportingError&&<div className="terminal-notice" role="alert">{t(commandReportingError)}<button type="button" onClick={()=>(isMainWindow?setCommandReportingOpen(true):void openMainSettings("command-reporting"))}>{t("Command status reporting settings")}</button></div>}
         {pastePolicyError&&<div className="terminal-notice" role="alert">{t(pastePolicyError)}<button type="button" onClick={()=>(isMainWindow?setPasteSettingsOpen(true):void openMainSettings("paste-settings"))}>{t("Paste settings")}</button></div>}
@@ -3309,6 +3484,30 @@ function App() {
           </div>
         )}
       </main>
+      <ProjectWorkspace open={projectToolsOpen} onClose={closeProjectTools} onResize={requestTerminalLayoutFit}>
+        <nav className="project-tools-tabs" role="tablist" aria-label={t("Project tools")} onKeyDown={event=>{
+          const tabs=["files","changes","worktrees"] as const,index=tabs.indexOf(projectToolsTab);
+          const next=event.key==="ArrowRight"?(index+1)%3:event.key==="ArrowLeft"?(index+2)%3:event.key==="Home"?0:event.key==="End"?2:-1;
+          if(next<0)return;event.preventDefault();setProjectToolsTab(tabs[next]);event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next]?.focus();
+        }}>
+          {(["files","changes","worktrees"] as const).map(tab=><button key={tab} id={`project-tools-tab-${tab}`} type="button" role="tab" tabIndex={projectToolsTab===tab?0:-1} aria-selected={projectToolsTab===tab} aria-controls={`project-tools-${tab}`} onClick={()=>setProjectToolsTab(tab)}>{t(tab==="files"?"Files":tab==="changes"?"Changes":"Worktrees")}</button>)}
+        </nav>
+        <div className="project-tools-body">
+          <section id="project-tools-files" className="project-tools-panel" role="tabpanel" aria-labelledby="project-tools-tab-files" hidden={projectToolsTab!=="files"}>
+            {isMainWindow&&<ProjectFiles sessionId={session&&!session.ssh?session.session_id:null} root={session?.cwd??""} active={projectToolsOpen&&projectToolsTab==="files"} invoke={invoke} request={projectFileRequest}/>}
+          </section>
+          <section id="project-tools-changes" className="project-tools-panel" role="tabpanel" aria-labelledby="project-tools-tab-changes" hidden={projectToolsTab!=="changes"}>
+            <RunChanges sessionId={session&&!session.ssh?session.session_id:null} root={session?.cwd??""} active={projectToolsOpen&&projectToolsTab==="changes"} invoke={invoke} onOpenFile={openDiffFile} onReview={reviewDiffFile}/>
+            <GitChanges path={projectToolsPath} owner={gitOwner} active={projectToolsOpen&&projectToolsTab==="changes"} sessionId={session&&!session.ssh?session.session_id:null} onOpenFile={openDiffFile} onReview={reviewDiffFile}/>
+            {isMainWindow&&<ReviewFeedback active={projectToolsOpen&&projectToolsTab==="changes"} origin={currentReviewOrigin} ready={reviewReady(reviewRecord,currentReviewOrigin)&&ownerConnectionAvailable.current.available} location={reviewLocation} onFill={fillReviewInOriginalTerminal}/>}
+          </section>
+          <section id="project-tools-worktrees" className="project-tools-panel" role="tabpanel" aria-labelledby="project-tools-tab-worktrees" hidden={projectToolsTab!=="worktrees"}>
+            {projectToolsOpen&&<div className="dialog-fields"><p>{projectToolsPath}</p><WorktreeControls root={projectToolsPath} owner={gitOwner} selected={selectedWorktree} onCreated={worktreeCreated} onStart={startManagedWorktree}/></div>}
+          </section>
+          {error&&<p role="alert">{t(error)}</p>}
+        </div>
+      </ProjectWorkspace>
+
       <dialog ref={renameDialog} className="app-dialog" aria-labelledby="rename-title">
         <form onSubmit={event => {
           event.preventDefault();saveRename();
@@ -3359,6 +3558,7 @@ function App() {
                   onClick={()=>changeAdapter(adapter.id)}>{adapter.id==="shell"?t("Terminal"):adapter.id==="codex"?t("Codex"):adapter.id==="claude"?t("Claude"):adapter.id==="gemini"?t("Gemini"):adapter.label}</button>)}
               </div>
             </div>
+            {formAdapter==="pi"&&<PiRoutingConfig args={formLaunch.extra_args} cwd={cwd} invoke={invoke} onChange={args=>editLaunch({extra_args:args})} onValidity={setPiValidation}/>}
             {installedTerminals.length>0&&<label><span>{t("Open in")}</span><Select aria-label={t("Open session in")} value={sessionTerminal} onChange={event=>setSessionTerminal(event.target.value)}>
               <option value="yam">{t("YAM")}</option>
               {installedTerminals.includes("terminal")&&<option value="terminal">{t("System Terminal")}</option>}
@@ -3390,11 +3590,14 @@ function App() {
             {gatewayDiscoveryError&&formLaunch.provider&&<small role="status">{t("Installed gateway discovery is unavailable. Enter the gateway URL manually.")}</small>}
             {formLaunch.provider&&["cc-switch","echobird"].includes(providerChoice(formAdapter,formLaunch.provider))&&<small>{t("Uses the default local routing address; update the URL if your port differs. Start routing in the gateway app first. YAM does not activate routing, switch accounts or edit shared CLI settings.")}</small>}
             {formLaunch.provider&&providerChoice(formAdapter,formLaunch.provider)==="echobird"&&formAdapter==="codex"&&<small>{t("EchoBird must support the Responses API for Codex; support varies by version.")}</small>}
+            <label><span>{t("Saved connections")}</span><Select aria-label={t("Saved connections")} value="" onChange={event=>{const item=launchTemplateCollection.templates.find(item=>item.id===event.target.value);if(item?.provider&&supportsProvider(formAdapter,item.provider))editLaunch({provider:{...item.provider}});}}><option value="">{t("Choose a saved connection…")}</option>{launchTemplateCollection.templates.filter(item=>item.provider&&supportsProvider(formAdapter,item.provider)).map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</Select></label>
             {formLaunch.provider&&<fieldset><legend>{t("Provider connection")}</legend>
               <label><span>{t("API / gateway URL")}</span><input aria-label={t("Provider endpoint")} value={formLaunch.provider.base_url} onChange={event=>changeProviderFields({base_url:event.target.value})}/></label>
               {formAdapter==='codex'?<small>{t("Codex requires a Responses API endpoint. Chat Completions compatibility alone is insufficient.")}</small>:formAdapter==='claude'?<small>{t("Claude requires an Anthropic Messages API endpoint. Check that the gateway supports this protocol.")}</small>:null}
               <ProviderCatalog endpoint={formLaunch.provider.base_url} model={formLaunch.provider.model} identityCheck={!["cc-switch","echobird"].includes(providerChoice(formAdapter,formLaunch.provider))} apiKeyEnv={formLaunch.provider.api_key_env} invoke={invoke} onSelect={model=>changeProviderFields({model})}><ProviderPortCheck endpoint={formLaunch.provider.base_url}/></ProviderCatalog>
               <label><span>{t("API key environment variable")}</span><input aria-label={t("API key environment variable")} value={formLaunch.provider.api_key_env??""} placeholder={t("Environment variable name")} onChange={event=>changeProviderFields({api_key_env:event.target.value||null})}/></label>
+              {isMainWindow&&<div className="connection-save"><input aria-label={t("Connection name")} value={connectionName} maxLength={80} placeholder={t("Connection name")} onChange={event=>setConnectionName(event.target.value)}/><button type="button" disabled={!connectionName.trim()||!isProviderConfig(formLaunch.provider)} onClick={saveConnection}>{t("Save connection")}</button></div>}
+              {launchTemplateActionError&&<p role="alert">{t(launchTemplateActionError)}</p>}
               <small>{t("Variable name, not the key. A local gateway managing its own key can leave this empty.")}</small><details className="connection-help"><summary>{t("Connection scope and troubleshooting")}</summary><p>{t("Only this Agent and its child processes use this connection. Ordinary terminals keep their own CLI configuration. The background owner must have the selected variable; reopening a window does not reload its environment. Finish tasks before restarting the owner to load changes. Codex uses a private snapshot of its existing configuration, with a separate history directory; later global changes apply to new sessions.")}</p></details>
             </fieldset>}
               {formAdapter==="codex"&&formLaunch.provider&&<label>
@@ -3433,7 +3636,7 @@ function App() {
             <button
               className="primary-button"
               type="submit"
-              disabled={starting || adapters.length === 0 || projectConfigBusy || (useProjectSettings&&!projectPreview?.trusted)}
+              disabled={starting || (formAdapter==="pi"&&!piFormValid) || adapters.length === 0 || projectConfigBusy || (useProjectSettings&&!projectPreview?.trusted)}
             >
               <Play aria-hidden="true" />
               {starting ? t("Starting...") : t("Start session")}
@@ -3451,14 +3654,6 @@ function App() {
           {launchDefaultsNotice&&<p role="status">{t(launchDefaultsNotice)}</p>}
           {error&&<p role="alert">{t(error)}</p>}
         </div><footer className="dialog-actions"><button type="button" onClick={()=>launchSettingsDialog.current?.close()}>{t("Close")}</button></footer>
-      </dialog>
-      <dialog ref={projectToolsDialog} className="app-dialog" aria-labelledby="project-tools-title" onClose={()=>setProjectToolsOpen(false)}>
-        <header className="dialog-header"><h2 id="project-tools-title">{t("Project Git and worktrees")}</h2><button type="button" className="icon-button" aria-label={t("Close project tools")} onClick={()=>projectToolsDialog.current?.close()}><X/></button></header>
-        {projectToolsOpen&&<div className="dialog-fields"><p>{projectToolsPath}</p>
-          <GitChanges path={projectToolsPath} owner={gitOwner} sessionId={session?.session_id ?? null}/>
-          <WorktreeControls root={projectToolsPath} owner={gitOwner} selected={selectedWorktree} onCreated={worktreeCreated} onStart={startManagedWorktree}/>
-          {error&&<p role="alert">{t(error)}</p>}
-        </div>}
       </dialog>
       <dialog ref={projectRenameDialog} className="app-dialog" aria-labelledby="rename-project-title" onCancel={closeProjectRename} onClose={()=>{if(!projectRenameDialog.current?.open)closeProjectRename();}}>
         <form onSubmit={event=>{event.preventDefault();saveProjectRename(projectRename);}}>

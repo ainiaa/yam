@@ -1219,7 +1219,12 @@ fn closure_t01_native_resume_claim_bridge_failure_and_retry_use_private_owned_pr
         "provider":{"id":"custom","model":"sonnet","base_url":"http://127.0.0.1:1","api_key_env":null}
     })).unwrap();
     let environment =
-        super::provider_launch::prepare(&fixture.root, &launch, &|_| panic!("no real credentials"))
+        super::provider_launch::prepare(&fixture.root, &launch, &|name| {
+            match name {
+                "CLAUDE_CONFIG_DIR" | "HOME" | "USERPROFILE" => None,
+                _ => panic!("no real credentials"),
+            }
+        })
             .unwrap();
     let config = environment.config_root(
         "claude",
@@ -1346,6 +1351,7 @@ fn closure_t01_native_resume_claim_bridge_failure_and_retry_use_private_owned_pr
                 id,
                 &prepared.generation,
                 prepared.cli_version.as_deref(),
+                None,
             )
         },
         &started,
@@ -1912,11 +1918,6 @@ fn closure_t10_final_spawn_rechecks_config_changed_during_hook_registration() {
         "adapter":"claude","mode":"interactive","extra_args":"","prompt":null,
         "provider":{"id":"claude","model":"sonnet","base_url":"http://127.0.0.1:3425","api_key_env":null}
     })).unwrap();
-        let environment = super::provider_launch::prepare(&fixture.root, &launch, &|_| {
-            panic!("no source credentials")
-        })
-        .unwrap();
-        let connection = environment.home.unwrap().join("yam-connection.json");
         let project = fixture.root.join("late-project");
         std::fs::create_dir(&project).unwrap();
         std::fs::create_dir(project.join("sub")).unwrap();
@@ -1965,9 +1966,10 @@ fn closure_t10_final_spawn_rechecks_config_changed_during_hook_registration() {
                 spawned.set(spawned.get() + 1);
                 Err("must not reach process spawn".into())
             },
-            |_, _, _, _, _| {
+            |_, _, _, _, builder| {
                 connected.set(connected.get() + 1);
                 if change == "connection" {
+                    let connection = std::path::Path::new(builder.get_env("CLAUDE_CONFIG_DIR").unwrap()).join("yam-connection.json");
                     std::fs::write(&connection, b"{}").unwrap();
                 } else {
                     std::fs::rename(project.join("sub"), project.join("saved-sub")).unwrap();
@@ -2889,4 +2891,35 @@ fn rust85_state_stop_is_idempotent_and_writes_reject_stopped_sessions() {
         .stop_requested
         .load(std::sync::atomic::Ordering::Acquire));
     assert!(super::write_session(manager, fixture.id(), "ignored".into()).is_err());
+}
+
+#[test]
+fn runtime_info_launch_snapshot_is_independent_of_hook_availability() {
+    use tauri::Manager;
+    let _serial = super::worktree_manager::serial_owner_test();
+    for (adapter, mode) in [("codex", "task"), ("gemini", "interactive")] {
+        let mut fixture = Rust85Session::new("exit 0");
+        fixture.parser();
+        let app = closure_t01_app(&fixture);
+        let manager = app.state::<super::SessionManager>();
+        let launch: super::AgentLaunch = serde_json::from_value(serde_json::json!({
+            "adapter": adapter, "mode": mode, "extra_args": "", "prompt": "owned fixture"
+        })).unwrap();
+        let result = super::create_session_with_effects(
+            Some(app.handle().clone()), &manager, &fixture.root,
+            Some(fixture.root.to_string_lossy().into_owned()), None, Some(launch),
+            None, None, None, None, None, None, None, None, None,
+            |name| { assert_eq!(name, adapter); Some(std::path::PathBuf::from("/bin/sh")) },
+            |size| super::native_pty_system().openpty(size).map_err(|e| e.to_string()),
+            |_, _| Err("owned spawn refusal".into()),
+            |_, _, _, _, _| panic!("task and unsupported hook launches cannot connect"),
+            |_, _, _| {}, |_, _, _, _| panic!("refused spawn cannot start workers"),
+        );
+        assert!(result.err().unwrap().contains("owned spawn refusal"));
+        let rows = fixture.session.history.list().unwrap();
+        let saved = rows.iter().find(|r| r.summary.launch.as_ref().is_some_and(|l| l.adapter == adapter)).unwrap();
+        assert_eq!(saved.agent.cli_path.as_deref(), Some("/bin/sh"));
+        assert_eq!(saved.status, "failed");
+        assert!(manager.sessions.lock().unwrap().is_empty());
+    }
 }

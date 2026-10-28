@@ -22,8 +22,6 @@ const CONFIG_CHANGED: &str = "Managed provider configuration changed; no CLI was
 struct PreparedStorage {
     directories: Vec<(PathBuf, (u64, u64))>,
     files: Vec<(PathBuf, crate::history::FileProof, Vec<u8>)>,
-    codex: bool,
-    forbidden_auth: Option<PathBuf>,
 }
 fn managed_file(path: &Path) -> Result<(crate::history::FileProof, Vec<u8>), String> {
     let read = || {
@@ -57,10 +55,7 @@ impl PreparedStorage {
             root.join("providers").join(&launch.adapter),
             home.to_path_buf(),
         ];
-        let codex = launch.adapter == "codex";
-        let paths = if codex {
-            vec![home.join("config.toml"), home.join("AGENTS.md")]
-        } else if launch.adapter == "claude" {
+        let paths = if launch.adapter == "claude" {
             vec![home.join("yam-connection.json")]
         } else {
             directories.push(home.join(".gemini"));
@@ -81,36 +76,25 @@ impl PreparedStorage {
             .into_iter()
             .map(|path| {
                 let (identity, bytes) = managed_file(&path)?;
-                let expected =
-                    if codex && path.file_name().is_some_and(|name| name == "config.toml") {
-                        codex_config(launch.provider.as_ref().ok_or(CONFIG_CHANGED)?, connection)?
-                            .into_bytes()
-                    } else if codex {
-                        IMAGE_API_INSTRUCTIONS.as_bytes().to_vec()
-                    } else if path
-                        .file_name()
-                        .is_some_and(|name| name == "yam-connection.json")
+                let expected = if path
+                    .file_name()
+                    .is_some_and(|name| name == "yam-connection.json")
+                {
+                    connection.as_bytes().to_vec()
+                } else {
+                    let value: serde_json::Value =
+                        serde_json::from_slice(&bytes).map_err(|_| CONFIG_CHANGED)?;
+                    if bytes.len() > 65536
+                        || value["security"]["auth"]["selectedType"] != "gemini-api-key"
                     {
-                        connection.as_bytes().to_vec()
-                    } else {
-                        let value: serde_json::Value =
-                            serde_json::from_slice(&bytes).map_err(|_| CONFIG_CHANGED)?;
-                        if bytes.len() > 65536
-                            || value["security"]["auth"]["selectedType"] != "gemini-api-key"
-                        {
-                            return Err(CONFIG_CHANGED.into());
-                        }
-                        bytes
-                    };
+                        return Err(CONFIG_CHANGED.into());
+                    }
+                    bytes
+                };
                 Ok((path, identity, expected))
             })
             .collect::<Result<_, String>>()?;
-        let storage = Self {
-            directories,
-            files,
-            codex,
-            forbidden_auth: codex.then(|| home.join("auth.json")),
-        };
+        let storage = Self { directories, files };
         storage.validate()?;
         Ok(storage)
     }
@@ -121,16 +105,8 @@ impl PreparedStorage {
             if !expected_identity.same_identity(&identity) {
                 return Err(CONFIG_CHANGED.into());
             }
-            if self.codex && path.file_name().is_some_and(|name| name == "config.toml") {
-                validate_codex_config(&bytes, expected)?;
-            } else if bytes != *expected {
+            if bytes != *expected {
                 return Err(CONFIG_CHANGED.into());
-            }
-        }
-        if let Some(path) = &self.forbidden_auth {
-            match std::fs::symlink_metadata(path) {
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                _ => return Err(CONFIG_CHANGED.into()),
             }
         }
         self.validate_directories()
@@ -207,9 +183,30 @@ pub(crate) fn prepare(
     }
     let mut vars = BTreeMap::new();
     if launch.adapter == "codex" {
-        let config = codex_config(provider, &snapshot)?;
-        codex_config_file(&home.join("config.toml"), config.as_bytes())?;
-        exact_private_file(&home.join("AGENTS.md"), IMAGE_API_INSTRUCTIONS.as_bytes())?;
+        let expected = codex_config(provider, &snapshot)?;
+        let previous = if home.join("config.toml").exists() {
+            let (_, bytes) = managed_file(&home.join("config.toml"))?;
+            match validate_codex_config(&bytes, expected.as_bytes()) {
+                Ok(()) => {
+                    if !home.join("yam-context.json").exists() {
+                        exact_private_file(
+                            &home.join("AGENTS.md"),
+                            IMAGE_API_INSTRUCTIONS.as_bytes(),
+                        )?;
+                    }
+                    Some(
+                        toml::from_str::<toml::Value>(
+                            std::str::from_utf8(&bytes).map_err(|_| CONFIG_CHANGED)?,
+                        )
+                        .map_err(|_| CONFIG_CHANGED)?,
+                    )
+                }
+                Err(error) if !home.join("yam-config.toml").exists() => return Err(error),
+                Err(_) => None,
+            }
+        } else {
+            Some(toml::Value::Table(Default::default()))
+        };
         vars.insert("CODEX_HOME".into(), home.to_string_lossy().into_owned());
         // Imagegen's SDK reads these aliases; pin both to this session, never the global account.
         let base = provider.base_url.trim_end_matches('/');
@@ -222,12 +219,27 @@ pub(crate) fn prepare(
         vars.insert("OPENAI_BASE_URL".into(), api_base);
         vars.insert("OPENAI_API_KEY".into(), key.clone());
         vars.insert("YAM_PROVIDER_API_KEY".into(), key);
+        let context =
+            crate::codex_context::prepare_legacy(root, &home, launch, &vars, lookup, previous)?;
+        return Ok(Environment {
+            vars,
+            home: Some(home),
+            storage: None,
+            context: Some(context),
+        });
     } else {
         exact_private_file(&home.join("yam-connection.json"), snapshot.as_bytes())?;
         if launch.adapter == "claude" {
+            crate::claude_context::inherit(root, &home, lookup)?;
             vars.insert(
                 "CLAUDE_CONFIG_DIR".into(),
                 home.to_string_lossy().into_owned(),
+            );
+            let profiles = home.join("anthropic");
+            crate::background::private_root(&profiles)?;
+            vars.insert(
+                "ANTHROPIC_CONFIG_DIR".into(),
+                profiles.to_string_lossy().into_owned(),
             );
             vars.insert("ANTHROPIC_API_KEY".into(), key);
             vars.insert("ANTHROPIC_BASE_URL".into(), provider.base_url.clone());
@@ -239,7 +251,10 @@ pub(crate) fn prepare(
                     "ANTHROPIC_DEFAULT_HAIKU_MODEL",
                     "CLAUDE_CODE_SUBAGENT_MODEL",
                 ] {
-                    vars.insert(name.into(), provider.model.clone());
+                    vars.insert(
+                        name.into(),
+                        lookup(name).unwrap_or_else(|| provider.model.clone()),
+                    );
                 }
             }
         } else {
@@ -288,7 +303,12 @@ pub(crate) fn prepare(
 fn managed_home(root: &Path, launch: &crate::AgentLaunch) -> Result<(String, PathBuf), String> {
     let provider = launch.provider.as_ref().ok_or("Missing provider")?;
     provider.validate(&launch.adapter, &launch.extra_args)?;
-    let snapshot = serde_json::to_string(provider).map_err(|_| "Invalid provider connection")?;
+    let snapshot = if launch.adapter == "claude" && launch.claude_context.is_some() {
+        serde_json::to_string(&(provider, &launch.claude_context))
+    } else {
+        serde_json::to_string(provider)
+    }
+    .map_err(|_| "Invalid provider connection")?;
     // Stable FNV names survive Rust upgrades; the immutable connection prefix rejects collisions.
     let fingerprint = snapshot.bytes().fold(0xcbf29ce484222325u64, |hash, byte| {
         (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
@@ -300,6 +320,7 @@ fn managed_home(root: &Path, launch: &crate::AgentLaunch) -> Result<(String, Pat
             .join(format!("{fingerprint:016x}")),
     ))
 }
+// Only recognize the on-disk pre-inheritance format; never use it to launch a new session.
 fn codex_config(provider: &ProviderConfig, snapshot: &str) -> Result<String, String> {
     Ok(format!(
         "# YAM managed connection: {snapshot}\nmodel = {}\nmodel_provider = \"yam_api\"\ncli_auth_credentials_store = \"file\"\nforced_login_method = \"api\"\nweb_search = \"disabled\"\n\n[model_providers.yam_api]\nname = {}\nbase_url = {}\nwire_api = \"responses\"\nenv_key = \"YAM_PROVIDER_API_KEY\"\nrequires_openai_auth = false\nsupports_websockets = false\n",
@@ -335,6 +356,12 @@ pub(crate) fn existing_home(root: &Path, launch: &crate::AgentLaunch) -> Result<
     if std::fs::symlink_metadata(home.join("auth.json")).is_ok() {
         return Err("conversation_storage_unavailable".into());
     }
+    if home.join("yam-config.toml").exists() {
+        crate::codex_context::Prepared::capture(root, &home, launch)?;
+        return home
+            .canonicalize()
+            .map_err(|_| "conversation_storage_unavailable".into());
+    }
     let expected = codex_config(launch.provider.as_ref().unwrap(), &snapshot)?;
     let mut bytes = Vec::new();
     crate::background::private_file(&home.join("config.toml"), false)?
@@ -350,6 +377,9 @@ pub(crate) fn validate_project(launch: &crate::AgentLaunch, cwd: &Path) -> Resul
     let Some(provider) = &launch.provider else {
         return Ok(());
     };
+    if launch.adapter == "claude" {
+        validate_claude_settings(&crate::parse_agent_args(&launch.extra_args)?, Some(cwd))?;
+    }
     if launch.env_refs.keys().any(|name| {
         (if launch.codex.is_some() {
             crate::codex_context::conflicting_env(name)
@@ -366,11 +396,7 @@ pub(crate) fn validate_project(launch: &crate::AgentLaunch, cwd: &Path) -> Resul
         return Err("Project environment references override the selected API provider; remove conflicting API/auth references".into());
     }
     if launch.adapter == "codex" {
-        return if launch.codex.is_some() {
-            crate::codex_context::validate_project(launch, cwd)
-        } else {
-            Ok(())
-        };
+        return crate::codex_context::validate_project(launch, cwd);
     }
     let cwd = cwd
         .canonicalize()
@@ -489,21 +515,6 @@ fn quoted(value: &str) -> Result<String, String> {
     serde_json::to_string(value).map_err(|_| "Invalid provider connection".into())
 }
 
-fn codex_config_file(path: &Path, expected: &[u8]) -> Result<(), String> {
-    match std::fs::symlink_metadata(path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return exact_private_file(path, expected)
-        }
-        Err(_) => return Err("Cannot inspect managed provider configuration".into()),
-        Ok(_) => {}
-    }
-    let mut bytes = Vec::new();
-    crate::background::private_file(path, false)?
-        .take(1024 * 1024 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| "Cannot read managed provider configuration")?;
-    validate_codex_config(&bytes, expected)
-}
 fn validate_codex_config(bytes: &[u8], expected: &[u8]) -> Result<(), String> {
     let changed = "Managed provider configuration changed; no CLI was started";
     if bytes.len() > 1024 * 1024 {
@@ -559,28 +570,85 @@ fn exact_private_file(path: &Path, expected: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-fn conflicting_env(name: &str) -> bool {
+pub(crate) fn conflicting_env(name: &str) -> bool {
     let name = name.to_ascii_uppercase();
-    name.starts_with("OPENAI_")
-        || name.starts_with("CODEX_")
-        || name.starts_with("ANTHROPIC_")
-        || name.starts_with("CLAUDE_")
-        || name.starts_with("GEMINI_")
-        || name.starts_with("GOOGLE_GENAI_")
-        || [
-            "GOOGLE_API_KEY",
-            "GOOGLE_APPLICATION_CREDENTIALS",
-            "GOOGLE_GEMINI_BASE_URL",
-            "GOOGLE_VERTEX_BASE_URL",
-            "YAM_PROVIDER_API_KEY",
-        ]
-        .contains(&name.as_str())
+    crate::codex_context::conflicting_env(&name)
+        || matches!(
+            name.as_str(),
+            "ANTHROPIC_UNIX_SOCKET"
+                | "CLAUDE_CODE_USE_ANTHROPIC_AWS"
+                | "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD"
+                | "CLAUDE_CODE_USE_MANTLE"
+                | "ANTHROPIC_AWS_BASE_URL"
+                | "ANTHROPIC_GOOGLE_CLOUD_BASE_URL"
+                | "ANTHROPIC_BEDROCK_MANTLE_BASE_URL"
+                | "CLAUDE_CODE_SKIP_BEDROCK_AUTH"
+                | "CLAUDE_CODE_SKIP_VERTEX_AUTH"
+                | "CLAUDE_CODE_SKIP_FOUNDRY_AUTH"
+                | "CLAUDE_CODE_SKIP_ANTHROPIC_AWS_AUTH"
+                | "CLAUDE_CODE_SKIP_ANTHROPIC_GOOGLE_CLOUD_AUTH"
+                | "CLAUDE_CODE_SKIP_MANTLE_AUTH"
+                | "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL"
+                | "CLAUDE_CODE_API_BASE_URL"
+                | "CLAUDE_CODE_USE_GATEWAY"
+                | "AWS_BEARER_TOKEN_BEDROCK"
+                | "ANTHROPIC_FOUNDRY_AUTH_TOKEN"
+                | "ANTHROPIC_AWS_API_KEY"
+                | "CLAUDE_CODE_GATEWAY_TOKEN_FILE_DESCRIPTOR"
+                | "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR"
+                | "CLAUDE_CODE_WEBSOCKET_AUTH_FILE_DESCRIPTOR"
+                | "CCR_AGENT_PROXY_TOKEN_FILE_DESCRIPTOR"
+                | "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST"
+                | "CLAUDE_CODE_HOST_AUTH_ENV_VAR"
+                | "CLAUDE_CODE_HOST_CREDS_FILE"
+                | "CLAUDE_CODE_HOST_GATEWAY_LINEAGE"
+                | "CLAUDE_BG_AUTH_SNAPSHOT_PATH"
+                | "CLAUDE_BG_SOCKET_TOKENS_PATH"
+                | "ANTHROPIC_CONFIG_DIR"
+                | "ANTHROPIC_PROFILE"
+                | "ANTHROPIC_FEDERATION_RULE_ID"
+                | "ANTHROPIC_ORGANIZATION_ID"
+                | "ANTHROPIC_WORKSPACE_ID"
+                | "ANTHROPIC_SERVICE_ACCOUNT_ID"
+                | "ANTHROPIC_IDENTITY_TOKEN"
+                | "ANTHROPIC_IDENTITY_TOKEN_FILE"
+                | "ANTHROPIC_SCOPE"
+                | "CLAUDE_CODE_FEDERATION_CACHE_DIR"
+                | "ANTHROPIC_API_KEY"
+                | "ANTHROPIC_AUTH_TOKEN"
+                | "ANTHROPIC_BASE_URL"
+                | "ANTHROPIC_CUSTOM_HEADERS"
+                | "ANTHROPIC_FOUNDRY_API_KEY"
+                | "ANTHROPIC_FOUNDRY_BASE_URL"
+                | "ANTHROPIC_FOUNDRY_RESOURCE"
+                | "ANTHROPIC_BEDROCK_BASE_URL"
+                | "ANTHROPIC_VERTEX_BASE_URL"
+                | "CLAUDE_CONFIG_DIR"
+                | "CLAUDE_CODE_OAUTH_TOKEN"
+                | "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR"
+                | "CLAUDE_CODE_USE_BEDROCK"
+                | "CLAUDE_CODE_USE_VERTEX"
+                | "CLAUDE_CODE_USE_FOUNDRY"
+                | "GEMINI_CLI_HOME"
+                | "GEMINI_API_KEY"
+                | "GOOGLE_API_KEY"
+                | "GOOGLE_APPLICATION_CREDENTIALS"
+                | "GOOGLE_GEMINI_BASE_URL"
+                | "GOOGLE_VERTEX_BASE_URL"
+                | "GOOGLE_GENAI_USE_VERTEXAI"
+        )
 }
 
 impl Environment {
     pub(crate) fn validate_before_spawn(&self) -> Result<(), String> {
         if let Some(context) = &self.context {
-            context.validate()?;
+            context.validate().map_err(|error| {
+                if context.legacy {
+                    CONFIG_CHANGED.to_string()
+                } else {
+                    error
+                }
+            })?;
         }
         match &self.storage {
             Some(storage) => storage.validate(),
@@ -588,7 +656,7 @@ impl Environment {
         }
     }
     fn conflicts(&self, name: &str) -> bool {
-        if self.context.is_some() {
+        if self.context.as_ref().is_some_and(|context| !context.legacy) {
             crate::codex_context::conflicting_env(name)
         } else {
             conflicting_env(name)
@@ -698,6 +766,371 @@ pub struct ProviderConfig {
     pub api_key_env: Option<String>,
 }
 
+// Interpret only the TOML key; values and capability semantics belong to the official CLI.
+pub(crate) fn config_override_path(value: &str) -> Result<Vec<String>, String> {
+    let (key, _) = value
+        .split_once('=')
+        .ok_or("CLI configuration requires key=value")?;
+    let tree: toml::Value =
+        toml::from_str(&format!("{key}=false")).map_err(|_| "Invalid CLI configuration key")?;
+    let mut result = Vec::new();
+    let mut value = &tree;
+    while let Some(table) = value.as_table() {
+        if table.len() != 1 {
+            return Err("Invalid CLI configuration key".into());
+        }
+        let (key, next) = table.iter().next().unwrap();
+        result.push(key.clone());
+        value = next;
+    }
+    if result.is_empty() {
+        return Err("Invalid CLI configuration key".into());
+    }
+    Ok(result)
+}
+
+pub(crate) fn validate_claude_settings(args: &[String], cwd: Option<&Path>) -> Result<(), String> {
+    for (index, arg) in args.iter().enumerate() {
+        let value = if arg == "--settings" {
+            Some(
+                args.get(index + 1)
+                    .ok_or("Missing Claude settings")?
+                    .as_str(),
+            )
+        } else {
+            arg.strip_prefix("--settings=")
+        };
+        let Some(value) = value else {
+            continue;
+        };
+        let settings = if value.trim_start().starts_with('{') {
+            Some(
+                serde_json::from_str::<serde_json::Value>(value)
+                    .map_err(|_| "Invalid Claude settings")?,
+            )
+        } else if let Some(cwd) = cwd {
+            let path = cwd.join(value);
+            Some(
+                crate::claude_context::read_json(&path)?
+                    .ok_or("Claude settings file is unavailable")?,
+            )
+        } else {
+            None
+        };
+        if settings.as_ref().is_some_and(|settings| {
+            !settings.is_object()
+                || settings["env"]
+                    .as_object()
+                    .is_some_and(|env| env.keys().any(|key| conflicting_env(key)))
+                || [
+                    "apiKeyHelper",
+                    "forceLoginMethod",
+                    "forceLoginOrgUUID",
+                    "awsAuthRefresh",
+                    "awsCredentialExport",
+                ]
+                .iter()
+                .any(|key| !settings[*key].is_null())
+        }) {
+            return Err("CLI settings override the selected API connection; use native CLI login or remove authentication overrides".into());
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_launch_args(
+    adapter: &str,
+    args: &[String],
+    managed: bool,
+) -> Result<(), String> {
+    fn route_table(value: &toml::Value) -> bool {
+        value.as_table().is_some_and(|table| {
+            table.iter().any(|(key, value)| {
+                matches!(
+                    key.as_str(),
+                    "model_provider"
+                        | "model_providers"
+                        | "openai_base_url"
+                        | "config_file"
+                        | "forced_login_method"
+                        | "cli_auth_credentials_store"
+                        | "mcp_oauth_credentials_store"
+                        | "shell_environment_policy"
+                        | "log_dir"
+                        | "sqlite_home"
+                ) || route_table(value)
+            })
+        })
+    }
+    fn profile(value: &str) -> Result<(), String> {
+        if value.is_empty() || matches!(value, "." | "..") || value.contains(['/', '\\']) {
+            return Err(
+                "Managed profiles must be names inside the inherited Codex configuration directory"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+    let conflict = || {
+        "CLI arguments override the managed connection or session; use YAM connection and session controls".to_string()
+    };
+    if managed && adapter == "claude" {
+        validate_claude_settings(args, None)?;
+    }
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        let name = arg.split('=').next().unwrap_or_default();
+        if adapter == "claude"
+            && (name == "--print" || (arg.starts_with("-p") && !arg.starts_with("--")))
+        {
+            return Err(conflict());
+        }
+        if adapter == "gemini"
+            && (matches!(
+                name,
+                "--session-file"
+                    | "--prompt"
+                    | "-p"
+                    | "--prompt-interactive"
+                    | "-i"
+                    | "--output-format"
+                    | "-o"
+                    | "--acp"
+                    | "--experimental-acp"
+                    | "--list-sessions"
+                    | "--delete-session"
+                    | "--list-extensions"
+                    | "-l"
+            ) || (!arg.starts_with("--")
+                && ["-p", "-i", "-o", "-l"]
+                    .iter()
+                    .any(|prefix| arg.starts_with(prefix)))
+                || matches!(arg.as_str(), "extensions" | "skills" | "hooks" | "gemma"))
+        {
+            return Err(conflict());
+        }
+        if matches!(
+            name,
+            "--remote"
+                | "--remote-auth-token-env"
+                | "--cd"
+                | "-C"
+                | "--worktree"
+                | "-w"
+                | "--resume"
+                | "-r"
+                | "--continue"
+                | "--fork-session"
+                | "--session-id"
+                | "--from-pr"
+                | "--teleport"
+                | "--desktop"
+                | "--cloud"
+                | "--environment"
+                | "--background"
+                | "--bg"
+                | "--tmux"
+                | "--"
+        ) || managed && (matches!(name, "--local-provider" | "--oss"))
+            || arg.starts_with("-C") && !arg.starts_with("--")
+            || arg.starts_with("-r") && !arg.starts_with("--")
+            || arg.starts_with("-w") && !arg.starts_with("--")
+            || adapter == "claude" && arg.starts_with("-c") && !arg.starts_with("--")
+        {
+            return Err(conflict());
+        }
+        let config = if adapter == "codex" {
+            if matches!(name, "-c" | "--config") {
+                Some(if let Some((_, value)) = arg.split_once('=') {
+                    value
+                } else {
+                    index += 1;
+                    args.get(index).ok_or_else(conflict)?.as_str()
+                })
+            } else {
+                arg.strip_prefix("-c").filter(|_| !arg.starts_with("--"))
+            }
+        } else {
+            None
+        };
+        if let Some(value) = config {
+            let path = config_override_path(value)?;
+            if managed
+                && (matches!(
+                    path[0].as_str(),
+                    "model_provider"
+                        | "model_providers"
+                        | "openai_base_url"
+                        | "cli_auth_credentials_store"
+                        | "mcp_oauth_credentials_store"
+                        | "forced_login_method"
+                        | "forced_chatgpt_workspace_id"
+                        | "log_dir"
+                        | "sqlite_home"
+                        | "shell_environment_policy"
+                ) || path.iter().any(|key| key == "config_file"))
+            {
+                return Err(conflict());
+            }
+            if managed && matches!(path[0].as_str(), "agents" | "profiles") {
+                let tree = toml::from_str::<toml::Value>(value).ok();
+                if path.iter().any(|key| key == "model_provider")
+                    || tree.as_ref().is_some_and(route_table)
+                {
+                    return Err(conflict());
+                }
+            }
+        } else if adapter == "claude" && matches!(name, "--debug" | "-d") {
+            if !arg.contains('=')
+                && args
+                    .get(index + 1)
+                    .is_some_and(|value| !value.starts_with('-'))
+            {
+                index += 1;
+            }
+        } else if adapter == "claude"
+            && matches!(
+                name,
+                "--add-dir"
+                    | "--mcp-config"
+                    | "--allowedTools"
+                    | "--allowed-tools"
+                    | "--disallowedTools"
+                    | "--disallowed-tools"
+                    | "--tools"
+            )
+        {
+            let mut values = usize::from(arg.contains('='));
+            while args
+                .get(index + 1)
+                .is_some_and(|value| !value.starts_with('-'))
+            {
+                index += 1;
+                values += 1;
+            }
+            if values == 0 {
+                return Err("Missing CLI option value".into());
+            }
+        } else if matches!(
+            name,
+            "--debug-file"
+                | "--include-directories"
+                | "--approval-mode"
+                | "--policy"
+                | "--admin-policy"
+                | "--allowed-mcp-server-names"
+                | "--allowed-tools"
+                | "--extensions"
+                | "-e"
+                | "--fake-responses"
+                | "--fake-responses-non-strict"
+                | "--record-responses"
+                | "--model"
+                | "-m"
+                | "--local-provider"
+                | "--profile"
+                | "-p"
+                | "--effort"
+                | "--permission-mode"
+                | "--agent"
+                | "--agents"
+                | "--add-dir"
+                | "--append-system-prompt"
+                | "--system-prompt"
+                | "--name"
+                | "--plugin-dir"
+                | "--settings"
+                | "--setting-sources"
+                | "--mcp-config"
+                | "--enable"
+                | "--disable"
+                | "--sandbox"
+                | "-s"
+                | "--ask-for-approval"
+                | "-a"
+                | "--image"
+                | "-i"
+        ) && !(adapter == "gemini" && matches!(name, "--sandbox" | "-s"))
+        {
+            let inline = arg.split_once('=').map(|(_, value)| value);
+            let value = if let Some(value) = inline {
+                value
+            } else {
+                index += 1;
+                args.get(index).ok_or("Missing CLI option value")?.as_str()
+            };
+            if (value.is_empty() && name != "--setting-sources")
+                || (inline.is_none() && value.starts_with('-'))
+            {
+                return Err("Missing CLI option value".into());
+            }
+            if managed && adapter == "codex" && matches!(name, "--profile" | "-p") {
+                profile(value)?;
+            }
+        } else if !arg.starts_with('-')
+            && matches!(
+                arg.as_str(),
+                "exec"
+                    | "e"
+                    | "review"
+                    | "login"
+                    | "logout"
+                    | "auth"
+                    | "resume"
+                    | "fork"
+                    | "app"
+                    | "app-server"
+                    | "remote-control"
+                    | "exec-server"
+                    | "cloud"
+                    | "mcp"
+                    | "plugin"
+                    | "plugins"
+                    | "agents"
+                    | "attach"
+                    | "stop"
+                    | "kill"
+                    | "purge"
+                    | "rm"
+                    | "respawn"
+                    | "install"
+                    | "update"
+                    | "upgrade"
+                    | "setup-token"
+                    | "gateway"
+                    | "import"
+                    | "doctor"
+                    | "completion"
+                    | "sandbox"
+                    | "debug"
+                    | "apply"
+                    | "archive"
+                    | "delete"
+                    | "queue"
+                    | "unarchive"
+                    | "migrate-rollouts"
+                    | "features"
+                    | "help"
+            )
+        {
+            return Err(conflict());
+        }
+        if managed && adapter == "codex" {
+            if let Some(value) = arg
+                .strip_prefix("--profile=")
+                .or_else(|| arg.strip_prefix("-p").filter(|_| !arg.starts_with("--")))
+            {
+                if !value.is_empty() {
+                    profile(value)?;
+                }
+            }
+        }
+        index += 1;
+    }
+    Ok(())
+}
+
 impl ProviderConfig {
     pub(crate) fn command_overrides(&self, adapter: &str) -> Result<Vec<String>, String> {
         if adapter != "codex" {
@@ -709,7 +1142,6 @@ impl ProviderConfig {
             "model_provider=\"yam_api\"".into(),
             "cli_auth_credentials_store=\"file\"".into(),
             "forced_login_method=\"api\"".into(),
-            "web_search=\"disabled\"".into(),
             format!("model_providers.yam_api.name={}", quoted(&self.id)?),
             format!(
                 "model_providers.yam_api.base_url={}",
@@ -767,17 +1199,7 @@ impl ProviderConfig {
             }
         }
         let args = crate::parse_agent_args(extra_args)?;
-        crate::agent_bridge::validate_interactive_args(adapter, &args)?;
-        if args.iter().any(|arg| {
-            matches!(
-                arg.split('=').next().unwrap_or_default(),
-                "--model" | "-m" | "--local-provider" | "--oss" | "--search"
-            )
-        }) {
-            return Err(
-                "Set the model and connection in provider settings, not CLI arguments".into(),
-            );
-        }
+        validate_launch_args(adapter, &args, true)?;
         Ok(())
     }
 }
@@ -827,9 +1249,10 @@ mod tests {
             launch.provider.as_mut().unwrap().model = model.into();
             launch.provider.as_mut().unwrap().base_url =
                 "https://api.deepseek.com/anthropic".into();
-            let environment =
-                super::prepare(&fixture.0, &launch, &|_| Some("unit-provider-value".into()))
-                    .unwrap();
+            let environment = super::prepare(&fixture.0, &launch, &|name| {
+                (name == "DEEPSEEK_API_KEY").then(|| "unit-provider-value".into())
+            })
+            .unwrap();
             let mut command = std::process::Command::new("claude");
             for name in [
                 "ANTHROPIC_MODEL",
@@ -874,8 +1297,11 @@ mod tests {
                 json!({"id":id,"model":"sonnet","base_url":"http://127.0.0.1:3425","api_key_env":null}),
             );
             launch.adapter = "claude".into();
-            let environment =
-                super::prepare(&fixture.0, &launch, &|_| panic!("local gateway")).unwrap();
+            let environment = super::prepare(&fixture.0, &launch, &|name| match name {
+                "CLAUDE_CONFIG_DIR" | "CODEX_HOME" | "HOME" | "USERPROFILE" => None,
+                _ => panic!("local gateway"),
+            })
+            .unwrap();
             for name in [
                 "ANTHROPIC_MODEL",
                 "ANTHROPIC_DEFAULT_OPUS_MODEL",
@@ -924,8 +1350,7 @@ mod tests {
     fn provider_launch_cannot_hide_connection_overrides_in_extra_arguments() {
         for args in [
             "-c model_provider=other",
-            "--profile other",
-            "--model other",
+            "--profile ../../other",
             "--remote ws://localhost:1",
         ] {
             let mut launch = launch(deepseek());
@@ -1038,6 +1463,12 @@ mod tests {
                 json!({"id":"custom","model":"3qrouter/gpt-6.1-sol","base_url":url,"api_key_env":"GATEWAY_KEY"}),
             );
             let environment = super::prepare(&fixture.0, &launch, &|name| {
+                if matches!(
+                    name,
+                    "CODEX_HOME" | "CLAUDE_CONFIG_DIR" | "HOME" | "USERPROFILE"
+                ) {
+                    return None;
+                }
                 assert_eq!(name, "GATEWAY_KEY");
                 Some("session-key".into())
             })
@@ -1047,13 +1478,48 @@ mod tests {
             assert_eq!(environment.vars["YAM_PROVIDER_API_KEY"], "session-key");
             let home = environment.home.unwrap();
             let before = std::fs::read(home.join("config.toml")).unwrap();
-            assert!(!String::from_utf8_lossy(&before).contains("session-key"));
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(
+                    std::fs::metadata(home.join("config.toml"))
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o077,
+                    0,
+                    "child connection values must stay private"
+                );
+            }
             std::fs::write(home.join("native-history-sentinel"), b"kept").unwrap();
-            let rotated =
-                super::prepare(&fixture.0, &launch, &|_| Some("rotated-key".into())).unwrap();
+            let rotated = super::prepare(&fixture.0, &launch, &|name| {
+                (!matches!(
+                    name,
+                    "CLAUDE_CONFIG_DIR" | "CODEX_HOME" | "HOME" | "USERPROFILE"
+                ))
+                .then(|| "rotated-key".into())
+            })
+            .unwrap();
             assert_eq!(rotated.vars["OPENAI_API_KEY"], "rotated-key");
             assert_eq!(rotated.home.as_ref(), Some(&home));
-            assert_eq!(std::fs::read(home.join("config.toml")).unwrap(), before);
+            let mut previous: toml::Value =
+                toml::from_str(std::str::from_utf8(&before).unwrap()).unwrap();
+            let mut current: toml::Value =
+                toml::from_str(&std::fs::read_to_string(home.join("config.toml")).unwrap())
+                    .unwrap();
+            assert_eq!(
+                current["shell_environment_policy"]["set"]["OPENAI_API_KEY"].as_str(),
+                Some("rotated-key")
+            );
+            previous
+                .as_table_mut()
+                .unwrap()
+                .remove("shell_environment_policy");
+            current
+                .as_table_mut()
+                .unwrap()
+                .remove("shell_environment_policy");
+            assert_eq!(previous, current);
             assert_eq!(
                 std::fs::read(home.join("native-history-sentinel")).unwrap(),
                 b"kept"
@@ -1077,7 +1543,13 @@ mod tests {
         let local = launch(
             json!({"id":"custom","model":"fixture","base_url":"http://localhost:3425","api_key_env":null}),
         );
-        let environment = super::prepare(&fixture.0, &local, &|_| {
+        let environment = super::prepare(&fixture.0, &local, &|name| {
+            if matches!(
+                name,
+                "CODEX_HOME" | "CLAUDE_CONFIG_DIR" | "HOME" | "USERPROFILE"
+            ) {
+                return None;
+            }
             panic!("No OpenAI or gateway key is needed for a keyless local gateway")
         })
         .unwrap();
@@ -1089,7 +1561,12 @@ mod tests {
         for key in ["", "bad\nkey"] {
             let mut launch = local.clone();
             launch.provider.as_mut().unwrap().api_key_env = Some("GATEWAY_KEY".into());
-            assert!(super::prepare(&fixture.0, &launch, &|_| Some(key.into())).is_err());
+            assert!(super::prepare(&fixture.0, &launch, &|name| (!matches!(
+                name,
+                "CLAUDE_CONFIG_DIR" | "CODEX_HOME" | "HOME" | "USERPROFILE"
+            ))
+            .then(|| key.into()))
+            .is_err());
         }
         let mut native = local;
         native.provider = None;
@@ -1112,8 +1589,11 @@ mod tests {
         let launch = launch(
             json!({"id":"custom","model":"fixture","base_url":"http://127.0.0.1:3425","api_key_env":null}),
         );
-        let environment =
-            super::prepare(&fixture.0, &launch, &|_| panic!("no source credentials")).unwrap();
+        let environment = super::prepare(&fixture.0, &launch, &|name| match name {
+            "CODEX_HOME" | "CLAUDE_CONFIG_DIR" | "HOME" | "USERPROFILE" => None,
+            _ => panic!("no source credentials"),
+        })
+        .unwrap();
         let home = environment.home.as_ref().unwrap();
         let config = home.join("config.toml");
         let original = std::fs::read(&config).unwrap();
@@ -1171,8 +1651,12 @@ mod tests {
         std::fs::write(official.join("config.toml"), "official-config-sentinel").unwrap();
         std::fs::write(official.join("auth.json"), "official-auth-sentinel").unwrap();
         let launch = launch(deepseek());
-        let prepared = super::prepare(&fixture.0, &launch, &|_| {
-            Some("private-key-sentinel".into())
+        let prepared = super::prepare(&fixture.0, &launch, &|name| {
+            (!matches!(
+                name,
+                "CODEX_HOME" | "CLAUDE_CONFIG_DIR" | "HOME" | "USERPROFILE"
+            ))
+            .then(|| "private-key-sentinel".into())
         })
         .unwrap();
         let home = prepared.home.unwrap();
@@ -1186,7 +1670,18 @@ mod tests {
         assert!(config.contains("wire_api = \"responses\""));
         assert!(config.contains("requires_openai_auth = false"));
         assert!(config.contains("cli_auth_credentials_store = \"file\""));
-        assert!(!config.contains("private-key-sentinel"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(home.join("config.toml"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o077,
+                0
+            );
+        }
         assert!(!home.join("auth.json").exists());
         assert_eq!(
             std::fs::read_to_string(official.join("config.toml")).unwrap(),
@@ -1196,8 +1691,12 @@ mod tests {
             std::fs::read_to_string(official.join("auth.json")).unwrap(),
             "official-auth-sentinel"
         );
-        let again = super::prepare(&fixture.0, &launch, &|_| {
-            Some("rotated-key-sentinel".into())
+        let again = super::prepare(&fixture.0, &launch, &|name| {
+            (!matches!(
+                name,
+                "CODEX_HOME" | "CLAUDE_CONFIG_DIR" | "HOME" | "USERPROFILE"
+            ))
+            .then(|| "rotated-key-sentinel".into())
         })
         .unwrap();
         assert_eq!(again.home.as_ref(), Some(&home));
@@ -1224,7 +1723,14 @@ mod tests {
     fn provider_launch_keeps_codex_native_metadata_on_reopen() {
         let fixture = Fixture::new();
         let launch = launch(deepseek());
-        let prepared = super::prepare(&fixture.0, &launch, &|_| Some("first-key".into())).unwrap();
+        let prepared = super::prepare(&fixture.0, &launch, &|name| {
+            (!matches!(
+                name,
+                "CLAUDE_CONFIG_DIR" | "CODEX_HOME" | "HOME" | "USERPROFILE"
+            ))
+            .then(|| "first-key".into())
+        })
+        .unwrap();
         let path = prepared.home.as_ref().unwrap().join("config.toml");
         let original = std::fs::read_to_string(&path).unwrap();
         let metadata = r#"
@@ -1242,10 +1748,21 @@ mod tests {
     "#;
         let updated = format!("{original}{metadata}");
         std::fs::write(&path, &updated).unwrap();
-        let again = super::prepare(&fixture.0, &launch, &|_| Some("rotated-key".into())).unwrap();
+        let again = super::prepare(&fixture.0, &launch, &|name| {
+            (!matches!(
+                name,
+                "CLAUDE_CONFIG_DIR" | "CODEX_HOME" | "HOME" | "USERPROFILE"
+            ))
+            .then(|| "rotated-key".into())
+        })
+        .unwrap();
         assert_eq!(again.home, prepared.home);
         assert_eq!(again.vars["YAM_PROVIDER_API_KEY"], "rotated-key");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), updated);
+        let actual: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let mut expected: toml::Value = toml::from_str(&updated).unwrap();
+        expected["shell_environment_policy"]["set"]["OPENAI_API_KEY"] = "rotated-key".into();
+        expected["shell_environment_policy"]["set"]["YAM_PROVIDER_API_KEY"] = "rotated-key".into();
+        assert_eq!(actual, expected);
         for tail in [
             "api_key = \"foreign-key\"\n",
             "[model_providers.other]\nbase_url = \"https://other.example\"\n",
@@ -1255,21 +1772,38 @@ mod tests {
             let invalid = format!("{original}{tail}");
             std::fs::write(&path, &invalid).unwrap();
             assert!(
-                super::prepare(&fixture.0, &launch, &|_| Some("key".into())).is_err(),
+                super::prepare(&fixture.0, &launch, &|name| (!matches!(
+                    name,
+                    "CLAUDE_CONFIG_DIR" | "CODEX_HOME" | "HOME" | "USERPROFILE"
+                ))
+                .then(|| "key".into()))
+                .is_err(),
                 "{tail}"
             );
             assert_eq!(std::fs::read_to_string(&path).unwrap(), invalid);
         }
         let changed = updated.replace("https://api.deepseek.com", "https://other.example");
         std::fs::write(&path, changed).unwrap();
-        assert!(super::prepare(&fixture.0, &launch, &|_| Some("key".into())).is_err());
+        assert!(super::prepare(&fixture.0, &launch, &|name| (!matches!(
+            name,
+            "CLAUDE_CONFIG_DIR" | "CODEX_HOME" | "HOME" | "USERPROFILE"
+        ))
+        .then(|| "key".into()))
+        .is_err());
     }
 
     #[test]
     fn provider_launch_codex_metadata_rejects_unsafe_files_and_oversize_content() {
         let fixture = Fixture::new();
         let launch = launch(deepseek());
-        let prepared = super::prepare(&fixture.0, &launch, &|_| Some("key".into())).unwrap();
+        let prepared = super::prepare(&fixture.0, &launch, &|name| {
+            (!matches!(
+                name,
+                "CLAUDE_CONFIG_DIR" | "CODEX_HOME" | "HOME" | "USERPROFILE"
+            ))
+            .then(|| "key".into())
+        })
+        .unwrap();
         let path = prepared.home.unwrap().join("config.toml");
         let original = std::fs::read(&path).unwrap();
         let mut invalid_utf8 = original.clone();
@@ -1280,7 +1814,12 @@ mod tests {
         oversized.extend(std::iter::repeat_n(b'x', 1024 * 1024));
         for bytes in [invalid_utf8, oversized] {
             std::fs::write(&path, &bytes).unwrap();
-            assert!(super::prepare(&fixture.0, &launch, &|_| Some("key".into())).is_err());
+            assert!(super::prepare(&fixture.0, &launch, &|name| (!matches!(
+                name,
+                "CLAUDE_CONFIG_DIR" | "CODEX_HOME" | "HOME" | "USERPROFILE"
+            ))
+            .then(|| "key".into()))
+            .is_err());
             assert_eq!(std::fs::read(&path).unwrap(), bytes);
         }
         #[cfg(unix)]
@@ -1289,7 +1828,12 @@ mod tests {
             std::fs::write(&external, &original).unwrap();
             std::fs::remove_file(&path).unwrap();
             std::os::unix::fs::symlink(&external, &path).unwrap();
-            assert!(super::prepare(&fixture.0, &launch, &|_| Some("key".into())).is_err());
+            assert!(super::prepare(&fixture.0, &launch, &|name| (!matches!(
+                name,
+                "CLAUDE_CONFIG_DIR" | "CODEX_HOME" | "HOME" | "USERPROFILE"
+            ))
+            .then(|| "key".into()))
+            .is_err());
             assert_eq!(std::fs::read(&external).unwrap(), original);
         }
     }
@@ -1316,16 +1860,35 @@ mod tests {
     #[test]
     fn provider_launch_changed_connection_gets_another_home_and_conflicts_fail_closed() {
         let fixture = Fixture::new();
-        let prepared =
-            super::prepare(&fixture.0, &launch(deepseek()), &|_| Some("key".into())).unwrap();
+        let prepared = super::prepare(&fixture.0, &launch(deepseek()), &|name| {
+            (!matches!(
+                name,
+                "CLAUDE_CONFIG_DIR" | "CODEX_HOME" | "HOME" | "USERPROFILE"
+            ))
+            .then(|| "key".into())
+        })
+        .unwrap();
         let original = prepared.home.unwrap();
         let mut changed = deepseek();
         changed["base_url"] = json!("https://other.example/v1");
-        let another =
-            super::prepare(&fixture.0, &launch(changed), &|_| Some("key".into())).unwrap();
+        let another = super::prepare(&fixture.0, &launch(changed), &|name| {
+            (!matches!(
+                name,
+                "CLAUDE_CONFIG_DIR" | "CODEX_HOME" | "HOME" | "USERPROFILE"
+            ))
+            .then(|| "key".into())
+        })
+        .unwrap();
         assert_ne!(another.home.as_ref(), Some(&original));
         std::fs::write(original.join("config.toml"), "foreign-config-sentinel").unwrap();
-        assert!(super::prepare(&fixture.0, &launch(deepseek()), &|_| Some("key".into())).is_err());
+        assert!(
+            super::prepare(&fixture.0, &launch(deepseek()), &|name| (!matches!(
+                name,
+                "CLAUDE_CONFIG_DIR" | "CODEX_HOME" | "HOME" | "USERPROFILE"
+            ))
+            .then(|| "key".into()))
+            .is_err()
+        );
         assert_eq!(
             std::fs::read_to_string(original.join("config.toml")).unwrap(),
             "foreign-config-sentinel"
@@ -1338,7 +1901,13 @@ mod tests {
         let mut gateway = deepseek();
         gateway["base_url"] = json!("http://127.0.0.1:3425/v1");
         gateway["api_key_env"] = Value::Null;
-        let prepared = super::prepare(&fixture.0, &launch(gateway), &|_| {
+        let prepared = super::prepare(&fixture.0, &launch(gateway), &|name| {
+            if matches!(
+                name,
+                "CODEX_HOME" | "CLAUDE_CONFIG_DIR" | "HOME" | "USERPROFILE"
+            ) {
+                return None;
+            }
             panic!("gateway must not read an upstream key")
         })
         .unwrap();
@@ -1391,8 +1960,14 @@ mod tests {
     fn provider_launch_process_and_probe_environments_strip_conflicting_authentication() {
         let fixture = Fixture::new();
         let launch = launch(deepseek());
-        let prepared =
-            super::prepare(&fixture.0, &launch, &|_| Some("private-key".into())).unwrap();
+        let prepared = super::prepare(&fixture.0, &launch, &|name| {
+            (!matches!(
+                name,
+                "CLAUDE_CONFIG_DIR" | "CODEX_HOME" | "HOME" | "USERPROFILE"
+            ))
+            .then(|| "private-key".into())
+        })
+        .unwrap();
         let mut pty = agent_command(Path::new("codex"), &launch).unwrap();
         pty.env("OPENAI_API_KEY", "official-key-sentinel");
         pty.env("OPENAI_BASE_URL", "https://wrong.example/v1");
@@ -1595,8 +2170,14 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let fixture = Fixture::new();
         let launch = launch(deepseek());
-        let environment =
-            super::prepare(&fixture.0, &launch, &|_| Some("fake-key".into())).unwrap();
+        let environment = super::prepare(&fixture.0, &launch, &|name| {
+            (!matches!(
+                name,
+                "CLAUDE_CONFIG_DIR" | "CODEX_HOME" | "HOME" | "USERPROFILE"
+            ))
+            .then(|| "fake-key".into())
+        })
+        .unwrap();
         let exe = fixture.0.join("fake-codex");
         let native = "01a0f6ec-5463-78c3-a404-5a7ad3b933fe";
         let script = format!(
@@ -1635,7 +2216,13 @@ read end
                 json!({"id":id,"model":"gateway-model","base_url":"http://127.0.0.1:3425","api_key_env":null}),
             );
             launch.adapter = adapter.into();
-            let env = super::prepare(&fixture.0, &launch, &|_| {
+            let env = super::prepare(&fixture.0, &launch, &|name| {
+                if matches!(
+                    name,
+                    "CLAUDE_CONFIG_DIR" | "CODEX_HOME" | "HOME" | "USERPROFILE"
+                ) {
+                    return None;
+                }
                 panic!("gateway uses no source credential")
             })
             .unwrap();
@@ -1712,8 +2299,12 @@ read end
             ("OPENAI_BASE_URL".into(), "https://wrong.example/v1".into()),
             ("PROJECT_VALUE".into(), "owner-resolved-value".into()),
         ]);
-        let managed = super::prepare(&fixture.0, &launch(deepseek()), &|_| {
-            Some("selected-key".into())
+        let managed = super::prepare(&fixture.0, &launch(deepseek()), &|name| {
+            (!matches!(
+                name,
+                "CODEX_HOME" | "CLAUDE_CONFIG_DIR" | "HOME" | "USERPROFILE"
+            ))
+            .then(|| "selected-key".into())
         })
         .unwrap()
         .with_project_env(&refs);
@@ -1901,6 +2492,781 @@ model_provider = "old_provider"
         );
         resumed.validate_before_spawn().unwrap();
     }
+    #[test]
+    fn fidelity_environment_preserves_reasoning_for_pty_probe_and_project_refs() {
+        for adapter in ["codex", "claude", "gemini"] {
+            let f = Fixture::new();
+            let mut launch = launch(
+                json!({"id":"custom","model":"test-model","base_url":"http://127.0.0.1:3425/v1","api_key_env":null}),
+            );
+            launch.adapter = adapter.into();
+            let env = super::prepare(&f.0, &launch, &|_| None).unwrap();
+            let options: std::collections::BTreeMap<String, String> =
+                std::collections::BTreeMap::from([
+                    ("CLAUDE_CODE_EFFORT_LEVEL".into(), "max".into()),
+                    ("CLAUDE_CODE_MAX_OUTPUT_TOKENS".into(), "64000".into()),
+                    ("CODEX_FEATURE_FLAG_FIXTURE".into(), "enabled".into()),
+                    ("GEMINI_MODEL".into(), "custom-model".into()),
+                    ("OPENAI_API_KEY".into(), "stale-key".into()),
+                    ("ANTHROPIC_AUTH_TOKEN".into(), "stale-auth".into()),
+                ]);
+            let mut pty = agent_command(Path::new(adapter), &launch).unwrap();
+            let mut probe = std::process::Command::new(adapter);
+            for (key, value) in &options {
+                pty.env(key, value);
+                probe.env(key, value);
+            }
+            env.apply_pty(&mut pty);
+            env.apply_command(&mut probe);
+            let probe_env: std::collections::BTreeMap<_, _> = probe.get_envs().collect();
+            for key in [
+                "CLAUDE_CODE_EFFORT_LEVEL",
+                "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+                "CODEX_FEATURE_FLAG_FIXTURE",
+                "GEMINI_MODEL",
+            ] {
+                assert_eq!(
+                    pty.get_env(key).and_then(|v| v.to_str()),
+                    Some(options[key].as_str()),
+                    "{adapter}: {key}"
+                );
+                assert_eq!(
+                    probe_env.get(std::ffi::OsStr::new(key)),
+                    Some(&Some(std::ffi::OsStr::new(&options[key])))
+                );
+            }
+            assert!(pty.get_env("ANTHROPIC_AUTH_TOKEN").is_none());
+            assert_ne!(
+                pty.get_env("OPENAI_API_KEY").and_then(|v| v.to_str()),
+                Some("stale-key")
+            );
+            let env = env.with_project_env(&options);
+            assert_eq!(
+                env.vars.get("CLAUDE_CODE_EFFORT_LEVEL").map(String::as_str),
+                Some("max")
+            );
+            assert!(!env.vars.contains_key("ANTHROPIC_AUTH_TOKEN"));
+        }
+    }
+
+    #[test]
+    fn fidelity_environment_claude_settings_keep_effort_without_auth_override() {
+        let f = Fixture::new();
+        let source = f.0.join("original");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("settings.json"), json!({"env":{"CLAUDE_CODE_EFFORT_LEVEL":"xhigh","CLAUDE_CODE_MAX_OUTPUT_TOKENS":"32000","ANTHROPIC_AUTH_TOKEN":"stale-auth","CLAUDE_CODE_USE_BEDROCK":"1"}}).to_string()).unwrap();
+        let mut launch = launch(
+            json!({"id":"custom","model":"test","base_url":"http://127.0.0.1:3425","api_key_env":null}),
+        );
+        launch.adapter = "claude".into();
+        let env = super::prepare(&f.0, &launch, &|name| {
+            (name == "CLAUDE_CONFIG_DIR").then(|| source.to_string_lossy().into_owned())
+        })
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(env.home.unwrap().join("settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(value["env"]["CLAUDE_CODE_EFFORT_LEVEL"], "xhigh");
+        assert_eq!(value["env"]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"], "32000");
+        assert!(value["env"].get("ANTHROPIC_AUTH_TOKEN").is_none());
+        assert!(value["env"].get("CLAUDE_CODE_USE_BEDROCK").is_none());
+    }
+
+    #[test]
+    fn fidelity_environment_accepts_project_reasoning_but_rejects_authentication() {
+        let f = Fixture::new();
+        std::fs::create_dir(f.0.join(".claude")).unwrap();
+        let path = f.0.join(".claude/settings.json");
+        let mut launch = launch(
+            json!({"id":"custom","model":"test","base_url":"http://127.0.0.1:3425","api_key_env":null}),
+        );
+        launch.adapter = "claude".into();
+        std::fs::write(&path, json!({"env":{"CLAUDE_CODE_EFFORT_LEVEL":"high","CLAUDE_CODE_MAX_OUTPUT_TOKENS":"32000"}}).to_string()).unwrap();
+        assert!(super::validate_project(&launch, &f.0).is_ok());
+        std::fs::write(
+            &path,
+            json!({"env":{"CLAUDE_CODE_USE_VERTEX":"1"}}).to_string(),
+        )
+        .unwrap();
+        assert!(super::validate_project(&launch, &f.0).is_err());
+        for key in [
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_BASE_URL",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "CLAUDE_CONFIG_DIR",
+            "GEMINI_API_KEY",
+            "GOOGLE_GENAI_USE_VERTEXAI",
+        ] {
+            assert!(super::conflicting_env(key), "{key}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn review_claude_native_diagnostics_and_multiple_directories_keep_hooks_and_resume() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = Fixture::new();
+        let executable = fixture.0.join("fake-claude");
+        std::fs::write(
+            &executable,
+            b"#!/bin/sh\nprintf '2.1.307 (Claude Code)\\n'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        for args in [
+            "--debug-file debug",
+            "--debug=hooks",
+            "--debug mcp",
+            "--add-dir /tmp /var/tmp --debug=hooks",
+            "--allowedTools Read Edit --disallowedTools Bash",
+            "--setting-sources '' --debug=hooks",
+        ] {
+            for managed in [false, true] {
+                let mut launch = launch(
+                    json!({"id":"custom","model":"sonnet","base_url":"http://127.0.0.1:3425","api_key_env":null}),
+                );
+                launch.adapter = "claude".into();
+                launch.extra_args = args.into();
+                if !managed {
+                    launch.provider = None;
+                }
+                assert!(agent_command(&executable, &launch).is_ok(), "start: {args}");
+                assert!(
+                    crate::agent_bridge::prepare(
+                        &executable,
+                        &launch,
+                        &fixture.0,
+                        &fixture.0,
+                        None
+                    )
+                    .is_ok(),
+                    "hooks: {args}"
+                );
+                assert!(
+                    crate::resume_command(
+                        &executable,
+                        &launch,
+                        "01a0f6ec-5463-78c3-a404-5a7ad3b933fe"
+                    )
+                    .is_ok(),
+                    "resume: {args}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn review_claude_conflicting_modes_do_not_gain_hook_integration() {
+        for args in [
+            "--bare",
+            "--safe-mode",
+            "--print",
+            "--resume foreign",
+            "--continue",
+            "--session-id foreign",
+            "--plugin-dir /tmp auth",
+            "--add-dir /tmp /var/tmp --resume foreign",
+            "--allowedTools Read --print",
+        ] {
+            assert!(
+                crate::agent_bridge::validate_interactive_args(
+                    "claude",
+                    &crate::parse_agent_args(args).unwrap()
+                )
+                .is_err(),
+                "{args}"
+            );
+        }
+    }
+
+    #[test]
+    fn review_gemini_ordinary_arguments_keep_start_and_resume_identity_boundaries() {
+        for args in [
+            "--include-directories /tmp",
+            "--include-directories /tmp,/var/tmp",
+            "--include-directories /tmp --include-directories /var/tmp",
+            "--include-directories debug",
+            "--extensions extension-one,extension-two",
+            "--sandbox",
+            "-s --extensions auth",
+            "--policy mcp --allowed-tools Read --approval-mode plan",
+            "--model native-model --include-directories /tmp",
+        ] {
+            for managed in [false, true] {
+                let mut launch = launch(
+                    json!({"id":"gemini","model":"fixture","base_url":"http://127.0.0.1:3425","api_key_env":null}),
+                );
+                launch.adapter = "gemini".into();
+                launch.extra_args = args.into();
+                if !managed {
+                    launch.provider = None;
+                }
+                assert!(
+                    agent_command(Path::new("gemini"), &launch).is_ok(),
+                    "start: {args}"
+                );
+                assert!(
+                    crate::resume_command(
+                        Path::new("gemini"),
+                        &launch,
+                        "01a0f6ec-5463-78c3-a404-5a7ad3b933fe"
+                    )
+                    .is_ok(),
+                    "resume: {args}"
+                );
+            }
+        }
+        let mut launch = launch(
+            json!({"id":"gemini","model":"fixture","base_url":"http://127.0.0.1:3425","api_key_env":null}),
+        );
+        launch.adapter = "gemini".into();
+        for args in [
+            "--resume foreign",
+            "--session-id foreign",
+            "--remote ws://127.0.0.1:1",
+            "--include-directories /tmp mcp list",
+            "--session-file /tmp/other",
+            "--output-format json",
+            "-ojson",
+            "--prompt foreign",
+            "-pforeign",
+            "--prompt-interactive foreign",
+            "-iforeign",
+            "--acp",
+            "--experimental-acp",
+            "--list-sessions",
+            "--delete-session 1",
+            "--list-extensions",
+            "-l",
+            "extensions list",
+            "skills list",
+            "hooks list",
+            "gemma list",
+        ] {
+            launch.extra_args = args.into();
+            assert!(
+                agent_command(Path::new("gemini"), &launch).is_err(),
+                "{args}"
+            );
+            assert!(
+                crate::resume_command(
+                    Path::new("gemini"),
+                    &launch,
+                    "01a0f6ec-5463-78c3-a404-5a7ad3b933fe"
+                )
+                .is_err(),
+                "{args}"
+            );
+        }
+    }
+
+    #[test]
+    fn transparency_claude_explicit_model_environment_survives_gateway_defaults() {
+        for explicit in [Some("native-child[1m]"), Some(""), None] {
+            let fixture = Fixture::new();
+            let mut launch = launch(deepseek());
+            launch.adapter = "claude".into();
+            launch.provider.as_mut().unwrap().base_url = "http://127.0.0.1:3425".into();
+            let environment = super::prepare(&fixture.0, &launch, &|name| match name {
+                "DEEPSEEK_API_KEY" => Some("synthetic-gateway-key".into()),
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL" | "CLAUDE_CODE_SUBAGENT_MODEL" => {
+                    explicit.map(str::to_owned)
+                }
+                _ => None,
+            })
+            .unwrap();
+            for key in [
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+                "CLAUDE_CODE_SUBAGENT_MODEL",
+            ] {
+                assert_eq!(
+                    environment.vars[key],
+                    explicit.unwrap_or("deepseek-flash"),
+                    "{key}"
+                );
+            }
+            assert_eq!(
+                environment.vars["ANTHROPIC_DEFAULT_SONNET_MODEL"],
+                "deepseek-flash"
+            );
+            assert_eq!(
+                environment.vars["ANTHROPIC_API_KEY"],
+                "synthetic-gateway-key"
+            );
+            let mut command = std::process::Command::new("claude");
+            environment.apply_command(&mut command);
+            let actual: std::collections::BTreeMap<_, _> = command
+                .get_envs()
+                .map(|(k, v)| {
+                    (
+                        k.to_string_lossy().into_owned(),
+                        v.map(|v| v.to_string_lossy().into_owned()),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                actual["CLAUDE_CODE_SUBAGENT_MODEL"].as_deref(),
+                Some(explicit.unwrap_or("deepseek-flash"))
+            );
+        }
+    }
+
+    #[test]
+    fn transparency_model_explicit_choices_keep_native_arguments_hooks_and_resume() {
+        for (adapter, args) in [
+            ("codex", "--model explicit-model"),
+            ("codex", "-mexplicit-model"),
+            ("codex", "-c='model=\"explicit-model\"'"),
+            ("codex", "--model=explicit-model"),
+            ("codex", "-c model=\"explicit-model\""),
+            ("codex", "--config='\"model\"=\"explicit-model\"'"),
+            ("codex", "--profile review"),
+            ("codex", "-preview"),
+            ("claude", "--model explicit-model --effort high"),
+            ("claude", "--model=explicit-model"),
+        ] {
+            for inherited in [false, true] {
+                let mut launch = launch(
+                    json!({"id":"custom","model":"yam-default","base_url":"http://127.0.0.1:3425","api_key_env":null}),
+                );
+                launch.adapter = adapter.into();
+                launch.extra_args = args.into();
+                if inherited && adapter == "codex" {
+                    launch.codex =
+                        Some(serde_json::from_value(json!({"image_mode":"native"})).unwrap());
+                }
+                let command = agent_command(Path::new(adapter), &launch).unwrap();
+                let actual: Vec<_> = command
+                    .get_argv()
+                    .iter()
+                    .map(|v| v.to_string_lossy().into_owned())
+                    .collect();
+                let original = crate::parse_agent_args(args).unwrap();
+                assert!(
+                    actual.ends_with(&original),
+                    "native argument order changed: {actual:?}"
+                );
+                assert!(
+                    !actual
+                        .iter()
+                        .any(|v| v == "yam-default" || v == "model=\"yam-default\""),
+                    "YAM must not force its model above an explicit native selection: {actual:?}"
+                );
+                crate::agent_bridge::validate_interactive_args(adapter, &original).unwrap();
+                assert!(crate::resume_command(
+                    Path::new(adapter),
+                    &launch,
+                    "01a0f6ec-5463-78c3-a404-5a7ad3b933fe"
+                )
+                .is_ok());
+            }
+        }
+    }
+
+    #[test]
+    fn transparency_model_default_and_gateway_resume_boundaries_remain_available() {
+        let mut launch = launch(
+            json!({"id":"custom","model":"yam-default","base_url":"http://127.0.0.1:3425","api_key_env":null}),
+        );
+        assert!(format!(
+            "{:?}",
+            agent_command(Path::new("codex"), &launch)
+                .unwrap()
+                .get_argv()
+        )
+        .contains("yam-default"));
+        for args in [
+            "--resume foreign",
+            "--cd /tmp",
+            "-c model_provider=foreign",
+            "--remote ws://127.0.0.1:1",
+        ] {
+            launch.extra_args = args.into();
+            assert!(
+                agent_command(Path::new("codex"), &launch).is_err(),
+                "{args}"
+            );
+        }
+    }
+
+    #[test]
+    fn fidelity_arguments_native_configuration_reaches_official_cli() {
+        for args in [
+            "-c 'model_reasoning_effort=\"high\"'",
+            "--config=model_reasoning_summary=auto",
+            "--profile deep-review",
+            "-pdeep-review",
+            "--enable multi_agent --disable fast_mode",
+            "--search",
+            "--future-native-feature=value",
+        ] {
+            let mut launch = launch(deepseek());
+            launch.extra_args = args.into();
+            let command = agent_command(Path::new("codex"), &launch)
+                .unwrap_or_else(|error| panic!("{args}: {error}"));
+            let actual: Vec<_> = command
+                .get_argv()
+                .iter()
+                .map(|s| s.to_string_lossy().into_owned())
+                .collect();
+            for value in crate::parse_agent_args(args).unwrap() {
+                assert!(actual.contains(&value), "{value}");
+            }
+        }
+        let mut launch = launch(
+            json!({"id":"custom","model":"sonnet","base_url":"http://127.0.0.1:3425","api_key_env":null}),
+        );
+        launch.adapter = "claude".into();
+        for args in [
+            "--effort xhigh --add-dir /tmp/extra --agent reviewer",
+            "--plugin-dir /tmp/plugins",
+            "--settings '{\"effortLevel\":\"max\"}'",
+        ] {
+            launch.extra_args = args.into();
+            assert!(
+                agent_command(Path::new("claude"), &launch).is_ok(),
+                "{args}"
+            );
+        }
+    }
+
+    #[test]
+    fn fidelity_arguments_managed_connection_cannot_be_overridden() {
+        for args in [
+            "-c 'model_provider=\"other\"'",
+            "--config '\"model_provider\"=\"other\"'",
+            "--config 'agents.review.config_file=\"/tmp/other.toml\"'",
+            "--config 'shell_environment_policy.inherit=\"none\"'",
+            "--config 'agents.review={config_file=\"/tmp/other.toml\"}'",
+            "--config 'profiles.x={model_provider=\"other\"}'",
+            "--profile ../../escape",
+            "-p../../escape",
+            "-rUUID",
+            "-wfoo",
+            "--remote ws://localhost:1",
+            "--cd /tmp",
+            "-C/tmp",
+            "--worktree",
+            "resume other",
+            "--continue",
+            "--session-id another",
+            "--config",
+        ] {
+            let mut launch = launch(deepseek());
+            launch.extra_args = args.into();
+            assert!(
+                agent_command(Path::new("codex"), &launch).is_err(),
+                "{args}"
+            );
+        }
+        let mut launch = launch(
+            json!({"id":"custom","model":"sonnet","base_url":"http://127.0.0.1:3425","api_key_env":null}),
+        );
+        launch.adapter = "claude".into();
+        for args in [
+            "--settings '{\"env\":{\"ANTHROPIC_AUTH_TOKEN\":\"other\"}}'",
+            "--settings '{\"apiKeyHelper\":\"other\"}'",
+            "--resume other",
+            "--session-id another",
+        ] {
+            launch.extra_args = args.into();
+            assert!(
+                agent_command(Path::new("claude"), &launch).is_err(),
+                "{args}"
+            );
+        }
+    }
+
+    #[test]
+    fn fidelity_arguments_file_settings_resolve_at_project_boundary() {
+        let f = Fixture::new();
+        let mut launch = launch(
+            json!({"id":"custom","model":"sonnet","base_url":"http://127.0.0.1:3425","api_key_env":null}),
+        );
+        launch.adapter = "claude".into();
+        launch.extra_args = "--settings extra.json".into();
+        let path = f.0.join("extra.json");
+        std::fs::write(&path, r#"{"effortLevel":"max"}"#).unwrap();
+        assert!(super::validate_project(&launch, &f.0).is_ok());
+        std::fs::write(&path, r#"{"apiKeyHelper":"other"}"#).unwrap();
+        assert!(super::validate_project(&launch, &f.0).is_err());
+    }
+    fn fidelity_legacy_fixture(f: &Fixture, launch: &crate::AgentLaunch) -> std::path::PathBuf {
+        use std::io::Write;
+        let (connection, home) = super::managed_home(&f.0, launch).unwrap();
+        for path in [
+            f.0.clone(),
+            f.0.join("providers"),
+            f.0.join("providers/codex"),
+            home.clone(),
+        ] {
+            crate::background::private_root(&path).unwrap();
+        }
+        let mut config =
+            super::codex_config(launch.provider.as_ref().unwrap(), &connection).unwrap();
+        config.push_str("\n[tui]\nnotifications = false\n[projects.\"/legacy/project\"]\ntrust_level = \"trusted\"\n");
+        crate::background::private_file(&home.join("config.toml"), true)
+            .unwrap()
+            .write_all(config.as_bytes())
+            .unwrap();
+        crate::background::private_file(&home.join("AGENTS.md"), true)
+            .unwrap()
+            .write_all(super::IMAGE_API_INSTRUCTIONS.as_bytes())
+            .unwrap();
+        std::fs::create_dir(home.join("sessions")).unwrap();
+        std::fs::write(
+            home.join("sessions/rollout.jsonl"),
+            "same-native-id-and-history",
+        )
+        .unwrap();
+        std::fs::write(home.join("state_5.sqlite"), "same-native-database").unwrap();
+        home
+    }
+
+    #[test]
+    fn fidelity_legacy_new_launches_normalize_to_native_inheritance() {
+        let mut launch = launch(deepseek());
+        assert!(launch.codex.is_none());
+        crate::codex_context::assign_context(&mut launch).unwrap();
+        let options = launch.codex.unwrap();
+        assert_eq!(options.image_mode, crate::codex_context::ImageMode::Native);
+        assert!(options.context.is_some());
+    }
+
+    #[test]
+    fn fidelity_legacy_inherits_capabilities_without_moving_history_or_changing_provider() {
+        let f = Fixture::new();
+        let launch = launch(deepseek());
+        let home = fidelity_legacy_fixture(&f, &launch);
+        let original = f.0.join("original");
+        std::fs::create_dir_all(original.join("skills/fixture")).unwrap();
+        std::fs::write(original.join("skills/fixture/SKILL.md"), "native-skill").unwrap();
+        std::fs::write(original.join("AGENTS.md"), "original-user-policy").unwrap();
+        std::fs::write(original.join("auth.json"), "must-not-copy-account").unwrap();
+        std::fs::write(original.join("config.toml"), "model_reasoning_effort='high'\nweb_search='live'\nsqlite_home='/must-not-use-global-store'\n[features]\nmulti_agent=true\n[mcp_servers.fixture]\ncommand='/usr/bin/false'\n[agents.reviewer]\nconfig_file='reviewer.toml'\n").unwrap();
+        std::fs::write(
+            original.join("reviewer.toml"),
+            "model='role-model'\nmodel_reasoning_effort='xhigh'\n",
+        )
+        .unwrap();
+        std::fs::write(
+            original.join("review.config.toml"),
+            "model_reasoning_effort='xhigh'\n",
+        )
+        .unwrap();
+        let saved = serde_json::to_value(&launch).unwrap();
+        let prepare = |key: &str| {
+            super::prepare(&f.0, &launch, &|name| match name {
+                "CODEX_HOME" => Some(original.to_string_lossy().into_owned()),
+                "DEEPSEEK_API_KEY" => Some(key.into()),
+                _ => None,
+            })
+            .unwrap()
+        };
+        let env = prepare("first-key");
+        assert_eq!(env.home.as_ref(), Some(&home));
+        let config: toml::Value =
+            toml::from_str(&std::fs::read_to_string(home.join("config.toml")).unwrap()).unwrap();
+        assert_eq!(config["model_provider"].as_str(), Some("yam_api"));
+        assert_eq!(
+            config["sqlite_home"].as_str(),
+            Some(home.to_string_lossy().as_ref())
+        );
+        assert_eq!(config["model_reasoning_effort"].as_str(), Some("high"));
+        assert_eq!(config["web_search"].as_str(), Some("live"));
+        assert_eq!(config["features"]["multi_agent"].as_bool(), Some(true));
+        assert_eq!(
+            config["mcp_servers"]["fixture"]["command"].as_str(),
+            Some("/usr/bin/false")
+        );
+        assert_eq!(
+            config["projects"]["/legacy/project"]["trust_level"].as_str(),
+            Some("trusted")
+        );
+        assert_eq!(config["tui"]["notifications"].as_bool(), Some(false));
+        assert!(std::fs::read_to_string(home.join("AGENTS.md"))
+            .unwrap()
+            .contains("original-user-policy"));
+        assert_eq!(
+            std::fs::read_to_string(home.join("skills/fixture/SKILL.md")).unwrap(),
+            "native-skill"
+        );
+        let profile: toml::Value =
+            toml::from_str(&std::fs::read_to_string(home.join("review.config.toml")).unwrap())
+                .unwrap();
+        assert_eq!(profile["model_reasoning_effort"].as_str(), Some("xhigh"));
+        assert_eq!(profile["model_provider"].as_str(), Some("yam_api"));
+        let role_path = config["agents"]["reviewer"]["config_file"]
+            .as_str()
+            .unwrap();
+        let role: toml::Value =
+            toml::from_str(&std::fs::read_to_string(role_path).unwrap()).unwrap();
+        assert_eq!(role["model"].as_str(), Some("role-model"));
+        assert_eq!(role["model_provider"].as_str(), Some("yam_api"));
+        assert!(!home.join("auth.json").exists());
+        let resumed = prepare("rotated-key");
+        resumed.validate_before_spawn().unwrap();
+        assert_eq!(resumed.vars["OPENAI_API_KEY"], "rotated-key");
+        let current: toml::Value =
+            toml::from_str(&std::fs::read_to_string(home.join("config.toml")).unwrap()).unwrap();
+        assert_eq!(
+            current["shell_environment_policy"]["set"]["OPENAI_API_KEY"].as_str(),
+            Some("rotated-key")
+        );
+        assert_eq!(serde_json::to_value(&launch).unwrap(), saved);
+        assert_eq!(
+            std::fs::read_to_string(home.join("sessions/rollout.jsonl")).unwrap(),
+            "same-native-id-and-history"
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.join("state_5.sqlite")).unwrap(),
+            "same-native-database"
+        );
+        assert_eq!(
+            super::existing_home(&f.0, &launch).unwrap(),
+            home.canonicalize().unwrap()
+        );
+        assert!(!launch
+            .provider
+            .as_ref()
+            .unwrap()
+            .command_overrides("codex")
+            .unwrap()
+            .iter()
+            .any(|arg| arg.starts_with("web_search=")));
+        std::fs::write(home.join("config.toml"), "model_provider='other'\n").unwrap();
+        assert!(
+            super::prepare(&f.0, &launch, &|name| (name == "DEEPSEEK_API_KEY")
+                .then(|| "rotated-key".into()))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn fidelity_legacy_failed_upgrade_preserves_old_configuration_and_native_history() {
+        let f = Fixture::new();
+        let launch = launch(deepseek());
+        let home = fidelity_legacy_fixture(&f, &launch);
+        let before = std::fs::read(home.join("config.toml")).unwrap();
+        let original = f.0.join("original");
+        std::fs::create_dir(&original).unwrap();
+        std::fs::write(original.join("config.toml"), "invalid = [").unwrap();
+        assert!(super::prepare(&f.0, &launch, &|name| match name {
+            "CODEX_HOME" => Some(original.to_string_lossy().into_owned()),
+            "DEEPSEEK_API_KEY" => Some("key".into()),
+            _ => None,
+        })
+        .is_err());
+        assert_eq!(std::fs::read(home.join("config.toml")).unwrap(), before);
+        assert_eq!(
+            std::fs::read_to_string(home.join("sessions/rollout.jsonl")).unwrap(),
+            "same-native-id-and-history"
+        );
+        assert!(!home.join("yam-config.toml").exists());
+    }
+    #[test]
+    fn fidelity_legacy_project_routes_are_checked_before_native_preparation() {
+        let f = Fixture::new();
+        std::fs::create_dir(f.0.join(".codex")).unwrap();
+        let path = f.0.join(".codex/config.toml");
+        let mut provider = deepseek();
+        provider["api_key_env"] = json!(format!(
+            "MISSING_{}",
+            crate::next_session_id().replace('-', "_")
+        ));
+        let launch = launch(provider);
+        std::fs::write(&path, "model_provider='other'\n").unwrap();
+        let manager = crate::SessionManager::default();
+        let _serial = crate::worktree_manager::serial_owner_test();
+        let error = crate::create_session_owner_with_worktree(
+            None,
+            &manager,
+            &f.0,
+            Some(f.0.to_string_lossy().into_owned()),
+            None,
+            Some(launch.clone()),
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(error.contains("Project Codex configuration"), "{error}");
+        assert!(super::validate_project(&launch, &f.0).is_err());
+        std::fs::write(
+            &path,
+            "model_provider='yam_api'\nmodel_reasoning_effort='high'\n",
+        )
+        .unwrap();
+        assert!(super::validate_project(&launch, &f.0).is_ok());
+        std::fs::write(
+            &path,
+            "[model_providers.yam_api]\nbase_url='http://127.0.0.1:1'\n",
+        )
+        .unwrap();
+        assert!(super::validate_project(&launch, &f.0).is_err());
+    }
+    #[test]
+    fn fidelity_claude_current_auth_routes_cannot_override_host_configuration() {
+        for key in [
+            "ANTHROPIC_UNIX_SOCKET",
+            "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+            "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+            "CLAUDE_CODE_USE_MANTLE",
+            "ANTHROPIC_AWS_BASE_URL",
+            "ANTHROPIC_GOOGLE_CLOUD_BASE_URL",
+            "ANTHROPIC_BEDROCK_MANTLE_BASE_URL",
+            "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
+            "CLAUDE_CODE_HOST_AUTH_ENV_VAR",
+            "CLAUDE_CODE_HOST_CREDS_FILE",
+            "ANTHROPIC_PROFILE",
+            "ANTHROPIC_CONFIG_DIR",
+        ] {
+            assert!(super::conflicting_env(key), "{key}");
+            let f = Fixture::new();
+            let source = f.0.join("original");
+            std::fs::create_dir(&source).unwrap();
+            std::fs::write(
+                source.join("settings.json"),
+                json!({"env":{key:"alternate"},"effortLevel":"xhigh"}).to_string(),
+            )
+            .unwrap();
+            let mut launch = launch(
+                json!({"id":"custom","model":"sonnet","base_url":"http://127.0.0.1:3425","api_key_env":null}),
+            );
+            launch.adapter = "claude".into();
+            let env = super::prepare(&f.0, &launch, &|name| {
+                (name == "CLAUDE_CONFIG_DIR").then(|| source.to_string_lossy().into_owned())
+            })
+            .unwrap();
+            let mut pty = crate::agent_command(Path::new("claude"), &launch).unwrap();
+            let mut probe = std::process::Command::new("claude");
+            pty.env(key, "alternate");
+            probe.env(key, "alternate");
+            env.apply_pty(&mut pty);
+            env.apply_command(&mut probe);
+            assert_ne!(pty.get_env(key).and_then(|v| v.to_str()), Some("alternate"));
+            assert_ne!(
+                probe
+                    .get_envs()
+                    .find(|(k, _)| k == &std::ffi::OsStr::new(key))
+                    .and_then(|(_, v)| v)
+                    .and_then(|v| v.to_str()),
+                Some("alternate")
+            );
+            let current: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(env.home.as_ref().unwrap().join("settings.json")).unwrap(),
+            )
+            .unwrap();
+            assert!(current["env"].get(key).is_none(), "{key}");
+            launch.extra_args = format!("--settings '{}'", json!({"env":{key:"alternate"}}));
+            assert!(
+                crate::agent_command(Path::new("claude"), &launch).is_err(),
+                "{key}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1914,7 +3280,14 @@ mod readonly_home_tests {
         let launch:crate::AgentLaunch=serde_json::from_value(serde_json::json!({"adapter":"codex","mode":"interactive","prompt":"","extra_args":"","provider":{"id":"custom","model":"test","base_url":"http://127.0.0.1:9876/v1","api_key_env":"NEVER_RESOLVE"}})).unwrap();
         assert!(super::existing_home(&root, &launch).is_err());
         assert!(!root.exists());
-        let env = super::prepare(&root, &launch, &|_| Some("synthetic-key".into())).unwrap();
+        let env = super::prepare(&root, &launch, &|name| {
+            (!matches!(
+                name,
+                "CLAUDE_CONFIG_DIR" | "CODEX_HOME" | "HOME" | "USERPROFILE"
+            ))
+            .then(|| "synthetic-key".into())
+        })
+        .unwrap();
         let home = env.home.unwrap().canonicalize().unwrap();
         assert_eq!(super::existing_home(&root, &launch).unwrap(), home);
         let path = home.join("config.toml");

@@ -209,3 +209,10 @@ test('delayed history response cannot bypass newly recorded backoff', async () =
  assert.equal(h.sends.length,1);
  assert.equal(h.q.canRetry('s-one:succeeded'),false);
 });
+
+test('archived session notification races discard stale retry state without a permanent banner',async()=>{
+ for(const options of [{sendError:Error('Unknown notification session')},{receiptError:Error('Unknown notification session')},{listSessions:async()=>{throw Error('Unknown session');}}]){
+  const h=notificationHarness(options);await h.notify(notificationEvent('succeeded'));assert.equal(h.pending.size,0);assert.equal(h.errors.at(-1),null);
+ }
+ const h=notificationHarness({sendError:Error('permission denied')});await h.notify(notificationEvent('succeeded'));assert.equal(h.pending.size,1);assert.ok(h.errors.at(-1));
+});

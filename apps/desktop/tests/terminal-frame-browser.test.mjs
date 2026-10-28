@@ -11,9 +11,13 @@ import {spawn} from 'node:child_process';
 import ts from 'typescript';
 
 const chrome = process.env.CHROME_BIN ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+// Headless Chrome can still display macOS keychain dialogs; installation is not test consent.
+const chromeSkip = process.env.YAM_TEST_HEADLESS_CHROME !== '1'
+  ? 'Set YAM_TEST_HEADLESS_CHROME=1 to explicitly run isolated local-browser tests'
+  : !existsSync(chrome) && 'Set CHROME_BIN to an installed Chromium browser';
 const source = ts.transpileModule(readFileSync(new URL('../src/terminal-frame.ts', import.meta.url), 'utf8'), {compilerOptions: {target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022}}).outputText.replace(/^export /gm, '');
 
-test('full TUI projections keep screen, focus and scrollbar stable through replacement', {skip: !existsSync(chrome) && 'Set CHROME_BIN to an installed Chromium browser'}, async () => {
+test('full TUI projections keep screen, focus and scrollbar stable through replacement', {skip: chromeSkip}, async () => {
   const directory = mkdtempSync(join(tmpdir(), 'yam-frame-render-'));
   try {
     writeFileSync(join(directory, 'xterm.js'), readFileSync(new URL('../node_modules/@xterm/xterm/lib/xterm.js', import.meta.url)));
@@ -102,7 +106,7 @@ test('full TUI projections keep screen, focus and scrollbar stable through repla
       });
       const timeout=setTimeout(()=>{failure=new Error('Chrome render completion timed out');if(child)child.kill('SIGKILL');else{server.close();reject(failure);}},15000);
       server.listen(0,'127.0.0.1',()=>{
-        child=spawn(chrome,['--headless','--disable-gpu','--disable-background-networking','--no-first-run','--no-default-browser-check','--user-data-dir='+join(directory,'profile'),'http://127.0.0.1:'+server.address().port],{stdio:['ignore','ignore','ignore']});
+        child=spawn(chrome,['--headless','--disable-gpu','--disable-background-networking','--use-mock-keychain','--disable-features=DialMediaRouteProvider','--no-first-run','--no-default-browser-check','--user-data-dir='+join(directory,'profile'),'http://127.0.0.1:'+server.address().port],{stdio:['ignore','ignore','ignore']});
         child.on('error',error=>{clearTimeout(timeout);server.close();reject(error);});
         child.on('close',()=>{clearTimeout(timeout);server.close();if(failure||!completed)reject(failure??new Error('Chrome exited without render results'));else resolve(completed);});
       });

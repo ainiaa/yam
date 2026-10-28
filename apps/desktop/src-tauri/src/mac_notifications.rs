@@ -5,13 +5,16 @@ use objc2::{
     runtime::{Bool, ProtocolObject},
     AnyThread, DefinedClass,
 };
-use objc2_foundation::{MainThreadMarker, NSBundle, NSError, NSObject, NSObjectProtocol, NSString};
+use objc2_foundation::{
+    MainThreadMarker, NSBundle, NSError, NSObject, NSObjectProtocol, NSString, NSUUID,
+};
 use objc2_user_notifications::{
     UNAuthorizationOptions, UNErrorCode, UNMutableNotificationContent, UNNotification,
     UNNotificationDismissActionIdentifier, UNNotificationPresentationOptions,
-    UNNotificationRequest, UNNotificationResponse, UNNotificationSound, UNUserNotificationCenter,
-    UNUserNotificationCenterDelegate,
+    UNNotificationRequest, UNNotificationResponse, UNNotificationSound,
+    UNTimeIntervalNotificationTrigger, UNUserNotificationCenter, UNUserNotificationCenterDelegate,
 };
+use sha2::{Digest, Sha256};
 use std::{
     cell::RefCell,
     sync::{
@@ -45,6 +48,12 @@ fn closure_t15_callback_wait_discards_late_and_repeated_delivery_results() {
     sender.send(Ok(())).unwrap();
     wait_callback(receiver, Duration::from_millis(10), "delivery").unwrap();
     assert!(sender.send(Err("late failure".into())).is_err());
+}
+fn presentation_options() -> UNNotificationPresentationOptions {
+    // YAM requires macOS 13.5; request the modern foreground banner explicitly.
+    UNNotificationPresentationOptions::Banner
+        | UNNotificationPresentationOptions::List
+        | UNNotificationPresentationOptions::Sound
 }
 static DELEGATE_READY: AtomicBool = AtomicBool::new(false);
 
@@ -80,7 +89,7 @@ define_class!(
             if &*response.actionIdentifier() == unsafe { UNNotificationDismissActionIdentifier } {
                 return;
             }
-            let link = response.notification().request().identifier().to_string();
+            let link = notification_link(&response.notification().request());
             if let Err(error) = crate::route_notification_link(&self.ivars().app, &link) {
                 eprintln!("[YAM] Notification activation failed: {error}");
             }
@@ -93,11 +102,7 @@ define_class!(
             _notification: &UNNotification,
             completion: &DynBlock<dyn Fn(UNNotificationPresentationOptions)>,
         ) {
-            // Alert also presents on macOS 10.14/10.15; Banner/List require 11.
-            #[allow(deprecated)]
-            let options =
-                UNNotificationPresentationOptions::Alert | UNNotificationPresentationOptions::Sound;
-            completion.call((options,));
+            completion.call((presentation_options(),));
         }
     }
 );
@@ -128,8 +133,10 @@ pub fn init(app: &tauri::AppHandle) -> Result<(), String> {
 pub fn send(
     _app: tauri::AppHandle,
     session_id: String,
+    project: String,
     title: String,
     body: String,
+    kind: String,
 ) -> Result<(), String> {
     // Create and release all SDK objects inside the worker's autorelease pool.
     std::thread::spawn(move || {
@@ -138,7 +145,12 @@ pub fn send(
             if !DELEGATE_READY.load(Ordering::Acquire) {
                 return Err("macOS notification delegate is not initialized".into());
             }
-            let request = notification_request(&session_id, &title, &body)?;
+            let grouping = (kind != "test").then_some((
+                project.as_str(),
+                notification_lane(&kind),
+                crate::unix_timestamp(),
+            ));
+            let request = notification_request(&session_id, &title, &body, grouping)?;
             let center = UNUserNotificationCenter::currentNotificationCenter();
             let (sender, receiver) = mpsc::channel();
             let authorization = RcBlock::new(move |granted: Bool, error: *mut NSError| {
@@ -217,24 +229,73 @@ fn require_app_bundle() -> Result<(), String> {
     Ok(())
 }
 
+fn notification_link(request: &UNNotificationRequest) -> String {
+    if let Some(link) = request
+        .content()
+        .targetContentIdentifier()
+        .filter(|value| !value.is_empty())
+    {
+        return link.to_string();
+    }
+    let link = request.content().threadIdentifier().to_string();
+    if link.is_empty() {
+        // Notifications delivered by older YAM versions stored the target as the ID.
+        request.identifier().to_string()
+    } else {
+        link
+    }
+}
+
+fn notification_lane(kind: &str) -> &str {
+    match kind {
+        "succeeded" | "response_finished" => "completion",
+        "failed" => "failure",
+        "needs_permission" => "permission",
+        _ => "attention",
+    }
+}
+
 fn notification_request(
     session_id: &str,
     title: &str,
     body: &str,
+    grouping: Option<(&str, &str, u64)>,
 ) -> Result<Retained<UNNotificationRequest>, String> {
     let identifier = format!("yam://session/{session_id}");
     if crate::session_id_from_link(&identifier).as_deref() != Some(session_id) {
         return Err("Invalid notification session ID".into());
     }
     let content = UNMutableNotificationContent::new();
+    content.setTargetContentIdentifier(Some(&NSString::from_str(&identifier)));
+    let (request_id, thread_id, trigger) = if let Some((project, lane, now)) = grouping {
+        if project.is_empty() {
+            return Err("Invalid notification project".into());
+        }
+        let thread = format!("yam.project.{:x}", Sha256::digest(project.as_bytes()));
+        // OS-owned requests survive GUI exit; replace pending updates within a ten-second bucket.
+        let id = format!("{thread}.{lane}.{}", now / 10);
+        (
+            NSString::from_str(&id),
+            NSString::from_str(&thread),
+            Some(UNTimeIntervalNotificationTrigger::triggerWithTimeInterval_repeats(2.0, false)),
+        )
+    } else {
+        (
+            NSUUID::UUID().UUIDString(),
+            NSString::from_str("yam.test"),
+            None,
+        )
+    };
+    content.setThreadIdentifier(&thread_id);
     content.setTitle(&NSString::from_str(title));
     content.setBody(&NSString::from_str(body));
     content.setSound(Some(&UNNotificationSound::defaultSound()));
+    // The latest merged request keeps its own navigation target, independent of project grouping.
     Ok(
         UNNotificationRequest::requestWithIdentifier_content_trigger(
-            &NSString::from_str(&identifier),
+            &request_id,
             &content,
-            None,
+            trigger.as_deref().map(|value| &**value),
         ),
     )
 }
@@ -244,12 +305,144 @@ mod tests {
     use super::*;
 
     #[test]
+    fn grouping_identity_is_separate_from_notification_navigation() {
+        autoreleasepool(|_| {
+            let request = notification_request("s-one", "Project · Task", "Done", None).unwrap();
+            assert_eq!(
+                request
+                    .content()
+                    .targetContentIdentifier()
+                    .unwrap()
+                    .to_string(),
+                "yam://session/s-one"
+            );
+            assert!(!request
+                .content()
+                .threadIdentifier()
+                .to_string()
+                .starts_with("yam://session/"));
+        });
+    }
+
+    #[test]
+    fn project_bursts_replace_one_pending_request_and_keep_the_latest_target() {
+        autoreleasepool(|_| {
+            let first = notification_request(
+                "s-one",
+                "first",
+                "one",
+                Some(("/a/project", "completion", 100)),
+            )
+            .unwrap();
+            let latest = notification_request(
+                "s-two",
+                "latest",
+                "two",
+                Some(("/a/project", "completion", 109)),
+            )
+            .unwrap();
+            let next = notification_request(
+                "s-two",
+                "next",
+                "three",
+                Some(("/a/project", "completion", 110)),
+            )
+            .unwrap();
+            let other = notification_request(
+                "s-three",
+                "other",
+                "four",
+                Some(("/b/project", "completion", 100)),
+            )
+            .unwrap();
+            assert_eq!(first.identifier(), latest.identifier());
+            assert_ne!(latest.identifier(), next.identifier());
+            assert_eq!(
+                first.content().threadIdentifier(),
+                next.content().threadIdentifier()
+            );
+            assert_ne!(
+                first.content().threadIdentifier(),
+                other.content().threadIdentifier()
+            );
+            assert!(!first
+                .content()
+                .threadIdentifier()
+                .to_string()
+                .contains("/a/project"));
+            assert_eq!(notification_link(&latest), "yam://session/s-two");
+            assert_eq!(latest.content().body().to_string(), "two");
+            let trigger = latest.trigger().unwrap();
+            assert!(!trigger.repeats());
+            let interval: f64 = unsafe { msg_send![&*trigger, timeInterval] };
+            assert_eq!(interval, 2.0);
+            for kind in ["failure", "permission", "attention"] {
+                let important = notification_request(
+                    "s-one",
+                    "important",
+                    "attention",
+                    Some(("/a/project", kind, 100)),
+                )
+                .unwrap();
+                assert_ne!(important.identifier(), first.identifier());
+                assert_eq!(
+                    important.content().threadIdentifier(),
+                    first.content().threadIdentifier()
+                );
+            }
+            assert!(
+                notification_request("s-one", "title", "body", Some(("", "completion", 100)))
+                    .is_err()
+            );
+        });
+    }
+
+    #[test]
+    fn grouping_lanes_preserve_failures_permissions_and_unexpected_stops() {
+        assert_eq!(
+            notification_lane("succeeded"),
+            notification_lane("response_finished")
+        );
+        for kind in [
+            "failed",
+            "needs_permission",
+            "idle_attention",
+            "needs_attention",
+            "stopped",
+        ] {
+            assert_ne!(notification_lane(kind), notification_lane("succeeded"));
+        }
+        assert_ne!(
+            notification_lane("failed"),
+            notification_lane("needs_permission")
+        );
+    }
+
+    #[test]
     fn request_identifier_and_unicode_content_roundtrip() {
         objc2::rc::autoreleasepool(|_| {
             let title = "任务完成 <&>\"' 😀";
             let body = "请查看会话\nLine two\t終わり";
-            let request = notification_request("s-abcdef-0", title, body).unwrap();
-            assert_eq!(request.identifier().to_string(), "yam://session/s-abcdef-0");
+            let request = notification_request("s-abcdef-0", title, body, None).unwrap();
+            let second = notification_request("s-abcdef-0", title, body, None).unwrap();
+            assert_ne!(request.identifier(), second.identifier());
+            assert_eq!(request.content().threadIdentifier().to_string(), "yam.test");
+            assert_eq!(notification_link(&request), "yam://session/s-abcdef-0");
+            assert_eq!(notification_link(&second), "yam://session/s-abcdef-0");
+            let legacy = UNNotificationRequest::requestWithIdentifier_content_trigger(
+                &NSString::from_str("yam://session/s-old"),
+                &UNMutableNotificationContent::new(),
+                None,
+            );
+            assert_eq!(notification_link(&legacy), "yam://session/s-old");
+            let old_content = UNMutableNotificationContent::new();
+            old_content.setThreadIdentifier(&NSString::from_str("yam://session/s-previous"));
+            let previous = UNNotificationRequest::requestWithIdentifier_content_trigger(
+                &NSUUID::UUID().UUIDString(),
+                &old_content,
+                None,
+            );
+            assert_eq!(notification_link(&previous), "yam://session/s-previous");
             assert_eq!(request.content().title().to_string(), title);
             assert_eq!(request.content().body().to_string(), body);
             assert!(request.trigger().is_none());
@@ -260,7 +453,7 @@ mod tests {
     #[test]
     fn empty_content_is_supported_and_malformed_ids_are_rejected() {
         objc2::rc::autoreleasepool(|_| {
-            let request = notification_request("s-1", "", "").unwrap();
+            let request = notification_request("s-1", "", "", None).unwrap();
             assert_eq!(request.content().title().to_string(), "");
             assert_eq!(request.content().body().to_string(), "");
             for id in [
@@ -274,7 +467,7 @@ mod tests {
                 "会话",
             ] {
                 assert!(
-                    notification_request(id, "title", "body").is_err(),
+                    notification_request(id, "title", "body", None).is_err(),
                     "accepted {id:?}"
                 );
             }
@@ -318,4 +511,13 @@ mod tests {
                 .contains(&description));
         });
     }
+}
+
+#[cfg(test)]
+#[test]
+fn foreground_presentation_requests_banner_list_and_sound_on_supported_macos() {
+    let options = presentation_options();
+    assert!(options.contains(UNNotificationPresentationOptions::Banner));
+    assert!(options.contains(UNNotificationPresentationOptions::List));
+    assert!(options.contains(UNNotificationPresentationOptions::Sound));
 }

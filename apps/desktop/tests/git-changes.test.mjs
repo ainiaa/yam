@@ -17,7 +17,7 @@ test("F3 actual App exposes a read-only Git changes entry bound to current direc
   const attrs = new Map(elements[0].attributes.properties.map(x => [x.name?.getText(tree), x.initializer?.getText(tree)]));
   assert.equal(attrs.get("path"), "{projectToolsPath}");
   assert.equal(attrs.get("owner"), "{gitOwner}");
-  assert.equal(attrs.get("sessionId"), "{session?.session_id ?? null}");
+  assert.equal(attrs.get("sessionId"), "{session&&!session.ssh?session.session_id:null}");
 });
 
 import * as git from "../src/git-context.ts";
@@ -60,8 +60,8 @@ async function componentHarness() {
  const source=await englishUiReadAsync(fs.readFile,new URL("../src/GitChanges.tsx",import.meta.url),"utf8");
  const tree=ts.createSourceFile("GitChanges.tsx",source,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
  const fn=tree.statements.find(n=>ts.isFunctionDeclaration(n)&&n.name?.text==="GitChanges");assert.ok(fn);
- const slots=[],refs=[],effects=[];let i=0,j=0,k=0;let props={path:"/repo",owner:1},nodes;
- const values={GitChangesController:git.GitChangesController,GitPatchView:"GitPatchView",FilePreview:"FilePreview",invoke:null,React:{createElement:(tag,props,...children)=>({tag,props:props??{},children:children.flat(Infinity)})},useCallback:fn=>fn,
+ let refreshAction;const slots=[],refs=[],effects=[];let i=0,j=0,k=0;let props={path:"/repo",owner:1},nodes;
+ const values={watchProjectRefresh:action=>{refreshAction=action;return()=>{refreshAction=null;};},GitChangesController:git.GitChangesController,GitPatchView:"GitPatchView",FilePreview:"FilePreview",invoke:null,React:{createElement:(tag,props,...children)=>({tag,props:props??{},children:children.flat(Infinity)})},useCallback:fn=>fn,
  useState:initial=>{const n=i++;if(!(n in slots))slots[n]=initial;return [slots[n],v=>{slots[n]=typeof v==="function"?v(slots[n]):v;}];},
  useRef:initial=>{const n=j++;return refs[n]??(refs[n]={current:initial});},
  useEffect:(fn,deps)=>{const n=k++,key=JSON.stringify(deps);if(effects[n]?.key!==key){effects[n]={key,fn,pending:true,cleanup:effects[n]?.cleanup};}}};
@@ -72,7 +72,7 @@ async function componentHarness() {
  const render=(next,flush=true)=>{if(next)props=next;i=j=k=0;nodes=component(props);if(flush)for(const effect of effects)if(effect.pending){effect.pending=false;effect.cleanup?.();effect.cleanup=effect.fn();}return nodes;};
  const buttons=()=>{const all=[];const walk=n=>{if(!n||typeof n!=="object")return;if(n.tag==="button")all.push(n);for(const child of n.children??[])walk(child);};walk(nodes);return all;};
  const unmount=()=>effects.forEach(e=>e.cleanup?.());
- return {render,buttons,unmount,calls,pending,slots};
+ return {render,buttons,unmount,calls,pending,slots,refresh:()=>refreshAction?.()};
 }
 test("F3 actual component opens list and selected-side request then cancels on close",async()=>{
  const h=await componentHarness();h.render();assert.equal(h.calls.length,0);
@@ -86,15 +86,15 @@ test("F3 actual component opens list and selected-side request then cancels on c
  assert.ok(!JSON.stringify(h.slots).includes("+old"));h.unmount();
 });
 
-async function patchHarness(patch) {
+async function patchHarness(patch,callbacks={}) {
  const raw=await englishUiReadAsync(fs.readFile,new URL('../src/GitChanges.tsx',import.meta.url),'utf8'),source=ts.createSourceFile('GitChanges.tsx',raw,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
  const fn=source.statements.find(node=>ts.isFunctionDeclaration(node)&&node.name?.text==='GitPatchView');assert.ok(fn,'actual diff navigation component required');
  const slots=[],focused=[];let i=0,tree;const root={querySelector:selector=>({focus:()=>focused.push(selector),scrollIntoView(){}})};
  const values={parseUnifiedDiff,findDiffLine,useMemo:fn=>fn(),useRef:()=>({current:root}),useState:initial=>{const at=i++;if(!(at in slots))slots[at]=initial;return [slots[at],value=>slots[at]=typeof value==='function'?value(slots[at]):value];},React:{createElement:(tag,props,...children)=>({tag,props:props??{},children:children.flat(Infinity)})}};
  const render=componentFunction(...Object.keys(values),ts.transpileModule(fn.getText(source).replace(/^export /,''),{compilerOptions:{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ESNext}}).outputText+';return GitPatchView;')(...Object.values(values));
  const nodes=node=>[node,...(node?.children??[]).flatMap(child=>child&&typeof child==='object'?nodes(child):[])];
- const refresh=()=>{i=0;tree=render({patch});};refresh();
- return {refresh,focused,button:label=>nodes(tree).find(node=>node.tag==='button'&&node.children.join('')===label),control:label=>nodes(tree).find(node=>node.props?.['aria-label']===label),get text(){return nodes(tree).flatMap(node=>node.children??[]).filter(child=>typeof child==='string').join(' ');}};
+ const refresh=()=>{i=0;tree=render({patch,...callbacks});};refresh();
+ return {refresh,focused,rows:()=>nodes(tree).filter(node=>node.props?.["data-diff-row"]!==undefined),updatePatch:next=>{patch=next;refresh();},button:label=>nodes(tree).find(node=>node.tag==='button'&&node.children.join('')===label),control:label=>nodes(tree).find(node=>node.props?.['aria-label']===label),get text(){return nodes(tree).flatMap(node=>node.children??[]).filter(child=>typeof child==='string').join(' ');}};
 }
 
 test('R2B Git untracked names require separate preview; stale row callbacks cannot cross scope',async()=>{
@@ -204,4 +204,33 @@ test("F3 actual frontend validator accepts exactly 1 MiB and rejects one additio
   const above=structuredClone(equal);above.rows.at(-1).path+="z";
   assert.equal(Buffer.byteLength(JSON.stringify(above)),1048577);assert.equal(git.isGitChanges(above),false);
   assert.equal(git.isGitChanges(equal),true);
+});
+
+test('review actions bind the selected snapshot and staged rows never claim a live editor line',async()=>{
+ const patch={path:'a.txt',kind:'text',side:'worktree',text:'@@ -1 +1 @@\n-before\n+after\n'},edited=[],reviewed=[];
+ const h=await patchHarness(patch,{onEditLine:line=>edited.push(line),onReviewLine:(side,line)=>reviewed.push([side,line])});
+ h.rows().find(row=>row.props['data-kind']==='add').props.onClick();h.refresh();h.button('Edit current line').props.onClick();assert.deepEqual(edited,[1]);
+ h.rows().find(row=>row.props['data-kind']==='remove').props.onClick();h.refresh();h.button('Use line for feedback').props.onClick();assert.deepEqual(reviewed,[['old',1]]);assert.equal(h.button('Edit current line'),undefined);
+ h.updatePatch({...patch,text:'@@ -4 +4 @@\n-old\n+new\n'});assert.equal(h.button('Use line for feedback'),undefined);
+ h.updatePatch({...patch,side:'staged'});h.rows().find(row=>row.props['data-kind']==='add').props.onClick();h.refresh();assert.equal(h.button('Edit current line'),undefined);
+});
+
+ test('background Git refresh keeps the displayed patch mounted during the read and pauses when inactive',async()=>{
+  const h=await componentHarness();h.render();h.buttons().find(b=>b.children.includes("Git changes")).props.onClick();h.render();let p=h.pending[0];p.resolve(result(p.args));await new Promise(r=>setImmediate(r));h.render();
+  h.buttons().find(b=>b.props["aria-label"]==="Staged changes for file.txt").props.onClick();p=h.pending[1];p.resolve(result(p.args,{patch:{path:"file.txt",side:"staged",kind:"text",text:"+current"}}));await new Promise(r=>setImmediate(r));
+  const contains=n=>n&&typeof n==='object'&&(n.tag==='GitPatchView'||(n.children??[]).some(contains));
+  assert.equal(contains(h.render()),true);const flight=h.refresh();assert.equal(contains(h.render()),true);p=h.pending[2];p.resolve(result(p.args,{patch:{path:"file.txt",side:"staged",kind:"text",text:"+current"}}));await flight;assert.equal(contains(h.render()),true);
+  h.render({path:"/repo",owner:1,active:false});const count=h.pending.length;await h.refresh();assert.equal(h.pending.length,count);h.unmount();
+ });
+
+test('workspace hide and reopen retain the selected Git file and comparison side',async()=>{
+ for(const side of ['staged','worktree']){
+  const h=await componentHarness();h.render();h.buttons().find(b=>b.children.includes('Git changes')).props.onClick();h.render();
+  h.pending[0].resolve(result(h.pending[0].args));await new Promise(r=>setImmediate(r));h.render();
+  h.buttons().find(b=>b.props['aria-label']===`${side==='staged'?'Staged':'Worktree'} changes for file.txt`).props.onClick();
+  const chosen=h.pending.at(-1);chosen.resolve(result(chosen.args,{patch:{path:'file.txt',side,kind:'text',text:'+selected-proof'}}));await new Promise(r=>setImmediate(r));h.render();
+  h.render({path:'/repo',owner:1,active:false});assert.ok(JSON.stringify(h.slots).includes('+selected-proof'),'hiding must keep the reviewed comparison');
+  h.render({path:'/repo',owner:1,active:true});const reload=h.pending.at(-1);assert.equal(reload.args.selected_path,'file.txt');assert.equal(reload.args.side,side);
+  reload.resolve(result(reload.args,{patch:{path:'file.txt',side,kind:'text',text:'+fresh-proof'}}));await new Promise(r=>setImmediate(r));h.render();assert.ok(JSON.stringify(h.slots).includes('+fresh-proof'));h.unmount();
+ }
 });

@@ -707,7 +707,7 @@ mod tests {
         let installed = root.0.join("system-node");
         let cache = root.0.join("cache");
         let result = select_or_install(
-            &[installed.clone()],
+            std::slice::from_ref(&installed),
             &cache,
             &item,
             true,

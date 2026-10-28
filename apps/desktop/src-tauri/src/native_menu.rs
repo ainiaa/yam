@@ -10,6 +10,7 @@ const ACTIONS: &[&str] = &[
     "project",
     "ssh",
     "hide",
+    "close",
     "reopen",
     "sidebar",
     "palette",
@@ -139,6 +140,15 @@ pub(super) fn build(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             ("", ""),
         ],
     )?;
+    #[cfg(target_os = "macos")]
+    file.append(&MenuItem::with_id(
+        app,
+        "yam-menu-close",
+        "Close window",
+        true,
+        Some("CmdOrCtrl+W"),
+    )?)?;
+    #[cfg(not(target_os = "macos"))]
     file.append(&PredefinedMenuItem::close_window(
         app,
         Some("Close window"),
@@ -279,6 +289,19 @@ pub(super) fn route(app: &tauri::AppHandle, id: &str) {
             }
         }
     }
+}
+
+#[tauri::command]
+pub(super) fn native_close_window(webview: tauri::Webview) -> Result<(), String> {
+    if !["main", "terminal-secondary"].contains(&webview.label())
+        || webview.window().label() != webview.label()
+    {
+        return Err("Desktop window unavailable".into());
+    }
+    webview
+        .window()
+        .close()
+        .map_err(|_| "Window could not be closed.".into())
 }
 
 fn menu_caption(text: &str, chinese: bool) -> String {

@@ -9,7 +9,7 @@ export function resolveLaunchDefaults(global:LaunchDefaults,trusted:ProjectSetti
 export function isLaunchDefaults(value:unknown):value is LaunchDefaults {
  if(!value||typeof value!=="object"||Array.isArray(value))return false;
  const v=value as Record<string,unknown>;
- return Object.keys(v).every(k=>["adapter","mode","extra_args","prompt","command","provider","codex"].includes(k))&&(v.codex===undefined||v.adapter==="codex"&&isCodexOptions(v.codex))&&typeof v.adapter==="string"&&["shell","custom","codex","claude","gemini","opencode"].includes(v.adapter)&&typeof v.mode==="string"&&["task","interactive"].includes(v.mode)&&typeof v.extra_args==="string"&&v.extra_args.length<=65536&&(v.prompt===null||typeof v.prompt==="string")&&(v.command===null||typeof v.command==="string")&&(v.provider===undefined||v.provider===null||isProviderConfig(v.provider)&&supportsProvider(v.adapter,v.provider));
+ return Object.keys(v).every(k=>["adapter","mode","extra_args","prompt","command","provider","codex"].includes(k))&&(v.codex===undefined||v.adapter==="codex"&&isCodexOptions(v.codex))&&typeof v.adapter==="string"&&["shell","custom","codex","claude","gemini","opencode","pi"].includes(v.adapter)&&typeof v.mode==="string"&&["task","interactive"].includes(v.mode)&&typeof v.extra_args==="string"&&v.extra_args.length<=65536&&(v.prompt===null||typeof v.prompt==="string")&&(v.command===null||typeof v.command==="string")&&(v.provider===undefined||v.provider===null||isProviderConfig(v.provider)&&supportsProvider(v.adapter,v.provider));
 }
 export class ProjectConfigSelection {
  preview:ProjectPreview|null=null;

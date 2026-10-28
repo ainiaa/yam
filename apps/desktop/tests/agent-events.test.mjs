@@ -1,3 +1,4 @@
+import {sessionRuntimeInfo} from '../src/session-runtime-info.ts';
 import {englishUiRead} from './fixtures/english-ui-source.mjs';
 const readFileSync=(...args)=>englishUiRead(rawReadFileSync,...args);
 import './fixtures/i18n-test-init.mjs';
@@ -35,7 +36,7 @@ const source=ts.createSourceFile('App.tsx',readFileSync(new URL('../src/App.tsx'
 test('primary Agent connection disclosure makes native round receipt limits visible',()=>{
  let code;const visit=node=>{if(ts.isFunctionDeclaration(node)&&node.name?.text==='SessionConnection')code=node.getText(source);ts.forEachChild(node,visit);};visit(source);assert.ok(code);
  const React={createElement:(type,props,...children)=>({type,props:props??{},children})};
- const Component=new Function('React','connectionDetails','ChevronDown',ts.transpile(code,{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2022})+';return SessionConnection;')(React,connectionDetails,()=>null);
+ const Component=new Function('React','connectionDetails','ChevronDown','sessionRuntimeInfo',ts.transpile(code,{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2022})+';return SessionConnection;')(React,connectionDetails,()=>null,sessionRuntimeInfo);
  const text=node=>typeof node==='string'?node:(node?.children??[]).flat(Infinity).map(text).join('');
  const claude=text(Component({launch:{adapter:'claude',mode:'interactive'}}));
  assert.match(claude,/Esc.*external.*receipt.*not guaranteed/i);assert.match(claude,/native terminal/i);
@@ -123,10 +124,11 @@ test('unknown or disconnected integration cannot advertise a ready or working CL
 });
 
 
-test('ended sidebar session labels explicitly identify historical events, not current permission waits',()=>{
- let label;function visit(n){if(ts.isJsxElement(n)&&n.openingElement.tagName.getText(source)==='small'&&n.getText(source).includes('agentLabel(')&&n.getText(source).includes('record.status'))label=n;ts.forEachChild(n,visit);}visit(source);assert.ok(label);
- const React={createElement:(_type,_props,...children)=>children.flat(Infinity).filter(x=>x!==false&&x!==null&&x!==undefined).join('')};
- const render=new Function('React','t','agentLabel','record',ts.transpileModule('const view='+label.getText(source)+';return view;',{compilerOptions:{target:ts.ScriptTarget.ESNext,jsx:ts.JsxEmit.React}}).outputText);
- for(const status of ['stopped','failed','succeeded'])assert.match(render(React,s=>s,agentLabel,{status,agent:{phase:'needs_permission',integration:'connected',unread_count:0}}),/^Last event: Permission required$/);
- assert.equal(render(React,s=>s,agentLabel,{status:'running',agent:{phase:'needs_permission',integration:'connected',unread_count:0}}),'Permission required');
+test('ended sidebar tooltips qualify historical events while rows keep only titles',()=>{
+ let row;function visit(n){if(ts.isJsxElement(n)&&n.openingElement.attributes.getText(source).includes('className={`session-row'))row=n;ts.forEachChild(n,visit);}visit(source);assert.ok(row);
+ const title=row.openingElement.attributes.properties.find(n=>n.name?.getText(source)==='title').initializer.expression;
+ const render=new Function('t','agentLabel','record','titleFor','statusLabels',ts.transpileModule('return ('+title.getText(source)+');',{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText);
+ for(const status of ['stopped','failed','succeeded'])assert.match(render(s=>s,agentLabel,{status,summary:{mode:'interactive'},agent:{phase:'needs_permission',integration:'connected'}},()=> 'Task',{stopped:'Stopped',failed:'Failed',succeeded:'Completed'}),/Last event: Permission required$/);
+ assert.doesNotMatch(render(s=>s,agentLabel,{status:'running',summary:{mode:'interactive'},agent:{phase:'needs_permission',integration:'connected'}},()=> 'Task',{running:'Running'}),/Last event/);
+ assert.doesNotMatch(row.getText(source),/<small|<time/);
 });

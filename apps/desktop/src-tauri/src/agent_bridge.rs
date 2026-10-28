@@ -255,6 +255,94 @@ fn claude_args(exe: &str) -> Result<Vec<String>, String> {
         serde_json::json!({"hooks":hooks}).to_string(),
     ])
 }
+pub(super) fn claude_hook_plugin(
+    exe: &str,
+    assets: &std::path::Path,
+) -> Result<Vec<String>, String> {
+    use std::hash::{Hash, Hasher};
+    let hooks: serde_json::Value =
+        serde_json::from_str(&claude_args(exe)?[1]).map_err(|_| "Invalid YAM hooks")?;
+    let manifest = serde_json::json!({"name":"yam-session-hooks", "version":"1.0.0", "description":"YAM session lifecycle callbacks", "author":{"name":"Jeff.Liu"}, "hooks": hooks["hooks"]}).to_string();
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    manifest.hash(&mut hash);
+    let helpers = assets.join("helpers");
+    let plugin = helpers.join(format!("claude-hooks-{:016x}", hash.finish()));
+    let directory = plugin.join(".claude-plugin");
+    for path in [&helpers, &plugin, &directory] {
+        super::background::private_root(path)?;
+    }
+    let path = directory.join("plugin.json");
+    if std::fs::symlink_metadata(&path).is_err() {
+        let mut file = super::background::private_file(&path, true)?;
+        file.write_all(manifest.as_bytes())
+            .and_then(|_| file.sync_all())
+            .map_err(|_| "Cannot store YAM Claude plugin")?;
+    }
+    let mut bytes = Vec::new();
+    super::background::private_file(&path, false)?
+        .take(manifest.len() as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "Cannot inspect YAM Claude plugin")?;
+    if bytes != manifest.as_bytes() {
+        return Err("Existing YAM Claude plugin differs; integration was not injected".into());
+    }
+    Ok(vec![
+        "--plugin-dir".into(),
+        plugin.to_str().ok_or("Invalid YAM plugin path")?.into(),
+    ])
+}
+
+fn claude_settings_args(
+    exe: &str,
+    args: &[String],
+    assets: &std::path::Path,
+) -> Result<Vec<String>, String> {
+    let mut injected = claude_args(exe)?;
+    let last = args
+        .iter()
+        .enumerate()
+        .filter_map(|(index, arg)| {
+            if arg == "--settings" {
+                args.get(index + 1).map(String::as_str)
+            } else {
+                arg.strip_prefix("--settings=")
+            }
+        })
+        .next_back();
+    let Some(settings) = last else {
+        return Ok(injected);
+    };
+    // File settings anchor permissions/sandbox to their directory; keep the native file untouched.
+    if !settings.starts_with('{') {
+        return claude_hook_plugin(exe, assets);
+    }
+    let mut settings: serde_json::Value =
+        serde_json::from_str(settings).map_err(|_| "Invalid Claude settings")?;
+    let settings = settings.as_object_mut().ok_or("Invalid Claude settings")?;
+    let hooks = settings
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or("Invalid Claude hooks")?;
+    let native: serde_json::Value =
+        serde_json::from_str(&injected[1]).map_err(|_| "Invalid YAM hooks")?;
+    for (event, groups) in native["hooks"].as_object().ok_or("Invalid YAM hooks")? {
+        hooks
+            .entry(event.clone())
+            .or_insert_with(|| serde_json::json!([]))
+            .as_array_mut()
+            .ok_or("Invalid Claude hook group")?
+            .extend(
+                groups
+                    .as_array()
+                    .ok_or("Invalid YAM hook group")?
+                    .iter()
+                    .cloned(),
+            );
+    }
+    injected[1] = serde_json::to_string(settings).map_err(|_| "Invalid Claude settings")?;
+    Ok(injected)
+}
 pub(super) fn credential() -> Result<String, String> {
     let mut bytes = [0u8; 32];
     #[cfg(unix)]
@@ -391,8 +479,8 @@ impl Bridge {
                         .is_some_and(|window| window.is_focused().unwrap_or(false))
                 })
             },
-            |app, id, title, body| {
-                super::send_native_notification(app.clone(), id.into(), title, body)
+            |app, id, project, title, body, kind| {
+                super::send_native_notification(app.clone(), id.into(), project, title, body, kind)
             },
         )
     }
@@ -401,7 +489,7 @@ impl Bridge {
         &self,
         app: tauri::AppHandle<R>,
         foreground: impl Fn(&tauri::AppHandle<R>) -> bool + Send + 'static,
-        send_native: impl Fn(&tauri::AppHandle<R>, &str, String, String) -> Result<(), String>
+        send_native: impl Fn(&tauri::AppHandle<R>, &str, &str, String, String, &str) -> Result<(), String>
             + Send
             + 'static,
     ) -> Result<(), String> {
@@ -445,7 +533,16 @@ impl Bridge {
                             history.native_delivery(
                                 id,
                                 super::agent_events::NativeSource::Round(entry),
-                                |_| send_native(&app, id, title, body),
+                                |record| {
+                                    send_native(
+                                        &app,
+                                        id,
+                                        &record.summary.cwd,
+                                        title,
+                                        body,
+                                        &entry.kind,
+                                    )
+                                },
                             )
                         },
                     );
@@ -984,25 +1081,18 @@ fn opencode_plugin(assets: &std::path::Path) -> Result<std::path::PathBuf, Strin
 }
 
 pub(super) fn validate_interactive_args(adapter: &str, args: &[String]) -> Result<(), String> {
+    if matches!(adapter, "claude" | "gemini") {
+        if adapter == "claude"
+            && args
+                .iter()
+                .any(|arg| matches!(arg.split('=').next(), Some("--bare" | "--safe-mode")))
+        {
+            return Err("Custom CLI configuration requires manual hook integration; existing CLI behavior is preserved".into());
+        }
+        return super::provider_launch::validate_launch_args(adapter, args, false);
+    }
     let (values, flags): (&[&str], &[&str]) = if adapter == "opencode" {
         (&["--model", "-m", "--agent"], &[])
-    } else if adapter == "gemini" {
-        (
-            &["--model", "-m", "--approval-mode"],
-            &["--sandbox", "--screen-reader"],
-        )
-    } else if adapter == "claude" {
-        (
-            &[
-                "--model",
-                "--effort",
-                "--permission-mode",
-                "--append-system-prompt",
-                "--system-prompt",
-                "--name",
-            ],
-            &["--verbose"],
-        )
     } else {
         (
             &[
@@ -1016,6 +1106,12 @@ pub(super) fn validate_interactive_args(adapter: &str, args: &[String]) -> Resul
                 "-i",
                 "--add-dir",
                 "--local-provider",
+                "--profile",
+                "-p",
+                "--enable",
+                "--disable",
+                "--config",
+                "-c",
             ],
             &[
                 "--search",
@@ -1033,6 +1129,39 @@ pub(super) fn validate_interactive_args(adapter: &str, args: &[String]) -> Resul
     let mut i = 0;
     while i < args.len() {
         let argument = &args[i];
+        if adapter == "codex" {
+            let config = if matches!(argument.as_str(), "-c" | "--config") {
+                Some(args.get(i + 1).ok_or_else(error)?.as_str())
+            } else {
+                argument
+                    .strip_prefix("--config=")
+                    .or_else(|| argument.strip_prefix("-c="))
+                    .or_else(|| {
+                        argument
+                            .strip_prefix("-c")
+                            .filter(|_| !argument.starts_with("--"))
+                    })
+            };
+            if let Some(config) = config {
+                let path = super::provider_launch::config_override_path(config)?;
+                if matches!(path[0].as_str(), "hooks" | "notify") {
+                    return Err(error());
+                }
+                i += if matches!(argument.as_str(), "-c" | "--config") {
+                    2
+                } else {
+                    1
+                };
+                continue;
+            }
+            if (argument.starts_with("-p") || argument.starts_with("-m"))
+                && !argument.starts_with("--")
+                && argument.len() > 2
+            {
+                i += 1;
+                continue;
+            }
+        }
         if flags.contains(&argument.as_str()) {
             i += 1;
             continue;
@@ -1200,6 +1329,15 @@ pub(super) fn validate_resume(
         serde_json::json!({"threadId":id,"includeTurns":false}),
         environment,
     )?;
+    // Native CLI owns profile/account selection; app-server does not apply all TUI options.
+    let provider = if launch.provider.is_none() {
+        thread["result"]["thread"]["modelProvider"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .ok_or("Invalid native thread provider")?
+    } else {
+        provider
+    };
     validate_resume_metadata(&thread, id, cwd, provider)
 }
 pub(super) struct Prepared {
@@ -1217,6 +1355,18 @@ pub(super) fn prepare(
     assets: &std::path::Path,
     _environment: Option<&super::provider_launch::Environment>,
 ) -> Result<Prepared, String> {
+    if launch.adapter == "pi" && launch.mode == "interactive" {
+        let version =
+            measured_version_checked(executable.as_os_str(), &[], |value| value.trim() == "1.4.0")?;
+        return Ok(Prepared {
+            token: credential()?,
+            generation: credential()?,
+            cli_version: Some(version),
+            args: vec![],
+            original: vec![],
+            opencode: None,
+        });
+    }
     if launch.adapter == "opencode" && launch.mode == "interactive" {
         validate_interactive_args("opencode", &super::parse_agent_args(&launch.extra_args)?)?;
         let plain = super::AgentLaunch {
@@ -1265,7 +1415,11 @@ pub(super) fn prepare(
             token: credential()?,
             generation: credential()?,
             cli_version: Some(cli_version),
-            args: claude_args(exe.to_str().ok_or("Helper executable path is not UTF-8")?)?,
+            args: claude_settings_args(
+                exe.to_str().ok_or("Helper executable path is not UTF-8")?,
+                &super::parse_agent_args(&launch.extra_args)?,
+                assets,
+            )?,
             original: vec![],
             opencode: None,
         });
@@ -1292,6 +1446,7 @@ pub(super) fn prepare(
     #[cfg(not(target_os = "macos"))]
     {
         let plain = super::AgentLaunch {
+            claude_context: None,
             codex: launch.codex.clone(),
             provider: launch.provider.clone(),
             env_refs: launch.env_refs.clone(),
@@ -1360,6 +1515,24 @@ impl Prepared {
 mod tests {
     use super::*;
     #[test]
+    fn routing_review_claude_last_settings_preserves_native_precedence_and_errors() {
+        let root =
+            std::env::temp_dir().join(format!("yam-settings-order-{}", crate::next_session_id()));
+        let args = vec![
+            "--settings".into(),
+            "invalid-earlier-value".into(),
+            "--settings={\"model\":\"chosen\",\"effortLevel\":\"max\"}".into(),
+        ];
+        let injected = claude_settings_args("/fixture/yam", &args, &root).unwrap();
+        let data: serde_json::Value = serde_json::from_str(&injected[1]).unwrap();
+        assert_eq!(data["model"], "chosen");
+        assert_eq!(data["effortLevel"], "max");
+        assert!(data["hooks"]["SessionStart"].is_array());
+        assert!(!root.exists());
+        let bad = vec!["--settings={}".into(), "--settings={bad}".into()];
+        assert!(claude_settings_args("/fixture/yam", &bad, &root).is_err());
+    }
+    #[test]
     fn closure_t05_real_delivery_loop_applies_context_focus_ttl_and_bounded_stop() {
         use tauri::Manager;
         let root =
@@ -1414,7 +1587,10 @@ mod tests {
                     tick_tx.send(tick).unwrap();
                     foreground
                 },
-                move |_, id, title, body| {
+                move |_, id, project, title, body, kind| {
+                    assert!(std::path::Path::new(project).is_dir());
+                    assert!(project.contains("yam-closure-delivery-"));
+                    assert_eq!(kind, "response_finished");
                     assert_eq!(id, "s-deliver");
                     assert!(title.contains("Response finished") && body.contains("review"));
                     observed_sends.fetch_add(1, Ordering::AcqRel);
@@ -1428,7 +1604,7 @@ mod tests {
             .start_delivery_with(
                 app.handle().clone(),
                 |_| panic!("duplicate delivery worker"),
-                |_, _, _, _| panic!("duplicate sender"),
+                |_, _, _, _, _, _| panic!("duplicate sender"),
             )
             .unwrap();
         let wait_cycles = || {
@@ -1687,6 +1863,7 @@ mod tests {
                     command: None,
                     status: "running".into(),
                     launch: Some(AgentLaunch {
+                        claude_context: None,
                         codex: None,
                         provider: None,
                         env_refs: Default::default(),
@@ -2435,6 +2612,7 @@ read end
         std::fs::write(&executable, script).unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
         let launch = super::super::AgentLaunch {
+            claude_context: None,
             adapter: "codex".into(),
             mode: "interactive".into(),
             codex: None,
@@ -2644,13 +2822,13 @@ read end
     fn alternate_config_directory_and_remote_flags_degrade_before_any_cli_query() {
         for extra in [
             "-cnotify=[]",
-            "-pprofile",
             "-C/tmp",
             "--cd=/tmp",
             "--remote=ws://localhost:123",
             "--worktree",
         ] {
             let launch = super::super::AgentLaunch {
+                claude_context: None,
                 codex: None,
                 provider: None,
                 env_refs: Default::default(),
@@ -2694,6 +2872,141 @@ read end
             assert!(!compatible_claude_version(version), "{version}");
         }
     }
+    #[cfg(unix)]
+    #[test]
+    fn fidelity_resume_native_profile_does_not_depend_on_app_server_tui_defaults() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(crate::next_session_id());
+        std::fs::create_dir(&root).unwrap();
+        let exe = root.join("fake-codex");
+        let id = "01a0f6ec-5463-78c3-a404-5a7ad3b933fe";
+        let script = format!(
+            r#"#!/bin/sh
+read init
+printf '%s\n' '{{"id":1,"result":{{}}}}'
+read initialized
+read query
+case "$query" in
+*config/read*) printf '%s\n' '{{"id":2,"result":{{"config":{{"model_provider":"openai"}}}}}}';;
+*thread/read*) printf '%s\n' '{{"id":2,"result":{{"thread":{{"id":"{id}","cwd":{cwd},"modelProvider":"native-profile-provider"}}}}}}';;
+esac
+read end
+"#,
+            cwd = serde_json::to_string(&root.to_string_lossy()).unwrap()
+        );
+        std::fs::write(&exe, script).unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut launch:crate::AgentLaunch=serde_json::from_value(serde_json::json!({"adapter":"codex","mode":"interactive","extra_args":"--profile review","prompt":null})).unwrap();
+        assert!(validate_resume(&exe, &root, id, &launch, None).is_ok());
+        launch.provider=Some(serde_json::from_value(serde_json::json!({"id":"codex","model":"test","base_url":"http://127.0.0.1:3425","api_key_env":null})).unwrap());
+        assert!(
+            validate_resume(&exe, &root, id, &launch, None).is_err(),
+            "managed provider identity must still match"
+        );
+        assert!(validate_resume(&exe, &root, "01a0f6ec-5463-78c3-a404-5a7ad3b933ff", &serde_json::from_value(serde_json::json!({"adapter":"codex","mode":"interactive","extra_args":"--profile review","prompt":null})).unwrap(), None).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repair_file_settings_preserve_native_hooks_and_resume() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(crate::next_session_id());
+        std::fs::create_dir(&root).unwrap();
+        let exe = root.join("fake-claude");
+        std::fs::write(&exe, "#!/bin/sh\nprintf '2.1.307 (Claude Code)\\n'\n").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let settings = serde_json::json!({"effortLevel":"xhigh","permissions":{"deny":["Bash(rm *)"]},"hooks":{"Stop":[{"matcher":"fixture","hooks":[{"type":"command","command":"/usr/bin/true"}]}]}});
+        let mut launch:crate::AgentLaunch=serde_json::from_value(serde_json::json!({"adapter":"claude","mode":"interactive","prompt":null,"extra_args":format!("--settings '{{\"effortLevel\":\"low\"}}' --settings '{}' --setting-sources user,project,local",settings)})).unwrap();
+        for file_settings in [false, true] {
+            if file_settings {
+                std::fs::write(root.join("extra.json"), settings.to_string()).unwrap();
+                launch.extra_args =
+                    "--settings extra.json --setting-sources user,project,local".into();
+            }
+            if file_settings {
+                let prepared = prepare(&exe, &launch, &root, &root, None)
+                    .expect("file settings must keep native paths and YAM hooks");
+                assert_eq!(prepared.args[0], "--plugin-dir");
+                let plugin =
+                    std::path::Path::new(&prepared.args[1]).join(".claude-plugin/plugin.json");
+                let manifest: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&plugin).unwrap()).unwrap();
+                assert!(manifest["hooks"]["SessionStart"].is_array());
+                assert!(manifest["hooks"]["PermissionRequest"].is_array());
+                assert_eq!(
+                    std::fs::read_to_string(root.join("extra.json")).unwrap(),
+                    settings.to_string()
+                );
+                assert_eq!(
+                    launch.extra_args,
+                    "--settings extra.json --setting-sources user,project,local"
+                );
+                let again = prepare(&exe, &launch, &root, &root, None).unwrap();
+                assert_eq!(again.args, prepared.args, "reuse the exact verified plugin");
+                std::fs::write(&plugin, "{}").unwrap();
+                assert!(
+                    prepare(&exe, &launch, &root, &root, None).is_err(),
+                    "do not load a modified YAM plugin"
+                );
+                assert!(crate::resume_command(
+                    &exe,
+                    &launch,
+                    "01a0f6ec-5463-78c3-a404-5a7ad3b933fe"
+                )
+                .is_ok());
+                assert!(crate::resume_picker_command(&exe, &launch).is_ok());
+                continue;
+            }
+            let prepared = prepare(&exe, &launch, &root, &root, None)
+                .expect("inline native settings must keep YAM hooks");
+            let actual: serde_json::Value = serde_json::from_str(&prepared.args[1]).unwrap();
+            assert_eq!(actual["effortLevel"], "xhigh");
+            assert_eq!(actual["permissions"], settings["permissions"]);
+            assert_eq!(actual["hooks"]["Stop"][0], settings["hooks"]["Stop"][0]);
+            assert_eq!(actual["hooks"]["Stop"].as_array().unwrap().len(), 2);
+            assert!(actual["hooks"]["SessionStart"].is_array());
+            assert!(
+                crate::resume_command(&exe, &launch, "01a0f6ec-5463-78c3-a404-5a7ad3b933fe")
+                    .is_ok()
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fidelity_arguments_preserve_normal_hook_integration() {
+        for args in [
+            vec!["-c", "model_reasoning_effort=high"],
+            vec!["--config=model_reasoning_summary=auto"],
+            vec!["--profile", "review"],
+            vec!["-pdeep-review"],
+            vec!["--enable", "multi_agent", "--disable", "fast_mode"],
+        ] {
+            let args = args
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>();
+            assert!(
+                validate_interactive_args("codex", &args).is_ok(),
+                "{args:?}"
+            );
+        }
+        let args = [
+            "--agent",
+            "reviewer",
+            "--add-dir",
+            "/tmp/extra",
+            "--plugin-dir",
+            "/tmp/plugins",
+        ]
+        .map(String::from);
+        assert!(validate_interactive_args("claude", &args).is_ok());
+        for config in ["notify=[]", "hooks.Stop=[]", "\"hooks\".SessionStart=[]"] {
+            assert!(validate_interactive_args("codex", &["-c".into(), config.into()]).is_err());
+        }
+    }
+
     #[test]
     fn safe_interactive_arguments_preserve_hooks_but_conflicts_degrade() {
         for (adapter, args) in [
@@ -2735,7 +3048,7 @@ read end
             .is_ok());
         }
         for (adapter, arg) in [
-            ("claude", "--settings=private.json"),
+            ("claude", "--settings"),
             ("claude", "--bare"),
             ("claude", "--resume=old"),
             ("claude", "--safe-mode"),
@@ -2833,8 +3146,10 @@ read end
             "adapter":"codex","mode":"interactive","extra_args":"","prompt":null,
             "provider":{"id":"custom","model":"fixture","base_url":"http://127.0.0.1:3425","api_key_env":null}
         })).unwrap();
-        let environment = super::super::provider_launch::prepare(&root, &launch, &|_| {
-            panic!("no source credentials")
+        let source = root.join("source");
+        std::fs::create_dir(&source).unwrap();
+        let environment = super::super::provider_launch::prepare(&root, &launch, &|name| {
+            (name == "CODEX_HOME").then(|| source.to_string_lossy().into_owned())
         })
         .unwrap();
         let marker = root.join("query-spawned");

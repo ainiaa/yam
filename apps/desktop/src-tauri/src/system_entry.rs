@@ -1212,23 +1212,28 @@ fn publish_status(manager: &super::SessionManager) {
     }
 }
 fn desktop_launch_command(executable: &std::path::Path) -> std::process::Command {
+    desktop_launch_command_with_link(executable, None)
+}
+pub(super) fn desktop_launch_command_with_link(
+    executable: &std::path::Path,
+    link: Option<&str>,
+) -> std::process::Command {
     #[cfg(target_os = "macos")]
-    if executable
-        .parent()
-        .is_some_and(|path| path.ends_with("Contents/MacOS"))
-    {
-        if let Some(bundle) = executable
-            .ancestors()
-            .nth(3)
-            .filter(|path| path.extension() == Some(std::ffi::OsStr::new("app")))
-        {
-            // Launch Services must register the GUI separately from the resident accessory owner.
-            let mut command = std::process::Command::new("/usr/bin/open");
+    if let Some(bundle) = super::mac_app::desktop_bundle(executable) {
+        let mut command = std::process::Command::new("/usr/bin/open");
+        if let Some(link) = link {
+            // Deliver an open-URL event even when the GUI is already running.
+            command.arg("-a").arg(bundle).arg(link);
+        } else {
             command.args(["-n", "-a"]).arg(bundle);
-            return command;
         }
+        return command;
     }
-    std::process::Command::new(executable)
+    let mut command = std::process::Command::new(executable);
+    if let Some(link) = link {
+        command.arg(link);
+    }
+    command
 }
 
 pub(super) fn open_native(app: &tauri::AppHandle) -> Result<(), String> {
@@ -1825,4 +1830,23 @@ mod stop_confirmation_tests {
             assert!(message.contains("all background tasks"));
         }
     }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[test]
+fn helper_notification_activation_delivers_session_url_to_running_or_cold_gui() {
+    let exe = std::path::Path::new(
+        "/Applications/YAM.app/Contents/Helpers/YAM Background.app/Contents/MacOS/yam-background",
+    );
+    let command = desktop_launch_command_with_link(exe, Some("yam://session/s-test"));
+    assert_eq!(command.get_program(), "/usr/bin/open");
+    assert_eq!(
+        command.get_args().collect::<Vec<_>>(),
+        vec!["-a", "/Applications/YAM.app", "yam://session/s-test"]
+    );
+    let command = desktop_launch_command(exe);
+    assert_eq!(
+        command.get_args().collect::<Vec<_>>(),
+        vec!["-n", "-a", "/Applications/YAM.app"]
+    );
 }

@@ -15,3 +15,26 @@ test('native menu subscription is scoped to the current webview so other windows
 });
 test('Chinese native menu keeps action IDs and shortcuts while translating labels',async()=>{const {setLocale}=await import('../src/i18n.ts');const {nativeMenuLabels}=await import('../src/native-menu.ts');const {defaultAppShortcuts}=await import('../src/app-shortcuts.ts');setLocale('zh-CN');try{const rows=nativeMenuLabels(defaultAppShortcuts(true),true);assert.equal(rows.new,'新建会话 · Command+N');assert.ok(rows.appearance);assert.ok(rows.settings.includes('终端'));}finally{setLocale('en');}});
 test('every YAM-owned native action translates and the native traversal supplies labels to nested items',async()=>{const {setLocale}=await import('../src/i18n.ts'),{nativeMenuLabels}=await import('../src/native-menu.ts'),{defaultAppShortcuts}=await import('../src/app-shortcuts.ts');setLocale('en');const english=nativeMenuLabels(defaultAppShortcuts(true),true);setLocale('zh-CN');try{const chinese=nativeMenuLabels(defaultAppShortcuts(true),true);assert.deepEqual(Object.keys(chinese),Object.keys(english));for(const key of Object.keys(chinese))assert.notEqual(chinese[key],english[key],key);const native=rawReadFileSync(new URL('../src-tauri/src/native_menu.rs',import.meta.url),'utf8');assert.match(native,/translate_items\(\s*item\.items\(\)[^\n]*,\s*chinese,\s*labels,?\s*\)/);assert.match(native,/action_caption\(\s*item\.id\(\)\.as_ref\(\)/);}finally{setLocale('en');}});
+
+test('native close closes only the focused file/workspace, otherwise requests the current desktop window close',async()=>{
+ const ts=(await import('typescript')).default,{dispatchNativeMenu}=await import('../src/native-menu.ts');
+ const source=ts.createSourceFile('App.tsx',readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
+ let handler;function visit(n){if(ts.isBinaryExpression(n)&&n.left.getText(source)==='nativeMenuHandler.current')handler=n.right;ts.forEachChild(n,visit);}visit(source);assert.ok(handler);
+ for(const scenario of ['file','workspace','terminal','modal','failure']){
+  const calls=[],root={querySelector:()=>scenario==='file'?{click:()=>calls.push('file')}:null};
+  const env={document:{querySelector:()=>scenario==='modal'?{}:null,activeElement:{closest:()=>['file','workspace'].includes(scenario)?root:null}},closeProjectTools:()=>calls.push('workspace'),dispatchNativeMenu,
+   nativeInvoke:async name=>{calls.push(name);if(scenario==='failure')throw Error('unavailable');},setError:value=>calls.push(['error',value])};
+  const run=new Function(...Object.keys(env),ts.transpileModule('return ('+handler.getText(source)+');',{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText)(...Object.values(env));
+  run('close');await new Promise(setImmediate);
+  assert.deepEqual(calls,scenario==='file'?['file']:scenario==='workspace'?['workspace']:scenario==='modal'?[]:scenario==='failure'?['native_close_window',['error','Window could not be closed.']]:['native_close_window'],scenario);
+ }
+});
+
+test('macOS Cmd+W routes through the app instead of the predefined window-close responder',()=>{
+ const native=readFileSync(new URL('../src-tauri/src/native_menu.rs',import.meta.url),'utf8');
+ assert.match(native,/"yam-menu-close"[\s\S]{0,160}Some\("CmdOrCtrl\+W"\)/);
+ assert.match(native,/pub\(super\) fn native_close_window\(/);
+ assert.match(native,/\["main", "terminal-secondary"\]\.contains\(&webview\.label\(\)\)/);
+ assert.match(native,/webview\.window\(\)\.label\(\) != webview\.label\(\)/);
+ const lib=readFileSync(new URL('../src-tauri/src/lib.rs',import.meta.url),'utf8');assert.match(lib,/native_menu::native_close_window/);
+});

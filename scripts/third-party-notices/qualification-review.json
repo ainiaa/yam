@@ -16096,5 +16096,447 @@
     "independent_review": "notices-review-repaired.json",
     "new_identities": 6,
     "typescript_third_party_notices_preserved": true
+  },
+  "version_rebinding_0_1_10": {
+    "author": "Jeff.Liu",
+    "reason": "First-party yam-desktop version only; third-party lock records and manifest records unchanged",
+    "before": {
+      "cargo_lock": "2a5a843dcf008b4108695476d6cbfe13795b14ef750630e6b196fd6801e8fd92",
+      "declarations": "f101de8351b12ab5d85c06559afee28dc987971814f44a3177750bc5f6c2acb4",
+      "pnpm_lock": "01b56b4dc19d6c001665e6190bc3d1f40d68e85c8c00e12407b68d61fa86b4f1",
+      "production_graph": "be557883c656a71863b7a2aea41d277b67c86a3ecb5bad373965a3fbad314b1e"
+    },
+    "after": {
+      "cargo_lock": "045239a6e49c4eabd28fbd99d4563ed070f4fd505a3837754a29d8bf5d058ac6",
+      "pnpm_lock": "01b56b4dc19d6c001665e6190bc3d1f40d68e85c8c00e12407b68d61fa86b4f1",
+      "declarations": "f101de8351b12ab5d85c06559afee28dc987971814f44a3177750bc5f6c2acb4",
+      "production_graph": "be557883c656a71863b7a2aea41d277b67c86a3ecb5bad373965a3fbad314b1e"
+    },
+    "previous_manifest_sha256": "d8571697bdb296ae1307510fa196c582e33feb618b2033e27d9d6895fc9b2dc2",
+    "manifest_sha256": "e50a9f912f1ad7c56d623096992c580ad0bc335f64bfd994ab15f1041bfc38c0"
+  },
+  "codemirror_dependencies_20261027": {
+    "author": "Jeff.Liu",
+    "purpose": "Mechanical complete-text and exact-source qualification; not legal approval",
+    "manifest_sha256": "fffd0261a1b6d4a5b7a6019132c88876b6a82f12fce44b9d6d52c4b8474fbbcb",
+    "inputs": {
+      "cargo_lock": "045239a6e49c4eabd28fbd99d4563ed070f4fd505a3837754a29d8bf5d058ac6",
+      "declarations": "dd2e50921eb8f0275863b35f3b954149dbf62c9d6aac20b70dec85e8f8c51925",
+      "pnpm_lock": "c82ae95c7d8638e8709dd9b1535c95d383834091755250d1ad2eedab1c496ab3",
+      "production_graph": "e6f1a111635fcebc3a8c96ed553d17ebfc1cc5605a202a36ca1b79d2fc812919"
+    },
+    "new_identities": 17,
+    "distinct_bodies": 6,
+    "independent_review": "Archive SHA512 SRI, installed metadata bytes, exact production graph delta, complete MIT text and unchanged historical material independently verified.",
+    "records": [
+      {
+        "identity": {
+          "ecosystem": "npm",
+          "name": "@codemirror/autocomplete",
+          "version": "6.20.4",
+          "source": "https://registry.npmjs.org/@codemirror/autocomplete/-/autocomplete-6.20.4.tgz",
+          "checksum": "sha512-yF8RhOf2SXlg00+qtupzLhrglcas61boqaONiNcbPIebHCpJocpqTBA6dyrtUrQO47hqyTdeob/3XnYilT7TaQ=="
+        },
+        "license": "MIT",
+        "qualified": [
+          {
+            "sha256": "05c6130cda97e7600ca91427a41e8a065efcf82365fc0293e7de80faec494c07",
+            "bytes": 1118,
+            "provenance": {
+              "kind": "sri_verified_npm_member",
+              "sri": "sha512-yF8RhOf2SXlg00+qtupzLhrglcas61boqaONiNcbPIebHCpJocpqTBA6dyrtUrQO47hqyTdeob/3XnYilT7TaQ==",
+              "archive_sha256": "40b9657b137284426bcd829cdee7dc78a748337de997a12b10b5c725f67aa0d0",
+              "source": "https://registry.npmjs.org/@codemirror/autocomplete/-/autocomplete-6.20.4.tgz",
+              "member": "package/LICENSE"
+            },
+            "classification": "MIT"
+          }
+        ]
+      },
+      {
+        "identity": {
+          "ecosystem": "npm",
+          "name": "@codemirror/commands",
+          "version": "6.11.1",
+          "source": "https://registry.npmjs.org/@codemirror/commands/-/commands-6.11.1.tgz",
+          "checksum": "sha512-O/4hG3SC1YwcmQ0d2UVNDs+AsaNWd1iHVxbTeEBuqH+6bExAiPK3iS/BvpY6rZGURALv4ZD3sIgcCmRvw3ehBg=="
+        },
+        "license": "MIT",
+        "qualified": [
+          {
+            "sha256": "05c6130cda97e7600ca91427a41e8a065efcf82365fc0293e7de80faec494c07",
+            "bytes": 1118,
+            "provenance": {
+              "kind": "sri_verified_npm_member",
+              "sri": "sha512-O/4hG3SC1YwcmQ0d2UVNDs+AsaNWd1iHVxbTeEBuqH+6bExAiPK3iS/BvpY6rZGURALv4ZD3sIgcCmRvw3ehBg==",
+              "archive_sha256": "f477f46d8c00278e1b387baebd53bd6556fd5f3c7401ebe2a05543600fcbff0f",
+              "source": "https://registry.npmjs.org/@codemirror/commands/-/commands-6.11.1.tgz",
+              "member": "package/LICENSE"
+            },
+            "classification": "MIT"
+          }
+        ]
+      },
+      {
+        "identity": {
+          "ecosystem": "npm",
+          "name": "@codemirror/language",
+          "version": "6.13.1",
+          "source": "https://registry.npmjs.org/@codemirror/language/-/language-6.13.1.tgz",
+          "checksum": "sha512-zfvU2r3TyylQLMj/te+5CnQ0rSqZi8B1oTCBbQkagcLW4Xc6imab6qN+pEJhsuNOLaJqiRyBXp9UhWA1DhVvDw=="
+        },
+        "license": "MIT",
+        "qualified": [
+          {
+            "sha256": "05c6130cda97e7600ca91427a41e8a065efcf82365fc0293e7de80faec494c07",
+            "bytes": 1118,
+            "provenance": {
+              "kind": "sri_verified_npm_member",
+              "sri": "sha512-zfvU2r3TyylQLMj/te+5CnQ0rSqZi8B1oTCBbQkagcLW4Xc6imab6qN+pEJhsuNOLaJqiRyBXp9UhWA1DhVvDw==",
+              "archive_sha256": "e711ec28da046f6c163e777c5466d8ac805ee9ef5f51c511e8729c6789be7f83",
+              "source": "https://registry.npmjs.org/@codemirror/language/-/language-6.13.1.tgz",
+              "member": "package/LICENSE"
+            },
+            "classification": "MIT"
+          }
+        ]
+      },
+      {
+        "identity": {
+          "ecosystem": "npm",
+          "name": "@codemirror/legacy-modes",
+          "version": "6.5.5",
+          "source": "https://registry.npmjs.org/@codemirror/legacy-modes/-/legacy-modes-6.5.5.tgz",
+          "checksum": "sha512-9ltT214oMb3Y1w5eAZMSigzrjzZnMI2Wa3Feq73rU/i4C56MkwrpfswfQYOr28C5pXr6dWwspNTMyeHXlzWMxg=="
+        },
+        "license": "MIT",
+        "qualified": [
+          {
+            "sha256": "05c6130cda97e7600ca91427a41e8a065efcf82365fc0293e7de80faec494c07",
+            "bytes": 1118,
+            "provenance": {
+              "kind": "sri_verified_npm_member",
+              "sri": "sha512-9ltT214oMb3Y1w5eAZMSigzrjzZnMI2Wa3Feq73rU/i4C56MkwrpfswfQYOr28C5pXr6dWwspNTMyeHXlzWMxg==",
+              "archive_sha256": "ca845d375f3fb240ca6adc737fe77f30b19ef208e4fcf93d0e25cc492d8ca125",
+              "source": "https://registry.npmjs.org/@codemirror/legacy-modes/-/legacy-modes-6.5.5.tgz",
+              "member": "package/LICENSE"
+            },
+            "classification": "MIT"
+          }
+        ]
+      },
+      {
+        "identity": {
+          "ecosystem": "npm",
+          "name": "@codemirror/lint",
+          "version": "6.9.7",
+          "source": "https://registry.npmjs.org/@codemirror/lint/-/lint-6.9.7.tgz",
+          "checksum": "sha512-28/+iWLYxKxsvGYhSYL7zaCZqLz5+FFFDq9tVsvGv9kv8RY4fFAchJ5WX9M3YrrRlTIsECjsXPqeNgnSmNP2dg=="
+        },
+        "license": "MIT",
+        "qualified": [
+          {
+            "sha256": "05c6130cda97e7600ca91427a41e8a065efcf82365fc0293e7de80faec494c07",
+            "bytes": 1118,
+            "provenance": {
+              "kind": "sri_verified_npm_member",
+              "sri": "sha512-28/+iWLYxKxsvGYhSYL7zaCZqLz5+FFFDq9tVsvGv9kv8RY4fFAchJ5WX9M3YrrRlTIsECjsXPqeNgnSmNP2dg==",
+              "archive_sha256": "934a9dbd3dd10ea35e7dc3aa3a3cd0609edd53d040d4a44dac2cbf678592d691",
+              "source": "https://registry.npmjs.org/@codemirror/lint/-/lint-6.9.7.tgz",
+              "member": "package/LICENSE"
+            },
+            "classification": "MIT"
+          }
+        ]
+      },
+      {
+        "identity": {
+          "ecosystem": "npm",
+          "name": "@codemirror/search",
+          "version": "6.7.2",
+          "source": "https://registry.npmjs.org/@codemirror/search/-/search-6.7.2.tgz",
+          "checksum": "sha512-gUYkYhT2+n/+VGZ+8EzE5WFkYZUZYm1VOKDudIsNqh42uRVQJ0a6Yss9sdKT3MeOYfuL1N6AZA57oza0Oyr0LA=="
+        },
+        "license": "MIT",
+        "qualified": [
+          {
+            "sha256": "05c6130cda97e7600ca91427a41e8a065efcf82365fc0293e7de80faec494c07",
+            "bytes": 1118,
+            "provenance": {
+              "kind": "sri_verified_npm_member",
+              "sri": "sha512-gUYkYhT2+n/+VGZ+8EzE5WFkYZUZYm1VOKDudIsNqh42uRVQJ0a6Yss9sdKT3MeOYfuL1N6AZA57oza0Oyr0LA==",
+              "archive_sha256": "cea9bcf62e34f89f2a49bc5e37bcf6d4f32049892f5a0b1cbd0b8160094dec97",
+              "source": "https://registry.npmjs.org/@codemirror/search/-/search-6.7.2.tgz",
+              "member": "package/LICENSE"
+            },
+            "classification": "MIT"
+          }
+        ]
+      },
+      {
+        "identity": {
+          "ecosystem": "npm",
+          "name": "@codemirror/state",
+          "version": "6.7.6",
+          "source": "https://registry.npmjs.org/@codemirror/state/-/state-6.7.6.tgz",
+          "checksum": "sha512-kAz+AncRtKuIknedxT1bq4XwXv4UowhbkHU1myPrtVb/jZtImWuV5BXzv5vK6i3kYACsdiZiQKFQQ5Mq7elW8w=="
+        },
+        "license": "MIT",
+        "qualified": [
+          {
+            "sha256": "05c6130cda97e7600ca91427a41e8a065efcf82365fc0293e7de80faec494c07",
+            "bytes": 1118,
+            "provenance": {
+              "kind": "sri_verified_npm_member",
+              "sri": "sha512-kAz+AncRtKuIknedxT1bq4XwXv4UowhbkHU1myPrtVb/jZtImWuV5BXzv5vK6i3kYACsdiZiQKFQQ5Mq7elW8w==",
+              "archive_sha256": "91d75acc955ceeaf86af9396c11cda7694fe6222aac8427fa033d89eff5ac839",
+              "source": "https://registry.npmjs.org/@codemirror/state/-/state-6.7.6.tgz",
+              "member": "package/LICENSE"
+            },
+            "classification": "MIT"
+          }
+        ]
+      },
+      {
+        "identity": {
+          "ecosystem": "npm",
+          "name": "@codemirror/streamparser",
+          "version": "6.0.0",
+          "source": "https://registry.npmjs.org/@codemirror/streamparser/-/streamparser-6.0.0.tgz",
+          "checksum": "sha512-JTFPF6xrfjt0mnfGPgzcLiMwYmvIyNaoizp8BYzv8FE8KrT6GBGDZ190rtt+O7Wke3gG/MFHyiY9YGNeimof4w=="
+        },
+        "license": "MIT",
+        "qualified": [
+          {
+            "sha256": "05c6130cda97e7600ca91427a41e8a065efcf82365fc0293e7de80faec494c07",
+            "bytes": 1118,
+            "provenance": {
+              "kind": "sri_verified_npm_member",
+              "sri": "sha512-JTFPF6xrfjt0mnfGPgzcLiMwYmvIyNaoizp8BYzv8FE8KrT6GBGDZ190rtt+O7Wke3gG/MFHyiY9YGNeimof4w==",
+              "archive_sha256": "b4888c5ab40350e7a1747d765948a8fa45cfd127c479dd4cdef8097046efe14a",
+              "source": "https://registry.npmjs.org/@codemirror/streamparser/-/streamparser-6.0.0.tgz",
+              "member": "package/LICENSE"
+            },
+            "classification": "MIT"
+          }
+        ]
+      },
+      {
+        "identity": {
+          "ecosystem": "npm",
+          "name": "@codemirror/view",
+          "version": "6.43.15",
+          "source": "https://registry.npmjs.org/@codemirror/view/-/view-6.43.15.tgz",
+          "checksum": "sha512-HHsfpqFeHyXLs983pSRe38Xajs0vFWZQ2BuX0m7Ki8w3jZ5iD8cuR3lBz2/5/X53Dhf32SBHKh6rtSTB6tKeGw=="
+        },
+        "license": "MIT",
+        "qualified": [
+          {
+            "sha256": "05c6130cda97e7600ca91427a41e8a065efcf82365fc0293e7de80faec494c07",
+            "bytes": 1118,
+            "provenance": {
+              "kind": "sri_verified_npm_member",
+              "sri": "sha512-HHsfpqFeHyXLs983pSRe38Xajs0vFWZQ2BuX0m7Ki8w3jZ5iD8cuR3lBz2/5/X53Dhf32SBHKh6rtSTB6tKeGw==",
+              "archive_sha256": "f0d5921406f841d211fa0887aabf10626c47676bfc63a4abed2a4d207e27c5ac",
+              "source": "https://registry.npmjs.org/@codemirror/view/-/view-6.43.15.tgz",
+              "member": "package/LICENSE"
+            },
+            "classification": "MIT"
+          }
+        ]
+      },
+      {
+        "identity": {
+          "ecosystem": "npm",
+          "name": "@lezer/common",
+          "version": "1.5.4",
+          "source": "https://registry.npmjs.org/@lezer/common/-/common-1.5.4.tgz",
+          "checksum": "sha512-xt3Q4z64xM+xhg4M7NXqw1N//1O74bUFo5kz6fwMeC4qwxSuRdwkYSmjcqCEEKYkNw5e67f2hcNqBoNERAEU0w=="
+        },
+        "license": "MIT",
+        "qualified": [
+          {
+            "sha256": "568902fb66eaf1f11750e966b33fd7b5d7c618e65af09f35ef843635bcf5f1ba",
+            "bytes": 1113,
+            "provenance": {
+              "kind": "sri_verified_npm_member",
+              "sri": "sha512-xt3Q4z64xM+xhg4M7NXqw1N//1O74bUFo5kz6fwMeC4qwxSuRdwkYSmjcqCEEKYkNw5e67f2hcNqBoNERAEU0w==",
+              "archive_sha256": "4374a52506fe751c934b9ee6c4d56fc827c5cf590dd78277833b45fbb133d3df",
+              "source": "https://registry.npmjs.org/@lezer/common/-/common-1.5.4.tgz",
+              "member": "package/LICENSE"
+            },
+            "classification": "MIT"
+          }
+        ]
+      },
+      {
+        "identity": {
+          "ecosystem": "npm",
+          "name": "@lezer/highlight",
+          "version": "1.2.5",
+          "source": "https://registry.npmjs.org/@lezer/highlight/-/highlight-1.2.5.tgz",
+          "checksum": "sha512-O1GMVKgtf5YspFaRzpmqkVgMtIk2HG9uMAbH6wdAIdNh3TVzCsch/+cRi+6l2//UGDKe6NB9BW3cvuR5ezMQ0w=="
+        },
+        "license": "MIT",
+        "qualified": [
+          {
+            "sha256": "568902fb66eaf1f11750e966b33fd7b5d7c618e65af09f35ef843635bcf5f1ba",
+            "bytes": 1113,
+            "provenance": {
+              "kind": "sri_verified_npm_member",
+              "sri": "sha512-O1GMVKgtf5YspFaRzpmqkVgMtIk2HG9uMAbH6wdAIdNh3TVzCsch/+cRi+6l2//UGDKe6NB9BW3cvuR5ezMQ0w==",
+              "archive_sha256": "e349eec1ff4382439c1e6286ae937e0203a8349c5192e2e133863391775ac7ff",
+              "source": "https://registry.npmjs.org/@lezer/highlight/-/highlight-1.2.5.tgz",
+              "member": "package/LICENSE"
+            },
+            "classification": "MIT"
+          }
+        ]
+      },
+      {
+        "identity": {
+          "ecosystem": "npm",
+          "name": "@lezer/lr",
+          "version": "1.4.11",
+          "source": "https://registry.npmjs.org/@lezer/lr/-/lr-1.4.11.tgz",
+          "checksum": "sha512-UwgZcl1R66H2hDzBrA7kWyYmX6s8p5TQ+e/t7CuvgCtBEPxbEPaHYHu+pJBvTvDotEJpuQkJjbXuHiw5Cixxgw=="
+        },
+        "license": "MIT",
+        "qualified": [
+          {
+            "sha256": "568902fb66eaf1f11750e966b33fd7b5d7c618e65af09f35ef843635bcf5f1ba",
+            "bytes": 1113,
+            "provenance": {
+              "kind": "sri_verified_npm_member",
+              "sri": "sha512-UwgZcl1R66H2hDzBrA7kWyYmX6s8p5TQ+e/t7CuvgCtBEPxbEPaHYHu+pJBvTvDotEJpuQkJjbXuHiw5Cixxgw==",
+              "archive_sha256": "9499b81992aae73e3aef90396eb1469b143d35a37ec34ab9f3fe06300ab04e90",
+              "source": "https://registry.npmjs.org/@lezer/lr/-/lr-1.4.11.tgz",
+              "member": "package/LICENSE"
+            },
+            "classification": "MIT"
+          }
+        ]
+      },
+      {
+        "identity": {
+          "ecosystem": "npm",
+          "name": "@marijn/find-cluster-break",
+          "version": "1.0.4",
+          "source": "https://registry.npmjs.org/@marijn/find-cluster-break/-/find-cluster-break-1.0.4.tgz",
+          "checksum": "sha512-Wy0V7+SGUjnF9/TkiM1hKVDPj7jKXduPNboMVtHTA8dySMURWqfg/JZ9E2Sq8JgSJmkl7k7Qe9FLeMSrSraWmQ=="
+        },
+        "license": "MIT",
+        "qualified": [
+          {
+            "sha256": "9360b00fdd091f05c783b568bdd46c679c41b72415599252de98949462ea1acb",
+            "bytes": 1102,
+            "provenance": {
+              "kind": "sri_verified_npm_member",
+              "sri": "sha512-Wy0V7+SGUjnF9/TkiM1hKVDPj7jKXduPNboMVtHTA8dySMURWqfg/JZ9E2Sq8JgSJmkl7k7Qe9FLeMSrSraWmQ==",
+              "archive_sha256": "5d12b770b64d46632c84fcd18e1d4c09f195ed0f5dbc71f94a41f0af333eaeae",
+              "source": "https://registry.npmjs.org/@marijn/find-cluster-break/-/find-cluster-break-1.0.4.tgz",
+              "member": "package/LICENSE"
+            },
+            "classification": "MIT"
+          }
+        ]
+      },
+      {
+        "identity": {
+          "ecosystem": "npm",
+          "name": "codemirror",
+          "version": "6.0.2",
+          "source": "https://registry.npmjs.org/codemirror/-/codemirror-6.0.2.tgz",
+          "checksum": "sha512-VhydHotNW5w1UGK0Qj96BwSk/Zqbp9WbnyK2W/eVMv4QyF41INRGpjUhFJY7/uDNuudSc33a/PKr4iDqRduvHw=="
+        },
+        "license": "MIT",
+        "qualified": [
+          {
+            "sha256": "05c6130cda97e7600ca91427a41e8a065efcf82365fc0293e7de80faec494c07",
+            "bytes": 1118,
+            "provenance": {
+              "kind": "sri_verified_npm_member",
+              "sri": "sha512-VhydHotNW5w1UGK0Qj96BwSk/Zqbp9WbnyK2W/eVMv4QyF41INRGpjUhFJY7/uDNuudSc33a/PKr4iDqRduvHw==",
+              "archive_sha256": "d2fc839b12c48f9f7e1405c39f8c4488628c306bfbec728b81cf95802c224ac6",
+              "source": "https://registry.npmjs.org/codemirror/-/codemirror-6.0.2.tgz",
+              "member": "package/LICENSE"
+            },
+            "classification": "MIT"
+          }
+        ]
+      },
+      {
+        "identity": {
+          "ecosystem": "npm",
+          "name": "crelt",
+          "version": "1.0.7",
+          "source": "https://registry.npmjs.org/crelt/-/crelt-1.0.7.tgz",
+          "checksum": "sha512-aK6BbWfhf4U/wCcLHKPJl/xa6VkVstRaPywWtMKGwuOLc/wZTyQYuoxgvZnNsBvv7Kg3YTBQYYBCggcviQczuA=="
+        },
+        "license": "MIT",
+        "qualified": [
+          {
+            "sha256": "23852ebf6aef7fadffc92514b3c5df163a8651f2c3ed0dbb494cb49d93bd5de5",
+            "bytes": 1089,
+            "provenance": {
+              "kind": "sri_verified_npm_member",
+              "sri": "sha512-aK6BbWfhf4U/wCcLHKPJl/xa6VkVstRaPywWtMKGwuOLc/wZTyQYuoxgvZnNsBvv7Kg3YTBQYYBCggcviQczuA==",
+              "archive_sha256": "3542299c0278fdc26aceb2b13d31bffbcb89d7367706bbc457130e3fd103c03e",
+              "source": "https://registry.npmjs.org/crelt/-/crelt-1.0.7.tgz",
+              "member": "package/LICENSE"
+            },
+            "classification": "MIT"
+          }
+        ]
+      },
+      {
+        "identity": {
+          "ecosystem": "npm",
+          "name": "style-mod",
+          "version": "4.1.4",
+          "source": "https://registry.npmjs.org/style-mod/-/style-mod-4.1.4.tgz",
+          "checksum": "sha512-XXWIQt633/EpAFx8aZDOTjBzrCaGmhvEQlQo6MVPfa2OzO2cWo+4hV9h+6UkHYlXGfy+ODXKUdP7Pthmcu5ATw=="
+        },
+        "license": "MIT",
+        "qualified": [
+          {
+            "sha256": "cb4474e26547397169061d3586c00022cda5330a1b64fa13e872319f3b63aff1",
+            "bytes": 1100,
+            "provenance": {
+              "kind": "sri_verified_npm_member",
+              "sri": "sha512-XXWIQt633/EpAFx8aZDOTjBzrCaGmhvEQlQo6MVPfa2OzO2cWo+4hV9h+6UkHYlXGfy+ODXKUdP7Pthmcu5ATw==",
+              "archive_sha256": "769073434ab698eb035cbaa9df5d028231c25d95bc7b8676a46d603fb2e89e39",
+              "source": "https://registry.npmjs.org/style-mod/-/style-mod-4.1.4.tgz",
+              "member": "package/LICENSE"
+            },
+            "classification": "MIT"
+          }
+        ]
+      },
+      {
+        "identity": {
+          "ecosystem": "npm",
+          "name": "w3c-keyname",
+          "version": "2.2.8",
+          "source": "https://registry.npmjs.org/w3c-keyname/-/w3c-keyname-2.2.8.tgz",
+          "checksum": "sha512-dpojBhNsCNN7T82Tm7k26A6G9ML3NkhDsnw9n/eoxSRlVBB4CEtIQ/KTCLI2Fwf3ataSXRhYFkQi3SlnFwPvPQ=="
+        },
+        "license": "MIT",
+        "qualified": [
+          {
+            "sha256": "869c30f368eb08735e779027b9f4bc9fea2f39624351856aebe42741f0bc0884",
+            "bytes": 1100,
+            "provenance": {
+              "kind": "sri_verified_npm_member",
+              "sri": "sha512-dpojBhNsCNN7T82Tm7k26A6G9ML3NkhDsnw9n/eoxSRlVBB4CEtIQ/KTCLI2Fwf3ataSXRhYFkQi3SlnFwPvPQ==",
+              "archive_sha256": "05d21484026d1f2dd842c843181e391e66d60f1d5dff292d562c3f40302dab36",
+              "source": "https://registry.npmjs.org/w3c-keyname/-/w3c-keyname-2.2.8.tgz",
+              "member": "package/LICENSE"
+            },
+            "classification": "MIT"
+          }
+        ]
+      }
+    ]
   }
 }

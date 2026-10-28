@@ -2190,7 +2190,8 @@ fn settings_target(target: Option<&str>) -> Result<&str, String> {
         | "system-entry"
         | "directory-reporting"
         | "command-reporting"
-        | "launch-settings") => Ok(value),
+        | "launch-settings"
+        | "support") => Ok(value),
         _ => Err("invalid_settings_target".into()),
     }
 }
@@ -2208,6 +2209,7 @@ fn settings_targets_preserve_pages_and_reject_unknown_values() {
         "system-entry",
         "directory-reporting",
         "command-reporting",
+        "support",
     ] {
         assert_eq!(settings_target(Some(page)).unwrap(), page);
     }

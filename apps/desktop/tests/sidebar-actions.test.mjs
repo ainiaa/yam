@@ -12,8 +12,8 @@ function visit(node){if(ts.isFunctionDeclaration(node)&&node.name)functions.set(
 function actual(name,bindings){assert.ok(functions.has(name),`missing ${name}`);return new Function(...Object.keys(bindings),ts.transpile(functions.get(name),{target:ts.ScriptTarget.ES2022})+';return '+name)(...Object.values(bindings));}
 test('project creation passes the clicked directory rather than the selected project',()=>{
  const button=buttons.find(node=>node.getText(tree).includes('newSession(project.path)'));assert.ok(button,'project session button');
- const paths=[];const render=new Function('React','project','newSession','starting','t',ts.transpile('return ('+button.getText(tree)+')',{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2022}));
- const view=render({createElement:(type,props)=>({type,props})},{name:'Other',path:'/other'},path=>paths.push(path),false,x=>x);view.props.onClick();assert.deepEqual(paths,['/other']);
+ const paths=[];const render=new Function('Plus','React','project','newSession','starting','t',ts.transpile('return ('+button.getText(tree)+')',{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2022}));
+ const view=render("Plus",{createElement:(type,props)=>({type,props})},{name:'Other',path:'/other'},path=>paths.push(path),false,x=>x);view.props.onClick();assert.deepEqual(paths,['/other']);
 });
 test('removed projects remain hidden even when history reloads, without losing history',()=>{
  const sessions=[{summary:{cwd:'/gone/'}},{summary:{cwd:'/keep'}}];
@@ -92,4 +92,13 @@ test('session context menu stays inside the window and focuses its first action'
  open(row,795,595);assert.equal(menu.open,true);assert.deepEqual(actions.style,{left:'612px',top:'502px'});assert.equal(focused,1);
  open(row,-10,-10);assert.deepEqual(actions.style,{left:'8px',top:'8px'});
  open({parentElement:null},10,10);menu.querySelector=()=>null;open(row,10,10);assert.equal(focused,2);
+});
+
+
+test('project and workspace action menus stay in the window and open above a bottom anchor',()=>{
+ for(const [anchor,expectedTop] of [[{top:100,bottom:128,right:220},134],[{top:700,bottom:728,right:220},434]]){
+  const actions={offsetWidth:232,offsetHeight:260,style:{}};
+  actual('positionProjectMenu',{window:{innerWidth:800,innerHeight:760}})({open:true,getBoundingClientRect:()=>anchor,querySelector:()=>actions});
+  assert.equal(actions.style.left,'8px');assert.equal(actions.style.top,expectedTop+'px');
+ }
 });

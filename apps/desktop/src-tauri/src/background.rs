@@ -583,7 +583,13 @@ pub(crate) fn validate_command(command: &str, args: &serde_json::Value) -> Resul
             (&["request"], &["request"])
         }
         "cli_show" | "cli_focus" | "cli_stop" | "archive_session" | "restore_archive"
-        | "get_session" => (&["session_id"], &["session_id"]),
+        | "get_session" | "test_notification" => (&["session_id"], &["session_id"]),
+        "get_pi_routing" => (&["session_id"], &["session_id"]),
+        "pi_routing_control" => (
+            &["session_id", "generation", "request"],
+            &["session_id", "generation", "request"],
+        ),
+        "pi_routing_catalog" => (&["cwd", "gateway"], &["cwd", "gateway"]),
         "cli_start" => (&["request_key", "start"], &["request_key", "start"]),
         "cli_events" => (&["cursor"], &["cursor"]),
         "set_history_policy" => (&["auto_archive_30_days"], &["auto_archive_30_days"]),
@@ -1113,6 +1119,28 @@ fn dispatch(app: &tauri::AppHandle, request: Request) -> Result<serde_json::Valu
                 return Ok(serde_json::json!({"session_id":session.session_id,"status":"started"}));
             }
             let result = match request.command.as_str() {
+                "get_pi_routing" => serde_json::to_value(super::get_pi_routing(
+                    app.clone(),
+                    manager,
+                    argument(args, "session_id")?,
+                )?),
+                "pi_routing_control" => serde_json::to_value(tauri::async_runtime::block_on(
+                    super::pi_routing_control(
+                        app.clone(),
+                        manager,
+                        argument(args, "session_id")?,
+                        argument(args, "generation")?,
+                        argument(args, "request")?,
+                    ),
+                )?),
+                "pi_routing_catalog" => serde_json::to_value(tauri::async_runtime::block_on(
+                    super::pi_routing_catalog(
+                        app.clone(),
+                        manager,
+                        argument(args, "cwd")?,
+                        argument(args, "gateway")?,
+                    ),
+                )?),
                 "get_history_policy" => {
                     serde_json::to_value(super::get_history_policy(app.clone(), manager)?)
                 }
@@ -1260,6 +1288,9 @@ fn dispatch(app: &tauri::AppHandle, request: Request) -> Result<serde_json::Valu
                         argument(args, "expected_status")?,
                     )?)
                 }
+                "test_notification" => serde_json::to_value(tauri::async_runtime::block_on(
+                    super::test_notification(app.clone(), manager, argument(args, "session_id")?),
+                )?),
                 "notify_session" => {
                     serde_json::to_value(tauri::async_runtime::block_on(super::notify_session(
                         app.clone(),
@@ -1422,6 +1453,17 @@ fn dispatch_with<'a>(
             .lock()
             .map_err(|_| "Input ownership lock poisoned")?
             .claim(&id, &request.client, now)?;
+    }
+    if request.command == "pi_routing_control" {
+        let id: String = argument(args, "session_id")?;
+        if !manager
+            .input_leases
+            .lock()
+            .map_err(|_| "Input ownership lock poisoned")?
+            .available(&id, &request.client, now)
+        {
+            return Err("This terminal is controlled by another window".into());
+        }
     }
     if request.command == "poll_events" {
         manager
@@ -1862,6 +1904,8 @@ pub(super) fn attach(app: &tauri::AppHandle) -> Result<(), String> {
             let _ = app.emit("terminal-runtime-setup", phase);
         })?;
         let executable = std::env::current_exe().map_err(|e| e.to_string())?;
+        #[cfg(target_os = "macos")]
+        let executable = super::mac_app::background_executable(&executable)?;
         let child = super::terminal_runtime::service_command(&executable)
             .arg("--yam-background")
             .arg("--yam-terminal-node")
@@ -2088,11 +2132,13 @@ pub(super) fn notify_lifecycle(app: &tauri::AppHandle, session: &str, status: &s
                 super::send_native_notification(
                     app.clone(),
                     session.clone(),
+                    &record.summary.cwd,
                     super::system_entry::notification_status(&record.status, chinese),
                     record
                         .reason
                         .clone()
                         .unwrap_or_else(|| record.summary.cwd.clone()),
+                    &record.status,
                 )
             },
         ) {
@@ -5196,6 +5242,7 @@ mod cli_event_tests {
         {
             let mut records = history.records.lock().unwrap();
             records[0].summary.launch = Some(super::super::AgentLaunch {
+                claude_context: None,
                 codex: None,
                 provider: None,
                 env_refs: Default::default(),
@@ -6407,4 +6454,20 @@ mod explicit_reconnect_tests {
             assert!(validate_command(command, &serde_json::json!({"force":true})).is_err());
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn notification_test_wire_accepts_only_one_session_reference() {
+    assert!(validate_command(
+        "test_notification",
+        &serde_json::json!({"session_id":"s-test"})
+    )
+    .is_ok());
+    assert!(validate_command("test_notification", &serde_json::json!({})).is_err());
+    assert!(validate_command(
+        "test_notification",
+        &serde_json::json!({"session_id":"s-test","title":"untrusted"})
+    )
+    .is_err());
 }

@@ -1148,8 +1148,12 @@ mod tests {
         let mut record:crate::SessionRecord=serde_json::from_value(json!({"conversation_id":"c","summary":{"session_id":"s","cwd":f.0.join("project"),"command":null,"status":"running","launch":{"adapter":"codex","mode":"interactive","prompt":"","extra_args":"","env_refs":{},"provider":{"id":"custom","model":"model","base_url":"http://127.0.0.1:9876/v1","api_key_env":null}}},"status":"running","exit_code":null,"reason":null,"started_at":1,"ended_at":null,"agent":{"generation":"g","agent_session_id":"native","turn_id":null,"phase":"idle","background":"unknown","integration":"connected","revision":0,"turns":[],"seen":[],"inbox":[]}})).unwrap();
         assert!(record_identity(&record, &f.0, "owner").is_err());
         let launch = record.summary.launch.as_ref().unwrap();
-        let env = crate::provider_launch::prepare(&f.0, launch, &|_| {
-            panic!("no credential lookup for keyless fixture")
+        let env = crate::provider_launch::prepare(&f.0, launch, &|name| {
+            assert!(
+                matches!(name, "CODEX_HOME" | "HOME" | "USERPROFILE"),
+                "no credential lookup for keyless fixture"
+            );
+            None
         })
         .unwrap();
         assert!(record_identity(&record, &f.0, "owner").is_err());

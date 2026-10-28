@@ -6,7 +6,7 @@ A desktop workspace for Codex, Claude Code, OpenCode and other local CLI session
 
 ## Status
 
-YAM is in active development. The [current capability matrix](docs/yam-capability-matrix.md) is the single reference for supported behavior, degraded operation, unimplemented features, platform acceptance and resource budgets. Source baseline: `6b00a7d`; historical reports retain their original commits and limits.
+YAM is in active development. The [current capability matrix](docs/yam-capability-matrix.md) is the single reference for supported behavior, degraded operation, unimplemented features, platform acceptance and resource budgets. Release baseline: [`0.1.10`](docs/releases/0.1.10.md) (unnotarized macOS Apple Silicon build); historical reports retain their original commits and limits.
 
 The app groups sessions by project, supports single-task and interactive modes, and keeps PTYs and terminal state in an independent background owner. Closing the desktop preserves active tasks; reconnecting, opening history and clicking notifications do not relaunch them. **Stop all tasks and quit** explicitly stops tasks. An owner with no active tasks exits after 60 seconds without a client request. Lost background/parser state is reported explicitly.
 

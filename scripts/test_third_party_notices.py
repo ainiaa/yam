@@ -542,20 +542,20 @@ class NoticeTests(unittest.TestCase):
     def test_real_locked_inputs_are_bound_to_reviewed_npm_seed(self):
         root = pathlib.Path(__file__).resolve().parents[1]
         found = notices.inputs(root)
-        self.assertEqual(found["pnpm_lock"], "01b56b4dc19d6c001665e6190bc3d1f40d68e85c8c00e12407b68d61fa86b4f1")
-        self.assertEqual(found["declarations"], "f101de8351b12ab5d85c06559afee28dc987971814f44a3177750bc5f6c2acb4")
+        self.assertEqual(found["pnpm_lock"], "c82ae95c7d8638e8709dd9b1535c95d383834091755250d1ad2eedab1c496ab3")
+        self.assertEqual(found["declarations"], "dd2e50921eb8f0275863b35f3b954149dbf62c9d6aac20b70dec85e8f8c51925")
 
 
 class ApprovedInventoryTests(unittest.TestCase):
-    def test_current_real_554_manifest_material_binding_includes_closed_cohort(self):
+    def test_current_real_571_manifest_material_binding_includes_closed_cohort(self):
         root = pathlib.Path(__file__).resolve().parents[1]
         trusted = notices.read_json(root/"scripts/third-party-notices/manifest.json")
-        approved = "d8571697bdb296ae1307510fa196c582e33feb618b2033e27d9d6895fc9b2dc2"
+        approved = "fffd0261a1b6d4a5b7a6019132c88876b6a82f12fce44b9d6d52c4b8474fbbcb"
         self.assertEqual(notices.digest(notices.canonical(trusted)),approved)
         with mock.patch.object(notices,"APPROVED_MANIFEST_SHA256",approved,create=True):
             content, report = notices.render(root,trusted,mode="developer")
-            self.assertEqual((report["selected"],report["covered"],len(report["gaps"])),(554,554,0))
-            self.assertEqual(len(content),5072566)
+            self.assertEqual((report["selected"],report["covered"],len(report["gaps"])),(571,571,0))
+            self.assertEqual(len(content),5091913)
             for name in ["anyhow", "adler2"]:
                 changed = json.loads(json.dumps(trusted))
                 record = next(row for row in changed["records"] if row["name"] == name)
@@ -610,7 +610,7 @@ class ReleaseClosureTests(unittest.TestCase):
         for target, system, suffix in ((None, "Windows", ".exe"), (None, "Darwin", ""), (None, "Linux", ""), ("x86_64-pc-windows-msvc", "Darwin", ".exe"), ("x86_64-unknown-linux-gnu", "Windows", "")):
             extra = ["--ci", "--no-bundle"] + (["--target", target] if target else [])
             captured=[]
-            def execute_config(argv):
+            def execute_config(argv, **kwargs):
                 captured.append(json.loads(pathlib.Path(argv[4]).read_text()))
                 return 7
             with self.subTest(target=target, system=system), mock.patch.object(entry.platform, "system", return_value=system), mock.patch.object(entry.shutil, "which", return_value="pnpm"), mock.patch.object(entry.subprocess, "call", side_effect=execute_config) as execute:
@@ -636,7 +636,7 @@ class ReleaseClosureTests(unittest.TestCase):
     def test_locked_inventory_has_complete_release_material(self):
         root = pathlib.Path(__file__).resolve().parents[1]
         content, report = notices.prepare(root, "release")
-        self.assertEqual((report["selected"], report["covered"], report["gaps"]), (554, 554, []))
+        self.assertEqual((report["selected"], report["covered"], report["gaps"]), (571, 571, []))
         self.assertTrue(report["release_eligible"])
         self.assertNotIn(b"DEVELOPER-INCOMPLETE", content)
 
@@ -942,7 +942,7 @@ class MaterialBatch01Tests(unittest.TestCase):
       'main': ['a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2',
                'fea1d5bf3dd71605ce5d7d2ff695c1837e914c77195e523a86b5391716477960'],
       'supp': []}]
-    APPROVED = 'd8571697bdb296ae1307510fa196c582e33feb618b2033e27d9d6895fc9b2dc2'
+    APPROVED = 'fffd0261a1b6d4a5b7a6019132c88876b6a82f12fce44b9d6d52c4b8474fbbcb'
 
     def _current(self):
         root = pathlib.Path(__file__).resolve().parents[1]
@@ -990,7 +990,7 @@ class MaterialBatch01Tests(unittest.TestCase):
         second, again = notices.render(root,trusted,mode='developer')
         self.assertEqual(first,second)
         self.assertEqual(report,again)
-        self.assertEqual((report['selected'],report['covered'],len(report['gaps'])),(554,554,0))
+        self.assertEqual((report['selected'],report['covered'],len(report['gaps'])),(571,571,0))
         self.assertEqual(sum(r['gap']=='archive_body_classification_unreviewed' for r in trusted['records']),0)
         self.assertEqual(sum(r['gap'] not in [None,'archive_body_classification_unreviewed'] for r in trusted['records']),0)
         self.assertEqual(len(trusted['additional']),3)
@@ -1045,3 +1045,15 @@ class MaterialBatch01Tests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class CodeMirrorInventoryTests(unittest.TestCase):
+ def test_editor_dependencies_have_exact_full_text_material_in_the_complete_bundle(self):
+  root=pathlib.Path(__file__).resolve().parents[1]
+  required={'codemirror','@codemirror/state','@codemirror/language','@codemirror/legacy-modes','@lezer/highlight','@codemirror/view','crelt','style-mod','w3c-keyname'}
+  records={row['name']:row for row in notices.read_json(root/'scripts/third-party-notices/manifest.json')['records'] if row['ecosystem']=='npm'}
+  self.assertTrue(required<=records.keys())
+  rendered,report=notices.prepare(root,'release');self.assertTrue(report['complete'])
+  for name in required:
+   row=records[name];self.assertEqual(row['license'],'MIT');self.assertIsNone(row['gap']);self.assertTrue(row['bodies'])
+   for body in row['bodies']:
+    material=notices.body_path(root,body['sha256']).read_bytes();self.assertIn(b'Permission is hereby granted',material);self.assertIn(material,rendered)

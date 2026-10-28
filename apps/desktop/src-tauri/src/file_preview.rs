@@ -436,6 +436,13 @@ pub(crate) fn open_beneath(
     root: &std::fs::File,
     relative: &Path,
 ) -> Result<std::fs::File, &'static str> {
+    open_beneath_optional(root, relative)?.ok_or("file_unavailable")
+}
+#[cfg(unix)]
+pub(crate) fn open_beneath_optional(
+    root: &std::fs::File,
+    relative: &Path,
+) -> Result<Option<std::fs::File>, &'static str> {
     use std::os::{
         fd::{AsRawFd, FromRawFd},
         unix::ffi::OsStrExt,
@@ -466,15 +473,18 @@ pub(crate) fn open_beneath(
             };
         let fd = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags) };
         if fd < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::NotFound {
+                return Ok(None);
+            }
             return Err("file_unavailable");
         }
         directory = unsafe { std::fs::File::from_raw_fd(fd) };
     }
-    Ok(directory)
+    Ok(Some(directory))
 }
 
 #[cfg(unix)]
-fn open_root(root: &Path) -> Result<std::fs::File, &'static str> {
+pub(crate) fn open_root(root: &Path) -> Result<std::fs::File, &'static str> {
     if !safe_path(root) {
         return Err("file_invalid_path");
     }
@@ -507,7 +517,7 @@ fn identity(m: &std::fs::Metadata) -> (u64, u64, u64, i64, i64, i64, i64) {
 }
 
 #[cfg(unix)]
-fn read_bytes(
+pub(crate) fn read_bytes(
     root: &Path,
     path: &Path,
     cancel: &AtomicBool,
@@ -568,7 +578,7 @@ fn read_bytes(
     Ok(bytes)
 }
 #[cfg(not(unix))]
-fn read_bytes(
+pub(crate) fn read_bytes(
     _root: &Path,
     _path: &Path,
     _cancel: &AtomicBool,
@@ -959,6 +969,7 @@ mod tests {
                         "cwd" => record.summary.cwd.push_str("/changed"),
                         "launch" => {
                             record.summary.launch = Some(crate::AgentLaunch {
+                                claude_context: None,
                                 codex: None,
                                 env_refs: Default::default(),
                                 adapter: "claude".into(),

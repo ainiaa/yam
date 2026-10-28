@@ -25,6 +25,17 @@ pub struct Options {
 }
 
 pub(crate) fn validate(launch: &crate::AgentLaunch) -> Result<(), String> {
+    if launch.adapter == "claude"
+        && launch.provider.is_some()
+        && launch.claude_context.as_ref().is_some_and(|id| {
+            !(32..=64).contains(&id.len())
+                || !id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        })
+    {
+        return Err("Invalid Claude configuration snapshot".into());
+    }
     if let Some(options) = &launch.codex {
         if launch.adapter != "codex"
             || options.image_mode == ImageMode::GatewayApi && launch.provider.is_none()
@@ -44,10 +55,12 @@ pub(crate) fn validate(launch: &crate::AgentLaunch) -> Result<(), String> {
 }
 pub(crate) fn assign_context(launch: &mut crate::AgentLaunch) -> Result<(), String> {
     validate(launch)?;
-    if launch.provider.is_some() {
-        if let Some(options) = &mut launch.codex {
-            options.context = Some(crate::agent_bridge::credential()?);
-        }
+    if launch.adapter == "claude" && launch.provider.is_some() {
+        launch.claude_context = Some(crate::agent_bridge::credential()?);
+    }
+    if launch.adapter == "codex" && launch.provider.is_some() {
+        let options = launch.codex.get_or_insert_with(Options::default);
+        options.context = Some(crate::agent_bridge::credential()?);
     }
     Ok(())
 }
@@ -110,6 +123,57 @@ fn overlay(
     }
     Ok(())
 }
+fn legacy_overlay(
+    value: &mut toml::Value,
+    provider: &ProviderConfig,
+    pin_model: bool,
+    home: &Path,
+) -> Result<(), String> {
+    overlay(value, provider, pin_model)?;
+    let table = value
+        .as_table_mut()
+        .ok_or("Invalid legacy Codex configuration")?;
+    table.insert("model_provider".into(), "yam_api".into());
+    table.insert(
+        "sqlite_home".into(),
+        home.to_string_lossy().into_owned().into(),
+    );
+    let providers = table
+        .entry("model_providers")
+        .or_insert_with(|| toml::Value::Table(Default::default()))
+        .as_table_mut()
+        .ok_or("Invalid legacy Codex providers")?;
+    providers.insert("yam_api".into(), toml::Value::try_from(serde_json::json!({"name":provider.id,"base_url":provider.base_url,"wire_api":"responses","env_key":"YAM_PROVIDER_API_KEY","requires_openai_auth":false,"supports_websockets":false})).map_err(|_| "Cannot encode legacy Codex connection")?);
+    if let Some(profiles) = table
+        .get_mut("profiles")
+        .and_then(toml::Value::as_table_mut)
+    {
+        for (_, profile) in profiles {
+            legacy_overlay(profile, provider, false, home)?;
+        }
+    }
+    Ok(())
+}
+
+fn without_legacy_runtime(mut config: toml::Value) -> toml::Value {
+    if let Some(set) = config
+        .get_mut("shell_environment_policy")
+        .and_then(|policy| policy.get_mut("set"))
+        .and_then(toml::Value::as_table_mut)
+    {
+        set.retain(|key, _| !conflicting_env(key));
+    }
+    if let Some(profiles) = config
+        .get_mut("profiles")
+        .and_then(toml::Value::as_table_mut)
+    {
+        for (_, profile) in profiles {
+            *profile = without_legacy_runtime(profile.clone());
+        }
+    }
+    config
+}
+
 fn read(path: &Path) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     std::fs::File::open(path)
@@ -140,6 +204,20 @@ fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .and_then(|_| file.sync_all())
         .map_err(|_| "Cannot write Codex snapshot".into())
 }
+fn replace_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    if std::fs::symlink_metadata(path).is_ok() && private_read(path)? == bytes {
+        return Ok(());
+    }
+    let temporary = path.with_extension(format!("pending-{}", crate::agent_bridge::credential()?));
+    let result = write(&temporary, bytes).and_then(|_| {
+        std::fs::rename(&temporary, path)
+            .map_err(|_| "Cannot update private Codex configuration".into())
+    });
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
 fn private_read(path: &Path) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     crate::background::private_file(path, false)?
@@ -153,7 +231,7 @@ fn private_read(path: &Path) -> Result<Vec<u8>, String> {
 }
 
 // Keep installed package identities: parent-relative skill resources depend on the real directory.
-fn share_resource(source: &Path, target: &Path) -> Result<(), String> {
+pub(crate) fn share_resource(source: &Path, target: &Path) -> Result<(), String> {
     let meta = std::fs::metadata(source).map_err(|_| "Inherited Codex resource is unavailable")?;
     if !meta.is_dir() && !meta.is_file() {
         return Err("Inherited Codex resource is not a regular file or directory".into());
@@ -263,7 +341,9 @@ fn rebase(
                             return Err("Inherited Codex agent configuration contains a cycle or exceeds 32 files".into());
                         }
                         let mut role = parse(&read(&role_source)?)?;
-                        oauth::inherit(&role, source, stage)?;
+                        if !target.join("yam-context.json").exists() {
+                            oauth::inherit(&role, source, stage)?;
+                        }
                         roles.push(role_source.clone());
                         rebase(
                             &mut role,
@@ -280,13 +360,19 @@ fn rebase(
                         roles.pop();
                         let directory = stage.join("yam-agent-configs");
                         crate::background::private_root(&directory)?;
-                        let name = format!("{}.toml", crate::agent_bridge::credential()?);
-                        write(
-                            &directory.join(&name),
-                            toml::to_string(&role)
-                                .map_err(|_| "Cannot serialize inherited agent configuration")?
-                                .as_bytes(),
-                        )?;
+                        use std::hash::{Hash, Hasher};
+                        let mut hash = std::collections::hash_map::DefaultHasher::new();
+                        role_source.hash(&mut hash);
+                        let name = format!("{:016x}.toml", hash.finish());
+                        let bytes = toml::to_string(&role)
+                            .map_err(|_| "Cannot serialize inherited agent configuration")?;
+                        if directory.join(&name).exists() {
+                            if private_read(&directory.join(&name))? != bytes.as_bytes() {
+                                return Err("Inherited agent path collision".into());
+                            }
+                        } else {
+                            write(&directory.join(&name), bytes.as_bytes())?;
+                        }
                         *value = target
                             .join("yam-agent-configs")
                             .join(name)
@@ -297,11 +383,10 @@ fn rebase(
                     }
                 }
                 if let Some(text) = value.as_str() {
-                    if key == "cwd" {
-                        *value = resolve(base, text).to_string_lossy().into_owned().into();
-                    } else if matches!(
+                    if matches!(
                         key.as_str(),
-                        "path"
+                        "cwd"
+                            | "path"
                             | "model_instructions_file"
                             | "experimental_instructions_file"
                             | "compact_prompt_file"
@@ -385,7 +470,9 @@ fn snapshot(
             {
                 if text == ".credentials.json" {
                     // MCP refresh tokens remain private so refreshes cannot change Desktop's login state.
-                    write(&stage.join(&name), &read(&entry.path())?)?;
+                    if !target.join("yam-context.json").exists() {
+                        write(&stage.join(&name), &read(&entry.path())?)?;
+                    }
                 } else {
                     share_resource(&entry.path(), &stage.join(&name))?;
                 }
@@ -396,7 +483,9 @@ fn snapshot(
         .provider
         .as_ref()
         .ok_or("Missing provider connection")?;
-    oauth::inherit(&config, source, stage)?;
+    if !target.join("yam-context.json").exists() {
+        oauth::inherit(&config, source, stage)?;
+    }
     rebase(
         &mut config,
         source,
@@ -430,7 +519,9 @@ fn snapshot(
                 continue;
             }
             let mut profile = parse(&read(&entry.path())?)?;
-            oauth::inherit(&profile, source, stage)?;
+            if !target.join("yam-context.json").exists() {
+                oauth::inherit(&profile, source, stage)?;
+            }
             rebase(
                 &mut profile,
                 source,
@@ -455,7 +546,11 @@ fn snapshot(
         toml::to_string(&config).map_err(|_| "Cannot serialize inherited Codex configuration")?;
     write(&stage.join("config.toml"), bytes.as_bytes())?;
     write(&stage.join("yam-config.toml"), bytes.as_bytes())?;
-    if launch.codex.as_ref().unwrap().image_mode == ImageMode::GatewayApi {
+    if launch
+        .codex
+        .as_ref()
+        .is_none_or(|options| options.image_mode == ImageMode::GatewayApi)
+    {
         // Codex prefers AGENTS.override.md when present; append to the effective original instructions.
         let path = if stage.join("AGENTS.override.md").is_file() {
             stage.join("AGENTS.override.md")
@@ -472,7 +567,9 @@ fn snapshot(
             }
             Err(_) => return Err("Cannot read inherited Codex instructions".into()),
         };
-        instructions.extend_from_slice(b"\n\n");
+        if !instructions.is_empty() {
+            instructions.extend_from_slice(b"\n\n");
+        }
         instructions.extend_from_slice(crate::provider_launch::IMAGE_API_INSTRUCTIONS.as_bytes());
         if path.exists() {
             std::fs::remove_file(&path).map_err(|_| "Cannot prepare image API instructions")?;
@@ -486,10 +583,20 @@ pub(crate) struct Prepared {
     directories: Vec<(PathBuf, (u64, u64))>,
     files: Vec<(PathBuf, crate::history::FileProof, Vec<u8>)>,
     baseline: toml::Value,
+    pub(crate) legacy: bool,
 }
 fn without_ui(mut config: toml::Value) -> toml::Value {
     if let Some(table) = config.as_table_mut() {
-        for key in ["projects", "tui", "notice"] {
+        // Native CLI persists these preferences; connection and resource bindings stay guarded.
+        for key in [
+            "projects",
+            "tui",
+            "notice",
+            "model_reasoning_effort",
+            "model_reasoning_summary",
+            "model_verbosity",
+            "web_search",
+        ] {
             table.remove(key);
         }
         if let Some(hooks) = table.get_mut("hooks").and_then(toml::Value::as_table_mut) {
@@ -512,25 +619,52 @@ impl Prepared {
         if private_read(&home.join("yam-context.json"))? != expected {
             return Err("Codex snapshot connection changed".into());
         }
-        let auth: serde_json::Value =
-            serde_json::from_slice(&private_read(&home.join("auth.json"))?)
-                .map_err(|_| "Invalid private Codex authentication")?;
-        if auth.as_object().is_none_or(|value| value.len() != 1)
-            || auth["OPENAI_API_KEY"].as_str().is_none_or(|key| {
-                key.is_empty() || key.len() > 16384 || key.chars().any(char::is_control)
-            })
-        {
-            return Err(
-                "Private Codex authentication must contain only the session API key".into(),
-            );
+        let legacy = launch.codex.is_none();
+        if legacy {
+            let instructions = if home.join("AGENTS.override.md").is_file() {
+                home.join("AGENTS.override.md")
+            } else {
+                home.join("AGENTS.md")
+            };
+            if !private_read(&instructions)?
+                .ends_with(crate::provider_launch::IMAGE_API_INSTRUCTIONS.as_bytes())
+            {
+                return Err("Legacy gateway instructions changed".into());
+            }
+        }
+        if !legacy {
+            let auth: serde_json::Value =
+                serde_json::from_slice(&private_read(&home.join("auth.json"))?)
+                    .map_err(|_| "Invalid private Codex authentication")?;
+            if auth.as_object().is_none_or(|value| value.len() != 1)
+                || auth["OPENAI_API_KEY"].as_str().is_none_or(|key| {
+                    key.is_empty() || key.len() > 16384 || key.chars().any(char::is_control)
+                })
+            {
+                return Err(
+                    "Private Codex authentication must contain only the session API key".into(),
+                );
+            }
+        } else if std::fs::symlink_metadata(home.join("auth.json")).is_ok() {
+            return Err("Unexpected authentication in legacy Codex home".into());
         }
         let baseline = parse(&private_read(&home.join("yam-config.toml"))?)?;
         let mut pinned = baseline.clone();
-        overlay(
-            &mut pinned,
-            launch.provider.as_ref().ok_or("Missing provider")?,
-            true,
-        )?;
+        if legacy {
+            legacy_overlay(
+                &mut pinned,
+                launch.provider.as_ref().ok_or("Missing provider")?,
+                true,
+                home,
+            )?;
+        } else {
+            overlay(
+                &mut pinned,
+                launch.provider.as_ref().ok_or("Missing provider")?,
+                true,
+            )?;
+        }
+
         if baseline != pinned {
             return Err("Codex snapshot route changed".into());
         }
@@ -552,8 +686,10 @@ impl Prepared {
             home.join("config.toml"),
             home.join("yam-config.toml"),
             home.join("yam-context.json"),
-            home.join("auth.json"),
         ];
+        if !legacy {
+            paths.push(home.join("auth.json"));
+        }
         for name in ["AGENTS.md", "AGENTS.override.md"] {
             let path = home.join(name);
             if path.exists()
@@ -575,10 +711,14 @@ impl Prepared {
                 paths.push(entry.path());
             }
         }
-        let roles = home.join("yam-agent-configs");
-        if roles.exists() {
-            for entry in std::fs::read_dir(&roles).map_err(|_| "Cannot inspect inherited agents")? {
-                paths.push(entry.map_err(|_| "Cannot inspect inherited agents")?.path());
+        for directory in ["yam-agent-configs", "yam-inherited"] {
+            let roles = home.join(directory);
+            if roles.exists() {
+                for entry in
+                    std::fs::read_dir(&roles).map_err(|_| "Cannot inspect inherited agents")?
+                {
+                    paths.push(entry.map_err(|_| "Cannot inspect inherited agents")?.path());
+                }
             }
         }
         let files = paths
@@ -596,11 +736,20 @@ impl Prepared {
             directories,
             files,
             baseline,
+            legacy,
         };
         prepared.validate()?;
         Ok(prepared)
     }
     pub(crate) fn validate(&self) -> Result<(), String> {
+        if self.legacy
+            && self
+                .directories
+                .last()
+                .is_some_and(|(home, _)| std::fs::symlink_metadata(home.join("auth.json")).is_ok())
+        {
+            return Err("Unexpected authentication in legacy Codex home".into());
+        }
         for (path, identity) in &self.directories {
             if crate::history::private_directory_identity(path)? != *identity {
                 return Err("Codex snapshot directory changed".into());
@@ -612,8 +761,20 @@ impl Prepared {
                 return Err("Codex snapshot file replaced".into());
             }
             let current = private_read(path)?;
-            if path.file_name().is_some_and(|name| name == "config.toml") {
-                if without_ui(parse(&current)?) != without_ui(self.baseline.clone()) {
+            if path.file_name().is_some_and(|name| name == "config.toml")
+                && self
+                    .directories
+                    .last()
+                    .is_some_and(|(home, _)| path.parent() == Some(home.as_path()))
+            {
+                let actual = without_ui(parse(&current)?);
+                let expected = without_ui(self.baseline.clone());
+                let changed = if self.legacy {
+                    without_legacy_runtime(actual) != without_legacy_runtime(expected)
+                } else {
+                    actual != expected
+                };
+                if changed {
                     return Err(
                         "Codex inherited configuration changed; restart with a new session".into(),
                     );
@@ -690,13 +851,513 @@ fn snapshot_child_environment(stage: &Path, vars: &BTreeMap<String, String>) -> 
     }
     for path in paths {
         let mut config = parse(&private_read(&path)?)?;
+        let original = config.clone();
         child_environment(&mut config, vars)?;
         let bytes =
             toml::to_string(&config).map_err(|_| "Cannot serialize private Codex configuration")?;
-        std::fs::remove_file(&path).map_err(|_| "Cannot update staged Codex configuration")?;
-        write(&path, bytes.as_bytes())?;
+        if original != config {
+            let temporary =
+                path.with_extension(format!("pending-{}", crate::agent_bridge::credential()?));
+            let result = write(&temporary, bytes.as_bytes()).and_then(|_| {
+                std::fs::rename(&temporary, &path)
+                    .map_err(|_| "Cannot update private Codex configuration".into())
+            });
+            if result.is_err() {
+                let _ = std::fs::remove_file(&temporary);
+            }
+            result?;
+        }
     }
     Ok(())
+}
+
+fn share_legacy_resource(source: &Path, target: &Path, depth: usize) -> Result<(), String> {
+    if depth >= 32 {
+        return Err("Legacy Codex resource merge exceeded its depth limit".into());
+    }
+    if std::fs::symlink_metadata(target).is_err() {
+        return share_resource(source, target);
+    }
+    if source
+        .canonicalize()
+        .ok()
+        .is_some_and(|source| target.canonicalize().ok().as_ref() == Some(&source))
+    {
+        return Ok(());
+    }
+    if source.is_dir()
+        && target.is_dir()
+        && !std::fs::symlink_metadata(target)
+            .map_err(|_| "Cannot inspect legacy resource")?
+            .file_type()
+            .is_symlink()
+    {
+        for entry in std::fs::read_dir(source).map_err(|_| "Cannot enumerate legacy resources")? {
+            let entry = entry.map_err(|_| "Cannot inspect legacy resource")?;
+            share_legacy_resource(&entry.path(), &target.join(entry.file_name()), depth + 1)?;
+        }
+        return Ok(());
+    }
+    if source.is_file()
+        && target.is_file()
+        && source
+            .metadata()
+            .is_ok_and(|meta| meta.len() <= 1024 * 1024)
+        && std::fs::read(source).ok() == std::fs::read(target).ok()
+    {
+        return Ok(());
+    }
+    Err(
+        "Inherited Codex resource conflicts with a legacy resource; existing data was preserved"
+            .into(),
+    )
+}
+
+pub(crate) fn prepare_legacy(
+    root: &Path,
+    home: &Path,
+    launch: &crate::AgentLaunch,
+    vars: &BTreeMap<String, String>,
+    lookup: &dyn Fn(&str) -> Option<String>,
+    previous: Option<toml::Value>,
+) -> Result<Prepared, String> {
+    if let Some(previous) = previous {
+        let stage = home.with_extension(format!("inherit-{}", crate::agent_bridge::credential()?));
+        crate::background::private_root(&stage)?;
+        let result = (|| -> Result<(), String> {
+            let source = lookup("CODEX_HOME")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .or_else(|| {
+                    lookup(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+                        .map(|value| PathBuf::from(value).join(".codex"))
+                })
+                .unwrap_or_else(|| stage.join("unconfigured"));
+            if !source.is_absolute()
+                || source.starts_with(root.join("providers"))
+                    && source != stage.join("unconfigured")
+                || source.canonicalize().is_ok_and(|source| {
+                    root.canonicalize()
+                        .is_ok_and(|root| source.starts_with(root.join("providers")))
+                })
+            {
+                return Err("Cannot inherit a relative or managed Codex configuration".into());
+            }
+            snapshot(&source, &stage, home, launch)?;
+            for dir in [stage.clone(), stage.join("yam-agent-configs")] {
+                if !dir.is_dir() {
+                    continue;
+                }
+                for entry in
+                    std::fs::read_dir(&dir).map_err(|_| "Cannot inspect legacy snapshot")?
+                {
+                    let path = entry.map_err(|_| "Cannot inspect legacy snapshot")?.path();
+                    if path.extension().is_none_or(|extension| extension != "toml") {
+                        continue;
+                    }
+                    let mut config = parse(&private_read(&path)?)?;
+                    legacy_overlay(
+                        &mut config,
+                        launch.provider.as_ref().ok_or("Missing legacy provider")?,
+                        dir == stage
+                            && path.file_name().is_some_and(|name| {
+                                name == "config.toml" || name == "yam-config.toml"
+                            }),
+                        home,
+                    )?;
+                    if path.parent() == Some(stage.as_path())
+                        && path.file_name().is_some_and(|name| {
+                            name == "config.toml"
+                                || name.to_string_lossy().ends_with(".config.toml")
+                        })
+                    {
+                        let directory = stage.join("yam-inherited");
+                        crate::background::private_root(&directory)?;
+                        let mut imported = config.clone();
+                        child_environment(&mut imported, vars)?;
+                        write(
+                            &directory.join(path.file_name().unwrap()),
+                            toml::to_string(&imported)
+                                .map_err(|_| "Cannot encode inherited configuration baseline")?
+                                .as_bytes(),
+                        )?;
+                    }
+                    if path
+                        .file_name()
+                        .is_some_and(|name| name == "config.toml" || name == "yam-config.toml")
+                    {
+                        for key in ["projects", "tui", "notice"] {
+                            if let Some(values) = previous.get(key).and_then(toml::Value::as_table)
+                            {
+                                config
+                                    .as_table_mut()
+                                    .unwrap()
+                                    .entry(key)
+                                    .or_insert_with(|| toml::Value::Table(Default::default()))
+                                    .as_table_mut()
+                                    .ok_or("Invalid legacy UI metadata")?
+                                    .extend(values.clone());
+                            }
+                        }
+                        if let Some(state) =
+                            previous.get("hooks").and_then(|hooks| hooks.get("state"))
+                        {
+                            config
+                                .as_table_mut()
+                                .unwrap()
+                                .entry("hooks")
+                                .or_insert_with(|| toml::Value::Table(Default::default()))
+                                .as_table_mut()
+                                .ok_or("Invalid legacy hook metadata")?
+                                .insert("state".into(), state.clone());
+                        }
+                    }
+                    std::fs::remove_file(&path).map_err(|_| "Cannot prepare legacy connection")?;
+                    write(
+                        &path,
+                        toml::to_string(&config)
+                            .map_err(|_| "Cannot encode legacy configuration")?
+                            .as_bytes(),
+                    )?;
+                }
+            }
+            snapshot_child_environment(&stage, vars)?;
+            let context = serde_json::to_vec(&(launch.provider.as_ref(), launch.codex.as_ref()))
+                .map_err(|_| "Invalid legacy connection")?;
+            let marker = home.join("yam-context.json");
+            if !marker.exists() {
+                for entry in std::fs::read_dir(&stage)
+                    .map_err(|_| "Cannot inspect legacy resource conflicts")?
+                {
+                    let entry = entry.map_err(|_| "Cannot inspect legacy resource conflict")?;
+                    let name = entry.file_name();
+                    let target = home.join(&name);
+                    if !target.exists() || name == "config.toml" || name == "AGENTS.md" {
+                        continue;
+                    }
+                    let metadata = std::fs::symlink_metadata(entry.path())
+                        .map_err(|_| "Cannot inspect inherited resource")?;
+                    if metadata.file_type().is_symlink() {
+                        let original = std::fs::read_link(entry.path())
+                            .map_err(|_| "Cannot resolve inherited resource")?;
+                        share_legacy_resource(&original, &target, 0)?;
+                    } else if !metadata.is_file()
+                        || private_read(&target)? != private_read(&entry.path())?
+                    {
+                        return Err("Inherited Codex configuration conflicts with legacy data; existing data was preserved".into());
+                    }
+                }
+            }
+            if marker.exists() {
+                if private_read(&marker)? != context {
+                    return Err("Legacy Codex connection changed".into());
+                }
+            } else {
+                write(&marker, &context)?;
+            }
+            for entry in std::fs::read_dir(&stage).map_err(|_| "Cannot publish legacy resources")? {
+                let entry = entry.map_err(|_| "Cannot publish legacy resource")?;
+                let name = entry.file_name();
+                if name == "config.toml" || name == "yam-config.toml" {
+                    continue;
+                }
+                let target = home.join(&name);
+                let metadata = std::fs::symlink_metadata(entry.path())
+                    .map_err(|_| "Cannot inspect staged legacy resource")?;
+                if metadata.file_type().is_symlink() {
+                    let original = std::fs::read_link(entry.path())
+                        .map_err(|_| "Cannot resolve inherited resource")?;
+                    if name == "AGENTS.md" && target.exists() {
+                        std::fs::rename(entry.path(), &target)
+                            .map_err(|_| "Cannot replace legacy instructions")?;
+                        continue;
+                    }
+                    share_legacy_resource(&original, &target, 0)?;
+                } else if (name == "yam-agent-configs" || name == "yam-inherited")
+                    && target.exists()
+                {
+                    crate::background::private_root(&target)?;
+                    for file in std::fs::read_dir(entry.path())
+                        .map_err(|_| "Cannot publish legacy agent configurations")?
+                    {
+                        let file = file.map_err(|_| "Cannot publish legacy agent configuration")?;
+                        std::fs::rename(file.path(), target.join(file.file_name()))
+                            .map_err(|_| "Cannot publish legacy agent configuration")?;
+                    }
+                } else if target.exists() && name != "AGENTS.md" && name != "AGENTS.override.md" {
+                    if private_read(&target)? != private_read(&entry.path())? {
+                        return Err(
+                            "Inherited Codex configuration conflicts with legacy data".into()
+                        );
+                    }
+                } else {
+                    std::fs::rename(entry.path(), target)
+                        .map_err(|_| "Cannot publish legacy capability resource")?;
+                }
+            }
+            // Commit configuration last; rollout files, databases and native IDs never move.
+            for name in ["yam-config.toml", "config.toml"] {
+                std::fs::rename(stage.join(name), home.join(name))
+                    .map_err(|_| "Cannot publish inherited legacy configuration")?;
+            }
+            Ok(())
+        })();
+        let _ = std::fs::remove_dir_all(&stage);
+        result?;
+    }
+    Prepared::capture(root, home, launch)?;
+    // Legacy environment references support key rotation; only managed child connection values change.
+    snapshot_child_environment(home, vars)?;
+    refresh_inherited(root, home, launch, vars, lookup)?;
+    Prepared::capture(root, home, launch)
+}
+
+fn inherited_source(
+    root: &Path,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<Option<PathBuf>, String> {
+    let source = lookup("CODEX_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            lookup(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+                .map(|v| PathBuf::from(v).join(".codex"))
+        });
+    if let Some(source) = &source {
+        if !source.is_absolute()
+            || source.starts_with(root.join("providers"))
+            || source
+                .canonicalize()
+                .is_ok_and(|p| p.starts_with(root.join("providers")))
+        {
+            return Err("Cannot inherit a relative or managed Codex configuration".into());
+        }
+    }
+    Ok(source)
+}
+fn inherited_config_files(directory: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut files = Vec::new();
+    for entry in
+        std::fs::read_dir(directory).map_err(|_| "Cannot inspect inherited configurations")?
+    {
+        let path = entry
+            .map_err(|_| "Cannot inspect inherited configuration")?
+            .path();
+        if path
+            .file_name()
+            .is_some_and(|v| v == "config.toml" || v.to_string_lossy().ends_with(".config.toml"))
+        {
+            files.push(path);
+        }
+    }
+    Ok(files)
+}
+fn store_inherited_baseline(stage: &Path) -> Result<(), String> {
+    let baseline = stage.join("yam-inherited");
+    crate::background::private_root(&baseline)?;
+    for path in inherited_config_files(stage)? {
+        write(
+            &baseline.join(path.file_name().unwrap()),
+            &private_read(&path)?,
+        )?;
+    }
+    Ok(())
+}
+fn refresh_table(current: &mut toml::Value, previous: &toml::Value, upstream: &toml::Value) {
+    let keys: std::collections::BTreeSet<_> = previous
+        .as_table()
+        .into_iter()
+        .flat_map(|v| v.keys())
+        .chain(upstream.as_table().into_iter().flat_map(|v| v.keys()))
+        .cloned()
+        .collect();
+    for key in keys {
+        let old = previous.get(&key);
+        let new = upstream.get(&key);
+        if old == new {
+            continue;
+        }
+        if new.is_some_and(toml::Value::is_table)
+            || (new.is_none()
+                && old.is_some_and(toml::Value::is_table)
+                && current.get(&key).is_some_and(toml::Value::is_table))
+        {
+            let value = current
+                .as_table_mut()
+                .unwrap()
+                .entry(key.clone())
+                .or_insert_with(|| toml::Value::Table(Default::default()));
+            if !value.is_table() {
+                *value = toml::Value::Table(Default::default());
+            }
+            let empty = toml::Value::Table(Default::default());
+            refresh_table(value, old.unwrap_or(&empty), new.unwrap_or(&empty));
+            if new.is_none() && value.as_table().is_some_and(|v| v.is_empty()) {
+                current.as_table_mut().unwrap().remove(&key);
+            }
+        } else if let Some(value) = new {
+            current.as_table_mut().unwrap().insert(key, value.clone());
+        } else {
+            current.as_table_mut().unwrap().remove(&key);
+        }
+    }
+}
+fn refresh_inherited(
+    root: &Path,
+    home: &Path,
+    launch: &crate::AgentLaunch,
+    vars: &BTreeMap<String, String>,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<(), String> {
+    let Some(source) = inherited_source(root, lookup)? else {
+        return Ok(());
+    };
+    let previous = Prepared::capture(root, home, launch)?;
+    let baseline = home.join("yam-inherited");
+    let previous_profiles =
+        inherited_config_files(if baseline.exists() { &baseline } else { home })?;
+    let stage = home.with_extension(format!("refresh-{}", crate::agent_bridge::credential()?));
+    std::fs::create_dir(&stage).map_err(|_| "Cannot stage inherited Codex refresh")?;
+    crate::background::private_root(&stage)?;
+    let result = (|| {
+        snapshot(&source, &stage, home, launch)?;
+        if launch.codex.is_none() {
+            let mut files = inherited_config_files(&stage)?;
+            files.push(stage.join("yam-config.toml"));
+            if stage.join("yam-agent-configs").is_dir() {
+                files.extend(
+                    std::fs::read_dir(stage.join("yam-agent-configs"))
+                        .map_err(|_| "Cannot inspect inherited agents")?
+                        .map(|e| e.map(|e| e.path()))
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|_| "Cannot inspect inherited agents")?,
+                );
+            }
+            for path in files {
+                let mut config = parse(&private_read(&path)?)?;
+                legacy_overlay(
+                    &mut config,
+                    launch.provider.as_ref().ok_or("Missing provider")?,
+                    path.parent() == Some(stage.as_path())
+                        && path
+                            .file_name()
+                            .is_some_and(|n| n == "config.toml" || n == "yam-config.toml"),
+                    home,
+                )?;
+                replace_private(
+                    &path,
+                    toml::to_string(&config)
+                        .map_err(|_| "Cannot encode inherited configuration")?
+                        .as_bytes(),
+                )?;
+            }
+        }
+        snapshot_child_environment(&stage, vars)?;
+        store_inherited_baseline(&stage)?;
+        for path in inherited_config_files(&stage)? {
+            let name = path.file_name().unwrap();
+            let current_path = home.join(name);
+            if !current_path.exists() {
+                continue;
+            }
+            let old_path = home.join("yam-inherited").join(name);
+            let mut old = if old_path.exists() {
+                parse(&private_read(&old_path)?)?
+            } else if name == "config.toml" {
+                parse(&private_read(&home.join("yam-config.toml"))?)?
+            } else {
+                parse(&private_read(&current_path)?)?
+            };
+            if !old_path.exists() && launch.codex.is_none() && name == "config.toml" {
+                for key in ["projects", "tui", "notice"] {
+                    old.as_table_mut().unwrap().remove(key);
+                }
+                if let Some(hooks) = old.get_mut("hooks").and_then(toml::Value::as_table_mut) {
+                    hooks.remove("state");
+                }
+            }
+            let mut current = parse(&private_read(&current_path)?)?;
+            let upstream = parse(&private_read(&path)?)?;
+            refresh_table(&mut current, &old, &upstream);
+            replace_private(
+                &path,
+                toml::to_string(&current)
+                    .map_err(|_| "Cannot encode refreshed configuration")?
+                    .as_bytes(),
+            )?;
+        }
+        replace_private(
+            &stage.join("yam-config.toml"),
+            &private_read(&stage.join("config.toml"))?,
+        )?;
+        previous.validate()?;
+        // Publish configuration only; session files, databases and private MCP credentials never move.
+        for entry in
+            std::fs::read_dir(&stage).map_err(|_| "Cannot publish configuration refresh")?
+        {
+            let entry = entry.map_err(|_| "Cannot publish configuration refresh")?;
+            let name = entry.file_name();
+            if name == "config.toml" || name == "yam-config.toml" {
+                continue;
+            }
+            let target = home.join(&name);
+            let metadata = std::fs::symlink_metadata(entry.path())
+                .map_err(|_| "Cannot inspect staged configuration")?;
+            if name == "yam-agent-configs" || name == "yam-inherited" {
+                crate::background::private_root(&target)?;
+                for file in
+                    std::fs::read_dir(entry.path()).map_err(|_| "Cannot publish inherited files")?
+                {
+                    let file = file.map_err(|_| "Cannot inspect inherited file")?;
+                    replace_private(&target.join(file.file_name()), &private_read(&file.path())?)?;
+                }
+            } else if name == "AGENTS.md" || name == "AGENTS.override.md" {
+                let same = if metadata.file_type().is_symlink() {
+                    std::fs::read_link(&target).ok() == std::fs::read_link(entry.path()).ok()
+                } else {
+                    private_read(&target).ok() == Some(private_read(&entry.path())?)
+                };
+                if !same {
+                    std::fs::rename(entry.path(), &target)
+                        .map_err(|_| "Cannot refresh inherited instructions")?;
+                }
+            } else if metadata.file_type().is_symlink() {
+                share_legacy_resource(
+                    &std::fs::read_link(entry.path())
+                        .map_err(|_| "Cannot resolve inherited resource")?,
+                    &target,
+                    0,
+                )?;
+            } else if !target.exists() {
+                std::fs::rename(entry.path(), &target)
+                    .map_err(|_| "Cannot publish inherited configuration")?;
+            } else if name.to_string_lossy().ends_with(".config.toml") {
+                replace_private(&target, &private_read(&entry.path())?)?;
+            }
+        }
+        for entry in previous_profiles {
+            let name = entry.file_name().unwrap();
+            if name != "config.toml" && !stage.join(name).exists() {
+                let target = home.join(name);
+                if target.exists() {
+                    private_read(&target)?;
+                    std::fs::remove_file(target)
+                        .map_err(|_| "Cannot remove deleted inherited profile")?;
+                }
+                let path = baseline.join(name);
+                if path.exists() {
+                    std::fs::remove_file(path)
+                        .map_err(|_| "Cannot update inherited profile baseline")?;
+                }
+            }
+        }
+        for name in ["yam-config.toml", "config.toml"] {
+            replace_private(&home.join(name), &private_read(&stage.join(name))?)?;
+        }
+        Ok(())
+    })();
+    let _ = std::fs::remove_dir_all(&stage);
+    result
 }
 
 pub(crate) fn prepare(
@@ -746,6 +1407,7 @@ pub(crate) fn prepare(
         let result = (|| -> Result<(), String> {
             snapshot(&source, &stage, &home, launch)?;
             snapshot_child_environment(&stage, &vars)?;
+            store_inherited_baseline(&stage)?;
             write(
                 &stage.join("auth.json"),
                 serde_json::to_vec(&serde_json::json!({"OPENAI_API_KEY":key}))
@@ -765,21 +1427,20 @@ pub(crate) fn prepare(
         }
         result?;
     }
-    let config = parse(&private_read(&home.join("config.toml"))?)?;
-    let mut expected = config.clone();
-    child_environment(&mut expected, &vars)?;
-    if expected != config {
-        return Err("Codex child connection snapshot is outdated; create a new session".into());
-    }
-    let prepared = Prepared::capture(&root, &home, launch)?;
+    // Validate the old connection before replacing only its current credential and child aliases.
+    Prepared::capture(&root, &home, launch)?;
+    snapshot_child_environment(&home, &vars)?;
     let auth: serde_json::Value = serde_json::from_slice(&private_read(&home.join("auth.json"))?)
         .map_err(|_| "Invalid Codex session authentication")?;
     if auth["OPENAI_API_KEY"].as_str() != Some(key) {
-        return Err(
-            "Codex session credential changed; create a new session to use the new credential"
-                .into(),
-        );
+        replace_private(
+            &home.join("auth.json"),
+            &serde_json::to_vec(&serde_json::json!({"OPENAI_API_KEY":key}))
+                .map_err(|_| "Invalid Codex authentication")?,
+        )?;
     }
+    refresh_inherited(&root, &home, launch, &vars, lookup)?;
+    let prepared = Prepared::capture(&root, &home, launch)?;
     Ok((home, vars, prepared))
 }
 pub(crate) fn existing_home(root: &Path, launch: &crate::AgentLaunch) -> Result<PathBuf, String> {
@@ -812,12 +1473,15 @@ pub(crate) fn validate_project(launch: &crate::AgentLaunch, cwd: &Path) -> Resul
         config: &toml::Value,
         base: &Path,
         provider: &ProviderConfig,
+        legacy: bool,
         visited: &mut Vec<PathBuf>,
     ) -> Result<(), String> {
         if let Some(table) = config.as_table() {
             for (key, value) in table {
                 let valid = match key.as_str() {
-                    "model_provider" => value.as_str() == Some("openai"),
+                    "model_provider" => {
+                        value.as_str() == Some(if legacy { "yam_api" } else { "openai" })
+                    }
                     "openai_base_url" => value.as_str().is_some_and(|url| {
                         url.trim_end_matches('/')
                             == api_base(provider).unwrap_or_default().trim_end_matches('/')
@@ -827,6 +1491,40 @@ pub(crate) fn validate_project(launch: &crate::AgentLaunch, cwd: &Path) -> Resul
                         value.as_str() == Some("file")
                     }
                     "log_dir" | "sqlite_home" | "shell_environment_policy" => false,
+                    "model_providers" => value
+                        .get(if legacy { "yam_api" } else { "openai" })
+                        .is_none_or(|selected| {
+                            selected.as_table().is_some_and(|table| {
+                                table.iter().all(|(key, value)| match key.as_str() {
+                                    "base_url" => value.as_str().is_some_and(|url| {
+                                        url.trim_end_matches('/')
+                                            == if legacy {
+                                                provider.base_url.trim_end_matches('/').to_string()
+                                            } else {
+                                                api_base(provider)
+                                                    .unwrap_or_default()
+                                                    .trim_end_matches('/')
+                                                    .to_string()
+                                            }
+                                    }),
+                                    "env_key" => {
+                                        value.as_str()
+                                            == Some(if legacy {
+                                                "YAM_PROVIDER_API_KEY"
+                                            } else {
+                                                "OPENAI_API_KEY"
+                                            })
+                                    }
+                                    "requires_openai_auth" => value.as_bool() == Some(!legacy),
+                                    "wire_api" => value.as_str() == Some("responses"),
+                                    "http_headers" | "env_http_headers" | "query_params" => {
+                                        value.as_table().is_some_and(|table| table.is_empty())
+                                    }
+                                    "experimental_bearer_token" => false,
+                                    _ => true,
+                                })
+                            })
+                        }),
                     _ => true,
                 };
                 if !valid {
@@ -849,11 +1547,12 @@ pub(crate) fn validate_project(launch: &crate::AgentLaunch, cwd: &Path) -> Resul
                         &parse(&read(&path)?)?,
                         path.parent().unwrap(),
                         provider,
+                        legacy,
                         visited,
                     )?;
                     visited.pop();
                 } else if key != "model_providers" {
-                    check(value, base, provider, visited)?;
+                    check(value, base, provider, legacy, visited)?;
                 }
             }
         }
@@ -879,6 +1578,7 @@ pub(crate) fn validate_project(launch: &crate::AgentLaunch, cwd: &Path) -> Resul
                 &parse(&read(&path)?)?,
                 path.parent().unwrap(),
                 provider,
+                launch.codex.is_none(),
                 &mut Vec::new(),
             )?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -926,6 +1626,221 @@ mod tests {
             let _ = std::fs::remove_dir_all(&self.root);
         }
     }
+    #[test]
+    fn routing_review_private_replace_is_idempotent_and_refuses_links() {
+        let f = Fixture::new("native");
+        let path = f.root.join("private.toml");
+        replace_private(&path, b"model_reasoning_effort='max'\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let inode = std::fs::metadata(&path).unwrap().ino();
+            replace_private(&path, b"model_reasoning_effort='max'\n").unwrap();
+            assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
+        }
+        replace_private(&path, b"model_reasoning_effort='high'\n").unwrap();
+        assert_eq!(
+            private_read(&path).unwrap(),
+            b"model_reasoning_effort='high'\n"
+        );
+        #[cfg(unix)]
+        {
+            let link = f.root.join("link");
+            std::os::unix::fs::symlink(&path, &link).unwrap();
+            assert!(replace_private(&link, b"wrong").is_err());
+            assert_eq!(
+                private_read(&path).unwrap(),
+                b"model_reasoning_effort='high'\n"
+            );
+        }
+    }
+    #[test]
+    fn routing_review_rebase_keeps_cwd_resources_and_reasoning_without_changing_unrelated_text() {
+        let f = Fixture::new("native");
+        let stage = f.root.join("stage");
+        let mut value:toml::Value=toml::from_str("cwd='work'\nmodel_instructions_file='rules.md'\ncompact_prompt_file='summary.md'\nmodel_reasoning_effort='max'\nmodel='chosen'\n").unwrap();
+        rebase(
+            &mut value,
+            &f.source,
+            &f.source,
+            &stage,
+            &stage,
+            f.launch.provider.as_ref().unwrap(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(value["cwd"].as_str(), f.source.join("work").to_str());
+        assert_eq!(
+            value["model_instructions_file"].as_str(),
+            f.source.join("rules.md").to_str()
+        );
+        assert_eq!(
+            value["compact_prompt_file"].as_str(),
+            f.source.join("summary.md").to_str()
+        );
+        assert_eq!(value["model_reasoning_effort"].as_str(), Some("max"));
+        assert_eq!(value["model"].as_str(), Some("chosen"));
+    }
+    #[test]
+    fn repair_refresh_codex_old_context_removes_deleted_upstream_profiles() {
+        for legacy in [false, true] {
+            let mut f = Fixture::new("native");
+            if legacy {
+                f.launch.codex = None;
+            }
+            std::fs::write(f.source.join("review.config.toml"), "model='review'\n").unwrap();
+            let home = f.prepare().unwrap().home.unwrap();
+            std::fs::remove_dir_all(home.join("yam-inherited")).unwrap();
+            std::fs::remove_file(f.source.join("review.config.toml")).unwrap();
+            assert!(home.join("review.config.toml").is_file());
+            f.prepare().unwrap();
+            assert!(
+                !home.join("review.config.toml").exists(),
+                "old managed profile must follow upstream deletion"
+            );
+        }
+    }
+
+    #[test]
+    fn repair_refresh_codex_global_config_profiles_and_instructions_without_history_loss() {
+        for legacy in [false, true] {
+            let mut f = Fixture::new("native");
+            if legacy {
+                f.launch.codex = None;
+            }
+            std::fs::write(
+                f.source.join("config.toml"),
+                "model_reasoning_effort='low'\nweb_search='disabled'\n",
+            )
+            .unwrap();
+            std::fs::write(f.source.join("review.config.toml"), "model='review-old'\n").unwrap();
+            std::fs::write(f.source.join("AGENTS.md"), "instructions-old").unwrap();
+            let env = f.prepare().unwrap();
+            let home = env.home.unwrap();
+            std::fs::create_dir_all(home.join("sessions")).unwrap();
+            std::fs::write(home.join("sessions/native-id.jsonl"), "history").unwrap();
+            let mut config = parse(&private_read(&home.join("config.toml")).unwrap()).unwrap();
+            config
+                .as_table_mut()
+                .unwrap()
+                .insert("model_reasoning_effort".into(), "high".into());
+            std::fs::write(home.join("config.toml"), toml::to_string(&config).unwrap()).unwrap();
+            std::fs::write(
+                f.source.join("config.toml"),
+                "model_reasoning_effort='low'\nweb_search='live'\n[features]\nmulti_agent=true\n",
+            )
+            .unwrap();
+            std::fs::write(f.source.join("review.config.toml"), "model='review-new'\n").unwrap();
+            std::fs::write(f.source.join("AGENTS.md"), "instructions-new").unwrap();
+            let refreshed = f
+                .prepare()
+                .expect("upstream configuration must refresh in the same context");
+            assert_eq!(refreshed.home.as_ref(), Some(&home));
+            assert!(refreshed.validate_before_spawn().is_ok());
+            let actual = parse(&private_read(&home.join("config.toml")).unwrap()).unwrap();
+            assert_eq!(actual["web_search"].as_str(), Some("live"));
+            assert_eq!(actual["model_reasoning_effort"].as_str(), Some("high"));
+            assert_eq!(actual["features"]["multi_agent"].as_bool(), Some(true));
+            assert_eq!(
+                parse(&private_read(&home.join("review.config.toml")).unwrap()).unwrap()["model"]
+                    .as_str(),
+                Some("review-new")
+            );
+            assert!(std::fs::read_to_string(home.join("AGENTS.md"))
+                .unwrap()
+                .starts_with("instructions-new"));
+            assert_eq!(
+                std::fs::read_to_string(home.join("sessions/native-id.jsonl")).unwrap(),
+                "history"
+            );
+            let unchanged = f.prepare().unwrap();
+            assert!(
+                refreshed.validate_before_spawn().is_ok(),
+                "unchanged input must not replace pinned configuration files"
+            );
+            assert!(unchanged.validate_before_spawn().is_ok());
+            std::fs::write(
+                f.source.join("config.toml"),
+                "model_reasoning_effort='xhigh'\n",
+            )
+            .unwrap();
+            std::fs::remove_file(f.source.join("review.config.toml")).unwrap();
+            f.prepare().unwrap();
+            let actual = parse(&private_read(&home.join("config.toml")).unwrap()).unwrap();
+            assert_eq!(actual["model_reasoning_effort"].as_str(), Some("xhigh"));
+            assert!(actual.get("web_search").is_none());
+            assert!(!home.join("review.config.toml").exists());
+            let before = private_read(&home.join("config.toml")).unwrap();
+            std::fs::write(f.source.join("config.toml"), "malformed = [").unwrap();
+            assert!(f.prepare().is_err());
+            assert_eq!(private_read(&home.join("config.toml")).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn repair_rotation_preserves_native_home_history_and_preferences() {
+        let mut f = Fixture::new("native");
+        f.launch.provider.as_mut().unwrap().api_key_env = Some("ROTATION_API_KEY".into());
+        std::fs::write(f.source.join("auth.json"), br#"{"account":"unchanged"}"#).unwrap();
+        let prepare = |key: &str| {
+            crate::provider_launch::prepare(&f.root, &f.launch, &|name| match name {
+                "CODEX_HOME" => Some(f.source.to_string_lossy().into_owned()),
+                "ROTATION_API_KEY" => Some(key.into()),
+                _ => None,
+            })
+        };
+        let first = prepare("old-key").unwrap();
+        let home = first.home.clone().unwrap();
+        std::fs::create_dir(home.join("sessions")).unwrap();
+        std::fs::write(home.join("sessions/native-id.jsonl"), "native history").unwrap();
+        let mut config = parse(&private_read(&home.join("config.toml")).unwrap()).unwrap();
+        config
+            .as_table_mut()
+            .unwrap()
+            .insert("model_reasoning_effort".into(), "high".into());
+        std::fs::write(home.join("config.toml"), toml::to_string(&config).unwrap()).unwrap();
+        let next =
+            prepare("new-key").expect("rotated gateway key must resume the original context");
+        assert_eq!(next.home.as_ref(), Some(&home));
+        assert!(next.validate_before_spawn().is_ok());
+        assert!(
+            first.validate_before_spawn().is_err(),
+            "prepared credentials cannot silently become stale"
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.join("sessions/native-id.jsonl")).unwrap(),
+            "native history"
+        );
+        let auth: serde_json::Value =
+            serde_json::from_slice(&private_read(&home.join("auth.json")).unwrap()).unwrap();
+        assert_eq!(auth, serde_json::json!({"OPENAI_API_KEY":"new-key"}));
+        let config = parse(&private_read(&home.join("config.toml")).unwrap()).unwrap();
+        assert_eq!(config["model_reasoning_effort"].as_str(), Some("high"));
+        for name in ["OPENAI_API_KEY", "CODEX_API_KEY", "YAM_PROVIDER_API_KEY"] {
+            assert_eq!(
+                config["shell_environment_policy"]["set"][name].as_str(),
+                Some("new-key")
+            );
+            assert_eq!(next.vars[name], "new-key");
+        }
+        assert_eq!(
+            std::fs::read(f.source.join("auth.json")).unwrap(),
+            br#"{"account":"unchanged"}"#
+        );
+        assert!(prepare("").is_err());
+        assert!(prepare("bad\nkey").is_err());
+        config_tamper(&home);
+        assert!(
+            prepare("third-key").is_err(),
+            "rotation cannot repair a tampered route"
+        );
+        fn config_tamper(home: &Path) {
+            let mut config = parse(&private_read(&home.join("config.toml")).unwrap()).unwrap();
+            config["model_provider"] = "untrusted".into();
+            std::fs::write(home.join("config.toml"), toml::to_string(&config).unwrap()).unwrap();
+        }
+    }
+
     #[test]
     #[cfg(unix)]
     fn shared_skill_checkout_keeps_real_directory_and_parent_dependencies_live() {
@@ -1207,6 +2122,36 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn fidelity_codex_native_reasoning_preferences_survive_resume_without_route_changes() {
+        let fixture = Fixture::new("native");
+        let env = fixture.prepare().unwrap();
+        let home = env.home.as_ref().unwrap();
+        let path = home.join("config.toml");
+        let mut config = parse(&std::fs::read(&path).unwrap()).unwrap();
+        for (key, value) in [
+            ("model_reasoning_effort", "xhigh"),
+            ("model_reasoning_summary", "detailed"),
+            ("web_search", "live"),
+        ] {
+            config
+                .as_table_mut()
+                .unwrap()
+                .insert(key.into(), value.into());
+        }
+        std::fs::write(&path, toml::to_string(&config).unwrap()).unwrap();
+        let resumed = fixture
+            .prepare()
+            .expect("native reasoning preference edits must survive restore");
+        resumed.validate_before_spawn().unwrap();
+        let actual = parse(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(actual["model_reasoning_effort"].as_str(), Some("xhigh"));
+        assert_eq!(actual["web_search"].as_str(), Some("live"));
+        config["openai_base_url"] = "https://wrong.invalid".into();
+        std::fs::write(&path, toml::to_string(&config).unwrap()).unwrap();
+        assert!(fixture.prepare().is_err());
+    }
+
     #[test]
     fn inherits_profiles_role_models_and_relative_resources_without_global_writes() {
         let fixture = Fixture::new("native");

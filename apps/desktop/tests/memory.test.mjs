@@ -43,7 +43,7 @@ test('a hung refresh expires the displayed total without waiting for the next po
  now=10101;expire();assert.equal(values.at(-1),null);assert.equal(call,2);stop();
 });
 
- test('memory is rendered in the always-visible workspace footer, outside diagnostics',async()=>{
+ test('memory stays visible in the persistent status bar with or without a selected session',async()=>{
  const {readFileSync}=await import('node:fs');const ts=(await import('typescript')).default;
  const text=readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8');
  const tree=ts.createSourceFile('App.tsx',text,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
@@ -51,7 +51,8 @@ test('a hung refresh expires the displayed total without waiting for the next po
   if(ts.isJsxElement(node)&&node.openingElement.getText(tree).startsWith('<span className="memory-usage"')){memory=node;parents.push(...ancestors);}
   ts.forEachChild(node,child=>visit(child,[...ancestors,node]));
  }visit(tree);assert.ok(memory);
- assert.ok(parents.some(node=>ts.isJsxElement(node)&&node.openingElement.getText(tree).includes('workspace-footer')),'memory belongs in footer');
+ assert.ok(!parents.some(node=>ts.isJsxElement(node)&&node.openingElement.getText(tree).includes('session-diagnostics')));
+ assert.ok(parents.some(node=>ts.isJsxElement(node)&&node.openingElement.getText(tree).includes('workspace-footer')));
  assert.ok(!parents.some(node=>ts.isJsxElement(node)&&node.openingElement.getText(tree).includes('diagnostics-details')));
- assert.ok(!parents.some(node=>ts.isBinaryExpression(node)&&node.left.getText(tree)==='session'&&node.operatorToken.kind===ts.SyntaxKind.AmpersandAmpersandToken),'footer survives empty selection');
+ assert.ok(!parents.some(node=>ts.isBinaryExpression(node)&&node.left.getText(tree)==='session'&&node.operatorToken.kind===ts.SyntaxKind.AmpersandAmpersandToken),'diagnostics survives empty selection');
  });

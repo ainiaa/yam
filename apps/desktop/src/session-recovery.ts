@@ -1,7 +1,7 @@
 // Author: Jeff.Liu.
 export type SessionAvailability = "available" | "owner_unavailable" | "terminal_unavailable";
 type RecoveryRecord = {
-  summary: {session_id:string; command:string|null; launch?:{adapter:string;mode:string;extra_args:string;provider?:unknown}|null};
+  summary: {session_id:string; command:string|null; ssh?:unknown; launch?:{adapter:string;mode:string;extra_args:string;provider?:unknown}|null};
   status:string; reason?:string|null;
   agent?: {generation?:string;agent_session_id:string|null};
 };
@@ -21,11 +21,12 @@ export function sessionRecovery(record:RecoveryRecord|null, selected:string|null
     && (launch.provider || launch.extra_args.trim() === "") && nativeId == null);
   const canContinue = chooseNative || !!(available && !starting && ended.has(record!.status) && ended.has(status)
     && record!.summary.command === null && launch?.mode === "interactive"
-    && ["codex", "claude", "gemini"].includes(launch.adapter)
+    && ["codex", "claude", "gemini", "pi"].includes(launch.adapter)
     && (launch.adapter !== "codex" || !!launch.provider || launch.extra_args.trim() === "")
     && record!.agent?.generation?.trim()
     && typeof nativeId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(nativeId));
   const canRunAgain = !!(available && !starting && (ended.has(record!.status) || ["starting", "running"].includes(record!.status)));
+  const canOpenTerminal=!!(available&&!starting&&ended.has(record!.status)&&ended.has(status)&&!record!.summary.ssh);
   let notice:string|null = null;
   if (matches && availability === "owner_unavailable") {
     notice = "Background connection unavailable. The current process state cannot be confirmed here.";
@@ -35,11 +36,12 @@ export function sessionRecovery(record:RecoveryRecord|null, selected:string|null
     notice = [legacyOwnerReason, ownerReason].includes(record!.reason ?? "")
       ? "The background owner restarted; the previous terminal process cannot be reattached. Review recorded output and choose an explicit action."
       : "This task needs attention. Review its recorded output and choose an explicit action.";
-  } else if (matches && ended.has(record!.status) && ended.has(status) && ["claude", "codex"].includes(launch?.adapter ?? "")) {
+  } else if (matches && ended.has(record!.status) && ended.has(status) && ["claude", "codex", "pi"].includes(launch?.adapter ?? "")) {
     notice = chooseNative ? "Recorded output only. Choose a saved conversation in the native CLI to continue."
       : canContinue
       ? "Recorded output only. Choose Continue to resume the saved conversation, or Run again to start a new task."
       : "Recorded output only. Choose Run again to start a new task.";
   }
-  return {canContinue, canRunAgain, chooseNative, notice};
+  if(!notice&&canOpenTerminal)notice="Saved terminal output. Type to open a new terminal here; previous tasks will not run again.";
+  return {canContinue, canRunAgain, canOpenTerminal, chooseNative, notice};
 }

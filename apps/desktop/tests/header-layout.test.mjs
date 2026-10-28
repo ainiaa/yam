@@ -1,3 +1,5 @@
+import {sidebarSessions} from '../src/workspaces.ts';
+import {sessionRuntimeInfo} from '../src/session-runtime-info.ts';
 import {englishUiRead} from './fixtures/english-ui-source.mjs';
 const readFileSync=(...args)=>englishUiRead(rawReadFileSync,...args);
 import './fixtures/i18n-test-init.mjs';
@@ -20,12 +22,17 @@ import {gitContextLabel} from '../src/git-context.ts';
 import {connectionDetails} from '../src/provider-config.ts';
 
 const chrome = process.env.CHROME_BIN ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+// Headless Chrome can still display macOS keychain dialogs; installation is not test consent.
+const chromeSkip = process.env.YAM_TEST_HEADLESS_CHROME !== '1'
+  ? 'Set YAM_TEST_HEADLESS_CHROME=1 to explicitly run isolated local-browser tests'
+  : !existsSync(chrome) && 'Set CHROME_BIN to an installed Chromium browser';
 const source = ts.createSourceFile('App.tsx', readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-let header, sidebar, creation;
+let header, sidebar, creation, viewbar;
 function visit(node) {
   if(ts.isVariableDeclaration(node)&&node.name.getText(source)==="newSessionButton")creation=node.initializer;
   if (ts.isJsxElement(node) && node.openingElement.getText(source) === '<header className="topbar">') header = node;
   if (ts.isJsxElement(node) && node.openingElement.tagName.getText(source) === "aside") sidebar = node;
+  if (ts.isJsxElement(node) && node.openingElement.getText(source) === '<div className="workspace-viewbar">') viewbar = node;
   ts.forEachChild(node, visit);
 }
 visit(source);
@@ -34,7 +41,7 @@ const code = ts.transpileModule('return (' + header.getText(source) + ');', {com
 const connectionDeclaration=source.statements.find(node=>ts.isFunctionDeclaration(node)&&node.name?.text==='SessionConnection');
 assert.ok(connectionDeclaration,'actual connection disclosure');
 const connectionCode=ts.transpileModule(connectionDeclaration.getText(source),{compilerOptions:{target:ts.ScriptTarget.ES2022,jsx:ts.JsxEmit.React}}).outputText;
-const SessionConnection=componentFunction('React','connectionDetails','ChevronDown',connectionCode+';return SessionConnection;')(React,connectionDetails,icons.ChevronDown);
+const SessionConnection=componentFunction('React','connectionDetails','ChevronDown','sessionRuntimeInfo',connectionCode+';return SessionConnection;')(React,connectionDetails,icons.ChevronDown,sessionRuntimeInfo);
 const css = readFileSync(new URL('../src/App.css', import.meta.url), 'utf8');
 
 const layoutSource=ts.createSourceFile('TerminalLayout.tsx',readFileSync(new URL('../src/TerminalLayout.tsx',import.meta.url),'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
@@ -47,16 +54,17 @@ function layoutElement() {
 }
 function markup(interactive, collapsed, longPath, stopped=false) {
   const bindings = {React, SessionConnection, ...Object.fromEntries(Object.entries(icons).filter(([name]) => /^[A-Z]/.test(name))), gitProjectPath:'/work',sidebarOpen: !collapsed, currentProject: {name: 'YAM'},
-    searchInput:{current:null},historyQuery:'',statusFilter:'all',unreadTotal:0,inboxOpen:false,shortcutError:null,history:[],historyCursor:null,historyLoading:false,capacityOpen:false,capacity:null,capacityError:null,capacityBusy:false,scanCapacity(){},jumpToAttention(){},addProject(){},endProjectDrag(){},
+    sidebarSessions,searchInput:{current:null},historyQuery:'',statusFilter:'all',unreadTotal:0,inboxOpen:false,shortcutError:null,history:[],historyCursor:null,historyLoading:false,capacityOpen:false,capacity:null,capacityError:null,capacityBusy:false,scanCapacity(){},jumpToAttention(){},addProject(){},endProjectDrag(){},
     visibleProjects:[{path:'/work',name:'Project',sessions:[{summary:{session_id:'fixture',mode:'command'},status:'stopped',started_at:0}]}],projectKey:path=>path,collapsedProjects:new Set(),normalizedQuery:'',projectColor:()=>'',canRenameProject:()=>true,canMoveProject:()=>false,pinnedSessions:[],
-    session: {session_id: 'fixture', cwd:'/work', launch: interactive ? {mode: 'interactive'} : null},
+    session: {session_id: 'fixture', cwd:'/work', launch: interactive ? {mode: 'interactive',adapter:'codex'} : null},
+    conversationOpen:false,showConversation(){},openTerminalFind(){},
     starting:false, titleFor: () => 'Codex interactive session', visibleGitContext: longPath ? {kind: 'repository', branch: 'feature/' + 'long-branch-'.repeat(30), dirty: true, root: '/work/' + 'long-directory/'.repeat(30), common_dir: '/repo/.git'} : {kind: 'unavailable'},
     gitContextLabel, isRunning: !stopped, currentAgent: {integration: 'connecting'}, agentLabel,
-    sessionStatus: stopped?'stopped':'running', statusLabels: {running:'Running',stopped:'Stopped'}, notificationsPaused: false,
+    agentPhase:"idle",sessionStatus: stopped?'stopped':'running', statusLabels: {running:'Running',stopped:'Stopped'}, notificationsPaused: false,
     historyOverview: {failed_receipts: 1,attention_sessions:0,total:1,active:1}, canNavigateReportedPrompt: () => false,
     shortcutMac: true, fileBusy: false, filePreview: null, canMoveTerminalTab: () => false,
     moveBusy: false, movePending: false, isMainWindow: true, stopAllBusy:false,
-    updaterSnapshot:null,isMainWindow:true,health:{status:'ready',version:'0.1.0'}, memory:null, memoryLabel:()=> '100 MB', diagnosticsExporting:false,diagnosticsMessage:null, notificationError:null,scrollView:null, ownerConnectionAvailable:{current:{available:true}},terminalPaneVisible:()=>true,canClearTerminalDisplay:()=>false, shortcuts: {}, shortcutHint: () => '',
+    updaterSnapshot:null,isMainWindow:true,health:{status:'ready',version:'0.1.0'}, memory:null, memoryLabel:()=> '100 MB', notificationTestBusy:{current:false},notificationTestStatus:null,openCommandPalette(){},diagnosticsExporting:false,diagnosticsMessage:null, notificationError:null,scrollView:null, ownerConnectionAvailable:{current:{available:true}},terminalPaneVisible:()=>true,canClearTerminalDisplay:()=>false, shortcuts: {}, shortcutHint: () => '',
     terminalViews: {current: new Map()}, recovery: {canRunAgain: false}, canContinue: false,
     closeEndedView() {}, rerunSelectedSession() {}, resumeSelectedSession() {}};
   assert.ok(creation,'actual shared new-session control');
@@ -65,10 +73,20 @@ function markup(interactive, collapsed, longPath, stopped=false) {
   const element = componentFunction(...Object.keys(bindings), code)(...Object.values(bindings));
   const asideCode=ts.transpileModule('return ('+sidebar.getText(source)+');',{compilerOptions:{target:ts.ScriptTarget.ES2022,jsx:ts.JsxEmit.React}}).outputText;
   const aside=componentFunction(...Object.keys(bindings),asideCode)(...Object.values(bindings));
-  return `<div class="app-shell${collapsed ? ' sidebar-collapsed' : ''}">${renderToStaticMarkup(aside)}<main class="main-panel">${renderToStaticMarkup(element)}<section class="terminal-area">${renderToStaticMarkup(layoutElement())}</section></main></div>`;
+  const viewCode=ts.transpileModule('return ('+viewbar.getText(source)+');',{compilerOptions:{target:ts.ScriptTarget.ES2022,jsx:ts.JsxEmit.React}}).outputText;
+  const view=componentFunction(...Object.keys(bindings),viewCode)(...Object.values(bindings));
+  return `<div class="app-shell${collapsed ? ' sidebar-collapsed' : ''}">${renderToStaticMarkup(aside)}<main class="main-panel">${renderToStaticMarkup(element)}${renderToStaticMarkup(view)}<section class="terminal-area">${renderToStaticMarkup(layoutElement())}</section></main></div>`;
 }
 
-test('actual header keeps Git readable, terminal space, and actions reachable', {skip: !existsSync(chrome) && 'Set CHROME_BIN to an installed Chromium browser'}, async () => {
+test('production workspace chrome renders shell, Agent, ended and collapsed states without a browser',()=>{
+ for(const options of [[false,false,false],[true,false,false],[true,true,true],[true,false,true,true]]){
+  const html=markup(...options);
+  assert.match(html,/class="sidebar-footer"/);assert.match(html,/class="workspace-viewbar"/);
+  assert.match(html,/aria-label="Session view"/);assert.doesNotMatch(html,/<time\b/);
+ }
+});
+
+test('actual header keeps Git readable, terminal space, and actions reachable', {skip: chromeSkip}, async () => {
   const cases = [
     {name: 'normal shell', width: 1000, interactive: false},
     {name: 'awaiting trusted hook', width: 1180, interactive: true},
@@ -108,7 +126,7 @@ test('actual header keeps Git readable, terminal space, and actions reachable', 
     const file = join(directory, 'header.html');
     writeFileSync(file, `<pre id="result"></pre><script>${script}</script>`);
     const results = await new Promise((resolve, reject) => {
-      const child = spawn(chrome, ['--headless', '--disable-gpu', '--disable-background-networking', '--no-first-run', '--no-default-browser-check', '--user-data-dir=' + join(directory, 'profile'), '--dump-dom', '--virtual-time-budget=1000', pathToFileURL(file).href], {stdio: ['ignore', 'pipe', 'pipe']});
+      const child = spawn(chrome, ['--headless', '--disable-gpu', '--disable-background-networking','--use-mock-keychain','--disable-features=DialMediaRouteProvider', '--no-first-run', '--no-default-browser-check', '--user-data-dir=' + join(directory, 'profile'), '--dump-dom', '--virtual-time-budget=1000', pathToFileURL(file).href], {stdio: ['ignore', 'pipe', 'pipe']});
       let output = '', completed, failure;
       const timeout = setTimeout(() => { failure = new Error('Chrome layout completion timed out'); child.kill('SIGKILL'); }, 15000);
       child.stdout.on('data', chunk => {
