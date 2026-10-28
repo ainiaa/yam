@@ -6,6 +6,15 @@ import third_party_notices as notices
 path=pathlib.Path(__file__).with_name('build-terminal-runtime.py')
 spec=importlib.util.spec_from_file_location('terminal_runtime',path);runtime=importlib.util.module_from_spec(spec);spec.loader.exec_module(runtime)
 class RuntimeTests(unittest.TestCase):
+ def test_ci_materializes_configured_script_resources_before_cargo(self):
+  root=path.resolve().parents[1]
+  workflow=(root/'.github/workflows/ci.yml').read_text()
+  build='pnpm build:terminal --script-only --notice-mode developer'
+  self.assertIn(build,workflow)
+  self.assertLess(workflow.index(build),workflow.index('cargo check --manifest-path'))
+  config=json.loads((root/'apps/desktop/src-tauri/tauri.conf.json').read_text())
+  self.assertIn('target/terminal-runtime/yam-terminal.cjs',config['bundle']['resources'])
+  self.assertTrue(any('DEVELOPER-INCOMPLETE-NOTICES' in resource for resource in config['bundle']['resources']))
  def test_production_configs_ship_only_script_and_never_build_sea(self):
   root=path.resolve().parents[1]/'apps/desktop/src-tauri'
   for name in ['tauri.conf.json','tauri.release.conf.json']:
