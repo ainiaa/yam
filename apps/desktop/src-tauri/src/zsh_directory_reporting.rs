@@ -427,6 +427,8 @@ mod tests {
         b.env("ZDOTDIR", root);
         b.env("PATH", "/usr/bin:/bin");
         b.env("TERM", "xterm-256color");
+        // Debian's global zshrc must not prompt about host completion directories in this owned fixture.
+        b.env("skip_global_compinit", "1");
         b.cwd(root);
         assert_eq!(&b.get_argv()[1..], &[OsStr::new("-l")]);
         let (child, assets, warning, _command_warning) =
