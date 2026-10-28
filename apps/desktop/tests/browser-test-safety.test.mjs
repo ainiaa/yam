@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {fileURLToPath} from 'node:url';
+import {fileURLToPath,pathToFileURL} from 'node:url';
 import {spawnSync} from 'node:child_process';
 
 const files = ['header-layout.test.mjs', 'terminal-frame-browser.test.mjs', 'external-terminal-stream.test.mjs'];
@@ -33,7 +33,7 @@ test('browser tests require explicit opt-in even when a browser is installed or 
       delete env.NODE_TEST_CONTEXT;
       delete env.YAM_TEST_HEADLESS_CHROME;
       if (enabled !== undefined) env.YAM_TEST_HEADLESS_CHROME = enabled;
-      return spawnSync(process.execPath, ['--import', preload, '--test', '--test-concurrency=1',
+      return spawnSync(process.execPath, ['--import', pathToFileURL(preload).href, '--test', '--test-concurrency=1',
         ...files.map(name => fileURLToPath(new URL(name, import.meta.url)))],
       {env, encoding:'utf8', timeout:30000});
     };

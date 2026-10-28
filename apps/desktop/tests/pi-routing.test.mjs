@@ -248,7 +248,7 @@ test('Pi loopback controls authenticate generation and token and keep credential
  const descriptor=JSON.parse(await fs.readFile(file,'utf8'));
  const send=(request,fragment=false)=>new Promise((resolve,reject)=>{const socket=connect({host:'127.0.0.1',port:descriptor.port});let raw='';socket.on('error',reject);socket.on('data',b=>raw+=b);socket.on('end',()=>{try{resolve(JSON.parse(raw));}catch(e){reject(e);}});socket.on('connect',()=>{const raw=Buffer.from(JSON.stringify(request));if(fragment){const split=raw.indexOf(Buffer.from('模'))+1;socket.write(raw.subarray(0,split));setTimeout(()=>socket.end(raw.subarray(split)),5);}else socket.end(raw);});});
  try{
-  assert.equal((await fs.stat(file)).mode&0o777,0o600);
+  if(process.platform!=='win32')assert.equal((await fs.stat(file)).mode&0o777,0o600);
   assert.equal((await send({token:'a'.repeat(64),generation,action:'reset',revision:1})).ok,false);assert.equal(calls,0);
   assert.equal((await send({token:descriptor.token,generation:'wrong',action:'reset',revision:1})).ok,false);assert.equal(calls,0);
   const catalog=await send({token:descriptor.token,generation,action:'catalog',revision:1});assert.equal(catalog.models[0].key,'p/strong');assert.ok(!JSON.stringify(catalog).includes(descriptor.token));assert.equal(calls,0);

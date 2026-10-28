@@ -47,6 +47,7 @@ jobs:
         shell: bash
         run: echo "SHELL=/bin/zsh" >> "$GITHUB_ENV"
       - run: pnpm install --frozen-lockfile
+      - run: pnpm build:terminal
       - run: pnpm build:terminal --script-only --notice-mode developer
       - run: cargo check --manifest-path src-tauri/Cargo.toml --locked
       - run: pnpm test:coverage

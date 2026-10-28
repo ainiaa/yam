@@ -12,6 +12,7 @@ class RuntimeTests(unittest.TestCase):
   build='pnpm build:terminal --script-only --notice-mode developer'
   self.assertIn(build,workflow)
   self.assertLess(workflow.index(build),workflow.index('cargo check --manifest-path'))
+  self.assertIn('- run: pnpm build:terminal\n',workflow, 'Native parser fixtures still require the standalone runtime')
   config=json.loads((root/'apps/desktop/src-tauri/tauri.conf.json').read_text())
   self.assertIn('target/terminal-runtime/yam-terminal.cjs',config['bundle']['resources'])
   self.assertTrue(any('DEVELOPER-INCOMPLETE-NOTICES' in resource for resource in config['bundle']['resources']))

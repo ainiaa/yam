@@ -6,8 +6,9 @@ import {EditorView} from 'codemirror';
 import {readFileSync} from 'node:fs';
 import ts from 'typescript';
 import {createRequire} from 'node:module';
+import {pathToFileURL} from 'node:url';
 const require=createRequire(import.meta.url);
-const commands=await import(require.resolve('@codemirror/commands',{paths:[require.resolve('codemirror')]}));
+const commands=await import(pathToFileURL(require.resolve('@codemirror/commands',{paths:[require.resolve('codemirror')]})).href);
 test('native editor state handles inert text and common source language extensions',async()=>{
  for(const name of ['a.ts','a.js','a.rs','a.py','a.java','a.sql','a.sh','a.json','a.yaml','a.toml','README.md','a.css','a.html','unknown.bin']){
   const syntax=await syntaxForPath(name);const state=createFileEditorState('<script>literal</script>\n',{language:syntax});assert.equal(state.doc.toString(),'<script>literal</script>\n');assert.equal(state.facet(language)!==null,!['README.md','unknown.bin'].includes(name));
