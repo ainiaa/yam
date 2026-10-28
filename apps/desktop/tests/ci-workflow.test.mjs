@@ -11,8 +11,8 @@ test('CI generates native permission schemas before frontend tests in every plat
  const schema=workflow.indexOf('- run: cargo check --manifest-path src-tauri/Cargo.toml --locked');
  const tests=workflow.indexOf('- run: pnpm test:coverage');
  assert.ok(runtime>=0&&schema>runtime&&tests>schema,'build runtime and native schema before frontend tests');
- assert.equal(workflow.match(/- run: pnpm build:terminal\n/g)?.length,1,'build the native fixture runtime once');
- assert.equal(workflow.match(/- run: pnpm build:terminal --script-only --notice-mode developer\n/g)?.length,1,'build the configured app script once');
+ assert.equal(workflow.match(/- run: pnpm build:terminal\r?\n/g)?.length,1,'build the native fixture runtime once');
+ assert.equal(workflow.match(/- run: pnpm build:terminal --script-only --notice-mode developer\r?\n/g)?.length,1,'build the configured app script once');
  assert.ok(workflow.indexOf('- run: pnpm build:terminal --script-only')<schema,'script resources must exist before native schema generation');
  const step=workflow.slice(workflow.lastIndexOf('\n      -',schema),workflow.indexOf('\n      -',schema+1));
  assert.doesNotMatch(step,/\bif:/,'all CI platforms need their native schema');
