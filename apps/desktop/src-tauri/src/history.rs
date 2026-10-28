@@ -4868,7 +4868,10 @@ mod tests {
     }
 
     fn store(count: usize) -> HistoryStore {
-        let root = std::env::temp_dir().join(format!("yam-history-pages-{}", next_session_id()));
+        // Deletion validates the parent owner too; system /tmp is not owned by the CI user.
+        let root = std::env::temp_dir()
+            .join(format!("yam-history-pages-{}", next_session_id()))
+            .join("sessions");
         let store = HistoryStore::open(root).unwrap();
         *store.records.lock().unwrap() = (0..count)
             .map(|index| SessionRecord {

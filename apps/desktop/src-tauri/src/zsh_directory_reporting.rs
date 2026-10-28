@@ -456,7 +456,8 @@ mod tests {
         while !out.windows(6).any(|s| s == b"READY>") {
             assert!(
                 std::time::Instant::now() < deadline,
-                "private legacy PTY first prompt timeout"
+                "private legacy PTY first prompt timeout: {}",
+                String::from_utf8_lossy(&out)
             );
             if let Ok(bytes) = receive.recv_timeout(std::time::Duration::from_millis(20)) {
                 out.extend(bytes);

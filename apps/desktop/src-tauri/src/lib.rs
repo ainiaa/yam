@@ -7531,7 +7531,7 @@ mod tests {
             status: "running".into(),
             launch: None,
         };
-        (root, summary)
+        (root.join("sessions"), summary)
     }
 
     #[test]
@@ -7539,6 +7539,8 @@ mod tests {
         let (first, _) = test_history();
         let (second, _) = test_history();
         assert!(first
+            .parent()
+            .unwrap()
             .file_name()
             .unwrap()
             .to_string_lossy()
