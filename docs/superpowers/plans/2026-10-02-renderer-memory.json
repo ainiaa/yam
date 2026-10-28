@@ -1,0 +1,134 @@
+{
+  "schema_version": 6,
+  "plan_id": "plan-yam-renderer-memory",
+  "requirement_fingerprint": "b48f4c78485c73bb8605899e21080267cf605f67fe5d77db722e77863dc8bda5",
+  "planner": {
+    "name": "superpowers-writing-plans-v1",
+    "source_path": "/Users/liuwenyuan/.agents/skills/writing-plans/SKILL.md",
+    "source_fingerprint": "4fd4627d2c02367879c0307d7249270bed633317ff9be82e926a6d57bf5d331b"
+  },
+  "context": "short",
+  "baseline": {
+    "commit": "816c3d69d69eabc4101a646115aee2209fc7fd73",
+    "source": {
+      "schema_version": 2,
+      "baseline_commit": "816c3d69d69eabc4101a646115aee2209fc7fd73",
+      "commit_id": "816c3d69d69eabc4101a646115aee2209fc7fd73",
+      "tree_hash": "01914da850869c6a358829fea62d99b4a420a553",
+      "diff_fingerprint": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "changed_paths": [],
+      "changed_entries": [],
+      "source_fingerprint": "4141328a2ad15fc71475fee136fd15c5539de62a3071740ef90fd95c0a92ad62"
+    }
+  },
+  "checkpoint": "same_session",
+  "tasks": [
+    {
+      "task_id": "T1",
+      "task_kind": "wide_refactor",
+      "outcomes": [
+        "Reduce duplicated hidden terminal renderer memory while preserving background-owned terminal state"
+      ],
+      "goal": "Release only idle hidden ended renderers with full background projections; live behavior remains unchanged",
+      "owned_paths": [
+        "apps/desktop/src/App.tsx",
+        "apps/desktop/src/terminal-views.ts",
+        "apps/desktop/tests/terminal-views.test.mjs",
+        "scripts/terminal-renderer-memory.py",
+        "docs/superpowers/plans/2026-10-02-renderer-memory.md",
+        "docs/superpowers/plans/2026-10-02-renderer-memory.json",
+        "scripts/webkit-memory-smoke.py",
+        "scripts/test_webkit_memory_smoke.py",
+        ".github/workflows/ci.yml",
+        "apps/desktop/src/terminal-frame.ts",
+        "apps/desktop/tests/terminal-frame.test.mjs",
+        "apps/desktop/src-tauri/src/lib.rs"
+      ],
+      "depends_on": [],
+      "steps": [
+        "Add selection and release regression tests",
+        "Observe failing tests",
+        "Implement selective renderer retention",
+        "Run frontend regression and build",
+        "Measure native WebKit retained and released renderer fixture",
+        "Review and record results"
+      ],
+      "acceptance": [
+        "Only hidden ended renderers confirmed from a valid persisted final frame are released; failed saves and old owners preserve the cached scene",
+        "Live, legacy or pending renderers remain retained and stale selections cannot release the current renderer",
+        "Switching back restores full Unicode, alternate screen, cursor and viewport from the background",
+        "Native WebKit fixture compares retained versus released renderers with matching output and process footprint"
+      ],
+      "verification": [
+        "npm --prefix apps/desktop test",
+        "npm --prefix apps/desktop run build",
+        "python3 scripts/webkit-memory-smoke.py",
+        "python3 scripts/terminal-renderer-memory.py",
+        "python3 -m unittest discover -s scripts -p test_webkit_memory_smoke.py",
+        "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked",
+        "cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings"
+      ],
+      "execution": "current",
+      "status": "pending",
+      "provider_run": {
+        "scope": "task",
+        "recursive_planning": false
+      },
+      "provider_binding": {
+        "binding": {
+          "controller": "converge",
+          "stage_providers": {},
+          "workflow_provider": {
+            "contract": {
+              "closure": [],
+              "entrypoint": "references/execution-protocol.md",
+              "preserve_external_behavior": true
+            },
+            "contract_fingerprint": "36630ab70e23678f1799b0c1a1301269554f0030e0e1f9fa2bd182085e7610d1",
+            "id": "native-v1",
+            "manifest": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/providers/native-v1.json",
+            "manifest_fingerprint": "da79b6af45fa1e1a94b5ce9b4b0cf84d5f43a798e57f5e1c50b510f6b7e954ee",
+            "role": "workflow",
+            "source_root": "/Users/liuwenyuan/www/tools/skills-convergent-delivery",
+            "sources": [
+              {
+                "fingerprint": "a43c016ea5daecbf5e74ea93840c1e489fe7ce85f926bb651fdbf36064028770",
+                "kind": "entrypoint",
+                "path": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/references/execution-protocol.md",
+                "relative_path": "references/execution-protocol.md"
+              }
+            ],
+            "task_kind": "refactor",
+            "version": "1"
+          }
+        },
+        "binding_fingerprint": "f8d8b8b19d4257b2d6718cb6d18c70874a77a530b6bf7df2949006c62c938e20",
+        "reason": "native engine was selected",
+        "selection": "explicit",
+        "task_kind": "refactor"
+      }
+    }
+  ],
+  "final_acceptance": [
+    "Only hidden ended renderers confirmed from a valid persisted final frame are released; failed saves and old owners preserve the cached scene",
+    "Live, legacy or pending renderers remain retained and stale selections cannot release the current renderer",
+    "Switching back restores full Unicode, alternate screen, cursor and viewport from the background",
+    "Native WebKit fixture compares retained versus released renderers with matching output and process footprint"
+  ],
+  "decisions": [
+    {
+      "id": "D1",
+      "status": "resolved",
+      "question": "May tasks or background terminal state be discarded to reduce memory?",
+      "resolution": "No; only reconstructable idle frontend views may be released",
+      "source": "user"
+    },
+    {
+      "id": "D2",
+      "status": "resolved",
+      "question": "Should live projected views also be released?",
+      "resolution": "No: native fixture return cost rises from 4 ms warm to 1017 ms reconstructed; keep live switching warm and limit release to ended scenes",
+      "source": "code"
+    }
+  ]
+}

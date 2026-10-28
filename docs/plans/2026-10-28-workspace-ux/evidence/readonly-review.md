@@ -1,0 +1,7 @@
+- **P2 — Async editor loading steals focus from workspace controls.** In `ProjectTextEditor.tsx`, the `[ready]` effect focuses CodeMirror whenever focus is anywhere inside the workspace. If the user moves to a tab, resize handle, or close button while the editor loads, completion unexpectedly redirects keyboard input into the file. Track whether editor focus is still intended before focusing.
+
+- **P2 — Closing then reopening can redirect focus to the terminal.** In `App.tsx`, `closeProjectTools()` schedules a frame callback without checking whether the workspace has reopened. Reopening before that callback runs can satisfy the existing focus checks, triggering `showConversation(false)` and terminal focus while the workspace is open. Invalidate pending close callbacks on reopen or check the current open state.
+
+- **P2 — Native Close silently does nothing outside the Files tab.** The new `action==="hide" && fileWorkspace` branch always returns, even when no `[data-close-active-file="true"]` button exists. This affects Changes, Worktrees, and Files with no open file. Return only after handling a file close; otherwise close the workspace through `closeProjectTools()`.
+
+Live testing and native CLI/Pi runtime verification were not performed; this review covers only the supplied code.

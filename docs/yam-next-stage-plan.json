@@ -1,0 +1,501 @@
+{
+  "schema_version": 6,
+  "plan_id": "yam-agent-workspace-20261001",
+  "requirement_fingerprint": "cd4197aed318efd5c3f396ece732e31704d62129e0c3ad737c93ce3334fc36bf",
+  "planner": {
+    "name": "project-plan-v1",
+    "source_path": "/Users/liuwenyuan/www/tools/yam/docs/yam-next-stage-proposal.md",
+    "source_fingerprint": "3e986ebc1b98d66b2698c027e8452da91aad738384a86dfcb518f608480a7bfb"
+  },
+  "context": "long",
+  "baseline": {
+    "commit": "0617b23d01be696212eb953994b420b119e89d4c",
+    "source": {
+      "schema_version": 2,
+      "baseline_commit": "0617b23d01be696212eb953994b420b119e89d4c",
+      "commit_id": "0617b23d01be696212eb953994b420b119e89d4c",
+      "tree_hash": "a05714bb13089f3e712257c651fbd1c32bad567a",
+      "diff_fingerprint": "4de82c0e505c10a04de26768901db68bb9c76d90dad66d29f158aab0c0f5eba5",
+      "changed_paths": [
+        "docs/yam-next-stage-proposal.md"
+      ],
+      "changed_entries": [
+        {
+          "path": "docs/yam-next-stage-proposal.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "3e986ebc1b98d66b2698c027e8452da91aad738384a86dfcb518f608480a7bfb"
+        }
+      ],
+      "source_fingerprint": "cf1fed06b436321cf15c3ddfecf9b86ccdbbebf4b8462e113103b964c842f340"
+    }
+  },
+  "checkpoint": "same_session",
+  "tasks": [
+    {
+      "task_id": "B0",
+      "task_kind": "vertical_slice",
+      "outcomes": [
+        "验证已安装CLI的双轮事件及安全接入能力"
+      ],
+      "goal": "验证已安装CLI的双轮事件及安全接入能力",
+      "owned_paths": [
+        "docs/agent-capabilities.md",
+        "scripts/agent-hook-smoke.py",
+        "docs/yam-next-stage-execution.md"
+      ],
+      "depends_on": [],
+      "steps": [
+        "记录安装版本和事件能力",
+        "执行限定会话双轮探测",
+        "记录接入决策与降级边界"
+      ],
+      "acceptance": [
+        "已安装CLI不修改全局配置即可识别可靠轮次或有实证降级",
+        "Hook续跑与CLI正常回答不被通知改变"
+      ],
+      "verification": [
+        "rtk proxy python3 scripts/agent-hook-smoke.py --check"
+      ],
+      "execution": "current",
+      "status": "pending",
+      "provider_run": {
+        "scope": "task",
+        "recursive_planning": false
+      },
+      "provider_binding": {
+        "binding": {
+          "controller": "converge",
+          "stage_providers": {},
+          "workflow_provider": {
+            "contract": {
+              "closure": [],
+              "entrypoint": "references/execution-protocol.md",
+              "preserve_external_behavior": false
+            },
+            "contract_fingerprint": "2fb1c069b1686ca2b67c505882e2ae27a404663386e5e72df4b2f65a6ec62822",
+            "id": "native-v1",
+            "manifest": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/providers/native-v1.json",
+            "manifest_fingerprint": "da79b6af45fa1e1a94b5ce9b4b0cf84d5f43a798e57f5e1c50b510f6b7e954ee",
+            "role": "workflow",
+            "source_root": "/Users/liuwenyuan/www/tools/skills-convergent-delivery",
+            "sources": [
+              {
+                "fingerprint": "a43c016ea5daecbf5e74ea93840c1e489fe7ce85f926bb651fdbf36064028770",
+                "kind": "entrypoint",
+                "path": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/references/execution-protocol.md",
+                "relative_path": "references/execution-protocol.md"
+              }
+            ],
+            "task_kind": "feature",
+            "version": "1"
+          }
+        },
+        "binding_fingerprint": "e04abc991b64aa44f1f760489b8c33bb40c03458b1e8c63a6eea860247bd300c",
+        "reason": "native engine was selected",
+        "selection": "explicit",
+        "task_kind": "feature"
+      }
+    },
+    {
+      "task_id": "B1",
+      "task_kind": "vertical_slice",
+      "outcomes": [
+        "已验证交互CLI每轮产生正确归属的通知"
+      ],
+      "goal": "已验证交互CLI每轮产生正确归属的通知",
+      "owned_paths": [
+        "apps/desktop/src-tauri/src",
+        "apps/desktop/src/App.tsx",
+        "apps/desktop/src/notifications.ts",
+        "apps/desktop/src/agent-events.ts",
+        "apps/desktop/tests/notifications.test.mjs",
+        "apps/desktop/tests/agent-events.test.mjs",
+        "apps/desktop/src-tauri/tests",
+        "docs/yam-next-stage-execution.md"
+      ],
+      "depends_on": [
+        "B0"
+      ],
+      "steps": [
+        "写轮次事件回归",
+        "观察红灯",
+        "实现安全接入与持久通知",
+        "运行验证",
+        "复核通知调用链"
+      ],
+      "acceptance": [
+        "两轮进程不退出时产生独立通知",
+        "重复迟到事件与旧回执不影响下一轮",
+        "不修改全局配置和用户权限"
+      ],
+      "verification": [
+        "rtk proxy pnpm --dir apps/desktop test:coverage",
+        "rtk proxy pnpm --dir apps/desktop build",
+        "rtk proxy cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked"
+      ],
+      "execution": "current",
+      "status": "pending",
+      "provider_run": {
+        "scope": "task",
+        "recursive_planning": false
+      },
+      "provider_binding": {
+        "binding": {
+          "controller": "converge",
+          "stage_providers": {},
+          "workflow_provider": {
+            "contract": {
+              "closure": [],
+              "entrypoint": "references/execution-protocol.md",
+              "preserve_external_behavior": false
+            },
+            "contract_fingerprint": "2fb1c069b1686ca2b67c505882e2ae27a404663386e5e72df4b2f65a6ec62822",
+            "id": "native-v1",
+            "manifest": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/providers/native-v1.json",
+            "manifest_fingerprint": "da79b6af45fa1e1a94b5ce9b4b0cf84d5f43a798e57f5e1c50b510f6b7e954ee",
+            "role": "workflow",
+            "source_root": "/Users/liuwenyuan/www/tools/skills-convergent-delivery",
+            "sources": [
+              {
+                "fingerprint": "a43c016ea5daecbf5e74ea93840c1e489fe7ce85f926bb651fdbf36064028770",
+                "kind": "entrypoint",
+                "path": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/references/execution-protocol.md",
+                "relative_path": "references/execution-protocol.md"
+              }
+            ],
+            "task_kind": "feature",
+            "version": "1"
+          }
+        },
+        "binding_fingerprint": "e04abc991b64aa44f1f760489b8c33bb40c03458b1e8c63a6eea860247bd300c",
+        "reason": "native engine was selected",
+        "selection": "explicit",
+        "task_kind": "feature"
+      }
+    },
+    {
+      "task_id": "B2",
+      "task_kind": "vertical_slice",
+      "outcomes": [
+        "用户可通过介入收件箱到达正确会话"
+      ],
+      "goal": "用户可通过介入收件箱到达正确会话",
+      "owned_paths": [
+        "apps/desktop/src",
+        "apps/desktop/tests",
+        "apps/desktop/src-tauri/src",
+        "docs/yam-next-stage-execution.md"
+      ],
+      "depends_on": [
+        "B1"
+      ],
+      "steps": [
+        "写收件箱和导航回归",
+        "观察红灯",
+        "实现未读状态与导航",
+        "运行验证",
+        "复核介入与已读行为"
+      ],
+      "acceptance": [
+        "通知接受发送不等于已读",
+        "键盘导航一次到对应会话",
+        "后台更新不抢焦点且不同轮次不被吞掉"
+      ],
+      "verification": [
+        "rtk proxy pnpm --dir apps/desktop test:coverage",
+        "rtk proxy pnpm --dir apps/desktop build",
+        "rtk proxy cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked"
+      ],
+      "execution": "current",
+      "status": "pending",
+      "provider_run": {
+        "scope": "task",
+        "recursive_planning": false
+      },
+      "provider_binding": {
+        "binding": {
+          "controller": "converge",
+          "stage_providers": {},
+          "workflow_provider": {
+            "contract": {
+              "closure": [],
+              "entrypoint": "references/execution-protocol.md",
+              "preserve_external_behavior": false
+            },
+            "contract_fingerprint": "2fb1c069b1686ca2b67c505882e2ae27a404663386e5e72df4b2f65a6ec62822",
+            "id": "native-v1",
+            "manifest": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/providers/native-v1.json",
+            "manifest_fingerprint": "da79b6af45fa1e1a94b5ce9b4b0cf84d5f43a798e57f5e1c50b510f6b7e954ee",
+            "role": "workflow",
+            "source_root": "/Users/liuwenyuan/www/tools/skills-convergent-delivery",
+            "sources": [
+              {
+                "fingerprint": "a43c016ea5daecbf5e74ea93840c1e489fe7ce85f926bb651fdbf36064028770",
+                "kind": "entrypoint",
+                "path": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/references/execution-protocol.md",
+                "relative_path": "references/execution-protocol.md"
+              }
+            ],
+            "task_kind": "feature",
+            "version": "1"
+          }
+        },
+        "binding_fingerprint": "e04abc991b64aa44f1f760489b8c33bb40c03458b1e8c63a6eea860247bd300c",
+        "reason": "native engine was selected",
+        "selection": "explicit",
+        "task_kind": "feature"
+      }
+    },
+    {
+      "task_id": "B3",
+      "task_kind": "vertical_slice",
+      "outcomes": [
+        "切换活跃会话保持终端交互上下文"
+      ],
+      "goal": "切换活跃会话保持终端交互上下文",
+      "owned_paths": [
+        "apps/desktop/src",
+        "apps/desktop/tests",
+        "apps/desktop/src-tauri/src",
+        "docs/yam-next-stage-execution.md"
+      ],
+      "depends_on": [],
+      "steps": [
+        "测量现有重放与切换",
+        "写上下文保持回归",
+        "观察红灯",
+        "实现最小缓存或快照改进",
+        "运行切换与资源验证"
+      ],
+      "acceptance": [
+        "滚动位置和焦点按用户动作保持",
+        "不串输入且资源有界",
+        "冷日志恢复限制明确"
+      ],
+      "verification": [
+        "rtk proxy pnpm --dir apps/desktop test:coverage",
+        "rtk proxy pnpm --dir apps/desktop build"
+      ],
+      "execution": "current",
+      "status": "pending",
+      "provider_run": {
+        "scope": "task",
+        "recursive_planning": false
+      },
+      "provider_binding": {
+        "binding": {
+          "controller": "converge",
+          "stage_providers": {},
+          "workflow_provider": {
+            "contract": {
+              "closure": [],
+              "entrypoint": "references/execution-protocol.md",
+              "preserve_external_behavior": false
+            },
+            "contract_fingerprint": "2fb1c069b1686ca2b67c505882e2ae27a404663386e5e72df4b2f65a6ec62822",
+            "id": "native-v1",
+            "manifest": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/providers/native-v1.json",
+            "manifest_fingerprint": "da79b6af45fa1e1a94b5ce9b4b0cf84d5f43a798e57f5e1c50b510f6b7e954ee",
+            "role": "workflow",
+            "source_root": "/Users/liuwenyuan/www/tools/skills-convergent-delivery",
+            "sources": [
+              {
+                "fingerprint": "a43c016ea5daecbf5e74ea93840c1e489fe7ce85f926bb651fdbf36064028770",
+                "kind": "entrypoint",
+                "path": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/references/execution-protocol.md",
+                "relative_path": "references/execution-protocol.md"
+              }
+            ],
+            "task_kind": "feature",
+            "version": "1"
+          }
+        },
+        "binding_fingerprint": "e04abc991b64aa44f1f760489b8c33bb40c03458b1e8c63a6eea860247bd300c",
+        "reason": "native engine was selected",
+        "selection": "explicit",
+        "task_kind": "feature"
+      }
+    },
+    {
+      "task_id": "B4",
+      "task_kind": "vertical_slice",
+      "outcomes": [
+        "用户可主动继续可信Agent原对话"
+      ],
+      "goal": "用户可主动继续可信Agent原对话",
+      "owned_paths": [
+        "apps/desktop/src",
+        "apps/desktop/tests",
+        "apps/desktop/src-tauri/src",
+        "docs/yam-next-stage-execution.md"
+      ],
+      "depends_on": [
+        "B1"
+      ],
+      "steps": [
+        "写原生resume参数回归",
+        "观察红灯",
+        "实现可信会话恢复",
+        "运行验证",
+        "复核失效与降级提示"
+      ],
+      "acceptance": [
+        "已有Agent会话ID时支持主动原生resume",
+        "通知点击不自动运行任务",
+        "ID目录或CLI缺失时不冒充续聊"
+      ],
+      "verification": [
+        "rtk proxy pnpm --dir apps/desktop test:coverage",
+        "rtk proxy pnpm --dir apps/desktop build",
+        "rtk proxy cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked"
+      ],
+      "execution": "current",
+      "status": "pending",
+      "provider_run": {
+        "scope": "task",
+        "recursive_planning": false
+      },
+      "provider_binding": {
+        "binding": {
+          "controller": "converge",
+          "stage_providers": {},
+          "workflow_provider": {
+            "contract": {
+              "closure": [],
+              "entrypoint": "references/execution-protocol.md",
+              "preserve_external_behavior": false
+            },
+            "contract_fingerprint": "2fb1c069b1686ca2b67c505882e2ae27a404663386e5e72df4b2f65a6ec62822",
+            "id": "native-v1",
+            "manifest": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/providers/native-v1.json",
+            "manifest_fingerprint": "da79b6af45fa1e1a94b5ce9b4b0cf84d5f43a798e57f5e1c50b510f6b7e954ee",
+            "role": "workflow",
+            "source_root": "/Users/liuwenyuan/www/tools/skills-convergent-delivery",
+            "sources": [
+              {
+                "fingerprint": "a43c016ea5daecbf5e74ea93840c1e489fe7ce85f926bb651fdbf36064028770",
+                "kind": "entrypoint",
+                "path": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/references/execution-protocol.md",
+                "relative_path": "references/execution-protocol.md"
+              }
+            ],
+            "task_kind": "feature",
+            "version": "1"
+          }
+        },
+        "binding_fingerprint": "e04abc991b64aa44f1f760489b8c33bb40c03458b1e8c63a6eea860247bd300c",
+        "reason": "native engine was selected",
+        "selection": "explicit",
+        "task_kind": "feature"
+      }
+    },
+    {
+      "task_id": "B5",
+      "task_kind": "integration",
+      "outcomes": [
+        "三平台可分发能力有明确验收证据"
+      ],
+      "goal": "三平台可分发能力有明确验收证据",
+      "owned_paths": [
+        ".github/workflows/ci.yml",
+        "docs/notification-acceptance.md",
+        "docs/agent-capabilities.md",
+        "README.md",
+        "docs/yam-next-stage-execution.md"
+      ],
+      "depends_on": [
+        "B1",
+        "B2",
+        "B3",
+        "B4"
+      ],
+      "steps": [
+        "运行联合回归",
+        "构建测试包",
+        "执行可用平台真实桌面验证",
+        "记录未覆盖环境",
+        "复核最终范围"
+      ],
+      "acceptance": [
+        "可运行验证通过且真实桌面结果单独记录",
+        "缺少环境证书或CLI能力不冒称通过",
+        "原有历史与通知路由保持兼容"
+      ],
+      "verification": [
+        "rtk proxy pnpm --dir apps/desktop test:coverage",
+        "rtk proxy pnpm --dir apps/desktop build",
+        "rtk proxy cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check",
+        "rtk proxy cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --locked --all-targets -- -D warnings",
+        "rtk proxy cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked"
+      ],
+      "execution": "current",
+      "status": "pending",
+      "provider_run": {
+        "scope": "task",
+        "recursive_planning": false
+      },
+      "provider_binding": {
+        "binding": {
+          "controller": "converge",
+          "stage_providers": {},
+          "workflow_provider": {
+            "contract": {
+              "closure": [],
+              "entrypoint": "references/execution-protocol.md",
+              "preserve_external_behavior": false
+            },
+            "contract_fingerprint": "2fb1c069b1686ca2b67c505882e2ae27a404663386e5e72df4b2f65a6ec62822",
+            "id": "native-v1",
+            "manifest": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/providers/native-v1.json",
+            "manifest_fingerprint": "da79b6af45fa1e1a94b5ce9b4b0cf84d5f43a798e57f5e1c50b510f6b7e954ee",
+            "role": "workflow",
+            "source_root": "/Users/liuwenyuan/www/tools/skills-convergent-delivery",
+            "sources": [
+              {
+                "fingerprint": "a43c016ea5daecbf5e74ea93840c1e489fe7ce85f926bb651fdbf36064028770",
+                "kind": "entrypoint",
+                "path": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/references/execution-protocol.md",
+                "relative_path": "references/execution-protocol.md"
+              }
+            ],
+            "task_kind": "feature",
+            "version": "1"
+          }
+        },
+        "binding_fingerprint": "e04abc991b64aa44f1f760489b8c33bb40c03458b1e8c63a6eea860247bd300c",
+        "reason": "native engine was selected",
+        "selection": "explicit",
+        "task_kind": "feature"
+      }
+    }
+  ],
+  "final_acceptance": [
+    "交互通知与导航按已验证能力准确运行",
+    "切换和恢复保持现有会话行为及有界资源",
+    "全部可执行检查与未覆盖项有实际证据"
+  ],
+  "decisions": [
+    {
+      "id": "D1",
+      "status": "resolved",
+      "question": "是否管理Git worktree或交付代码",
+      "resolution": "仅使用选定现有目录，不管理worktree提交或PR",
+      "source": "user"
+    },
+    {
+      "id": "D2",
+      "status": "resolved",
+      "question": "CLI能力未验证如何处理",
+      "resolution": "B0探测后按安全会话接入能力实现，不关闭用户安全检查，未支持项降级",
+      "source": "docs"
+    },
+    {
+      "id": "D3",
+      "status": "resolved",
+      "question": "架构依赖与发布边界",
+      "resolution": "沿用既有架构和依赖，缺失能力如实记录；新增依赖单独确认；不合并或发布",
+      "source": "docs"
+    }
+  ]
+}

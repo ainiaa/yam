@@ -1,0 +1,1828 @@
+{
+  "schema_version": 6,
+  "plan_id": "plan-yam-provider-continuity-20261016",
+  "requirement_fingerprint": "53928643232763c401b2560d408e3d7d89df2a78cb35094aa111cd3874165c6b",
+  "planner": {
+    "name": "superpowers-writing-plans-v1",
+    "source_path": "/Users/liuwenyuan/.agents/skills/writing-plans/SKILL.md",
+    "source_fingerprint": "4fd4627d2c02367879c0307d7249270bed633317ff9be82e926a6d57bf5d331b"
+  },
+  "context": "long",
+  "baseline": {
+    "commit": "8fb2cb00c32a5ae72b48f0d04776eec1420734ab",
+    "source": {
+      "schema_version": 2,
+      "baseline_commit": "8fb2cb00c32a5ae72b48f0d04776eec1420734ab",
+      "commit_id": "8fb2cb00c32a5ae72b48f0d04776eec1420734ab",
+      "tree_hash": "193d564797e73d2f32b64e78d57edfb22fdc6395",
+      "diff_fingerprint": "bfec4728c9884dc09172108b1bffb02ba23fd93adac4bbd01e9d4fc5e161082b",
+      "changed_paths": [
+        "apps/desktop/README.md",
+        "apps/desktop/package.json",
+        "apps/desktop/pnpm-lock.yaml",
+        "apps/desktop/src-tauri/Cargo.toml",
+        "apps/desktop/src-tauri/capabilities/default.json",
+        "apps/desktop/src-tauri/src/agent_bridge.rs",
+        "apps/desktop/src-tauri/src/agent_events.rs",
+        "apps/desktop/src-tauri/src/background.rs",
+        "apps/desktop/src-tauri/src/browser_window.rs",
+        "apps/desktop/src-tauri/src/desktop_windows.rs",
+        "apps/desktop/src-tauri/src/history.rs",
+        "apps/desktop/src-tauri/src/lib.rs",
+        "apps/desktop/src-tauri/src/project_config.rs",
+        "apps/desktop/src-tauri/src/shell_command_report.rs",
+        "apps/desktop/src-tauri/src/shell_cwd.rs",
+        "apps/desktop/src-tauri/src/ssh_launch.rs",
+        "apps/desktop/src-tauri/src/system_entry.rs",
+        "apps/desktop/src-tauri/src/terminal_file_actions.rs",
+        "apps/desktop/src-tauri/src/terminal_runtime.rs",
+        "apps/desktop/src-tauri/src/worktree_manager.rs",
+        "apps/desktop/src-tauri/src/zsh_directory_reporting.rs",
+        "apps/desktop/src/App.css",
+        "apps/desktop/src/App.tsx",
+        "apps/desktop/src/BrowserWindowDialog.tsx",
+        "apps/desktop/src/KeyboardShortcutSettings.tsx",
+        "apps/desktop/src/SshLaunchDialog.tsx",
+        "apps/desktop/src/TerminalFileDropDialog.tsx",
+        "apps/desktop/src/TerminalFilePreview.tsx",
+        "apps/desktop/src/TerminalFind.tsx",
+        "apps/desktop/src/TerminalLayout.tsx",
+        "apps/desktop/src/TerminalPastePreview.tsx",
+        "apps/desktop/src/TerminalProfiles.tsx",
+        "apps/desktop/src/TerminalSettings.tsx",
+        "apps/desktop/src/ZshCommandReporting.tsx",
+        "apps/desktop/src/ZshDirectoryReporting.tsx",
+        "apps/desktop/src/app-shortcuts.ts",
+        "apps/desktop/src/browser-window.ts",
+        "apps/desktop/src/command-palette.ts",
+        "apps/desktop/src/main.tsx",
+        "apps/desktop/src/shell-launch.ts",
+        "apps/desktop/src/ssh-launch.ts",
+        "apps/desktop/src/terminal-cursor.ts",
+        "apps/desktop/src/terminal-file-actions.ts",
+        "apps/desktop/src/terminal-file-drop.ts",
+        "apps/desktop/src/terminal-find-worker.ts",
+        "apps/desktop/src/terminal-find.ts",
+        "apps/desktop/src/terminal-frame.ts",
+        "apps/desktop/src/terminal-layout-persistence.ts",
+        "apps/desktop/src/terminal-layout.ts",
+        "apps/desktop/src/terminal-line-height.ts",
+        "apps/desktop/src/terminal-links.ts",
+        "apps/desktop/src/terminal-paste.ts",
+        "apps/desktop/src/terminal-profiles.ts",
+        "apps/desktop/src/terminal-retention.ts",
+        "apps/desktop/src/terminal-scroll.ts",
+        "apps/desktop/src/terminal-settings.ts",
+        "apps/desktop/src/window-context.ts",
+        "apps/desktop/src/workspaces.ts",
+        "apps/desktop/src/zsh-command-reporting.ts",
+        "apps/desktop/src/zsh-directory-reporting.ts",
+        "apps/desktop/terminal-service.cjs",
+        "apps/desktop/tests/agent-events.test.mjs",
+        "apps/desktop/tests/app-shortcuts-ui.test.mjs",
+        "apps/desktop/tests/app-shortcuts.test.mjs",
+        "apps/desktop/tests/attention-actions.test.mjs",
+        "apps/desktop/tests/browser-window-ui.test.mjs",
+        "apps/desktop/tests/browser-window.test.mjs",
+        "apps/desktop/tests/command-palette.test.mjs",
+        "apps/desktop/tests/crosswindow-move-ui.test.mjs",
+        "apps/desktop/tests/crosswindow-move.test.mjs",
+        "apps/desktop/tests/header-layout.test.mjs",
+        "apps/desktop/tests/history-archive.test.mjs",
+        "apps/desktop/tests/history.test.mjs",
+        "apps/desktop/tests/launch-templates.test.mjs",
+        "apps/desktop/tests/notifications.test.mjs",
+        "apps/desktop/tests/project-config.test.mjs",
+        "apps/desktop/tests/project-rename-ui.test.mjs",
+        "apps/desktop/tests/session-recovery.test.mjs",
+        "apps/desktop/tests/shell-command-report-ui.test.mjs",
+        "apps/desktop/tests/shell-launch.test.mjs",
+        "apps/desktop/tests/ssh-launch-ui.test.mjs",
+        "apps/desktop/tests/ssh-launch.test.mjs",
+        "apps/desktop/tests/system-entry.test.mjs",
+        "apps/desktop/tests/terminal-clear-entrypoints-ui.test.mjs",
+        "apps/desktop/tests/terminal-clear-ui.test.mjs",
+        "apps/desktop/tests/terminal-cursor-ui.test.mjs",
+        "apps/desktop/tests/terminal-cursor.test.mjs",
+        "apps/desktop/tests/terminal-file-actions-ui.test.mjs",
+        "apps/desktop/tests/terminal-file-actions.test.mjs",
+        "apps/desktop/tests/terminal-file-drop-ui.test.mjs",
+        "apps/desktop/tests/terminal-file-drop.test.mjs",
+        "apps/desktop/tests/terminal-find-projection.test.mjs",
+        "apps/desktop/tests/terminal-find-routing.test.mjs",
+        "apps/desktop/tests/terminal-find.test.mjs",
+        "apps/desktop/tests/terminal-frame-browser.test.mjs",
+        "apps/desktop/tests/terminal-frame.test.mjs",
+        "apps/desktop/tests/terminal-launch.test.mjs",
+        "apps/desktop/tests/terminal-layout-focus.test.mjs",
+        "apps/desktop/tests/terminal-layout-persistence.test.mjs",
+        "apps/desktop/tests/terminal-layout-resize.test.mjs",
+        "apps/desktop/tests/terminal-layout-restore.test.mjs",
+        "apps/desktop/tests/terminal-layout-tabs.test.mjs",
+        "apps/desktop/tests/terminal-layout-tree.test.mjs",
+        "apps/desktop/tests/terminal-layout.test.mjs",
+        "apps/desktop/tests/terminal-line-height-ui.test.mjs",
+        "apps/desktop/tests/terminal-line-height.test.mjs",
+        "apps/desktop/tests/terminal-links-ui.test.mjs",
+        "apps/desktop/tests/terminal-links.test.mjs",
+        "apps/desktop/tests/terminal-paste-ui.test.mjs",
+        "apps/desktop/tests/terminal-paste.test.mjs",
+        "apps/desktop/tests/terminal-profiles-ui.test.mjs",
+        "apps/desktop/tests/terminal-profiles.test.mjs",
+        "apps/desktop/tests/terminal-projection-capacity.test.mjs",
+        "apps/desktop/tests/terminal-prompt-navigation-ui.test.mjs",
+        "apps/desktop/tests/terminal-reopen-ui.test.mjs",
+        "apps/desktop/tests/terminal-retention-ui.test.mjs",
+        "apps/desktop/tests/terminal-retention.test.mjs",
+        "apps/desktop/tests/terminal-scroll-routing.test.mjs",
+        "apps/desktop/tests/terminal-scroll.test.mjs",
+        "apps/desktop/tests/terminal-service.test.mjs",
+        "apps/desktop/tests/terminal-settings-ui.test.mjs",
+        "apps/desktop/tests/terminal-settings.test.mjs",
+        "apps/desktop/tests/terminal-tab-drag.test.mjs",
+        "apps/desktop/tests/terminal-tab-edge-drop.test.mjs",
+        "apps/desktop/tests/terminal-toolbar.test.mjs",
+        "apps/desktop/tests/terminal-views.test.mjs",
+        "apps/desktop/tests/ui-declutter.test.mjs",
+        "apps/desktop/tests/updater.test.mjs",
+        "apps/desktop/tests/window-context.test.mjs",
+        "apps/desktop/tests/workspaces.test.mjs",
+        "apps/desktop/tests/worktree-controls.test.mjs",
+        "apps/desktop/tests/zsh-command-reporting-ui.test.mjs",
+        "apps/desktop/tests/zsh-command-reporting.test.mjs",
+        "apps/desktop/tests/zsh-directory-reporting-ui.test.mjs",
+        "apps/desktop/tests/zsh-directory-reporting.test.mjs",
+        "docs/THIRD_PARTY_NOTICES.md",
+        "docs/superpowers/plans/2026-10-04-yam-cmux-terminal-parity-proposal.md",
+        "docs/superpowers/plans/2026-10-08-yam-cmux-a01a.md",
+        "docs/superpowers/plans/2026-10-08-yam-cmux-a01b.md",
+        "docs/superpowers/plans/2026-10-08-yam-cmux-a02a.md",
+        "docs/superpowers/plans/2026-10-08-yam-cmux-a02b.md",
+        "docs/superpowers/plans/2026-10-08-yam-cmux-a02c1.md",
+        "docs/superpowers/plans/2026-10-08-yam-cmux-a04a.md",
+        "docs/superpowers/plans/2026-10-08-yam-cmux-a04b1.md",
+        "docs/superpowers/plans/2026-10-08-yam-cmux-a07a.md",
+        "docs/superpowers/plans/2026-10-08-yam-cmux-a07b1.md",
+        "docs/superpowers/plans/2026-10-08-yam-cmux-b02a.md",
+        "docs/superpowers/plans/2026-10-08-yam-cmux-b02b.md",
+        "docs/superpowers/plans/2026-10-08-yam-cmux-b02c.md",
+        "docs/superpowers/plans/2026-10-08-yam-cmux-b02d.md",
+        "docs/superpowers/plans/2026-10-08-yam-cmux-b03a.md",
+        "docs/superpowers/plans/2026-10-08-yam-cmux-b03b.md",
+        "docs/superpowers/plans/2026-10-08-yam-cmux-b04a.md",
+        "docs/superpowers/plans/2026-10-08-yam-cmux-b05a.md",
+        "docs/superpowers/plans/2026-10-08-yam-cmux-terminal-parity-progress.md",
+        "docs/superpowers/plans/2026-10-08-yam-terminal-ui-fixes.md",
+        "docs/superpowers/plans/2026-10-09-yam-cmux-a02c2.md",
+        "docs/superpowers/plans/2026-10-09-yam-cmux-a02c2a.md",
+        "docs/superpowers/plans/2026-10-09-yam-cmux-a04b2.md",
+        "docs/superpowers/plans/2026-10-09-yam-cmux-a05a1.md",
+        "docs/superpowers/plans/2026-10-09-yam-cmux-a05a2.md",
+        "docs/superpowers/plans/2026-10-09-yam-cmux-a05a3.md",
+        "docs/superpowers/plans/2026-10-09-yam-cmux-a07b2.md",
+        "docs/superpowers/plans/2026-10-09-yam-cmux-a07c1.md",
+        "docs/superpowers/plans/2026-10-09-yam-cmux-a07c2.md",
+        "docs/superpowers/plans/2026-10-09-yam-cmux-a07c3.md",
+        "docs/superpowers/plans/2026-10-09-yam-cmux-a08b.md",
+        "docs/superpowers/plans/2026-10-09-yam-cmux-a08c.md",
+        "docs/superpowers/plans/2026-10-09-yam-cmux-a08d.md",
+        "docs/superpowers/plans/2026-10-09-yam-cmux-a09a.md",
+        "docs/superpowers/plans/2026-10-09-yam-cmux-a11-fixture.md",
+        "docs/superpowers/plans/2026-10-09-yam-cmux-a11-r7.md",
+        "docs/superpowers/plans/2026-10-09-yam-cmux-a11-r8.md",
+        "docs/superpowers/plans/2026-10-09-yam-cmux-a11-r9.md",
+        "docs/superpowers/plans/2026-10-09-yam-cmux-a11b1.md",
+        "docs/superpowers/plans/2026-10-09-yam-cmux-b01a.md",
+        "docs/superpowers/plans/2026-10-09-yam-cmux-b01b.md",
+        "docs/superpowers/plans/2026-10-09-yam-cmux-b01c.md",
+        "docs/superpowers/plans/2026-10-09-yam-cmux-b01d.md",
+        "docs/superpowers/plans/2026-10-09-yam-cmux-b04b.md",
+        "docs/superpowers/plans/2026-10-09-yam-cmux-b05b.md",
+        "docs/superpowers/plans/2026-10-09-yam-cmux-b05c.md",
+        "docs/superpowers/plans/2026-10-09-yam-cmux-c01a.md",
+        "docs/superpowers/plans/2026-10-09-yam-cmux-d03a.md",
+        "docs/superpowers/plans/2026-10-09-yam-cmux-d03b.md",
+        "docs/superpowers/plans/2026-10-09-yam-cmux-native-window-identity.md",
+        "docs/superpowers/plans/2026-10-09-yam-cmux-shortcut-boundary.md",
+        "docs/superpowers/plans/2026-10-09-yam-native-output-stage-diagnostics.md",
+        "docs/superpowers/plans/2026-10-09-yam-terminal-authoritative-clear.md",
+        "docs/superpowers/plans/2026-10-09-yam-terminal-stop-ps.md",
+        "docs/superpowers/plans/2026-10-09-yam-terminal-stop-rejection-diagnostics.md",
+        "docs/yam-capability-matrix.md",
+        "docs/yam-core-workflows.md",
+        "docs/yam-release-hardening.md",
+        "scripts/background-smoke.py",
+        "scripts/build-terminal-runtime.py",
+        "scripts/terminal-owner-responsiveness.py",
+        "scripts/test_background_smoke.py",
+        "scripts/test_terminal_owner_responsiveness.py",
+        "scripts/test_terminal_runtime.py",
+        "scripts/test_third_party_notices.py",
+        "scripts/third-party-notices/bodies/689ceb10716bd7a87a804c14951d7c2b818cbd60aab83d540902470ce3b13444",
+        "scripts/third-party-notices/manifest.json",
+        "scripts/third_party_notices.py"
+      ],
+      "changed_entries": [
+        {
+          "path": "apps/desktop/README.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "fda5234cc4cddefe48d6aa050679ed9769eaa0730cc1eb879a8187a267c1d481"
+        },
+        {
+          "path": "apps/desktop/package.json",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "a3a3b217dd0c7e4885224931d317445b05bff946bc8604ea2ae0530960f0f266"
+        },
+        {
+          "path": "apps/desktop/pnpm-lock.yaml",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "ee7f49e5c5edf875fef092fd2bf787c09eafe403746f0cfdf1b0463d2c1854a9"
+        },
+        {
+          "path": "apps/desktop/src-tauri/Cargo.toml",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "5b5c5627974de1c20a5c4c567e35c47cfcac794467cb7d70802ef0902f16e31d"
+        },
+        {
+          "path": "apps/desktop/src-tauri/capabilities/default.json",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "d707c49090f3f2fd1a8abf721103753e74e22a57ecdf72a00de365ca1707385c"
+        },
+        {
+          "path": "apps/desktop/src-tauri/src/agent_bridge.rs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "9691b0ed774d05ed87202033d1793c8667c51751d649c822e43d09f2361c87fe"
+        },
+        {
+          "path": "apps/desktop/src-tauri/src/agent_events.rs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "27f83a998c550f4259394df74be94106412eed8c4401fcf6c2b80528f7f0ead7"
+        },
+        {
+          "path": "apps/desktop/src-tauri/src/background.rs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "9542b9ff2938e1779621325dd3739850d4a14dc23dbd5089e866191ffcafec68"
+        },
+        {
+          "path": "apps/desktop/src-tauri/src/browser_window.rs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "e02e11a193d8708f5f0a06d52d10b2b5ce798b71a2d2eb32c948a8df147c6d9f"
+        },
+        {
+          "path": "apps/desktop/src-tauri/src/desktop_windows.rs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "6a14899dd58af276cc037ef35df28ab22423ee632275cb5a992379d661d97515"
+        },
+        {
+          "path": "apps/desktop/src-tauri/src/history.rs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "efbdab01450628d6e52fad89c104798b5561bd96e2c8f6b90afe5250e0f1143c"
+        },
+        {
+          "path": "apps/desktop/src-tauri/src/lib.rs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "320ca63d001d97eff9b8fe25fb4cd9d52e987cfd918bde7586958ce213113c7c"
+        },
+        {
+          "path": "apps/desktop/src-tauri/src/project_config.rs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "f894b9f1e221f8917c255cc4380482382a40fcce0ad3000840b68b5a884c3311"
+        },
+        {
+          "path": "apps/desktop/src-tauri/src/shell_command_report.rs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "ee240025075f328278df5e28099df878256bc0aa3c3496c4fb5ec211de48c1fe"
+        },
+        {
+          "path": "apps/desktop/src-tauri/src/shell_cwd.rs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "b13d6c9e66e204e5795ead9f1b0d56cf3562c1b27e8c3306d838bd072616e834"
+        },
+        {
+          "path": "apps/desktop/src-tauri/src/ssh_launch.rs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "c67fa628a3be6e8165843a5d935bee949f7a596bd437a84f62b242d64b752715"
+        },
+        {
+          "path": "apps/desktop/src-tauri/src/system_entry.rs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "d0b9e8378dc882fce86101268a6dd6be40024950b02f96531d19f129699ad157"
+        },
+        {
+          "path": "apps/desktop/src-tauri/src/terminal_file_actions.rs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "eb0312449ee509477abc94cefa5b9fbcdac5dbe2deac6b99fe37d3c8ba27e356"
+        },
+        {
+          "path": "apps/desktop/src-tauri/src/terminal_runtime.rs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "7ccc8d8f7e211b3fd0edd691662651418228849464c5dbc33e42f04ce77efd2b"
+        },
+        {
+          "path": "apps/desktop/src-tauri/src/worktree_manager.rs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "635f4f3300256c4057c88964d4eb55b782d6c4450fba3f05f7dc16b9197801e7"
+        },
+        {
+          "path": "apps/desktop/src-tauri/src/zsh_directory_reporting.rs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "05ed2a2c0212f4343332bf909c9b01f516401db711a8765728ae2128455448a7"
+        },
+        {
+          "path": "apps/desktop/src/App.css",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "75cd89bdd393b00f691eb49461680d5d647686a3a515ab9fedfc61a0149a44f4"
+        },
+        {
+          "path": "apps/desktop/src/App.tsx",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "5b9d77c1cabf48d19003ef061afc81fa197c8781db8bcd33d001f1df65fc0985"
+        },
+        {
+          "path": "apps/desktop/src/BrowserWindowDialog.tsx",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "bbd55f67ceeb1067e0a51c365f4868742b604f5ed3b0c8b529fd1ba94c20e923"
+        },
+        {
+          "path": "apps/desktop/src/KeyboardShortcutSettings.tsx",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "a05b71d9481a264bef16d5afadbd59f65505041e67763902a43342eb666ff401"
+        },
+        {
+          "path": "apps/desktop/src/SshLaunchDialog.tsx",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "dda70936a8046e49735ccb212a69333036fc3be61836478c56e615a30714a9a9"
+        },
+        {
+          "path": "apps/desktop/src/TerminalFileDropDialog.tsx",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "0d2618251080d98a6d143abf3fc4fe564db0d4e62b523b8d97da5b05ae8b9eec"
+        },
+        {
+          "path": "apps/desktop/src/TerminalFilePreview.tsx",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "a8bb9eb222ef06c97abc2758828487d8cef223afd8ffff42522a09149376a566"
+        },
+        {
+          "path": "apps/desktop/src/TerminalFind.tsx",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "1a365a9d9b54db42c61d6d02e9ba219ba56be728ea53cde31d48499ac29ef0b4"
+        },
+        {
+          "path": "apps/desktop/src/TerminalLayout.tsx",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "856be7747c8c7248f7ff5454a6a6435a4977860d963e5e58a63131ec758ea5a8"
+        },
+        {
+          "path": "apps/desktop/src/TerminalPastePreview.tsx",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "0a94c84636deaf257e03c8dba310397b061025fbb1c4d17ebb960befd080847e"
+        },
+        {
+          "path": "apps/desktop/src/TerminalProfiles.tsx",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "7ceb60b9262160b668a012f4a96d3e46c72bf4e550fc20ff013ac13c84d720ed"
+        },
+        {
+          "path": "apps/desktop/src/TerminalSettings.tsx",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "48748751c2768e9bdf16e80b4776c529fb80874d32c3dbd72b0d68fa03f87d1f"
+        },
+        {
+          "path": "apps/desktop/src/ZshCommandReporting.tsx",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "e6898b98412ea1b07e57b042e6a5bb7c8abc61bae6b5daba6885de5898316f44"
+        },
+        {
+          "path": "apps/desktop/src/ZshDirectoryReporting.tsx",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "d446e56585db645a049c4e74154d06e791ffcb98406a7f21a1381c9eb0a48384"
+        },
+        {
+          "path": "apps/desktop/src/app-shortcuts.ts",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "ffd65723e31e91f130c59c685c167ddca306961c82c707c63220563c8abe72f6"
+        },
+        {
+          "path": "apps/desktop/src/browser-window.ts",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "097fe4dc53197f2814a8d2357e1499da256fb3995b0fafc845260bceb9385867"
+        },
+        {
+          "path": "apps/desktop/src/command-palette.ts",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "45a34b69de3fe778f99d06fd1ba5d24b03f0a8738bbc6e571a7e7e44a75a6ecd"
+        },
+        {
+          "path": "apps/desktop/src/main.tsx",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "390ccd02e4cdb076e4b4ee45435d819636e7e99188f1415e0ec9875fcf2ebc90"
+        },
+        {
+          "path": "apps/desktop/src/shell-launch.ts",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "881f1028b4b9a37e8f46f04e2c1dd1bb43a9905d1430aeee4986f8f3ed2a515c"
+        },
+        {
+          "path": "apps/desktop/src/ssh-launch.ts",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "28f03a3aaab4591c56535f8cb0620374d4d3cb0899a81d7b29ca54940a61f17b"
+        },
+        {
+          "path": "apps/desktop/src/terminal-cursor.ts",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "47bd6cd9afb6844702a011cd66a2722bb60502d7f682e5cafff6c8fecdae034e"
+        },
+        {
+          "path": "apps/desktop/src/terminal-file-actions.ts",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "272b0814a338d0f20b25d67ff9a157b671b0936e379f3879f3144095f1b5267f"
+        },
+        {
+          "path": "apps/desktop/src/terminal-file-drop.ts",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "79427213e9c5004585c8728e29407a013b22fbea2c71fd0db37eb64d6dde9c94"
+        },
+        {
+          "path": "apps/desktop/src/terminal-find-worker.ts",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "7c32c357245ada1c2cda63bdb7ad6fa14b6b7697b2e65842b03dd49bc7d7e31b"
+        },
+        {
+          "path": "apps/desktop/src/terminal-find.ts",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "2fe4d4a85950eb73426f58d2a5fed7fe2537b416cc188649e80ac31e425f1d1f"
+        },
+        {
+          "path": "apps/desktop/src/terminal-frame.ts",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "03fa68638a68b28c05ae74ca0cde4c484a059ba6e2efc9bfbd9ee31b3b2e442d"
+        },
+        {
+          "path": "apps/desktop/src/terminal-layout-persistence.ts",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "6b9d690cc0fd2be98b3f00557e6e6ddfb0631aa1039cd22dc68f621d583d80e1"
+        },
+        {
+          "path": "apps/desktop/src/terminal-layout.ts",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "92e08a57d953facba34fa0249852372e79ea098d2afb4ee6fec6f4af3c1e8f99"
+        },
+        {
+          "path": "apps/desktop/src/terminal-line-height.ts",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "655677ca81df8081b996e692a8e3ff528f8c9a49de8fa60003c01bac618f76f0"
+        },
+        {
+          "path": "apps/desktop/src/terminal-links.ts",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "4507722886b988eedbb95e7cb22ad1961563b8af913a1718ec8545a7e5a51882"
+        },
+        {
+          "path": "apps/desktop/src/terminal-paste.ts",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "f20f6d97d2974d16a98c0d0c88975244c78e165ed23a17383c33b84528217a76"
+        },
+        {
+          "path": "apps/desktop/src/terminal-profiles.ts",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "80ab51f4fd9d1d23103d35250e606a92d9f4bc697d83a8c1377a76e7c2a20b2e"
+        },
+        {
+          "path": "apps/desktop/src/terminal-retention.ts",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "9934c9864709366d55b0d45c7e032916bec109b3195db6389f4b6cf076b3a6e6"
+        },
+        {
+          "path": "apps/desktop/src/terminal-scroll.ts",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "4fdf9eaf88166ee18fdfbea151fd3eb51a1407151ec058943971f2b8906a6fed"
+        },
+        {
+          "path": "apps/desktop/src/terminal-settings.ts",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "f3179f7209a109961e3cfd233b0074ef986bd75fed64a026b70b92365aacb847"
+        },
+        {
+          "path": "apps/desktop/src/window-context.ts",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "7ac2b09bb251cdf9912462cf1e2953647e1dc51811200b5265e928f84c6f9872"
+        },
+        {
+          "path": "apps/desktop/src/workspaces.ts",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "fa43475adc28ee4eebb48692e850d373d0b9630e9f9826f49056271174a24271"
+        },
+        {
+          "path": "apps/desktop/src/zsh-command-reporting.ts",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "1f45193460388435bf9fbe14bccb99a79812e6dd7f7399e51a1dd7bbb5b93df8"
+        },
+        {
+          "path": "apps/desktop/src/zsh-directory-reporting.ts",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "4a2bffc0b111ddee68aa1e87ca783b6453bc8c8bf34b4ad75438b749d3c7bcb2"
+        },
+        {
+          "path": "apps/desktop/terminal-service.cjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "4fac0f203071a3441461a31ffefc9e314d7ff8090ddd282831e08c00bb625404"
+        },
+        {
+          "path": "apps/desktop/tests/agent-events.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "70b61507b30f584c26162666a931026c2d01d83bb65c3673ebfc866c0cf05619"
+        },
+        {
+          "path": "apps/desktop/tests/app-shortcuts-ui.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "6e8aa9133f988166898b7887393dc73c8a3ce9d09fd44411aca14a8782b6a1d1"
+        },
+        {
+          "path": "apps/desktop/tests/app-shortcuts.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "ceff48be294d508e7023a70024efe31e5b536065b5060057550fc804fbd7a75a"
+        },
+        {
+          "path": "apps/desktop/tests/attention-actions.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "fd83204c9378018080627c84060c6826477183957b9305b07975dfba27061e2a"
+        },
+        {
+          "path": "apps/desktop/tests/browser-window-ui.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "c7195b4be47f25b5e8cb8aacf9958c8ea7440059ad30015cd6e5436445c6a3aa"
+        },
+        {
+          "path": "apps/desktop/tests/browser-window.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "5e73f0197e7282a3a76687ea4a12bc53f1012bbef60369489a5cfacf2c3453b0"
+        },
+        {
+          "path": "apps/desktop/tests/command-palette.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "20b4b130735be93333f9637ee1e27f6331adea0d511b9b40b9bb712b4e5a7db2"
+        },
+        {
+          "path": "apps/desktop/tests/crosswindow-move-ui.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "d65fda5358a78bbb552e712f7b3f35447f8f3277a98a8305c8b724b65095a3ff"
+        },
+        {
+          "path": "apps/desktop/tests/crosswindow-move.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "3ad816da52cff8b7195eaf603230553194212ba96fc39e41dbff677f72f61d71"
+        },
+        {
+          "path": "apps/desktop/tests/header-layout.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "9b140d871c750fd331e77571dc74c1c64d65c9d5abd68d0a0020dfc259aaa4df"
+        },
+        {
+          "path": "apps/desktop/tests/history-archive.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "e87fed59fbd878eb7bb568dc735fbde380cc3d179250f91fb2afa224ae886092"
+        },
+        {
+          "path": "apps/desktop/tests/history.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "28091b5c1276cc839e97af6e2ab26dd6717122f087e2aa401139a14c28555cf5"
+        },
+        {
+          "path": "apps/desktop/tests/launch-templates.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "0853af296e0d4ec56d7ceb1e042704eafac8953d843a9acd0f557e679267b4ac"
+        },
+        {
+          "path": "apps/desktop/tests/notifications.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "02d351a6354424342322f1b9c22b2c1e1614663a2ec390898bc669afd9b4d767"
+        },
+        {
+          "path": "apps/desktop/tests/project-config.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "2221a1613852b837c74f5d517b99094d84c1e7c371e9e41f737b0e4117c5f801"
+        },
+        {
+          "path": "apps/desktop/tests/project-rename-ui.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "18cbb26b706df7e1da381a9f1a0c0973d6cc359fcd852204a5cbde305f2df3fc"
+        },
+        {
+          "path": "apps/desktop/tests/session-recovery.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "d5bdc9d491f01e08f2e5af8cd51d1c3785ae8c5b88fbb38f9fc852973ef8e81e"
+        },
+        {
+          "path": "apps/desktop/tests/shell-command-report-ui.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "b03d958015d7d6dd7a3320ce74519319f9c38e01a115606c7d823e5bfa974f6d"
+        },
+        {
+          "path": "apps/desktop/tests/shell-launch.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "d4965340296fda454e91b0335b41365a42d2e4654ed56f3597333723d95292d0"
+        },
+        {
+          "path": "apps/desktop/tests/ssh-launch-ui.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "d6d53502eb242088e3e08a9adcf755aefcecefd657b2d7c08e177343597875b7"
+        },
+        {
+          "path": "apps/desktop/tests/ssh-launch.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "1b7004139dbe118ab4b9c83d090d7bba262f292aaea2c5b3f8adc9ae975f25f2"
+        },
+        {
+          "path": "apps/desktop/tests/system-entry.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "81b8ba8aae9d4964302998f33ece4c7821d2b8052251aa30bce460f59770effb"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-clear-entrypoints-ui.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "69b09adbaac6af338ff808021667c7791c2686ebfe1302b6f522989e84de19f8"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-clear-ui.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "42297a003ef267343f1d42caa082b386d2ab00c1d1858f8b38b9f525882ca6df"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-cursor-ui.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "a663e616793a399674dbf0339cbbdb2a6f229404a75734114001aba0adc0cb54"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-cursor.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "dd77b5901eec724e45e60b10eaa4953838ed53aab55df0fbc3ea39d56a8da7bb"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-file-actions-ui.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "c7e0ddb23bbabc7ed3d2a4c92c6e047e0cc032eae9e02cfff898c9d619e4d27a"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-file-actions.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "5f2f03181d4edbfd4c71f8463d4757ed51482a4c32a778f89213eac5a27030df"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-file-drop-ui.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "b721aeba6925c08d83bf0063a28282faab9b86e87d14e8d1f3d3aa645774c002"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-file-drop.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "44fa96da95641e7e300d275b11a866e1281e93dd566f434fe478793f38566437"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-find-projection.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "1a57bf70274a80be4405384f617b682b07bc81b1f7e52464ae0b0d0cfc870320"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-find-routing.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "8b15ebe61193c47003eb39e09e2026e08d93144ca5f8d9fa040cc8ed21ba1995"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-find.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "714cea296428a91719584f2253bef76e41f4fd9d631cd8803217806d7468ac9d"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-frame-browser.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "69c67bbd260be2abba08d15a82a26b107166447d156aadfb3d2253418a1bff47"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-frame.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "67bc4a62cba289335db9405c334641238bf72b5caa56282dd305bbad40d3f215"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-launch.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "e51ae092e43cf4f09d8d8708013b03c84e82eab0848ad20c8ceef2148b9597e6"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-layout-focus.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "3126bb80974434c8d0340cfe4744cf2a009b571be3245afd58c126d2f05732ca"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-layout-persistence.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "329e406a0a1111a5d33c70477959f531a77f64f547cfb578ba653fc2352f0488"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-layout-resize.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "c69280e6614f1ea84b202b274d06953382cc78c60cb716c728fb380b0fb2737f"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-layout-restore.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "54065e4133d89d021d30a6b5994484625d480d48a396112ae9876575a1383ad4"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-layout-tabs.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "4bf8ab77e7f2d8744daa1fb301d737c4e34255eb99c93e5f7ec4c4b0eef42d0c"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-layout-tree.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "f24b6edc15a22f7bfba9c5dab107164af7ed7097e9b8dc5d40715ebfbd353b84"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-layout.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "28d5dd19629ae24a68c707f0f08058d4274ed69d570405fa2ea958c73d3a4c88"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-line-height-ui.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "8b0c44ab66306dcd9a789ef51f90905d4a3f9c7680c4e6a665dee13e00130aee"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-line-height.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "186349df807d3cf4df548fa342feb091072c6846e01517b090a046f7ece746f3"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-links-ui.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "29741e91838b756b147265be9745b519a4663246d8004ea94ec2bdfda8670c29"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-links.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "899ba273b49a4819132e286170729fef8fe332ed332c082456fdeb6b270f664e"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-paste-ui.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "ac46d97f84d9f1a00030fff67caca07cc91612b88f4d4e656f88318c729fb665"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-paste.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "e91c6c3a1c72eedd6a895584b60d030d26b52013d7e571bd7cf9b8df03d1f521"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-profiles-ui.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "61f919e52dca36ca6549468ea2be6105c896da579deca9cc2282392943e3bffb"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-profiles.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "bfda12ce1364dcc93f2480a67bcd906410696bab12e20f1c9940c90aa4212e8a"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-projection-capacity.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "d5395939101053d347e2c4322ec0c4909e7f0211cfc4b373adef18ffaaf50f00"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-prompt-navigation-ui.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "44ae96582a12c9b4711244153cc7dc6d6f1548dd3876e5287c7a0c88e0bfa679"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-reopen-ui.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "cf1dd7fb90f0d8fa73b36710ede7b7e7bbecfbf442ebc65d943af7dcfc1756c8"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-retention-ui.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "65b5e1d28edd3e1f1e6abcaa9d891d3202332b8d2a31aa68b306153da8c9de4a"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-retention.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "9830f07c37d431f0549a0dfa2a60cc00ebd2fe726c9d6736bd873490f46acf36"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-scroll-routing.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "1bda6df3b58e1d58ab2dcc2a26b4b4fcce73a19144fb16206630f106ae31c7bc"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-scroll.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "ffd1fffbc30314dd420a863075edebdd64538d7c75db2a349c88d1cbb23cbff8"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-service.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "2e074ad1bd2b418bc5442730115ae0363746b115f12ee5422a7127e706dd0315"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-settings-ui.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "256910c038db4f9e6891b2d55824a53d947cb211093f9c470db422528740391e"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-settings.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "492d8fb2983624d8620217e3d3ec446fa08dfb7451682f07e83e7a34484e0cea"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-tab-drag.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "2579628c9418b867cf7853aa19c40b90f2d433c74979235a30f67079c7db6edb"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-tab-edge-drop.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "98f2f4985c067a8d35c24e00cb455047921498fbd20c18160456ce6cd51e86d1"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-toolbar.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "406057e0474090fcbcd148cca57c25437304fad8e2fdbb417323c64ebf80daf9"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-views.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "5052d24f29a626a9dcb1a76b42087ef84a6a73c9565b50e4c3760f165ddd126d"
+        },
+        {
+          "path": "apps/desktop/tests/ui-declutter.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "bc9a2611544e59529e82144b759273d05f9cc9bdebea456a239e28a265d3b03a"
+        },
+        {
+          "path": "apps/desktop/tests/updater.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "96df5acaf8148d811644be960088010eeee40b81cf307096399ed1b33cc09add"
+        },
+        {
+          "path": "apps/desktop/tests/window-context.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "b4a43e81db36c18b7028225ef0fb23e658b5d622e81542b7e014ea650bf5788e"
+        },
+        {
+          "path": "apps/desktop/tests/workspaces.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "cb44d32025d06517396e4abfff12eeb6d15f745fed7af5a2d469e679d28fd2b1"
+        },
+        {
+          "path": "apps/desktop/tests/worktree-controls.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "8b7840925c7a74cf43118322b437a9ac3f6bd1dbdaa54ab2459456de601764b0"
+        },
+        {
+          "path": "apps/desktop/tests/zsh-command-reporting-ui.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "f691b847bcc677830d88b9d8623520c12dabb45cdd547b414b963e632ee53890"
+        },
+        {
+          "path": "apps/desktop/tests/zsh-command-reporting.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "9db0c9356901893b6b0c422afc589209ce74d89d762e1ae9d0f401c6da61fe8f"
+        },
+        {
+          "path": "apps/desktop/tests/zsh-directory-reporting-ui.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "6735c66497fc6f72a984890e6f829499c31838eb67eeb86c7bd0e9a6bba4011c"
+        },
+        {
+          "path": "apps/desktop/tests/zsh-directory-reporting.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "9768c6fbfee6565f99c99f3e5da1c2721eaa7be561dab79efa86b5cf46241d58"
+        },
+        {
+          "path": "docs/THIRD_PARTY_NOTICES.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "d84ca1ead337be16087fca13e4bac17ece5c17a67bf86fb53534c3013c8c7eb7"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-04-yam-cmux-terminal-parity-proposal.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "cfd3ca843c976126e4cbea392a16d89b8ea05f0bd53db944347c8605113cf778"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-08-yam-cmux-a01a.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "87df2b22b5a4beef1da20706623ec9a45922a62efcc00a594e76829406e24d91"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-08-yam-cmux-a01b.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "287e3bd2a9577434dfd7c157f22b98c9c4f87b96062624c602b5543e5aa1faa7"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-08-yam-cmux-a02a.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "6df90b604a7103d421e52f361938e14ae9208bd62e54f770af247a1a158a4ac2"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-08-yam-cmux-a02b.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "4a7a96682a330e008af826b1a3b0e8df73ff592b009cddd3d16567a67dc35ddb"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-08-yam-cmux-a02c1.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "51ef7a7837efc7c7de59f8318a9d778982a177c484d6b50d93fdb067e34cb5e2"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-08-yam-cmux-a04a.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "613a4b2e6078ab9c5e8fe628408f341ff6de7e491a689297aa58d8bef2d242fc"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-08-yam-cmux-a04b1.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "2017a218b23656229c50d76201e6d4c5e14a3e35bc2686fc4ff0c3f5f98e8f56"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-08-yam-cmux-a07a.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "de249349720d976f01fbf7af0db819150c1038dbd3f24e404f1973ac7406cd27"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-08-yam-cmux-a07b1.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "b101f41a2dcad83604ea9800964913a5367f16d2dfe8a5309ba77015a5e2cd0b"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-08-yam-cmux-b02a.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "0b2e9e41b2d4bb98571a3a4e2d37e1d51e688a242784baa2db3a1cafb2d89120"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-08-yam-cmux-b02b.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "77e951c24863dd98dbbe0f7aa17324083ad554c39b50a4453bb1eb815988bbd5"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-08-yam-cmux-b02c.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "c18cf520d9a872956dbfef2f432d457c3327dda1e43dde258f7cc82b3a6a581a"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-08-yam-cmux-b02d.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "4511c1a8b7ee24d1acaa50cd3047729016f8b7fb105272262805c875a12ca165"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-08-yam-cmux-b03a.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "649d8b055a45e8f24da2616da8442626812fc22460d8808aeb951116ddf9e0f8"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-08-yam-cmux-b03b.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "45b84c71bfaf46875914582bd2c116e538e2b9c666dd104a3d51563b7f64adda"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-08-yam-cmux-b04a.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "dbdb46db9f09c39574784b3918323d8c059a3f1fd659e497e89cf005740493f0"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-08-yam-cmux-b05a.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "74ab21f90e2e5e44410941a6790cebcb9a48b458c8a4ff731cf177bdc65add3e"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-08-yam-cmux-terminal-parity-progress.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "2524e033c29cc2c98c61a5001ecd57f2959c447d3267e209ed4d101c4daf80d1"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-08-yam-terminal-ui-fixes.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "b9317da148e771dbafd946003217eb5fa265afcae338aad060f6557337ecbb4e"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-09-yam-cmux-a02c2.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "ae1da1acc8541f91bf56fdc851de642531806069eb12881fd6a354cf2bef2632"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-09-yam-cmux-a02c2a.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "752d3e5eed46b00346a84f7601ddc8a6ebd704be411ef877686259077a92a892"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-09-yam-cmux-a04b2.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "ac7b737e96e2968ad3961d335ca62f770a8fd5a0b1a5e801cc8d6d415a2dad3a"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-09-yam-cmux-a05a1.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "a0c68de56a74f21b49ff9d99545c34b510d8f8ab0ac069f386d4162244c7e051"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-09-yam-cmux-a05a2.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "f3be25e9e144aadd4786b5ae3942f275fbf58da2b6df3594726abfaa0dd1b6ec"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-09-yam-cmux-a05a3.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "273d80e193070fcd2fd6ec9148d49f353c909efea9185677666823462e78deef"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-09-yam-cmux-a07b2.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "ed83e61fd0abb4d4a8d741b5a153889965f0d8280d75ea7b2433d70b4378cf99"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-09-yam-cmux-a07c1.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "4938ef75afcb5ab63a4dc92f1106b258d4fd36070ca27792e5aaef5dbbc34783"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-09-yam-cmux-a07c2.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "5b172f91194cb25d61c2223bc349ae6c602a8ae04fd9cef9ce564e305d2f434a"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-09-yam-cmux-a07c3.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "5a7a8ea0362ed70072918ffc84b296dbbe5fb2af30e47f16f7b3480813021f4d"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-09-yam-cmux-a08b.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "1783929ae0ee58c4add312685926996d8ae0ac5979b391a9a3ae7e987e634b81"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-09-yam-cmux-a08c.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "86a5fb00151229dbac0a143a64aa0df2f5026e4dfbaf12cb618baac0cb31ba8a"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-09-yam-cmux-a08d.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "b04dd2acda3e7b4fcaccebeff3f58b577110e11e606560f8cb82b3cc378b7ab5"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-09-yam-cmux-a09a.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "af0cea4938bdd7730c407c29823b350449bae1489673fcf53ef51502a810a9e7"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-09-yam-cmux-a11-fixture.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "d853e63ac833b84d55e1010d740a06cfd9b604c9571e8874a94f79316bc83fd2"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-09-yam-cmux-a11-r7.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "6057bd0991b457d07840cd6c6bb816a0d59fff7e102e92091de55da08b724b00"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-09-yam-cmux-a11-r8.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "93b93972bee7c9551ee5409122bd0f8d93bb2a28fe19973da6032eeb16521a0a"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-09-yam-cmux-a11-r9.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "824fa2480baecad210f30ee6cdb99c464b5b5cf90ceed08e1a8cf6b7327232e1"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-09-yam-cmux-a11b1.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "2c7a8606b76944afb293260497b42754e355a1923581635251a5969d94820905"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-09-yam-cmux-b01a.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "bf9350417e8ce43300d90d5d97be308060fe3052c60e0cba9e617b7cfb10bf84"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-09-yam-cmux-b01b.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "bce72b9ad0553d2523084cb9bb0cb8b63f3fe5f014e283444a978e3ca116655c"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-09-yam-cmux-b01c.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "32ed27d2849a77131240bc15fbbf5549035d7c1534f60d9d0af98c75e81e7489"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-09-yam-cmux-b01d.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "fe7426db1f658d8c6e68419504c804bd749d08d0b89155dc1ca154471060d59e"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-09-yam-cmux-b04b.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "c28fec96c301b40c84bbd35c2324dcee9eb26f549fc9277578987cc8a33efe56"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-09-yam-cmux-b05b.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "e8e29d5a78fed05362f4fb45688de3fb53e10950637b52b9b7677f88e95eadfd"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-09-yam-cmux-b05c.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "05a1bbbc3187961eec73e8547ccca340ede8ebeaa26d25c99454628104fd9c95"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-09-yam-cmux-c01a.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "7fbb2a2cc62f090fb089229e0cf46c982143f8b3959047756c5cffa38803704d"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-09-yam-cmux-d03a.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "870f7d5115ea49fa921f5d6850704e03412bbfc3264692bc67e7a657325e2353"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-09-yam-cmux-d03b.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "74dd2e3b334c15fb0cbc71f22933ef8c2f30a21c00f70c56be673dffa1fa2e5b"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-09-yam-cmux-native-window-identity.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "35597b12321e721f7041225b47895abf3f6b86135e8560a99f81b96d8127a503"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-09-yam-cmux-shortcut-boundary.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "67645e6fd4e939638168fb931d528d0a795f8a53cb5a0bdda38e27423a14541a"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-09-yam-native-output-stage-diagnostics.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "8d78d7b707075c5b709fe7f6962d4ac13ce654729af6ce78310d428237cb65d3"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-09-yam-terminal-authoritative-clear.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "e1f5d402465fdf4a43c5a71ac9668583458cd898d39a01195b21d640c7c25af8"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-09-yam-terminal-stop-ps.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "8327c8f490cd54c165903e57b738e5f34ec8b53f84e3eb942c299ada0da3446b"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-10-09-yam-terminal-stop-rejection-diagnostics.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "57970a51a4364099151a69ae52442899fe82c4abc186a1f0e7e4796c1bf8ab99"
+        },
+        {
+          "path": "docs/yam-capability-matrix.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "29e46b09c7a1f96dbe33ee8d4aad682362e650ce81abea24583d47f205ba2e76"
+        },
+        {
+          "path": "docs/yam-core-workflows.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "ea43842e9d761c8b90d054800b310f42b7e49f5075b38057bc5ce1bc3edbefde"
+        },
+        {
+          "path": "docs/yam-release-hardening.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "dd773be52f1f8efc64eec675d898c0aaba4fbc31fb1f5e978abc091c6acd70a5"
+        },
+        {
+          "path": "scripts/background-smoke.py",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "13fc858d308d6ace90408c2bb1d0fdce84f7c2b422d3ff430dc69ff438aa547e"
+        },
+        {
+          "path": "scripts/build-terminal-runtime.py",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "8d49480bd4621835c63dddacb77ee930e796d7cd38799e0c3b1bd2b3b0b56e13"
+        },
+        {
+          "path": "scripts/terminal-owner-responsiveness.py",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "53c8c54d3714bd49095f3249772f5a130c20ffcea266c33930052990a96741a4"
+        },
+        {
+          "path": "scripts/test_background_smoke.py",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "d2035a8a70faf412ad50e9b92cc5968c95b4299f34461981105a720391f93bcd"
+        },
+        {
+          "path": "scripts/test_terminal_owner_responsiveness.py",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "ad5fb964bca571eed4c5ffe52d24d35b5bccc87e55d2f9d5326f39614da17001"
+        },
+        {
+          "path": "scripts/test_terminal_runtime.py",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "3dcc88c9a9ccbb7edb96edf9d783e50ce38513ea76f1ed399996c77957e439b1"
+        },
+        {
+          "path": "scripts/test_third_party_notices.py",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "831f0447dd42396145af9cb5c1fe6b80970813b566e7b22a8685fcfa44a93e67"
+        },
+        {
+          "path": "scripts/third-party-notices/bodies/689ceb10716bd7a87a804c14951d7c2b818cbd60aab83d540902470ce3b13444",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "689ceb10716bd7a87a804c14951d7c2b818cbd60aab83d540902470ce3b13444"
+        },
+        {
+          "path": "scripts/third-party-notices/manifest.json",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "a5d7ab9a8c831f01bbfda39edeef498f36ed1a060024aa09cd21c71831d4b0f9"
+        },
+        {
+          "path": "scripts/third_party_notices.py",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "c11863418d88cbb529e937c2f3fa0077f1b150c620343bca747bd4b9ec4bb3ed"
+        }
+      ],
+      "source_fingerprint": "e04b71e3e7754a6e4ce7870e86e99b2178d5dd9a10b7528c2342fd55438184b7"
+    }
+  },
+  "checkpoint": "same_session",
+  "tasks": [
+    {
+      "task_id": "T1",
+      "task_kind": "vertical_slice",
+      "outcomes": [
+        "DeepSeek 可由表单启动于独立 Codex 环境，连接快照可持久化"
+      ],
+      "goal": "DeepSeek 可由表单启动于独立 Codex 环境，连接快照可持久化",
+      "owned_paths": [
+        "apps/desktop/src-tauri/src/lib.rs",
+        "apps/desktop/src-tauri/src/provider_launch.rs",
+        "apps/desktop/src-tauri/src/project_config.rs",
+        "apps/desktop/src-tauri/src/background.rs",
+        "apps/desktop/src-tauri/src/cli.rs",
+        "apps/desktop/src-tauri/src/agent_bridge.rs",
+        "apps/desktop/src-tauri/src/agent_events.rs",
+        "apps/desktop/src-tauri/src/history.rs",
+        "apps/desktop/src-tauri/src/gemini_resume.rs",
+        "apps/desktop/src/App.tsx",
+        "apps/desktop/src/provider-config.ts",
+        "apps/desktop/src/project-config.ts",
+        "apps/desktop/src/launch-templates.ts",
+        "apps/desktop/src/session-recovery.ts",
+        "apps/desktop/src/history.ts",
+        "apps/desktop/src/agent-events.ts",
+        "apps/desktop/src/ProjectConfigPreview.tsx",
+        "apps/desktop/tests",
+        "docs/yam-provider-continuity-plan.md",
+        "docs/yam-provider-continuity-plan.json"
+      ],
+      "depends_on": [],
+      "steps": [
+        "编写连接校验与隔离启动的失败测试",
+        "实现受管连接快照和独立配置环境",
+        "接入现有表单、模板和项目设置",
+        "运行隔离启动回归"
+      ],
+      "acceptance": [
+        "合法 DeepSeek 配置走 Codex CLI 独立目录，官方配置和认证哨兵不变",
+        "非法配置或缺凭据在创建任务前失败，持久化数据不含密钥值"
+      ],
+      "verification": [
+        "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked --lib provider_launch -- --test-threads=1",
+        "node --test apps/desktop/tests/provider-config.test.mjs"
+      ],
+      "execution": "current",
+      "status": "pending",
+      "provider_run": {
+        "scope": "task",
+        "recursive_planning": false
+      },
+      "provider_binding": {
+        "binding": {
+          "controller": "converge",
+          "stage_providers": {},
+          "workflow_provider": {
+            "contract": {
+              "closure": [],
+              "entrypoint": "references/execution-protocol.md",
+              "preserve_external_behavior": false
+            },
+            "contract_fingerprint": "2fb1c069b1686ca2b67c505882e2ae27a404663386e5e72df4b2f65a6ec62822",
+            "id": "native-v1",
+            "manifest": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/providers/native-v1.json",
+            "manifest_fingerprint": "da79b6af45fa1e1a94b5ce9b4b0cf84d5f43a798e57f5e1c50b510f6b7e954ee",
+            "role": "workflow",
+            "source_root": "/Users/liuwenyuan/www/tools/skills-convergent-delivery",
+            "sources": [
+              {
+                "fingerprint": "75e3d35fa88cffabda31cd7239ba1bd41624e1d5ebfab3979288466f63fe9db8",
+                "kind": "entrypoint",
+                "path": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/references/execution-protocol.md",
+                "relative_path": "references/execution-protocol.md"
+              }
+            ],
+            "task_kind": "feature",
+            "version": "1"
+          }
+        },
+        "binding_fingerprint": "60f556d1ee3420e8f1b371f96dc5a64f4886dc142ce05d0a137da65f75347c97",
+        "reason": "native engine was selected",
+        "selection": "explicit",
+        "task_kind": "feature"
+      }
+    },
+    {
+      "task_id": "T2",
+      "task_kind": "vertical_slice",
+      "outcomes": [
+        "重开历史可在原连接环境继续同一原生对话"
+      ],
+      "goal": "重开历史可在原连接环境继续同一原生对话",
+      "owned_paths": [
+        "apps/desktop/src-tauri/src/lib.rs",
+        "apps/desktop/src-tauri/src/provider_launch.rs",
+        "apps/desktop/src-tauri/src/project_config.rs",
+        "apps/desktop/src-tauri/src/background.rs",
+        "apps/desktop/src-tauri/src/cli.rs",
+        "apps/desktop/src-tauri/src/agent_bridge.rs",
+        "apps/desktop/src-tauri/src/agent_events.rs",
+        "apps/desktop/src-tauri/src/history.rs",
+        "apps/desktop/src-tauri/src/gemini_resume.rs",
+        "apps/desktop/src/App.tsx",
+        "apps/desktop/src/provider-config.ts",
+        "apps/desktop/src/project-config.ts",
+        "apps/desktop/src/launch-templates.ts",
+        "apps/desktop/src/session-recovery.ts",
+        "apps/desktop/src/history.ts",
+        "apps/desktop/src/agent-events.ts",
+        "apps/desktop/src/ProjectConfigPreview.tsx",
+        "apps/desktop/tests"
+      ],
+      "depends_on": [
+        "T1"
+      ],
+      "steps": [
+        "补续聊环境丢失与身份边界回归",
+        "复用准备环境执行探测和 resume",
+        "关联执行记录与原对话",
+        "运行前后端续聊验证"
+      ],
+      "acceptance": [
+        "Continue 恢复原生 ID、目录与连接快照，不重发初始 prompt",
+        "缺失历史或配置明确失败，不创建新对话或回退订阅"
+      ],
+      "verification": [
+        "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked --lib resume -- --test-threads=1",
+        "node --test apps/desktop/tests/session-recovery.test.mjs apps/desktop/tests/history.test.mjs"
+      ],
+      "execution": "current",
+      "status": "pending",
+      "provider_run": {
+        "scope": "task",
+        "recursive_planning": false
+      },
+      "provider_binding": {
+        "binding": {
+          "controller": "converge",
+          "stage_providers": {},
+          "workflow_provider": {
+            "contract": {
+              "closure": [],
+              "entrypoint": "references/execution-protocol.md",
+              "preserve_external_behavior": false
+            },
+            "contract_fingerprint": "2fb1c069b1686ca2b67c505882e2ae27a404663386e5e72df4b2f65a6ec62822",
+            "id": "native-v1",
+            "manifest": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/providers/native-v1.json",
+            "manifest_fingerprint": "da79b6af45fa1e1a94b5ce9b4b0cf84d5f43a798e57f5e1c50b510f6b7e954ee",
+            "role": "workflow",
+            "source_root": "/Users/liuwenyuan/www/tools/skills-convergent-delivery",
+            "sources": [
+              {
+                "fingerprint": "75e3d35fa88cffabda31cd7239ba1bd41624e1d5ebfab3979288466f63fe9db8",
+                "kind": "entrypoint",
+                "path": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/references/execution-protocol.md",
+                "relative_path": "references/execution-protocol.md"
+              }
+            ],
+            "task_kind": "feature",
+            "version": "1"
+          }
+        },
+        "binding_fingerprint": "60f556d1ee3420e8f1b371f96dc5a64f4886dc142ce05d0a137da65f75347c97",
+        "reason": "native engine was selected",
+        "selection": "explicit",
+        "task_kind": "feature"
+      }
+    },
+    {
+      "task_id": "T3",
+      "task_kind": "vertical_slice",
+      "outcomes": [
+        "Claude 与 Gemini 可按约定 CLI 和连接配置启动并续聊"
+      ],
+      "goal": "Claude 与 Gemini 可按约定 CLI 和连接配置启动并续聊",
+      "owned_paths": [
+        "apps/desktop/src-tauri/src/lib.rs",
+        "apps/desktop/src-tauri/src/provider_launch.rs",
+        "apps/desktop/src-tauri/src/project_config.rs",
+        "apps/desktop/src-tauri/src/background.rs",
+        "apps/desktop/src-tauri/src/cli.rs",
+        "apps/desktop/src-tauri/src/agent_bridge.rs",
+        "apps/desktop/src-tauri/src/agent_events.rs",
+        "apps/desktop/src-tauri/src/history.rs",
+        "apps/desktop/src-tauri/src/gemini_resume.rs",
+        "apps/desktop/src/App.tsx",
+        "apps/desktop/src/provider-config.ts",
+        "apps/desktop/src/project-config.ts",
+        "apps/desktop/src/launch-templates.ts",
+        "apps/desktop/src/session-recovery.ts",
+        "apps/desktop/src/history.ts",
+        "apps/desktop/src/agent-events.ts",
+        "apps/desktop/src/ProjectConfigPreview.tsx",
+        "apps/desktop/tests"
+      ],
+      "depends_on": [
+        "T2"
+      ],
+      "steps": [
+        "补 CLI 映射及 Gemini 原生身份测试",
+        "接入 Gemini CLI 与安全 resume 校验",
+        "接入 Claude 的隔离连接与 Gemini 网关选择",
+        "运行 CLI 映射和历史回归"
+      ],
+      "acceptance": [
+        "Codex→codex，Claude→claude，Gemini→gemini且可选claude，DeepSeek→codex",
+        "Gemini/Claude 的会话存储与配置环境匹配，无未验证身份推断"
+      ],
+      "verification": [
+        "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked --lib gemini -- --test-threads=1",
+        "node --test apps/desktop/tests/provider-config.test.mjs apps/desktop/tests/session-recovery.test.mjs"
+      ],
+      "execution": "current",
+      "status": "pending",
+      "provider_run": {
+        "scope": "task",
+        "recursive_planning": false
+      },
+      "provider_binding": {
+        "binding": {
+          "controller": "converge",
+          "stage_providers": {},
+          "workflow_provider": {
+            "contract": {
+              "closure": [],
+              "entrypoint": "references/execution-protocol.md",
+              "preserve_external_behavior": false
+            },
+            "contract_fingerprint": "2fb1c069b1686ca2b67c505882e2ae27a404663386e5e72df4b2f65a6ec62822",
+            "id": "native-v1",
+            "manifest": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/providers/native-v1.json",
+            "manifest_fingerprint": "da79b6af45fa1e1a94b5ce9b4b0cf84d5f43a798e57f5e1c50b510f6b7e954ee",
+            "role": "workflow",
+            "source_root": "/Users/liuwenyuan/www/tools/skills-convergent-delivery",
+            "sources": [
+              {
+                "fingerprint": "75e3d35fa88cffabda31cd7239ba1bd41624e1d5ebfab3979288466f63fe9db8",
+                "kind": "entrypoint",
+                "path": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/references/execution-protocol.md",
+                "relative_path": "references/execution-protocol.md"
+              }
+            ],
+            "task_kind": "feature",
+            "version": "1"
+          }
+        },
+        "binding_fingerprint": "60f556d1ee3420e8f1b371f96dc5a64f4886dc142ce05d0a137da65f75347c97",
+        "reason": "native engine was selected",
+        "selection": "explicit",
+        "task_kind": "feature"
+      }
+    },
+    {
+      "task_id": "T4",
+      "task_kind": "integration",
+      "outcomes": [
+        "真实已安装 CLI 在本地可控端点下完成隔离与重启续聊闭环"
+      ],
+      "goal": "真实已安装 CLI 在本地可控端点下完成隔离与重启续聊闭环",
+      "owned_paths": [
+        "apps/desktop/src-tauri/src/lib.rs",
+        "apps/desktop/src-tauri/src/provider_launch.rs",
+        "apps/desktop/src-tauri/src/project_config.rs",
+        "apps/desktop/src-tauri/src/background.rs",
+        "apps/desktop/src-tauri/src/cli.rs",
+        "apps/desktop/src-tauri/src/agent_bridge.rs",
+        "apps/desktop/src-tauri/src/agent_events.rs",
+        "apps/desktop/src-tauri/src/history.rs",
+        "apps/desktop/src-tauri/src/gemini_resume.rs",
+        "apps/desktop/src/App.tsx",
+        "apps/desktop/src/provider-config.ts",
+        "apps/desktop/src/project-config.ts",
+        "apps/desktop/src/launch-templates.ts",
+        "apps/desktop/src/session-recovery.ts",
+        "apps/desktop/src/history.ts",
+        "apps/desktop/src/agent-events.ts",
+        "apps/desktop/src/ProjectConfigPreview.tsx",
+        "apps/desktop/tests",
+        "scripts/test_provider_continuity.py",
+        "docs/yam-provider-continuity-plan.md",
+        "docs/yam-capability-matrix.md",
+        "apps/desktop/README.md"
+      ],
+      "depends_on": [
+        "T3"
+      ],
+      "steps": [
+        "编写可控端点与真实 CLI 集成检查",
+        "运行首次请求和重启续聊检查",
+        "运行相关全量回归与标准构建",
+        "执行风险复核并修复同范围缺陷",
+        "记录真实供应商验证边界"
+      ],
+      "acceptance": [
+        "本地端点证明真实 CLI 使用独立环境并继续原生对话",
+        "相关测试和标准构建通过，官方配置哨兵保持不变",
+        "没有真实供应商请求时如实标记未验收"
+      ],
+      "verification": [
+        "python3 -m unittest scripts.test_provider_continuity",
+        "pnpm --dir apps/desktop build"
+      ],
+      "execution": "current",
+      "status": "pending",
+      "provider_run": {
+        "scope": "task",
+        "recursive_planning": false
+      },
+      "provider_binding": {
+        "binding": {
+          "controller": "converge",
+          "stage_providers": {},
+          "workflow_provider": {
+            "contract": {
+              "closure": [],
+              "entrypoint": "references/execution-protocol.md",
+              "preserve_external_behavior": false
+            },
+            "contract_fingerprint": "2fb1c069b1686ca2b67c505882e2ae27a404663386e5e72df4b2f65a6ec62822",
+            "id": "native-v1",
+            "manifest": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/providers/native-v1.json",
+            "manifest_fingerprint": "da79b6af45fa1e1a94b5ce9b4b0cf84d5f43a798e57f5e1c50b510f6b7e954ee",
+            "role": "workflow",
+            "source_root": "/Users/liuwenyuan/www/tools/skills-convergent-delivery",
+            "sources": [
+              {
+                "fingerprint": "75e3d35fa88cffabda31cd7239ba1bd41624e1d5ebfab3979288466f63fe9db8",
+                "kind": "entrypoint",
+                "path": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/references/execution-protocol.md",
+                "relative_path": "references/execution-protocol.md"
+              }
+            ],
+            "task_kind": "feature",
+            "version": "1"
+          }
+        },
+        "binding_fingerprint": "60f556d1ee3420e8f1b371f96dc5a64f4886dc142ce05d0a137da65f75347c97",
+        "reason": "native engine was selected",
+        "selection": "explicit",
+        "task_kind": "feature"
+      }
+    }
+  ],
+  "final_acceptance": [
+    "DeepSeek 启动和续聊不改变官方 Codex 登录配置",
+    "历史在重启后保留可信 native ID 及连接配置引用",
+    "CLI 映射符合用户约定，缺失身份或连接时明确失败",
+    "实际执行的本地端点验证与真实供应商请求验证分别记录"
+  ],
+  "decisions": [
+    {
+      "id": "D1",
+      "status": "resolved",
+      "question": "首个切片和执行顺序",
+      "resolution": "DeepSeek/Codex 隔离启动→重启续聊→Claude/Gemini→集成复核",
+      "source": "user"
+    },
+    {
+      "id": "D2",
+      "status": "resolved",
+      "question": "密钥与协议转换的实现方式",
+      "resolution": "复用环境变量引用，DeepSeek Responses 直连优先；兼容网关可选，不引入依赖或自研代理",
+      "source": "reversible-default"
+    },
+    {
+      "id": "D3",
+      "status": "resolved",
+      "question": "官方配置与原生历史处理",
+      "resolution": "第三方使用受管独立环境，不迁移官方认证或历史",
+      "source": "user"
+    }
+  ]
+}

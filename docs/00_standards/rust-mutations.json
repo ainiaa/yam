@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "tool_version": "27.1.0",
+  "manifest": "apps/desktop/src-tauri/Cargo.toml",
+  "selector": "agent_events::tests::",
+  "mutants": [
+    {
+      "name": "src/agent_events.rs:317:27: replace != with == in AgentState::read",
+      "source_sha256": "02d21d0c6be918397dcdbab3c2efaf204370d7372ff2b4f26ea06bf9dbc9f346",
+      "criterion": "旧 revision 不得读取新回执"
+    },
+    {
+      "name": "src/agent_events.rs:457:31: replace != with == in super::HistoryStore::agent_delivery",
+      "source_sha256": "02d21d0c6be918397dcdbab3c2efaf204370d7372ff2b4f26ea06bf9dbc9f346",
+      "criterion": "旧 revision 不得覆盖投递结果"
+    },
+    {
+      "name": "src/agent_events.rs:420:36: replace != with == in super::HistoryStore::ingest_agent",
+      "source_sha256": "02d21d0c6be918397dcdbab3c2efaf204370d7372ff2b4f26ea06bf9dbc9f346",
+      "criterion": "旧 generation 事件必须拒绝"
+    },
+    {
+      "name": "src/agent_events.rs:421:16: delete ! in super::HistoryStore::ingest_agent",
+      "source_sha256": "02d21d0c6be918397dcdbab3c2efaf204370d7372ff2b4f26ea06bf9dbc9f346",
+      "criterion": "已终态会话不得接收新 agent 事件"
+    },
+    {
+      "name": "src/agent_events.rs:500:43: replace == with != in super::HistoryStore::native_delivery",
+      "source_sha256": "02d21d0c6be918397dcdbab3c2efaf204370d7372ff2b4f26ea06bf9dbc9f346",
+      "criterion": "通知投递必须绑定当前 receipt revision"
+    },
+    {
+      "name": "src/agent_events.rs:501:32: delete ! in super::HistoryStore::native_delivery",
+      "source_sha256": "02d21d0c6be918397dcdbab3c2efaf204370d7372ff2b4f26ea06bf9dbc9f346",
+      "criterion": "已读回执不得再次投递"
+    },
+    {
+      "name": "src/agent_events.rs:589:50: replace < with <= in DeliveryQueue::tick",
+      "source_sha256": "02d21d0c6be918397dcdbab3c2efaf204370d7372ff2b4f26ea06bf9dbc9f346",
+      "criterion": "重试到期时必须恢复投递，保留毫秒边界"
+    },
+    {
+      "name": "src/agent_events.rs:639:12: delete ! in DeliveryQueue::tick",
+      "source_sha256": "02d21d0c6be918397dcdbab3c2efaf204370d7372ff2b4f26ea06bf9dbc9f346",
+      "criterion": "暂停期间必须保留显式 retry 状态"
+    }
+  ]
+}

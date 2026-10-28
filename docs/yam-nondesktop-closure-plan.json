@@ -1,0 +1,265 @@
+{
+  "schema_version": 6,
+  "plan_id": "yam-nondesktop-closure-20261001",
+  "requirement_fingerprint": "78702167b21a55c37ad7b94dcd414899402f6b0c9185210bbb36f0ba2093645b",
+  "planner": {
+    "name": "native-plan-v1",
+    "source_path": null,
+    "source_fingerprint": null
+  },
+  "context": "long",
+  "baseline": {
+    "commit": "33b85bd6d5b71dd8222988574123ea21082088ea",
+    "source": {
+      "schema_version": 2,
+      "baseline_commit": "33b85bd6d5b71dd8222988574123ea21082088ea",
+      "commit_id": "33b85bd6d5b71dd8222988574123ea21082088ea",
+      "tree_hash": "8c9429ac8c32386761a14a8c65cb1fb27639a2dd",
+      "diff_fingerprint": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "changed_paths": [],
+      "changed_entries": [],
+      "source_fingerprint": "e3443636e202acd7d6dfb9b5407dcc11e82e8e8c8f68007d1de5aa83d0e2020b"
+    }
+  },
+  "checkpoint": "same_session",
+  "tasks": [
+    {
+      "task_id": "N1",
+      "task_kind": "vertical_slice",
+      "outcomes": [
+        "可靠 Agent 轮次和权限状态接入"
+      ],
+      "goal": "可靠 Agent 轮次和权限状态接入",
+      "owned_paths": [
+        "apps/desktop/src-tauri/src/agent_bridge.rs",
+        "apps/desktop/src-tauri/src/agent_events.rs",
+        "apps/desktop/src/agent-events.ts",
+        "apps/desktop/src/App.tsx",
+        "apps/desktop/tests/agent-events.test.mjs",
+        "scripts/agent-bridge-smoke.py",
+        "apps/desktop/src-tauri/src/lib.rs"
+      ],
+      "depends_on": [],
+      "steps": [
+        "定义带原生身份的事件回归",
+        "实现会话限定事件注入",
+        "运行真实 CLI 验收"
+      ],
+      "acceptance": [
+        "权限 Hook 不改变审批决定且保留既有配置",
+        "Claude 缺失身份和异常不可误报完成",
+        "完成回执隔离轮次且幂等",
+        "系统冷启动的精简 PATH 可找到常见用户安装 CLI，探针与真实进程使用相同 PATH"
+      ],
+      "verification": [
+        "rtk proxy cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked",
+        "rtk proxy npm run test:coverage --prefix apps/desktop"
+      ],
+      "execution": "current",
+      "status": "pending",
+      "provider_run": {
+        "scope": "task",
+        "recursive_planning": false
+      },
+      "provider_binding": {
+        "binding": {
+          "controller": "converge",
+          "stage_providers": {},
+          "workflow_provider": {
+            "contract": {
+              "closure": [],
+              "entrypoint": "references/execution-protocol.md",
+              "preserve_external_behavior": false
+            },
+            "contract_fingerprint": "2fb1c069b1686ca2b67c505882e2ae27a404663386e5e72df4b2f65a6ec62822",
+            "id": "native-v1",
+            "manifest": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/providers/native-v1.json",
+            "manifest_fingerprint": "da79b6af45fa1e1a94b5ce9b4b0cf84d5f43a798e57f5e1c50b510f6b7e954ee",
+            "role": "workflow",
+            "source_root": "/Users/liuwenyuan/www/tools/skills-convergent-delivery",
+            "sources": [
+              {
+                "fingerprint": "a43c016ea5daecbf5e74ea93840c1e489fe7ce85f926bb651fdbf36064028770",
+                "kind": "entrypoint",
+                "path": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/references/execution-protocol.md",
+                "relative_path": "references/execution-protocol.md"
+              }
+            ],
+            "task_kind": "feature",
+            "version": "1"
+          }
+        },
+        "binding_fingerprint": "e04abc991b64aa44f1f760489b8c33bb40c03458b1e8c63a6eea860247bd300c",
+        "reason": "native engine was selected",
+        "selection": "explicit",
+        "task_kind": "feature"
+      }
+    },
+    {
+      "task_id": "N2",
+      "task_kind": "vertical_slice",
+      "outcomes": [
+        "可执行的 macOS 签名公证流程"
+      ],
+      "goal": "可执行的 macOS 签名公证流程",
+      "owned_paths": [
+        "scripts/macos-release.py",
+        "scripts/test_macos_release.py",
+        "docs/macos-release.md",
+        ".github/workflows/ci.yml"
+      ],
+      "depends_on": [],
+      "steps": [
+        "先写签名流程断言",
+        "实现签名和公证检查",
+        "验证缺失证书时明确失败"
+      ],
+      "acceptance": [
+        "缺失证书不得宣称正式签名成功",
+        "签名公证使用现有钥匙串配置且不暴露凭据",
+        "只准备产物，不发布"
+      ],
+      "verification": [
+        "rtk proxy python3 -m unittest discover -s scripts -p test_macos_release.py"
+      ],
+      "execution": "current",
+      "status": "pending",
+      "provider_run": {
+        "scope": "task",
+        "recursive_planning": false
+      },
+      "provider_binding": {
+        "binding": {
+          "controller": "converge",
+          "stage_providers": {},
+          "workflow_provider": {
+            "contract": {
+              "closure": [],
+              "entrypoint": "references/execution-protocol.md",
+              "preserve_external_behavior": false
+            },
+            "contract_fingerprint": "2fb1c069b1686ca2b67c505882e2ae27a404663386e5e72df4b2f65a6ec62822",
+            "id": "native-v1",
+            "manifest": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/providers/native-v1.json",
+            "manifest_fingerprint": "da79b6af45fa1e1a94b5ce9b4b0cf84d5f43a798e57f5e1c50b510f6b7e954ee",
+            "role": "workflow",
+            "source_root": "/Users/liuwenyuan/www/tools/skills-convergent-delivery",
+            "sources": [
+              {
+                "fingerprint": "a43c016ea5daecbf5e74ea93840c1e489fe7ce85f926bb651fdbf36064028770",
+                "kind": "entrypoint",
+                "path": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/references/execution-protocol.md",
+                "relative_path": "references/execution-protocol.md"
+              }
+            ],
+            "task_kind": "feature",
+            "version": "1"
+          }
+        },
+        "binding_fingerprint": "e04abc991b64aa44f1f760489b8c33bb40c03458b1e8c63a6eea860247bd300c",
+        "reason": "native engine was selected",
+        "selection": "explicit",
+        "task_kind": "feature"
+      }
+    },
+    {
+      "task_id": "N3",
+      "task_kind": "integration",
+      "outcomes": [
+        "通知激活与最终证据核对"
+      ],
+      "goal": "通知激活与最终证据核对",
+      "owned_paths": [
+        "docs/notification-acceptance.md",
+        "docs/yam-next-stage-execution.md",
+        "docs/agent-capabilities.md",
+        "README.md"
+      ],
+      "depends_on": [
+        "N1",
+        "N2"
+      ],
+      "steps": [
+        "复核通知激活调用链",
+        "运行构建与全范围检查",
+        "记录通过和外部阻塞证据"
+      ],
+      "acceptance": [
+        "退出后唤醒不自动运行历史命令",
+        "真实点击未执行时保留验收缺口",
+        "桌面体验不纳入本次范围"
+      ],
+      "verification": [
+        "rtk proxy npm run build --prefix apps/desktop",
+        "rtk proxy git diff --check"
+      ],
+      "execution": "current",
+      "status": "pending",
+      "provider_run": {
+        "scope": "task",
+        "recursive_planning": false
+      },
+      "provider_binding": {
+        "binding": {
+          "controller": "converge",
+          "stage_providers": {},
+          "workflow_provider": {
+            "contract": {
+              "closure": [],
+              "entrypoint": "references/execution-protocol.md",
+              "preserve_external_behavior": false
+            },
+            "contract_fingerprint": "2fb1c069b1686ca2b67c505882e2ae27a404663386e5e72df4b2f65a6ec62822",
+            "id": "native-v1",
+            "manifest": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/providers/native-v1.json",
+            "manifest_fingerprint": "da79b6af45fa1e1a94b5ce9b4b0cf84d5f43a798e57f5e1c50b510f6b7e954ee",
+            "role": "workflow",
+            "source_root": "/Users/liuwenyuan/www/tools/skills-convergent-delivery",
+            "sources": [
+              {
+                "fingerprint": "a43c016ea5daecbf5e74ea93840c1e489fe7ce85f926bb651fdbf36064028770",
+                "kind": "entrypoint",
+                "path": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/references/execution-protocol.md",
+                "relative_path": "references/execution-protocol.md"
+              }
+            ],
+            "task_kind": "feature",
+            "version": "1"
+          }
+        },
+        "binding_fingerprint": "e04abc991b64aa44f1f760489b8c33bb40c03458b1e8c63a6eea860247bd300c",
+        "reason": "native engine was selected",
+        "selection": "explicit",
+        "task_kind": "feature"
+      }
+    }
+  ],
+  "final_acceptance": [
+    "非桌面范围的事件集成有可执行回归和真实证据",
+    "签名公证流程检查可运行，实际正式签名因无证书不宣称完成",
+    "不会改全局认证或审批，不发布应用"
+  ],
+  "decisions": [
+    {
+      "id": "D1",
+      "status": "resolved",
+      "question": "是否纳入真实桌面体验？",
+      "resolution": "排除 Windows/Linux 真实桌面体验；可用的 macOS 通知激活仍检查",
+      "source": "user"
+    },
+    {
+      "id": "D2",
+      "status": "resolved",
+      "question": "没有签名证书时如何执行？",
+      "resolution": "先完成签名与公证流程及检查，不获取证书或发布",
+      "source": "user"
+    },
+    {
+      "id": "D3",
+      "status": "resolved",
+      "question": "Claude Stop 能否宣称确定最终结束？",
+      "resolution": "不能；按准确通知目标采用回复就绪且可能继续的保守提醒，不作最终成功回执，后续用户明确选择可收紧",
+      "source": "reversible-default"
+    }
+  ]
+}

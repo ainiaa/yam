@@ -1,0 +1,88 @@
+# YAM 实时内存显示实施计划
+
+作者：Jeff.Liu
+
+目标：状态栏每 5 秒显示当前 YAM 内存，包含 GUI、WebKit、后台 owner 和终端解析器；PTY/Agent 工作负载单独统计。macOS 使用 physical footprint，Linux 使用 RSS，Windows 使用 working set；提示说明逐进程相加、不去重共享页。异常或归属不完整不显示完整总量。
+
+1. 先添加正常、边界、采样失败和轮询取消测试。
+2. 实现原生进程采样及认证后台进程归属，限制时间、输出和进程数量。
+3. 状态栏接入单请求轮询，隐藏时停止采样，清理后禁止更新。
+4. 执行前后端回归、构建和原生采样验收。
+5. 审查变更并记录实际结果与无法验收项。
+
+不增加依赖、系统权限或全局配置。既有 Converge coverage provider 未配置，preflight 如实返回 uncovered；实际可执行测试仍为交付门禁。
+
+## 验证记录
+
+- 先运行新增测试，确认不存在采样/显示实现而失败；实现后前端 81 项、macOS Rust 164 项通过。
+- 真实 LaunchServices 启动的隔离 macOS 应用：三次完整 native 采样通过，包含 WebKit、owner、parser 与实际 PTY 工作负载。直接 Popen 启动没有显式 coalition membership，正确显示不可用，不能当成全量总数。
+- native 测试数据：
+
+```json
+{
+  "samples": [
+    {
+      "application_bytes": 228350768,
+      "workload_bytes": 852160,
+      "metric": "physical footprint",
+      "sampled_at": 1790908300117
+    },
+    {
+      "application_bytes": 122624816,
+      "workload_bytes": 852160,
+      "metric": "physical footprint",
+      "sampled_at": 1790908306972
+    },
+    {
+      "application_bytes": 114039600,
+      "workload_bytes": 852160,
+      "metric": "physical footprint",
+      "sampled_at": 1790908312570
+    }
+  ],
+  "owner_and_workload_attribution": true,
+  "native_webkit_included": true
+}
+```
+
+- 新增 native fixture 测试需要活跃隔离应用，普通回归中明确 ignored，本次已单独执行三次通过。
+- 独立 spec review 发现旧数值过期后可能保留至下一轮刷新；先加失败回归，再补独立到期清理，spec 复核与 quality review 通过。
+- 前端生产构建、macOS app 打包及 Clippy 通过；Windows native 模块单独 cross-check 编译通过，完整跨平台原生检查交 CI。
+- CUA 读取测试界面超时，未声称完成可见 UI 验收。Converge coverage provider 与正式 Review v3 runner 仍未配置，不声称已具备对应机器回执。
+
+## 最终自动化结果
+
+实现、回归、native 采样、独立审查及三平台打包生命周期检查已完成。可见 UI 验收因 CUA 超时除外，未标记为已验收。
+
+源代码提交：`585edb3d7729d6a4747cc4cc472551188b45b33c`。
+[三平台 CI 36956464177](https://github.com/ainiaa/yam/actions/runs/36956464177) 全部成功。
+
+- desktop (macos-latest, app, macos/YAM-macos.zip, src-tauri/target/debug/bundle/macos/YAM.app/Cont...: success; 2026-10-02T02:41:40.9967280Z test result: ok. 164 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 9.66s
+- desktop (ubuntu-22.04, deb, deb, src-tauri/target/ci-installed/usr/bin/yam-desktop): success; 2026-10-02T02:41:15.4909078Z test result: ok. 162 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 7.60s
+- desktop (windows-latest, nsis, nsis, src-tauri/target/debug/yam-desktop.exe): success; 2026-10-02T02:42:59.3361178Z test result: ok. 143 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 10.27s
+
+生产身份 YAM 已启动，确认一个 GUI 和认证 owner 正常连接；native 采样 application_bytes=110893536，workload_bytes=0。测试用隔离应用与后台均已关闭。
+
+## 用户实机发现的白屏修复
+
+此前通过的 Node 测试和原生后端采样不能证明前端能在 WebKit 中启动。用户截图确认主界面空白。真实 WKWebView 复现错误：`TypeError: Can only call Window.setInterval on instances of Window`。根因是默认 clock 将 Window timer 方法挂在普通对象上调用，Node 没有同样的 receiver 校验。
+
+先增加默认计时器 receiver 的失败回归，再将四个默认 timer 方法绑定到 globalThis。前端 82 项测试与构建通过。新增 native WebKit smoke 加载完整构建前端，使用明确的 IPC/visibility 测试替身，实际 DOM 出现 footer 与 `YAM 100.0 MiB · Tasks 50.0 MiB`，捕获的 JavaScript errors 为空；此测试不代表真实 IPC 后端验收。macOS CI 已接入该回归。
+
+本地重新打包并重启生产 GUI，没有执行任务停止命令。最终确认一个生产 GUI，前端 heartbeat 已连接，active_sessions=0。
+
+新增 native gate 另经构建产物反向验证：仅恢复原来的 setInterval 调用即检测到 blank frontend 并以非零退出；恢复修复产物后 footer/memory 渲染通过。独立 spec/quality 复核通过，并独立执行 native smoke 成功。
+
+修复提交 `ca396c400fd115127fd0f3af8ed2459a161292f6` 的 [CI 36957990014](https://github.com/ainiaa/yam/actions/runs/36957990014)：新增 macOS 原生 WebKit 前端启动检查已成功；记录时其余整包作业仍运行中，未称全平台最终结果已通过。
+
+## 用户实机发现的内存不可用修复
+
+作者：Jeff.Liu。此前从外部测试进程采样 GUI 的验收漏掉了应用内部查询路径。将 Rust 测试二进制作为隔离 LaunchServices 应用启动，并在其内部调用 sample，先复现 `WebKit process membership changed during sampling`：应用启动的 lsappinfo 自己进入应用 coalition，查询退出后该瞬时 PID 导致两次进程集合不同。
+
+修复仅排除本轮查询 child.id()，保留真正的 WebKit、后台、parser 和任务进程，以及前后集合与进程身份校验。新增正常、查询 PID 排除及误排除主进程的回归；隔离自采样 smoke 接入 macOS CI。debug 构建记录实际命令返回的字节数或固定错误，以验证真实前端 IPC，不记录凭据。
+
+本地 Rust 164 项通过、2 项原生 fixture 默认 ignored；本次分别单独验证原生 fixture。Clippy、格式及 app 打包通过，独立审查无可执行问题，自采样 smoke 连续六次通过。
+
+实际 GUI 的连续三次前端请求分别返回 application_bytes=230595664、198467024、198598096，workload_bytes 均为 3801496。最后一次约为应用 189.4 MiB、任务 3.6 MiB。切换前后认证 owner、parser 和活动终端 PID 完全一致，只有一个生产 GUI，后台连接正常。此证据是真实前端 IPC；CUA 可见 UI 读取仍超时，未声称截图验收。
+
+为避免覆盖活动后台正在使用的旧 bundle，新版构建并启动于 `apps/desktop/src-tauri/target/memory-fix/debug/bundle/macos/YAM.app`；原 target/debug bundle 暂未覆盖。当前修复的远程 CI 尚待提交后运行，不将前次 CI 当作本次结果。

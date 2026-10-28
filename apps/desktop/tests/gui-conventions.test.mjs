@@ -1,0 +1,32 @@
+import {englishUiRead} from './fixtures/english-ui-source.mjs';
+const readFileSync=(...args)=>englishUiRead(rawReadFileSync,...args);
+import './fixtures/i18n-test-init.mjs';
+// Author: Jeff.Liu. UI wiring checks complement runtime event tests and native acceptance.
+import test from 'node:test';import assert from 'node:assert/strict';import {existsSync,readFileSync as rawReadFileSync} from 'node:fs';import ts from 'typescript';
+const read=name=>readFileSync(new URL('../src/'+name,import.meta.url),'utf8');
+const app=read('App.tsx'),settings=read('TerminalSettings.tsx'),layout=read('TerminalLayout.tsx'),css=read('App.css');
+test('settings keep one reachable footer cancel, Escape and one scroll body',()=>{assert.match(settings,/className="terminal-settings-body"/);assert.doesNotMatch(settings,/aria-label="Close terminal settings"/);assert.match(settings,/onCancel=\{event=>\{event.preventDefault\(\);onClose\(\);\}\}/);assert.equal((settings.match(/>Cancel<\/button>/g)||[]).length,1);assert.match(css,/\.terminal-settings-body\s*\{[^}]*overflow-y:\s*auto/s);});
+test('empty single window never renders pane guidance underneath whole-window guidance',()=>{assert.match(css,/\.terminal-whole-empty \.terminal-layout-shell\s*\{[^}]*visibility:\s*hidden/s);assert.match(app,/const currentProject = \(session\?\.cwd \|\| activeProject\) \?/);});
+test('one primary new-session button and one project action share the session dialog',()=>{const source=ts.createSourceFile('App.tsx',app,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);let count=0;function visit(n){if(ts.isJsxElement(n)&&n.openingElement.tagName.getText(source)==='button'&&n.openingElement.attributes.properties.some(a=>a.name?.getText(source)==='onClick'&&a.initializer?.getText(source).includes('newSession(')))count++;ts.forEachChild(n,visit);}visit(source);assert.equal(count,2);});
+test('available startup programs are not prohibited by window identity',()=>{const line=app.split('\n').find(line=>line.includes('disabled={')&&line.includes('adapter.available'));assert.ok(line);assert.doesNotMatch(line,/!isMainWindow/);});
+test('pane actions are direct commands rather than a nested select',()=>{const start=layout.indexOf('className="toolbar-more pane-more"'),end=layout.indexOf('</details>',start),menu=layout.slice(start,end);assert.ok(start>=0);assert.doesNotMatch(menu,/<Select/);assert.match(menu,/Move tab left/);assert.match(menu,/onReorderTab/);assert.match(menu,/onMoveTab/);});
+test('global settings requests reuse the modal-aware native dispatch',()=>{const line=app.split('\n').find(line=>line.includes('"terminal-main-settings"'));assert.match(line,/nativeMenuHandler\.current\(event\.payload\?\?"settings"\)/);assert.doesNotMatch(line,/setTerminalSettingsOpen\(true\)/);});
+test('shared menu dismissal is installed by the app with cleanup',()=>{assert.match(app,/useEffect\(\(\)=>installActionMenus\(document\)/);assert.ok(existsSync(new URL('../src/action-menus.ts',import.meta.url)),'shared menu listener must exist');});
+test('editable combo reuses existing menu geometry and style',()=>{assert.ok(existsSync(new URL('../src/EditableCombo.tsx',import.meta.url)),'single editable combobox must exist');const source=read('EditableCombo.tsx');assert.match(source,/selectMenuGeometry/);assert.match(source,/role="combobox"/);assert.match(source,/aria-autocomplete="list"/);});
+
+test("profile appearance reuses the same font and size editable combos",()=>{const source=read("TerminalProfiles.tsx");assert.match(source,/<EditableCombo[^>]*aria-label="Profile font family"/);assert.match(source,/<EditableCombo.*?aria-label="Profile font size"/);});
+test('all native app dialogs bound their own body rather than clipping long sections',()=>{assert.match(css,/\.app-dialog\[open\]\s*\{[^}]*display:\s*flex/s);assert.match(css,/\.app-dialog form\s*\{[^}]*min-height:\s*0/s);});
+test('System entry and Updates use native modal admission and focus containment',()=>{assert.match(app,/<dialog ref=\{systemEntryDialog\}/);assert.match(app,/systemEntryDialog\.current\?\.showModal\(\)/);const updater=read('UpdaterSettings.tsx');assert.match(updater,/<dialog ref=\{dialog\}/);assert.match(updater,/dialog\.current\?\.showModal\(\)/);assert.match(updater,/onCancel=/);});
+test('editable arrow is visually part of its field and checkbox labels stay inline',()=>{assert.match(css,/\.editable-combo > \.editable-combo-arrow\s*\{[^}]*border:\s*0/s);assert.match(settings,/<label className="log-checkbox"><input type="checkbox" aria-label="Blink by default"/);});
+
+test('cursor checkbox uses a horizontal label with an intrinsic-width checkbox',()=>{assert.match(css,/\.terminal-preferences label\.log-checkbox\s*\{[^}]*display:\s*flex/s);assert.match(css,/\.terminal-preferences \.log-checkbox input\s*\{[^}]*width:\s*auto/s);});
+test('the same primary creation control remains visible in exactly one place for either sidebar state',()=>{
+ const source=ts.createSourceFile('App.tsx',app,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX),placements=[];let definition;
+ function visit(n){if(ts.isVariableDeclaration(n)&&n.name.getText(source)==='newSessionButton')definition=n.initializer;if(ts.isJsxExpression(n)&&n.expression&&/newSessionButton/.test(n.expression.getText(source)))placements.push(n.expression);ts.forEachChild(n,visit);}visit(source);
+ assert.ok(definition,'one reusable primary control');assert.equal(placements.length,2,'sidebar and collapsed toolbar placements');
+ for(const sidebarOpen of [true,false]){const control={};const visible=placements.map(n=>new Function('sidebarOpen','newSessionButton',ts.transpile('return ('+n.getText(source)+');',{target:ts.ScriptTarget.ES2022}))(sidebarOpen,control)).filter(v=>v===control);assert.equal(visible.length,1);}
+});
+
+test('inline rename errors use the existing theme surface and error colors',()=>{
+ const rule=css.match(/\.tab-name-error\{([^}]+)\}/)?.[1];assert.ok(rule);assert.match(rule,/background:var\(--surface\)/);assert.match(rule,/color:var\(--error\)/);
+});

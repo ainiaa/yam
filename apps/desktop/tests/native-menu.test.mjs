@@ -1,0 +1,40 @@
+import {englishUiRead} from './fixtures/english-ui-source.mjs';
+const readFileSync=(...args)=>englishUiRead(rawReadFileSync,...args);
+import './fixtures/i18n-test-init.mjs';
+// Author: Jeff.Liu. Finite native-menu dispatch never starts an unknown or blocked action.
+import test from 'node:test';import assert from 'node:assert/strict';import {readFileSync as rawReadFileSync} from 'node:fs';
+test('native menu dispatch handles known actions once and rejects unknown/modal actions',async()=>{const {dispatchNativeMenu}=await import('../src/native-menu.ts');const calls=[];const handlers={new:()=>calls.push('new'),find:()=>calls.push('find')};assert.equal(dispatchNativeMenu('new',handlers,false),true);assert.deepEqual(calls,['new']);for(const value of ['constructor','__proto__','stop-all',null,{},'find'])assert.equal(dispatchNativeMenu(value,handlers,value==='find'),false);assert.deepEqual(calls,['new']);});
+test('native menu labels reflect remapped and disabled shortcuts without claiming a stale accelerator',async()=>{const {nativeMenuLabels}=await import('../src/native-menu.ts');const {defaultAppShortcuts}=await import('../src/app-shortcuts.ts');const bindings={...defaultAppShortcuts(true),terminal:{key:'b',shift:true},palette:null};const rows=nativeMenuLabels(bindings,true);assert.equal(rows.new,'New session · Command+Shift+B');assert.equal(rows.palette,'Command palette');assert.equal(rows['split-horizontal'],'Split right · Command+D');});
+test('menus target a focused YAM desktop webview once and preserve task-safe quit actions',()=>{const native=readFileSync(new URL('../src-tauri/src/native_menu.rs',import.meta.url),'utf8');for(const title of ['File','Edit','View','Session','Window'])assert.ok(native.includes('"'+title+'"'));assert.match(native,/\["main", "terminal-secondary"\]/);assert.match(native,/is_focused/);assert.match(native,/emit_to/);assert.match(native,/break/);assert.match(native,/yam-stop-quit/);assert.match(native,/yam-quit/);assert.doesNotMatch(native,/"new"[^\n]*Some\(/);});
+test('opening Updates during an existing check or install never dispatches a duplicate operation',async()=>{const ts=(await import('typescript')).default;const {dispatchNativeMenu}=await import('../src/native-menu.ts');const {updaterBusy}=await import('../src/updater.ts');const text=readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8'),source=ts.createSourceFile('App.tsx',text,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);let body;function visit(node){if(ts.isBinaryExpression(node)&&node.left.getText(source)==='nativeMenuHandler.current')body=node.right.getText(source);ts.forEachChild(node,visit);}visit(source);assert.ok(body);for(const state of ['checking','downloading','installing','verified','idle']){const calls=[],bindings={document:{querySelector:()=>null},dispatchNativeMenu,isMainWindow:true,setUpdaterOpen:value=>calls.push(['open',value]),updaterBusy,updaterController:{current:{snapshot:{state,configured:true}}},runUpdaterAction:action=>calls.push(['action',action])};const handler=new Function(...Object.keys(bindings),ts.transpileModule('const handler='+body,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText+';return handler;')(...Object.values(bindings));handler('updates');assert.deepEqual(calls,state==='idle'?[['open',true],['action','check']]:[['open',true]],state);}});
+test('native menu subscription is scoped to the current webview so other windows cannot execute the action',async()=>{
+ const ts=(await import('typescript')).default,text=readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8'),source=ts.createSourceFile('App.tsx',text,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);let effect;
+ function visit(node){if(ts.isCallExpression(node)&&node.expression.getText(source)==='useEffect'&&node.arguments[0]?.getText(source).includes('"native-menu"'))effect=node.arguments[0];ts.forEachChild(node,visit);}visit(source);assert.ok(effect);
+ const calls=[];const args={getCurrentWebview:()=>({listen:async(name,callback)=>{calls.push(name);return()=>{};}}),listen:()=>assert.fail('global listener receives other webviews targeted events'),nativeMenuHandler:{current:()=>{}},setError:error=>assert.fail(error)};
+ const setup=new Function(...Object.keys(args),ts.transpileModule('const setup='+effect.getText(source),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText+';return setup;')(...Object.values(args));const cleanup=setup();await new Promise(setImmediate);assert.deepEqual(calls,['native-menu']);cleanup();
+});
+test('Chinese native menu keeps action IDs and shortcuts while translating labels',async()=>{const {setLocale}=await import('../src/i18n.ts');const {nativeMenuLabels}=await import('../src/native-menu.ts');const {defaultAppShortcuts}=await import('../src/app-shortcuts.ts');setLocale('zh-CN');try{const rows=nativeMenuLabels(defaultAppShortcuts(true),true);assert.equal(rows.new,'新建会话 · Command+N');assert.ok(rows.appearance);assert.ok(rows.settings.includes('终端'));}finally{setLocale('en');}});
+test('every YAM-owned native action translates and the native traversal supplies labels to nested items',async()=>{const {setLocale}=await import('../src/i18n.ts'),{nativeMenuLabels}=await import('../src/native-menu.ts'),{defaultAppShortcuts}=await import('../src/app-shortcuts.ts');setLocale('en');const english=nativeMenuLabels(defaultAppShortcuts(true),true);setLocale('zh-CN');try{const chinese=nativeMenuLabels(defaultAppShortcuts(true),true);assert.deepEqual(Object.keys(chinese),Object.keys(english));for(const key of Object.keys(chinese))assert.notEqual(chinese[key],english[key],key);const native=rawReadFileSync(new URL('../src-tauri/src/native_menu.rs',import.meta.url),'utf8');assert.match(native,/translate_items\(\s*item\.items\(\)[^\n]*,\s*chinese,\s*labels,?\s*\)/);assert.match(native,/action_caption\(\s*item\.id\(\)\.as_ref\(\)/);}finally{setLocale('en');}});
+
+test('native close closes only the focused file/workspace, otherwise requests the current desktop window close',async()=>{
+ const ts=(await import('typescript')).default,{dispatchNativeMenu}=await import('../src/native-menu.ts');
+ const source=ts.createSourceFile('App.tsx',readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
+ let handler;function visit(n){if(ts.isBinaryExpression(n)&&n.left.getText(source)==='nativeMenuHandler.current')handler=n.right;ts.forEachChild(n,visit);}visit(source);assert.ok(handler);
+ for(const scenario of ['file','workspace','terminal','modal','failure']){
+  const calls=[],root={querySelector:()=>scenario==='file'?{click:()=>calls.push('file')}:null};
+  const env={document:{querySelector:()=>scenario==='modal'?{}:null,activeElement:{closest:()=>['file','workspace'].includes(scenario)?root:null}},closeProjectTools:()=>calls.push('workspace'),dispatchNativeMenu,
+   nativeInvoke:async name=>{calls.push(name);if(scenario==='failure')throw Error('unavailable');},setError:value=>calls.push(['error',value])};
+  const run=new Function(...Object.keys(env),ts.transpileModule('return ('+handler.getText(source)+');',{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText)(...Object.values(env));
+  run('close');await new Promise(setImmediate);
+  assert.deepEqual(calls,scenario==='file'?['file']:scenario==='workspace'?['workspace']:scenario==='modal'?[]:scenario==='failure'?['native_close_window',['error','Window could not be closed.']]:['native_close_window'],scenario);
+ }
+});
+
+test('macOS Cmd+W routes through the app instead of the predefined window-close responder',()=>{
+ const native=readFileSync(new URL('../src-tauri/src/native_menu.rs',import.meta.url),'utf8');
+ assert.match(native,/"yam-menu-close"[\s\S]{0,160}Some\("CmdOrCtrl\+W"\)/);
+ assert.match(native,/pub\(super\) fn native_close_window\(/);
+ assert.match(native,/\["main", "terminal-secondary"\]\.contains\(&webview\.label\(\)\)/);
+ assert.match(native,/webview\.window\(\)\.label\(\) != webview\.label\(\)/);
+ const lib=readFileSync(new URL('../src-tauri/src/lib.rs',import.meta.url),'utf8');assert.match(lib,/native_menu::native_close_window/);
+});

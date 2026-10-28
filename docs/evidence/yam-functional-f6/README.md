@@ -1,0 +1,17 @@
+# F6 retained log ranges and export
+
+Current seven-file R1 freeze（原始文件已归档） passed Root（原始文件已归档） and Astra（原始文件已归档） independent source reviews. The first candidate（原始文件已归档） was rejected for two P2 findings; its review（原始文件已归档） and task patch（原始文件已归档） remain historical. Current task-only patch（原始文件已归档） uses verified task-start originals, not HEAD.
+
+Current local/current-owner snapshot/search/String readers use strict UTF-8, read at most8MiB+1, and reject over-budget bytes before decoding. Older-owner proxy reads are not thereby made bounded or strict; compatibility protection here is the export preparation guard. Received older-owner snapshots are checked again at actual export preparation entry, before range/metadata/body assembly and save dialog. Exact half-open ranges use canonical u64 decimal strings; legacy ended end0 and inconsistent/missing offsets remain unknown. Missing/invalid byte counts remain unknown; valid explicit0 remains zero. Captured raw retained bytes describe provenance even when plain export sanitization changes output length. No removed output is reconstructed.
+
+Search descriptors cover successfully read, **budget-admitted** current-page sources, including zero hits. A read exceeding remaining64MiB scan budget is excluded from descriptors, leaves page incomplete and cursor at that source. Exhausted line iteration is complete; early hit limit is incomplete. Existing256-session/64MiB/50-hit/5000-skip,8MiB log and unrelated32MiB history/2000-line scene budgets are retained. Unsafe legacy numeric offsets show unknown position and disable excerpt RPC while session navigation remains available.
+
+Actual export component rendering fences A/B, ABA, title changes, unmount, effect replay and old finally before passive effects. Current cancel produces no Saved result; existing files remain protected. Fencing stale UI does not claim an already approved file operation was aborted.
+
+Actual fresh results: Node25/25 target（原始文件已归档）, full Node509/509 coverage（原始文件已归档）, Rust12/12 target（原始文件已归档）, and a single quiet locked serialized full Rust（原始文件已归档）497 passed/2 existing ignored. Targeted Rust is a subset, not additional tests. Standard build（原始文件已归档）, fmt（原始文件已归档）, Clippy（原始文件已归档） and diff（原始文件已归档） all exit0 with seven source hashes stable. Native GUI/save dialog/real owner/Agent and formal provider coverage are not established; F7 remains pending.
+
+R1 RED: actual unknown-count component/utility（原始文件已归档）2 AssertionErrors and1 genuine empty directGREEN; received-snapshot cap（原始文件已归档） actual helper over-cap acceptance failed, then raw/plain × supplied/missing range × exact/over-cap passed. The earlier plain-text tail assertion（原始文件已归档） was an incorrect test oracle because plain export appends newline, not a budget RED. String reader excerpt（原始文件已归档） is bounded; its full8MiB synthetic failure log is retained only in/tmp with exact hash in provenance（原始文件已归档）. Private-constant compile failure（原始文件已归档） is harness, not business RED. The effect replay RED（原始文件已归档） remains actual component evidence. Earlier placeholder/compiler failures are classified separately in provenance; no missing symbol/import is counted as baseline behavior RED.
+
+Validation（原始文件已归档）, source receipt（原始文件已归档）, doc check（原始文件已归档）, and index（原始文件已归档） describe this archive. Scoped source fingerprints cover seven files only; Root independently captures final whole workspace. No self-referential final whole hash is claimed.
+
+> 原始开发证据已移至仓库外；保留文字结论不等于当前版本重新验收。参见[归档规则](../../development-artifacts.md)。

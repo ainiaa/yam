@@ -1,0 +1,5 @@
+- **[P1] Explicit native `off` becomes automatic reasoning.** In `router.mjs`, the new `session_tree` fallback maps every projected `yam/auto` + `off` selection to `{effort:'auto'}` and persists it. A branch containing an explicit native `off` selection but no YAM preferences entry therefore loses its reasoning lock; subsequent routing can enable reasoning. Preserve projected `off` unless branch evidence establishes automatic intent.
+
+- **[P2] Routing drafts survive session and generation changes.** In `PiRouting.tsx`, `draft` is retained when `sessionId` or `generation` changes, and staleness checks compare only revisions. If the component remains mounted and the new session has the same revision, Apply can submit the previous session’s draft to the new session. Clear drafts on identity changes, or include session ID and generation in the draft and validate both before submission.
+
+Limitations: Supplied text only; no tools, edits, agents, or tests. Native projection behavior and parent component remounting were not verified.

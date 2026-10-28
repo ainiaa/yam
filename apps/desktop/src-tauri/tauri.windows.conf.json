@@ -1,0 +1,9 @@
+{
+  "bundle": {
+    "resources": [
+      "target/terminal-runtime/yam-terminal.cjs",
+      "target/terminal-runtime/DEVELOPER-INCOMPLETE-NOTICES.txt",
+      "target/terminal-runtime/DEVELOPER-INCOMPLETE-NOTICES.report.json"
+    ]
+  }
+}

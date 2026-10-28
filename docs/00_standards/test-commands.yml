@@ -1,0 +1,2 @@
+test: python3 -m unittest scripts.test_project_quality scripts.test_project_mutation -v
+coverage: cargo llvm-cov --manifest-path apps/desktop/src-tauri/Cargo.toml --locked --fail-under-lines=85 -- --test-threads=2

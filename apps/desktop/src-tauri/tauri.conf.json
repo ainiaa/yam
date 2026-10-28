@@ -1,18 +1,20 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "YAM",
-  "version": "0.1.0",
+  "version": "0.1.10",
   "identifier": "com.yam.desktop",
   "build": {
-    "beforeDevCommand": "corepack pnpm dev",
+    "beforeDevCommand": "pnpm build:terminal --script-only --notice-mode developer && pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "corepack pnpm build",
-    "frontendDist": "../dist"
+    "beforeBuildCommand": "pnpm build && pnpm build:terminal --script-only --notice-mode developer",
+    "frontendDist": "../dist",
+    "beforeBundleCommand": "python3 ../../scripts/bundle-background-helper.py"
   },
   "app": {
     "windows": [
       {
         "title": "YAM",
+        "theme": "Dark",
         "width": 1180,
         "height": 760,
         "minWidth": 640,
@@ -21,8 +23,10 @@
       }
     ],
     "security": {
-      "csp": null
-    }
+      "csp": "default-src 'self'; base-uri 'none'; object-src 'none'; frame-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob:; font-src 'self'; connect-src ipc: http://ipc.localhost; form-action 'none'",
+      "devCsp": "default-src 'self'; base-uri 'none'; object-src 'none'; frame-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' blob:; font-src 'self'; connect-src ipc: http://ipc.localhost http://localhost:1420 ws://localhost:1420 ws://localhost:1421; form-action 'none'"
+    },
+    "enableGTKAppId": true
   },
   "bundle": {
     "active": true,
@@ -33,6 +37,34 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "13.5",
+      "files": {
+        "Helpers/YAM Background.app": "target/background-helper/YAM Background.app"
+      }
+    },
+    "resources": [
+      "target/terminal-runtime/yam-terminal.cjs",
+      "target/terminal-runtime/DEVELOPER-INCOMPLETE-NOTICES.txt",
+      "target/terminal-runtime/DEVELOPER-INCOMPLETE-NOTICES.report.json"
     ]
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": [
+          "yam"
+        ]
+      }
+    },
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEJDQ0ZFRTIwQjFFRTNERkIKUldUN1BlNnhJTzdQdkhWWjdITFMwejhmVk05eSs3YTQ3TDBQd1dxaXM5TDdTbXdndUd3MkxwRmcK",
+      "endpoints": [
+        "https://github.com/ainiaa/yam/releases/latest/download/latest.json"
+      ],
+      "requireSignedVersion": true,
+      "allowDowngrades": false
+    }
   }
 }

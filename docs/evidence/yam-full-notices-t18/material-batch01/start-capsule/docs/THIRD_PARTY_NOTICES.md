@@ -1,0 +1,29 @@
+# Third-party notice integrity
+
+Author: Jeff.Liu.
+
+This is a source inventory and an incomplete developer notice pipeline. It is not legal compatibility approval or a release-ready notice document.
+
+The checked-in manifest binds all 535 current Cargo registry identities and the 12 reviewed production npm identities to exact checksums/SRI, the Cargo and pnpm lock bytes, production dependency declarations, and the directed installed production graph corroborated during offline collection. Node 26.10.0 aggregate LICENSE is a separate distribution component, not a thirteenth npm package.
+
+Current qualified full-body material covers 24 Cargo and 8 npm identities. There are 515 explicit gaps: 26 previously known Cargo source/body gaps, 485 additional Cargo archive candidates awaiting body classification, 2 npm SPDX-only source gaps, and 2 package-specific headless/serializer applicability gaps. Named LICENSE, NOTICE, COPYRIGHT, or SPDX files alone do not establish full-body coverage. The existing shared XTERM attribution and five frontend LICENSE bodies are retained; shared attribution does not resolve package-specific applicability. API MIT bytes are 1090; the historical 1089-size hint is superseded by actual SRI-bound archive bytes.
+
+Original body bytes live in [the content-addressed body directory](../scripts/third-party-notices/bodies/); each manifest mapping remains identity-specific even when body hashes are shared. The manifest（原始文件已归档） and stdlib collector/validator/renderer（原始文件已归档） retain checksum/source/revision/body provenance. Rendering verifies the current inputs, exact identity set, independent accepted body qualifications, and every selected body hash/length. It needs neither package cache, pnpm, nor network. Source collection uses bounded local archives and existing pnpm9 list output; no YAML parser, package install, network fallback, or SPDX text synthesis is introduced.
+
+Ordinary builds explicitly select developer mode and package DEVELOPER-INCOMPLETE-NOTICES.txt plus its report. The report separates selected/covered/gap counts, always has release_eligible=false in developer mode, and does not claim license_ready. A full fixture may be mechanically complete while remaining a developer artifact.
+
+The explicit `pnpm --dir apps/desktop build:release` entry uses [the release override](../apps/desktop/src-tauri/tauri.release.conf.json). Formal mode requires zero gaps before runtime fetch, Node/SEA subprocesses, temporary SEA configuration, or final output promotion. Current real inventory therefore refuses a formal release. macOS check/deliver additionally recomputes packaged notice/report/runtime integrity before signing, Keychain lookup, notarization, stapling, or Gatekeeper checks.
+
+Reports bind runtime, notice, manifest, input, and implementation hashes and are published last. A pre-promotion failure preserves prior final outputs. Promotion is not a three-file physical transaction: mixed outputs after an I/O failure fail validation. Only this invocation's unique temporary files are cleaned; another writer's files are retained.
+
+Limits: locks/reports and pnpm output 16 MiB; graph deadline 30 seconds; body 8 MiB; selected material and total rendered output each 128 MiB; compressed archive 256 MiB; archive headers 20,000; identities 4,096. Archive extraction and collection check a shared budget before the next selected read; archive metadata and duplicate hint reads are conservatively charged in addition to retained body material. Validation sums all descriptor lengths, including repeated identity mappings, before reading any body. Rendered titles, separators, and gap descriptions count toward the same output limit used by packaged validation, and an oversized render is rejected before promotion. These are accepted-byte bounds, not a hard process memory cap.
+
+Lucide copyright.js and copyright.js.map are icon code and a source map, and are excluded from notice selection. The two content-addressed files created by the historical first candidate are retained as unreferenced history; current rendering does not include them.
+
+The project license remains unresolved. Full text qualification, licensing compatibility, native packaged notice acceptance, signing, and publication remain separate work; no release/native/legal acceptance is asserted here.
+
+Current R2 source passed independent Root and Astra source reviews. A fixed, independently approved canonical manifest digest binds the entire 547-identity material inventory, including supplemental bodies, declarations, provenance, gap classifications and additional Node material. Collection produces candidates without granting readiness; Collection rejects unapproved candidates before accepted return/publication; the public approval check, both render modes and packaged validation reject mapping changes before validator body reads. Future material changes require separate review and approval-anchor updates; no flag or environment bypass is provided.
+
+The five fresh checks, 28 actual failing assertions before repair, and the separate direct-green freshly report-bound package regression are preserved in [current R2 evidence](evidence/yam-full-notices-t18/r2/README.md). The unchanged R1 archive is historical and superseded after a later supplemental-inventory finding; its earlier source review is not final ArtifactReview acceptance. Current counts remain 32 qualified identities, 515 material gaps (30 known and 485 awaiting classification), and one additional Node attribution. Developer output remains deterministic at 4,774,340 bytes and is never release-eligible. The collector/render/release-gate source slice is complete; full notice material, legal, native signed release and formal provider acceptance remain incomplete.
+
+> 原始开发证据已移至仓库外；保留文字结论不等于当前版本重新验收。参见[归档规则](../../../../../development-artifacts.md)。

@@ -1,0 +1,12 @@
+// Author: Jeff.Liu
+import assert from 'node:assert/strict';
+import {test} from 'node:test';
+import {loadZshCommandReporting,saveZshCommandReporting,zshCommandReportingEligible} from '../src/zsh-command-reporting.ts';
+test('A07c2 preference defaults OFF and loads only exact boolean schema',()=>{assert.deepEqual(loadZshCommandReporting(()=>null),{enabled:false,error:null});for(const enabled of [true,false])assert.deepEqual(loadZshCommandReporting(()=>JSON.stringify({version:1,enabled})),{enabled,error:null});});
+test('A07c2 malformed and failed reads remain OFF with fixed visible errors',()=>{for(const read of [()=>'{',()=>'{"version":1,"enabled":"true"}',()=>'{"version":1,"enabled":true,"extra":1}',()=>'{"version":2,"enabled":true}',()=>{throw Error('PRIVATE');}]){const result=loadZshCommandReporting(read);assert.equal(result.enabled,false);assert.equal(result.error,'Could not load Zsh command reporting settings.');}});
+test('A07c2 Save validates and writes one exact preference before caller changes state',()=>{const calls=[];saveZshCommandReporting((key,value)=>calls.push([key,value]),true);assert.deepEqual(calls,[['yam.zsh-command-reporting.v1','{"version":1,"enabled":true}']]);assert.throws(()=>saveZshCommandReporting(()=>{throw Error('PRIVATE');},false),{message:'Could not save Zsh command reporting settings.'});assert.throws(()=>saveZshCommandReporting(()=>assert.fail(),null),{message:'Invalid Zsh command reporting settings.'});});
+test('A07c2 eligibility is exact Unix explicit executable basename and preserves shell input',()=>{for(const login of [true,false]){const shell={program:'/bin/zsh',login};assert.equal(zshCommandReportingEligible(true,shell,false),true);assert.deepEqual(shell,{program:'/bin/zsh',login});}for(const shell of [{program:'/bin/ZSH',login:true},{program:'/bin/zsh-other',login:true},{program:'/bin/fish',login:false},{program:'/bin/zsh/',login:true}])assert.equal(zshCommandReportingEligible(true,shell,false),false);assert.equal(zshCommandReportingEligible(false,{program:'/bin/zsh',login:true},false),false);assert.equal(zshCommandReportingEligible(true,{program:'/bin/zsh',login:null},true),false);});
+
+for(const shell of [undefined,null,{program:null,login:true},{program:null,login:false}])test('A07c2 default eligibility '+JSON.stringify(shell),()=>{
+ assert.equal(zshCommandReportingEligible(true,shell,false),true);assert.equal(zshCommandReportingEligible(false,shell,false),false);assert.equal(zshCommandReportingEligible(true,shell,true),false);
+});

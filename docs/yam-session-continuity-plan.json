@@ -1,0 +1,717 @@
+{
+  "schema_version": 6,
+  "plan_id": "yam-session-continuity-20261001",
+  "requirement_fingerprint": "f9ca5d6320514391f313da6a4e7c065895da065167dda0f5fcb4b87c75ebdb68",
+  "planner": {
+    "name": "native-plan-v1",
+    "source_path": null,
+    "source_fingerprint": null
+  },
+  "context": "long",
+  "baseline": {
+    "commit": "d94f2718dbaf3c5d1ef760218eca2ad80dc02c15",
+    "source": {
+      "schema_version": 2,
+      "baseline_commit": "d94f2718dbaf3c5d1ef760218eca2ad80dc02c15",
+      "commit_id": "d94f2718dbaf3c5d1ef760218eca2ad80dc02c15",
+      "tree_hash": "a5ad31f2c56f676b480a4d6352921461ecb2e3aa",
+      "diff_fingerprint": "bbae28002a300a850f3b3595b2f17a3a22c3bab5ee4c0917c7d3c0ff37a05d21",
+      "changed_paths": [
+        "docs/yam-session-continuity-plan.md"
+      ],
+      "changed_entries": [
+        {
+          "path": "docs/yam-session-continuity-plan.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "4b6b2937d0f3fe5f519619c637b0343005a315f16d3aeb93e876de60a1c5d8d6"
+        }
+      ],
+      "source_fingerprint": "98d9250916a426f5ba237efd6972bef81691c07f1a9c665c35add871725319b9"
+    }
+  },
+  "checkpoint": "same_session",
+  "tasks": [
+    {
+      "task_id": "P0",
+      "task_kind": "vertical_slice",
+      "outcomes": [
+        "建立包含 WebKit 的内存采样工具与基础基线"
+      ],
+      "goal": "建立包含 WebKit 的内存采样工具与基础基线",
+      "owned_paths": [
+        "scripts/yam-memory.py",
+        "scripts/test_yam_memory.py",
+        "docs/yam-memory-baseline.md"
+      ],
+      "depends_on": [],
+      "steps": [
+        "编写验收场景的失败测试",
+        "运行并确认失败原因",
+        "实现最小改动",
+        "运行影响范围回归",
+        "复审当前差异",
+        "记录本步证据"
+      ],
+      "acceptance": [
+        "采样明确区分应用、WebKit、Agent 和未知归属",
+        "覆盖进程退出、PID复用、归属不明与权限失败",
+        "空闲、单会话、四会话及十六会话基础采样可核对；30分钟持续采样在P8收口"
+      ],
+      "verification": [
+        "python3 -m unittest discover -s scripts -p test_yam_memory.py"
+      ],
+      "execution": "current",
+      "status": "pending",
+      "provider_run": {
+        "scope": "task",
+        "recursive_planning": false
+      },
+      "provider_binding": {
+        "binding": {
+          "controller": "converge",
+          "stage_providers": {},
+          "workflow_provider": {
+            "contract": {
+              "closure": [],
+              "entrypoint": "references/execution-protocol.md",
+              "preserve_external_behavior": false
+            },
+            "contract_fingerprint": "2fb1c069b1686ca2b67c505882e2ae27a404663386e5e72df4b2f65a6ec62822",
+            "id": "native-v1",
+            "manifest": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/providers/native-v1.json",
+            "manifest_fingerprint": "da79b6af45fa1e1a94b5ce9b4b0cf84d5f43a798e57f5e1c50b510f6b7e954ee",
+            "role": "workflow",
+            "source_root": "/Users/liuwenyuan/www/tools/skills-convergent-delivery",
+            "sources": [
+              {
+                "fingerprint": "a43c016ea5daecbf5e74ea93840c1e489fe7ce85f926bb651fdbf36064028770",
+                "kind": "entrypoint",
+                "path": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/references/execution-protocol.md",
+                "relative_path": "references/execution-protocol.md"
+              }
+            ],
+            "task_kind": "feature",
+            "version": "1"
+          }
+        },
+        "binding_fingerprint": "e04abc991b64aa44f1f760489b8c33bb40c03458b1e8c63a6eea860247bd300c",
+        "reason": "native engine was selected",
+        "selection": "explicit",
+        "task_kind": "feature"
+      }
+    },
+    {
+      "task_id": "P1",
+      "task_kind": "vertical_slice",
+      "outcomes": [
+        "搜索已保留的会话日志内容"
+      ],
+      "goal": "搜索已保留的会话日志内容",
+      "owned_paths": [
+        "apps/desktop/src-tauri/src",
+        "apps/desktop/src",
+        "apps/desktop/tests"
+      ],
+      "depends_on": [
+        "P0"
+      ],
+      "steps": [
+        "编写验收场景的失败测试",
+        "运行并确认失败原因",
+        "实现最小改动",
+        "运行影响范围回归",
+        "复审当前差异",
+        "记录本步证据"
+      ],
+      "acceptance": [
+        "中文、大小写、分页和取消正确",
+        "结果定位会话与日志位置",
+        "安全处理ANSI、恶意控制序列及不可读日志"
+      ],
+      "verification": [
+        "pnpm -C apps/desktop test",
+        "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml"
+      ],
+      "execution": "current",
+      "status": "pending",
+      "provider_run": {
+        "scope": "task",
+        "recursive_planning": false
+      },
+      "provider_binding": {
+        "binding": {
+          "controller": "converge",
+          "stage_providers": {},
+          "workflow_provider": {
+            "contract": {
+              "closure": [],
+              "entrypoint": "references/execution-protocol.md",
+              "preserve_external_behavior": false
+            },
+            "contract_fingerprint": "2fb1c069b1686ca2b67c505882e2ae27a404663386e5e72df4b2f65a6ec62822",
+            "id": "native-v1",
+            "manifest": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/providers/native-v1.json",
+            "manifest_fingerprint": "da79b6af45fa1e1a94b5ce9b4b0cf84d5f43a798e57f5e1c50b510f6b7e954ee",
+            "role": "workflow",
+            "source_root": "/Users/liuwenyuan/www/tools/skills-convergent-delivery",
+            "sources": [
+              {
+                "fingerprint": "a43c016ea5daecbf5e74ea93840c1e489fe7ce85f926bb651fdbf36064028770",
+                "kind": "entrypoint",
+                "path": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/references/execution-protocol.md",
+                "relative_path": "references/execution-protocol.md"
+              }
+            ],
+            "task_kind": "feature",
+            "version": "1"
+          }
+        },
+        "binding_fingerprint": "e04abc991b64aa44f1f760489b8c33bb40c03458b1e8c63a6eea860247bd300c",
+        "reason": "native engine was selected",
+        "selection": "explicit",
+        "task_kind": "feature"
+      }
+    },
+    {
+      "task_id": "P2",
+      "task_kind": "vertical_slice",
+      "outcomes": [
+        "安全导出选定会话日志"
+      ],
+      "goal": "安全导出选定会话日志",
+      "owned_paths": [
+        "apps/desktop/src-tauri",
+        "apps/desktop/src",
+        "apps/desktop/tests"
+      ],
+      "depends_on": [
+        "P1"
+      ],
+      "steps": [
+        "编写验收场景的失败测试",
+        "运行并确认失败原因",
+        "实现最小改动",
+        "运行影响范围回归",
+        "复审当前差异",
+        "记录本步证据"
+      ],
+      "acceptance": [
+        "纯文本和原始输出导出内容正确",
+        "取消与写入失败不破坏目标",
+        "仅允许读取已知会话日志"
+      ],
+      "verification": [
+        "pnpm -C apps/desktop test",
+        "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml"
+      ],
+      "execution": "current",
+      "status": "pending",
+      "provider_run": {
+        "scope": "task",
+        "recursive_planning": false
+      },
+      "provider_binding": {
+        "binding": {
+          "controller": "converge",
+          "stage_providers": {},
+          "workflow_provider": {
+            "contract": {
+              "closure": [],
+              "entrypoint": "references/execution-protocol.md",
+              "preserve_external_behavior": false
+            },
+            "contract_fingerprint": "2fb1c069b1686ca2b67c505882e2ae27a404663386e5e72df4b2f65a6ec62822",
+            "id": "native-v1",
+            "manifest": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/providers/native-v1.json",
+            "manifest_fingerprint": "da79b6af45fa1e1a94b5ce9b4b0cf84d5f43a798e57f5e1c50b510f6b7e954ee",
+            "role": "workflow",
+            "source_root": "/Users/liuwenyuan/www/tools/skills-convergent-delivery",
+            "sources": [
+              {
+                "fingerprint": "a43c016ea5daecbf5e74ea93840c1e489fe7ce85f926bb651fdbf36064028770",
+                "kind": "entrypoint",
+                "path": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/references/execution-protocol.md",
+                "relative_path": "references/execution-protocol.md"
+              }
+            ],
+            "task_kind": "feature",
+            "version": "1"
+          }
+        },
+        "binding_fingerprint": "e04abc991b64aa44f1f760489b8c33bb40c03458b1e8c63a6eea860247bd300c",
+        "reason": "native engine was selected",
+        "selection": "explicit",
+        "task_kind": "feature"
+      }
+    },
+    {
+      "task_id": "P3",
+      "task_kind": "vertical_slice",
+      "outcomes": [
+        "主动恢复可信 Claude 原对话"
+      ],
+      "goal": "主动恢复可信 Claude 原对话",
+      "owned_paths": [
+        "apps/desktop/src-tauri/src",
+        "apps/desktop/src",
+        "apps/desktop/tests",
+        "scripts/agent-resume-smoke.py"
+      ],
+      "depends_on": [
+        "P2"
+      ],
+      "steps": [
+        "编写验收场景的失败测试",
+        "运行并确认失败原因",
+        "实现最小改动",
+        "运行影响范围回归",
+        "复审当前差异",
+        "记录本步证据"
+      ],
+      "acceptance": [
+        "真实恢复原对话上下文",
+        "失效身份、重复恢复、错目录被拒绝",
+        "不重放旧prompt并保持Codex回归"
+      ],
+      "verification": [
+        "pnpm -C apps/desktop test",
+        "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml"
+      ],
+      "execution": "current",
+      "status": "pending",
+      "provider_run": {
+        "scope": "task",
+        "recursive_planning": false
+      },
+      "provider_binding": {
+        "binding": {
+          "controller": "converge",
+          "stage_providers": {},
+          "workflow_provider": {
+            "contract": {
+              "closure": [],
+              "entrypoint": "references/execution-protocol.md",
+              "preserve_external_behavior": false
+            },
+            "contract_fingerprint": "2fb1c069b1686ca2b67c505882e2ae27a404663386e5e72df4b2f65a6ec62822",
+            "id": "native-v1",
+            "manifest": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/providers/native-v1.json",
+            "manifest_fingerprint": "da79b6af45fa1e1a94b5ce9b4b0cf84d5f43a798e57f5e1c50b510f6b7e954ee",
+            "role": "workflow",
+            "source_root": "/Users/liuwenyuan/www/tools/skills-convergent-delivery",
+            "sources": [
+              {
+                "fingerprint": "a43c016ea5daecbf5e74ea93840c1e489fe7ce85f926bb651fdbf36064028770",
+                "kind": "entrypoint",
+                "path": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/references/execution-protocol.md",
+                "relative_path": "references/execution-protocol.md"
+              }
+            ],
+            "task_kind": "feature",
+            "version": "1"
+          }
+        },
+        "binding_fingerprint": "e04abc991b64aa44f1f760489b8c33bb40c03458b1e8c63a6eea860247bd300c",
+        "reason": "native engine was selected",
+        "selection": "explicit",
+        "task_kind": "feature"
+      }
+    },
+    {
+      "task_id": "P4",
+      "task_kind": "vertical_slice",
+      "outcomes": [
+        "OpenCode 原生轮次事件通知"
+      ],
+      "goal": "OpenCode 原生轮次事件通知",
+      "owned_paths": [
+        "apps/desktop/src-tauri/src",
+        "apps/desktop/src",
+        "apps/desktop/tests",
+        "scripts/opencode-smoke.py"
+      ],
+      "depends_on": [
+        "P3"
+      ],
+      "steps": [
+        "编写验收场景的失败测试",
+        "运行并确认失败原因",
+        "实现最小改动",
+        "运行影响范围回归",
+        "复审当前差异",
+        "记录本步证据"
+      ],
+      "acceptance": [
+        "主会话真实双轮、权限与异常归属正确",
+        "子会话、重复乱序、重连无误报",
+        "原用户配置保持"
+      ],
+      "verification": [
+        "pnpm -C apps/desktop test",
+        "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml"
+      ],
+      "execution": "current",
+      "status": "pending",
+      "provider_run": {
+        "scope": "task",
+        "recursive_planning": false
+      },
+      "provider_binding": {
+        "binding": {
+          "controller": "converge",
+          "stage_providers": {},
+          "workflow_provider": {
+            "contract": {
+              "closure": [],
+              "entrypoint": "references/execution-protocol.md",
+              "preserve_external_behavior": false
+            },
+            "contract_fingerprint": "2fb1c069b1686ca2b67c505882e2ae27a404663386e5e72df4b2f65a6ec62822",
+            "id": "native-v1",
+            "manifest": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/providers/native-v1.json",
+            "manifest_fingerprint": "da79b6af45fa1e1a94b5ce9b4b0cf84d5f43a798e57f5e1c50b510f6b7e954ee",
+            "role": "workflow",
+            "source_root": "/Users/liuwenyuan/www/tools/skills-convergent-delivery",
+            "sources": [
+              {
+                "fingerprint": "a43c016ea5daecbf5e74ea93840c1e489fe7ce85f926bb651fdbf36064028770",
+                "kind": "entrypoint",
+                "path": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/references/execution-protocol.md",
+                "relative_path": "references/execution-protocol.md"
+              }
+            ],
+            "task_kind": "feature",
+            "version": "1"
+          }
+        },
+        "binding_fingerprint": "e04abc991b64aa44f1f760489b8c33bb40c03458b1e8c63a6eea860247bd300c",
+        "reason": "native engine was selected",
+        "selection": "explicit",
+        "task_kind": "feature"
+      }
+    },
+    {
+      "task_id": "P5",
+      "task_kind": "vertical_slice",
+      "outcomes": [
+        "验证终端状态快照的完整恢复能力"
+      ],
+      "goal": "验证终端状态快照的完整恢复能力",
+      "owned_paths": [
+        "scripts/terminal-state-probe.mjs",
+        "docs/yam-terminal-state-probe.md"
+      ],
+      "depends_on": [
+        "P4"
+      ],
+      "steps": [
+        "编写验收场景的失败测试",
+        "运行并确认失败原因",
+        "实现最小改动",
+        "运行影响范围回归",
+        "复审当前差异",
+        "记录本步证据"
+      ],
+      "acceptance": [
+        "正常及交替屏幕、光标、模式、Unicode、尺寸对照等价",
+        "拆分控制序列和后台连续输出可恢复",
+        "记录候选缺陷及正式运行时打包方案"
+      ],
+      "verification": [
+        "node --test scripts/terminal-state-probe.mjs"
+      ],
+      "execution": "current",
+      "status": "pending",
+      "provider_run": {
+        "scope": "task",
+        "recursive_planning": false
+      },
+      "provider_binding": {
+        "binding": {
+          "controller": "converge",
+          "stage_providers": {},
+          "workflow_provider": {
+            "contract": {
+              "closure": [],
+              "entrypoint": "references/execution-protocol.md",
+              "preserve_external_behavior": false
+            },
+            "contract_fingerprint": "2fb1c069b1686ca2b67c505882e2ae27a404663386e5e72df4b2f65a6ec62822",
+            "id": "native-v1",
+            "manifest": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/providers/native-v1.json",
+            "manifest_fingerprint": "da79b6af45fa1e1a94b5ce9b4b0cf84d5f43a798e57f5e1c50b510f6b7e954ee",
+            "role": "workflow",
+            "source_root": "/Users/liuwenyuan/www/tools/skills-convergent-delivery",
+            "sources": [
+              {
+                "fingerprint": "a43c016ea5daecbf5e74ea93840c1e489fe7ce85f926bb651fdbf36064028770",
+                "kind": "entrypoint",
+                "path": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/references/execution-protocol.md",
+                "relative_path": "references/execution-protocol.md"
+              }
+            ],
+            "task_kind": "feature",
+            "version": "1"
+          }
+        },
+        "binding_fingerprint": "e04abc991b64aa44f1f760489b8c33bb40c03458b1e8c63a6eea860247bd300c",
+        "reason": "native engine was selected",
+        "selection": "explicit",
+        "task_kind": "feature"
+      }
+    },
+    {
+      "task_id": "P6",
+      "task_kind": "vertical_slice",
+      "outcomes": [
+        "桌面退出后保留后台会话并重连"
+      ],
+      "goal": "桌面退出后保留后台会话并重连",
+      "owned_paths": [
+        "apps/desktop/src-tauri",
+        "apps/desktop/src",
+        "apps/desktop/tests",
+        "scripts/background-smoke.py"
+      ],
+      "depends_on": [
+        "P5"
+      ],
+      "steps": [
+        "编写验收场景的失败测试",
+        "运行并确认失败原因",
+        "实现最小改动",
+        "运行影响范围回归",
+        "复审当前差异",
+        "记录本步证据"
+      ],
+      "acceptance": [
+        "桌面主进程退出后同一任务PTY仍存活",
+        "重新打开连接原进程且不重复启动",
+        "认证、输入所有权、异常、停止及回退可验证"
+      ],
+      "verification": [
+        "pnpm -C apps/desktop test",
+        "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml"
+      ],
+      "execution": "current",
+      "status": "pending",
+      "provider_run": {
+        "scope": "task",
+        "recursive_planning": false
+      },
+      "provider_binding": {
+        "binding": {
+          "controller": "converge",
+          "stage_providers": {},
+          "workflow_provider": {
+            "contract": {
+              "closure": [],
+              "entrypoint": "references/execution-protocol.md",
+              "preserve_external_behavior": false
+            },
+            "contract_fingerprint": "2fb1c069b1686ca2b67c505882e2ae27a404663386e5e72df4b2f65a6ec62822",
+            "id": "native-v1",
+            "manifest": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/providers/native-v1.json",
+            "manifest_fingerprint": "da79b6af45fa1e1a94b5ce9b4b0cf84d5f43a798e57f5e1c50b510f6b7e954ee",
+            "role": "workflow",
+            "source_root": "/Users/liuwenyuan/www/tools/skills-convergent-delivery",
+            "sources": [
+              {
+                "fingerprint": "a43c016ea5daecbf5e74ea93840c1e489fe7ce85f926bb651fdbf36064028770",
+                "kind": "entrypoint",
+                "path": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/references/execution-protocol.md",
+                "relative_path": "references/execution-protocol.md"
+              }
+            ],
+            "task_kind": "feature",
+            "version": "1"
+          }
+        },
+        "binding_fingerprint": "e04abc991b64aa44f1f760489b8c33bb40c03458b1e8c63a6eea860247bd300c",
+        "reason": "native engine was selected",
+        "selection": "explicit",
+        "task_kind": "feature"
+      }
+    },
+    {
+      "task_id": "P7",
+      "task_kind": "vertical_slice",
+      "outcomes": [
+        "冷启动恢复后台终端现场"
+      ],
+      "goal": "冷启动恢复后台终端现场",
+      "owned_paths": [
+        "apps/desktop/src-tauri",
+        "apps/desktop/src",
+        "apps/desktop/tests",
+        "scripts/terminal-restore-smoke.py"
+      ],
+      "depends_on": [
+        "P6"
+      ],
+      "steps": [
+        "编写验收场景的失败测试",
+        "运行并确认失败原因",
+        "实现最小改动",
+        "运行影响范围回归",
+        "复审当前差异",
+        "记录本步证据"
+      ],
+      "acceptance": [
+        "界面关闭期间输出后恢复当前正常及交替屏幕",
+        "快照增量竞争无缺字或重复",
+        "损坏与版本不兼容明确失败"
+      ],
+      "verification": [
+        "pnpm -C apps/desktop test",
+        "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml"
+      ],
+      "execution": "current",
+      "status": "pending",
+      "provider_run": {
+        "scope": "task",
+        "recursive_planning": false
+      },
+      "provider_binding": {
+        "binding": {
+          "controller": "converge",
+          "stage_providers": {},
+          "workflow_provider": {
+            "contract": {
+              "closure": [],
+              "entrypoint": "references/execution-protocol.md",
+              "preserve_external_behavior": false
+            },
+            "contract_fingerprint": "2fb1c069b1686ca2b67c505882e2ae27a404663386e5e72df4b2f65a6ec62822",
+            "id": "native-v1",
+            "manifest": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/providers/native-v1.json",
+            "manifest_fingerprint": "da79b6af45fa1e1a94b5ce9b4b0cf84d5f43a798e57f5e1c50b510f6b7e954ee",
+            "role": "workflow",
+            "source_root": "/Users/liuwenyuan/www/tools/skills-convergent-delivery",
+            "sources": [
+              {
+                "fingerprint": "a43c016ea5daecbf5e74ea93840c1e489fe7ce85f926bb651fdbf36064028770",
+                "kind": "entrypoint",
+                "path": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/references/execution-protocol.md",
+                "relative_path": "references/execution-protocol.md"
+              }
+            ],
+            "task_kind": "feature",
+            "version": "1"
+          }
+        },
+        "binding_fingerprint": "e04abc991b64aa44f1f760489b8c33bb40c03458b1e8c63a6eea860247bd300c",
+        "reason": "native engine was selected",
+        "selection": "explicit",
+        "task_kind": "feature"
+      }
+    },
+    {
+      "task_id": "P8",
+      "task_kind": "integration",
+      "outcomes": [
+        "联合功能验收与内存复测"
+      ],
+      "goal": "联合功能验收与内存复测",
+      "owned_paths": [
+        "docs",
+        "scripts",
+        ".github",
+        "README.md"
+      ],
+      "depends_on": [
+        "P7"
+      ],
+      "steps": [
+        "编写验收场景的失败测试",
+        "运行并确认失败原因",
+        "实现最小改动",
+        "运行影响范围回归",
+        "复审当前差异",
+        "记录本步证据"
+      ],
+      "acceptance": [
+        "同负载改造前后内存报告可核对",
+        "三Agent及后台重连、搜索、导出联合流程通过",
+        "三平台构建与进程测试并标注桌面未覆盖项",
+        "已安装基线包的30分钟持续输出曲线与最终版本相同场景复测均有完整记录"
+      ],
+      "verification": [
+        "pnpm -C apps/desktop test:coverage",
+        "pnpm -C apps/desktop build",
+        "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml",
+        "cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --check",
+        "cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings",
+        "python3 -m unittest discover -s scripts -p test_*.py"
+      ],
+      "execution": "current",
+      "status": "pending",
+      "provider_run": {
+        "scope": "task",
+        "recursive_planning": false
+      },
+      "provider_binding": {
+        "binding": {
+          "controller": "converge",
+          "stage_providers": {},
+          "workflow_provider": {
+            "contract": {
+              "closure": [],
+              "entrypoint": "references/execution-protocol.md",
+              "preserve_external_behavior": false
+            },
+            "contract_fingerprint": "2fb1c069b1686ca2b67c505882e2ae27a404663386e5e72df4b2f65a6ec62822",
+            "id": "native-v1",
+            "manifest": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/providers/native-v1.json",
+            "manifest_fingerprint": "da79b6af45fa1e1a94b5ce9b4b0cf84d5f43a798e57f5e1c50b510f6b7e954ee",
+            "role": "workflow",
+            "source_root": "/Users/liuwenyuan/www/tools/skills-convergent-delivery",
+            "sources": [
+              {
+                "fingerprint": "a43c016ea5daecbf5e74ea93840c1e489fe7ce85f926bb651fdbf36064028770",
+                "kind": "entrypoint",
+                "path": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/references/execution-protocol.md",
+                "relative_path": "references/execution-protocol.md"
+              }
+            ],
+            "task_kind": "feature",
+            "version": "1"
+          }
+        },
+        "binding_fingerprint": "e04abc991b64aa44f1f760489b8c33bb40c03458b1e8c63a6eea860247bd300c",
+        "reason": "native engine was selected",
+        "selection": "explicit",
+        "task_kind": "feature"
+      }
+    }
+  ],
+  "final_acceptance": [
+    "六项能力按上述范围可使用，各平台证据明确",
+    "终端恢复与进程重连不冒充新任务或日志恢复",
+    "未覆盖项明确记录，Windows/Linux通知继续暂缓"
+  ],
+  "decisions": [
+    {
+      "id": "D1",
+      "status": "resolved",
+      "question": "实施范围",
+      "resolution": "按计划实现OpenCode可靠轮次通知、日志搜索导出、退出后台运行、冷启动终端恢复、WebKit内存测量和Claude原生续聊。",
+      "source": "user"
+    },
+    {
+      "id": "D2",
+      "status": "resolved",
+      "question": "后台方案与隔离依赖验证是否允许",
+      "resolution": "用户已批准后台进程方案与隔离验证；正式依赖另行确认",
+      "source": "user"
+    },
+    {
+      "id": "D3",
+      "status": "resolved",
+      "question": "其他Agent首个新增范围",
+      "resolution": "首个新增OpenCode，保留有原生事件的会话限定接入契约，不宣称任意CLI可靠通知",
+      "source": "docs"
+    }
+  ]
+}
