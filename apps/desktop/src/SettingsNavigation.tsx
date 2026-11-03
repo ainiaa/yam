@@ -2,7 +2,7 @@ import {matchesSettingsPage} from './settings-search';
 // Author: Jeff.Liu. Navigation changes presentation only; each page retains its own save boundary.
 import {useEffect,useRef,useState,type ReactNode} from 'react';
 import {t} from './i18n';
-export const settingsPages=[['appearance','Appearance'],['settings','Terminal'],['keyboard-shortcuts','Keyboard shortcuts'],['updates','Updates'],['profiles','Terminal profiles'],['paste-settings','Paste settings'],['system-entry','System entry'],['launch-settings','Launch templates and defaults'],['support','Data and diagnostics'],['directory-reporting','Zsh directory reporting'],['command-reporting','Zsh command status reporting']] as const;
+export const settingsPages=[['appearance','Appearance'],['settings','Terminal'],['keyboard-shortcuts','Keyboard shortcuts'],['updates','Updates'],['profiles','Terminal profiles'],['paste-settings','Paste settings'],['system-entry','System entry'],['launch-settings','Launch templates and defaults'],['pi-plugins','Pi plugins'],['support','Data and diagnostics'],['directory-reporting','Zsh directory reporting'],['command-reporting','Zsh command status reporting']] as const;
 export type SettingsPage=typeof settingsPages[number][0];
 export type SettingsNavigationRenderer=(dirty:boolean)=>ReactNode;
 export function SettingsNavigation({current,dirty,onSelect,blocked=false}:{current:SettingsPage;dirty:boolean;onSelect:(page:SettingsPage)=>void;blocked?:boolean}){

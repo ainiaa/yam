@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
 import {decide, guardCapacity, resolveEffort} from '../src-tauri/pi/policy.mjs';
+test('automatic high never silently increases to max while explicit max remains available',()=>{
+ const model={id:'only-max',reasoning:true,thinkingLevelMap:{max:'max'}};
+ assert.throws(()=>resolveEffort(model,'high','off'),/unsupported/i);
+ assert.equal(resolveEffort(model,'max','max'),'max');
+});
 
 const previous={v:1,model:'strong',effort:'max',task:'fix bug'};
 test('Pi routing distinguishes independent retrieval, coding and high-risk work',()=>{
@@ -35,20 +40,132 @@ test('Pi is an independent launch choice with native configuration and no offici
 });
 
 import install from '../src-tauri/pi/router.mjs';
-function fixture({answer={intent:'new',difficulty:'simple',uncertain:false,reason:'read only'},selected='off',state}={}) {
- const handlers={},commands={},flags={'yam-small':'p/small','yam-strong':'p/strong'},entries=[],statuses=[];
+import {defaultRules,rulesVersion} from '../src-tauri/pi/task-rules.mjs';
+function fixture({answer={intent:'new',difficulty:'simple',uncertain:false,readOnly:true,reason:'read only'},selected='off',state,raw=false,native}={}) {
+ // Older policy test cases keep their difficulty shorthand; actual classifier mocks use task facts.
+ if(!raw&&answer&&['simple','complex','critical'].includes(answer.difficulty))answer={...answer,task:answer.difficulty==='simple'?'answer':answer.difficulty==='critical'?'review':'coding',context:'independent',action:answer.readOnly===false?'write':'none',depth:answer.difficulty==='critical'?'deep':'normal',readOnly:answer.readOnly??false};
+ const handlers={},commands={},renderers={},flags={'yam-small':'p/small','yam-strong':'p/strong'},entries=[],statuses=[];
  const models=Object.fromEntries(['small','strong'].map(id=>[id,{provider:'p',id,reasoning:true,api:'openai-responses',contextWindow:100000,maxTokens:10000,input:['text','image'],thinkingLevelMap:Object.fromEntries(['off','low','medium','high','xhigh','max'].map(v=>[v,v]))}]));
  let classifierCalls=0,definition;
- const pi={on:(name,fn)=>handlers[name]=fn,registerCommand:(name,v)=>commands[name]=v,registerFlag(){},getFlag:n=>flags[n],registerVirtualModel:v=>{definition=v;models.auto={provider:v.provider,id:v.id,api:"pi-virtual",reasoning:true,thinkingLevelMap:Object.fromEntries(v.thinkingLevels.map(level=>[level,level]))};},appendEntry:(customType,data)=>entries.push({type:'custom',customType,data}),setModel:async()=>true,setThinkingLevel:v=>selected=v,getThinkingLevel:()=>selected};
- const ready=install(pi,m=>Object.keys(m.thinkingLevelMap));
- const ctx={model:{api:'pi-virtual',provider:'yam',id:'auto'},isIdle:()=>true,ui:{setStatus:(...v)=>statuses.push(v),notify(){},select:async()=>null},sessionManager:{getBranch:()=>entries},modelRegistry:{find:(_p,id)=>models[id],hasConfiguredAuth:()=>true,complete:async()=>{classifierCalls++;if(answer instanceof Error)throw answer;return {content:[{type:'text',text:JSON.stringify(answer)}]};}}};
+ const pi={registerEntryRenderer:(name,fn)=>renderers[name]=fn,on:(name,fn)=>handlers[name]=fn,registerCommand:(name,v)=>commands[name]=v,registerFlag(){},getFlag:n=>flags[n],registerVirtualModel:v=>{definition=v;models.auto={provider:v.provider,id:v.id,api:"pi-virtual",reasoning:true,thinkingLevelMap:Object.fromEntries(v.thinkingLevels.map(level=>[level,level]))};},appendEntry:(customType,data)=>entries.push({type:'custom',customType,data}),setModel:async()=>true,setThinkingLevel:v=>selected=v,getThinkingLevel:()=>selected};
+ const nativeCalls=[];
+ const adapter=native??{resolveModel:(_ctx,m)=>m,stream:(...args)=>{nativeCalls.push(args);return {result:()=>ctx.modelRegistry.complete(...args)};}};
+ const ready=install(pi,m=>Object.keys(m.thinkingLevelMap),class Text {constructor(text){this.text=text;}},adapter);
+ const ctx={model:{api:'pi-virtual',provider:'yam',id:'auto'},isIdle:()=>true,ui:{setStatus:(...v)=>statuses.push(v),notify(){},select:async()=>null},sessionManager:{getBranch:()=>entries},modelRegistry:{find:(_p,id)=>models[id],getAvailable:()=>Object.values(models),hasConfiguredAuth:()=>true,complete:async()=>{classifierCalls++;if(answer instanceof Error)throw answer;return {content:[{type:'text',text:JSON.stringify(answer)}]};}}};
+ ctx.modelRegistry.streamSimple=(...args)=>({result:()=>ctx.modelRegistry.complete(...args)});
  const route=(extra={})=>definition.route({reason:'user',thinkingLevel:selected,messages:[{role:'user',content:'read a file'}],state,...extra},ctx);
- return {pi,route,ctx,handlers,commands,models,statuses,ready,flags,get calls(){return classifierCalls;},entries};
+ return {pi,route,ctx,handlers,commands,renderers,models,statuses,ready,flags,nativeCalls,get calls(){return classifierCalls;},entries};
 }
+test('Pi setup probe calls only selected model and rejects invalid or failed classification',async()=>{
+ for(const [answer,expected] of [[{intent:'new',task:'answer',context:'independent',action:'none',depth:'normal',uncertain:false,readOnly:true,requires:['text']},true],[{},false],[new Error('provider failure'),false]]){
+  const f=fixture({answer,raw:true}),messages=[];await f.ready;f.flags['yam-catalog-probe']=true;f.flags['yam-setup-model']='p/small';f.ctx.ui.notify=s=>messages.push(JSON.parse(s));
+  await f.handlers.session_start({},f.ctx);
+  assert.equal(f.calls,1);assert.equal(messages.at(-1).probe?.ok,expected);assert.equal(f.entries.filter(e=>e.customType==='yam.routing.rules.v1').length,0);
+ }
+});
+test('Pi upgrades untouched legacy defaults but preserves explicit later max rules',async()=>{
+ const f=fixture(),api=await f.ready,legacy=structuredClone(defaultRules);legacy.rules.find(r=>r.task==='review').effort='max';
+ f.entries.push({type:'custom',customType:'yam.routing.rules.v1',data:legacy});await f.handlers.session_start({},f.ctx);
+ assert.equal(api.snapshot().rules.rules.find(r=>r.task==='review').effort,'high');
+ const explicit=structuredClone(defaultRules);explicit.rules.find(r=>r.task==='review').effort='max';
+ await api.control({action:'rules',revision:api.snapshot().revision,data:explicit});await f.handlers.session_start({},f.ctx);
+ assert.equal(api.snapshot().rules.rules.find(r=>r.task==='review').effort,'max');
+ const custom=fixture(),customApi=await custom.ready,modified=structuredClone(legacy);modified.rules[0].description='Custom translation rule';
+ custom.entries.push({type:'custom',customType:'yam.routing.rules.v1',data:modified});await custom.handlers.session_start({},custom.ctx);
+ assert.deepEqual(customApi.snapshot().rules,modified);
+});
 test('Pi native virtual routing actually chooses physical model and effort with persisted state',async()=>{
  const f=fixture(),r=await f.route();assert.equal(r.model.id,'small');assert.equal(r.thinkingLevel,'medium');assert.equal(r.state.v,1);assert.equal(f.calls,1);
  const next=await f.route({reason:'continuation',previous:r});assert.equal(next.model,r.model);assert.equal(next.thinkingLevel,'medium');assert.equal(f.calls,1);
  const retry=await f.route({reason:'retry',failed:r});assert.equal(retry.model,r.model);assert.equal(f.calls,1);
+});
+test('ordinary Pi routing keeps its classifier and has no forced coordinator path',async()=>{
+ const f=fixture(),api=await f.ready;await f.handlers.before_agent_start({},f.ctx);
+ assert.equal(api.setAgentCoordinator,undefined);
+ const selected=await f.route();assert.equal(selected.model.id,'small');assert.equal(f.calls,1);
+ assert.notEqual(api.snapshot().decision.rule,'agent-coordinator');
+});
+test('agent routing context keeps task rules and explicit effort while limiting lightweight workers',async()=>{
+ const f=fixture(),api=await f.ready,c=api.agentRoutingContext(f.ctx);
+ assert.deepEqual(c.rules,defaultRules);assert.equal(c.profiles.find(p=>p.id==='pi-small').capabilities.includes('files'),false);assert.equal(c.profiles.find(p=>p.id==='pi-strong').thinking,'high');
+ const locked=fixture({selected:'max'}),lockedApi=await locked.ready;
+ assert.ok(lockedApi.agentRoutingContext(locked.ctx).profiles.every(p=>p.thinking==='max'));
+});
+
+test('Pi rules are explicitly applied, versioned, restored and rejected while busy or stale',async()=>{
+ const f=fixture(),api=await f.ready;await f.handlers.session_start({},f.ctx);
+ const original=api.snapshot(),edited=structuredClone(defaultRules);edited.rules[0].model='strong';
+ await assert.rejects(api.control({action:'rules',revision:original.revision-1,data:edited}),/changed/);
+ await api.control({action:'rules',revision:original.revision,data:edited});
+ assert.equal(api.snapshot().ruleVersion,rulesVersion(edited));assert.equal(f.entries.findLast(e=>e.customType==='yam.routing.rules.v1').data.rules[0].model,'strong');
+ f.flags['yam-rules']=JSON.stringify(defaultRules);await f.handlers.session_start({},f.ctx);assert.equal(api.snapshot().ruleVersion,rulesVersion(edited));
+ f.ctx.isIdle=()=>false;await assert.rejects(api.control({action:'rules',revision:api.snapshot().revision,data:defaultRules}),/finish/);
+});
+test('Pi invalid launch rules stop execution and can be repaired through the session rule control',async()=>{
+ const f=fixture(),api=await f.ready;f.flags['yam-rules']='{}';await f.handlers.session_start({},f.ctx);
+ await assert.rejects(f.route(),/rules/i);
+ await api.control({action:'rules',revision:api.snapshot().revision,data:defaultRules});assert.equal((await f.route()).model.id,'small');
+});
+test('Pi corrupt saved rule entries never silently fall back to launch defaults',async()=>{
+ const f=fixture(),api=await f.ready;f.entries.push({type:'custom',customType:'yam.routing.rules.v1',data:null});await f.handlers.session_start({},f.ctx);
+ assert.match(api.snapshot().error,/rules/i);await assert.rejects(f.route(),/rules/i);
+});
+test('Pi repairing saved rules preserves a fixed model and off lock without unused automatic roles',async()=>{
+ for(const event of ['session_start','session_tree']){
+ const f=fixture(),api=await f.ready;f.entries.push({type:'custom',customType:'yam.routing.rules.v1',data:null},{type:'custom',customType:'yam.routing.preferences.v1',data:{model:'p/strong',effort:'off'}});
+ delete f.models.small;await f.handlers[event]({},f.ctx);
+ await api.control({action:'rules',revision:api.snapshot().revision,data:defaultRules});
+ assert.deepEqual(api.snapshot().preferences,{model:'p/strong',effort:'off'});const r=await f.route();assert.equal(r.model.id,'strong');assert.equal(r.thinkingLevel,'off');assert.equal(f.calls,0);
+ }
+});
+test('Pi rule repair persists launch and legacy branch locks even without a saved preference entry',async()=>{
+ for(const event of ['session_start','session_tree']){
+  const f=fixture(),api=await f.ready;f.entries.push({type:'custom',customType:'yam.routing.rules.v1',data:null});delete f.models.small;
+  if(event==='session_start'){f.flags['yam-fixed-model']='p/strong';f.flags['yam-effort']='off';}
+  else f.ctx.sessionManager.buildSessionProjection=()=>({model:{provider:'p',modelId:'strong'},thinkingLevel:'off'});
+  await f.handlers[event]({},f.ctx);await api.control({action:'rules',revision:api.snapshot().revision,data:defaultRules});
+  assert.deepEqual(f.entries.findLast(e=>e.customType==='yam.routing.preferences.v1')?.data,{model:'p/strong',effort:'off'},event);
+  const resumed=fixture();delete resumed.models.small;resumed.entries.push(...structuredClone(f.entries));const next=await resumed.ready;await resumed.handlers.session_start({},resumed.ctx);
+  assert.deepEqual(next.snapshot().preferences,{model:'p/strong',effort:'off'});assert.equal((await resumed.route()).thinkingLevel,'off');
+ }
+});
+test('Pi rule preview calls classification only, never changes preferences or saves its input',async()=>{
+ const f=fixture(),api=await f.ready;await f.handlers.session_start({},f.ctx);const before=structuredClone(f.entries),preferences=api.snapshot().preferences;
+ await api.control({action:'preview',revision:api.snapshot().revision,data:{text:'PREVIEW_PRIVATE_TEXT',rules:defaultRules}});
+ assert.equal(f.calls,1);assert.deepEqual(api.snapshot().preferences,preferences);assert.deepEqual(f.entries,before);
+ assert.ok(api.snapshot().preview);assert.doesNotMatch(JSON.stringify(api.snapshot()),/PREVIEW_PRIVATE_TEXT/);
+});
+test('Pi structured routing applies edited rules and records only policy metadata, not conversation text',async()=>{
+ const facts={intent:'new',task:'transform',context:'independent',action:'none',depth:'normal',uncertain:false,readOnly:true,reason:'PRIVATE_CLASSIFIER_REASON'};
+ const f=fixture({answer:facts}),api=await f.ready;
+ const r=await f.route({messages:[{role:'user',content:'PRIVATE_REQUEST_TEXT'}]});assert.equal(r.model.id,'small');assert.equal(r.state.rule,'transform');assert.equal(r.state.ruleVersion,rulesVersion(defaultRules));
+ assert.equal(api.snapshot().decision.classifierCost,null);assert.ok(api.snapshot().decision.classificationMs>=0);
+ assert.doesNotMatch(JSON.stringify(api.snapshot().decision),/PRIVATE_/);
+ const edited=structuredClone(defaultRules);edited.rules.find(r=>r.task==='transform').model='strong';
+ await f.handlers.session_start({},f.ctx);await api.control({action:'rules',revision:api.snapshot().revision,data:edited});assert.equal((await f.route()).model.id,'strong');
+});
+test('Pi legacy or incomplete classifier output cannot authorise lightweight routing',async()=>{
+ for(const answer of [{intent:'new',difficulty:'simple',uncertain:false},{intent:'new',task:'answer',context:'independent',depth:'normal',uncertain:false,readOnly:true}]){
+  const f=fixture({answer,raw:true}),r=await f.route();assert.equal(r.model.id,'strong');assert.equal(r.state.rule,'fallback');
+ }
+});
+test('Pi classification cost is unknown without quoted prices and is still counted for malformed output',async()=>{
+ const f=fixture(),api=await f.ready;f.ctx.modelRegistry.complete=async()=>({content:[{type:'text',text:'invalid JSON'}],usage:{cost:{input:.1,output:.2,cacheRead:0,cacheWrite:0}}});
+ await f.route();assert.equal(api.snapshot().decision.classifierCost,null);
+ f.models.small.cost={input:1,output:1,cacheRead:0,cacheWrite:0};await f.route();assert.ok(Math.abs(api.snapshot().decision.classifierCost-.3)<1e-10);
+ assert.ok(f.entries.some(e=>e.customType==='yam.routing.decision.v1'));
+});
+test('Pi task totals include every native model response and stay unknown when any response lacks cost',async()=>{
+ const f=fixture(),api=await f.ready;await f.handlers.before_agent_start({},f.ctx);await f.route();
+ const message={role:'assistant',provider:'p',model:'small',stopReason:'stop',content:[{type:'text',text:'answer'}],usage:{cost:{input:.1,output:.2,cacheRead:0,cacheWrite:0}}};
+ f.models.small.cost={input:1,output:1,cacheRead:0,cacheWrite:0};await f.handlers.message_end({message},f.ctx);await f.handlers.message_end({message},f.ctx);
+ assert.ok(Math.abs(api.snapshot().decision.executionCost-.3)<1e-10);assert.equal(api.snapshot().decision.totalCost,null);
+ await f.handlers.agent_settled({aborted:false},f.ctx);assert.equal(f.entries.findLast(e=>e.customType==='yam.routing.decision.v1').data.executionCost,api.snapshot().decision.executionCost);
+});
+test('Pi native physical model turns account for known costs without virtual routing',async()=>{
+ const f=fixture({selected:'max'}),api=await f.ready;f.ctx.model=f.models.strong;f.models.strong.cost={input:1,output:1,cacheRead:0,cacheWrite:0};
+ await f.handlers.before_agent_start({},f.ctx);await f.handlers.message_end({message:{role:'assistant',provider:'p',model:'strong',stopReason:'stop',content:[{type:'text',text:'done'}],usage:{cost:{input:.1,output:.2,cacheRead:0,cacheWrite:0}}}},f.ctx);
+ assert.ok(Math.abs(api.snapshot().decision.totalCost-.3)<1e-10);assert.equal(api.snapshot().decision.classifierCost,0);assert.equal(f.calls,0);
 });
 test('Pi manual reasoning survives model routing, classifier failure and compaction',async()=>{
  const f=fixture({selected:'max',answer:Error('offline')});const r=await f.route();assert.equal(r.model.id,'strong');assert.equal(r.thinkingLevel,'max');
@@ -107,11 +224,11 @@ test('Pi YAM event bridge commits native lifecycle and recovered retries with th
 test('Pi gateway registration precedes session restore and retains native context/output limits',async()=>{
  const oldArgv=process.argv,oldFetch=globalThis.fetch,providers=[];
  process.argv=[...oldArgv,'--yam-gateway','http://127.0.0.1:3425'];
- globalThis.fetch=async()=>({ok:true,json:async()=>({data:[{id:'codex/model',reasoning:true,context_window:500000,max_output_tokens:128000,reasoning_levels:['low','medium','high','xhigh','max','ultra'],modalities:{input:['text','image']},pricing:{prompt:'0.000002',completion:'0.00001'}}]})});
+ globalThis.fetch=async()=>({ok:true,json:async()=>({data:[{id:'vendor/model',reasoning:true,context_window:500000,max_output_tokens:128000,reasoning_levels:['low','medium','high','xhigh','max','ultra'],modalities:{input:['text','image']},pricing:{prompt:'0.000002',completion:'0.00001'}}]})});
  try {
-  await install({registerFlag(){},on(){},registerCommand(){},registerVirtualModel(){},registerProvider:(id,config)=>providers.push({id,config})},()=>['high']);
+  await install({registerEntryRenderer(){},registerFlag(){},on(){},registerCommand(){},registerVirtualModel(){},registerProvider:(id,config)=>providers.push({id,config})},()=>['high']);
   assert.equal(providers.length,1);assert.equal(providers[0].config.models[0].maxTokens,128000);assert.equal(providers[0].config.models[0].contextWindow,500000);
-  assert.equal(providers[0].config.models[0].thinkingLevelMap.max,'max');assert.equal(providers[0].config.models[0].thinkingLevelMap.minimal,null);assert.equal(providers[0].config.api,'openai-responses');
+  assert.equal(providers[0].config.models[0].thinkingLevelMap.max,'max');assert.equal(providers[0].config.models[0].thinkingLevelMap.minimal,null);assert.equal(providers[0].config.api,'openai-completions');
  }finally{process.argv=oldArgv;globalThis.fetch=oldFetch;}
 });
 
@@ -163,7 +280,7 @@ test('Pi missing gateway catalog never leaves an authenticated fallback provider
  process.argv=[...argv,'--yam-gateway','http://127.0.0.1:3425'];globalThis.fetch=async()=>({ok:false,status:503});
  const automatic={api:'pi-virtual',provider:'yam',id:'auto'};
  try {
-  await install({on:(k,v)=>handlers[k]=v,registerFlag(){},registerCommand(){},registerVirtualModel:v=>definition=v,setModel:async m=>{selected=m;return true;},getThinkingLevel:()=> 'high',getFlag:()=>undefined},()=>['high']);
+  await install({registerEntryRenderer(){},appendEntry(){},on:(k,v)=>handlers[k]=v,registerFlag(){},registerCommand(){},registerVirtualModel:v=>definition=v,setModel:async m=>{selected=m;return true;},getThinkingLevel:()=> 'high',getFlag:()=>undefined},()=>['high']);
   const ctx={model:selected,ui:{notify(){},setStatus(){}},sessionManager:{getBranch:()=>[]},modelRegistry:{find:()=>automatic,hasConfiguredAuth:()=>true}};
   await handlers.session_start({},ctx);assert.equal(selected,automatic);
   await assert.rejects(definition.route({thinkingLevel:'high',reason:'user',messages:[]},ctx),/catalog|gateway/i);
@@ -195,7 +312,7 @@ test('Pi graphical controls keep fixed model and automatic effort independent, p
  await runtime.control({action:'set',revision:state.revision,data:{model:'p/small',effort:'auto'}});
  const routed=await f.route();assert.equal(routed.model.id,'small');assert.equal(routed.thinkingLevel,'medium');
  state=runtime.snapshot();assert.equal(state.preferences.model,'p/small');assert.equal(state.preferences.effort,'auto');
- assert.equal(f.entries.at(-1).customType,'yam.routing.preferences.v1');
+ assert.ok(f.entries.findLast(e=>e.customType==='yam.routing.preferences.v1'));
  const resumed=fixture();resumed.entries.push(...structuredClone(f.entries));const r=await resumed.ready;await resumed.handlers.session_start({},resumed.ctx);
  assert.deepEqual(r.snapshot().preferences,state.preferences);assert.equal((await resumed.route()).thinkingLevel,'medium');
  await r.control({action:'set',revision:r.snapshot().revision,data:{model:'auto',effort:'max'}});
@@ -215,7 +332,7 @@ test('Pi actual status comes from native messages and blocked input survives a c
  const f=fixture(),runtime=await f.ready;let editor='';f.ctx.ui.getEditorText=()=>editor;f.ctx.ui.setEditorText=v=>editor=v;
  await f.handlers.session_start({},f.ctx);await f.route();assert.equal(runtime.snapshot().actual,null);assert.equal(runtime.snapshot().target.model,'p/small');
  f.handlers.message_end({message:{role:'assistant',provider:'p',model:'small',thinkingLevel:'medium',timestamp:123,content:[{type:'text',text:'done'}],stopReason:'stop'}},f.ctx);
- assert.deepEqual(runtime.snapshot().actual,{model:'p/small',effort:'medium',at:123});
+ assert.deepEqual(runtime.snapshot().actual,{model:'p/small',effort:'medium',at:123,source:'pi-native',billing:'api'});
  delete f.models.strong;await f.handlers.session_start({},f.ctx);assert.equal(runtime.snapshot().phase,'error');
  assert.equal(f.handlers.input({text:'do not lose this',source:'interactive'},f.ctx).action,'handled');assert.equal(editor,'do not lose this');
  const calls=f.calls;f.models.strong={...f.models.small,id:'strong'};
@@ -255,6 +372,7 @@ test('Pi loopback controls authenticate generation and token and keep credential
   const applied=await send({token:descriptor.token,generation,action:'reset',revision:1});assert.equal(applied.state.revision,2);assert.equal(calls,1);assert.ok(!JSON.stringify(applied).includes(descriptor.token));
   assert.equal((await send({token:descriptor.token,generation,action:'reset',revision:2,unexpected:true})).ok,false);assert.equal(calls,1);
   await send({token:descriptor.token,generation,action:'set',revision:2,data:{model:'p/模型'}},true);assert.equal(seen.model,'p/模型');
+  const previewText='\0'.repeat(4000);assert.equal((await send({token:descriptor.token,generation,action:'preview',revision:3,data:{text:previewText,rules:defaultRules}})).ok,true);assert.equal(seen.text,previewText);
  }finally{await server.close();await fs.rm(root,{recursive:true,force:true});}
 });
 
@@ -307,7 +425,7 @@ test('Pi does not reuse an old blocked attachment after a different explicit pro
 });
 test('Pi routing commands commit explicit off/max through the same native preference path and restore them',async()=>{
  const f=fixture(),runtime=await f.ready;await f.handlers.session_start({},f.ctx);await runtime.control({action:'reset',revision:runtime.snapshot().revision});
- await f.commands['yam-route'].handler('effort off',f.ctx);assert.equal(runtime.snapshot().preferences.effort,'off');assert.equal((await f.route()).thinkingLevel,'off');assert.equal(f.entries.at(-1).data.effort,'off');
+ await f.commands['yam-route'].handler('effort off',f.ctx);assert.equal(runtime.snapshot().preferences.effort,'off');assert.equal((await f.route()).thinkingLevel,'off');assert.equal(f.entries.findLast(e=>e.customType==='yam.routing.preferences.v1').data.effort,'off');
  await f.commands['yam-route'].handler('effort max',f.ctx);assert.equal(runtime.snapshot().preferences.effort,'max');assert.equal(f.entries.at(-1).data.effort,'max');
  const resumed=fixture();resumed.entries.push(...f.entries);const r=await resumed.ready;await resumed.handlers.session_start({},resumed.ctx);assert.equal(r.snapshot().preferences.effort,'max');
 });
@@ -354,4 +472,394 @@ test('Pi saved reasoning overrides original native launch flags on restart',asyn
   const f=fixture({selected:'max'}),runtime=await f.ready;f.entries.push({type:'custom',customType:'yam.routing.preferences.v1',data:{model:'auto',effort:'max'}});
   await f.handlers.session_start({},f.ctx);assert.equal(runtime.snapshot().error,null);assert.equal(f.pi.getThinkingLevel(),'max');assert.equal((await f.route()).thinkingLevel,'max');
  }finally{process.argv=argv;}
+});
+
+test('Pi ongoing tasks upgrade independently in model and reasoning and never silently downgrade',()=>{
+ for(const model of ['small','strong'])for(const level of ['low','medium','high','xhigh','max'])for(const difficulty of ['simple','complex','critical']){
+  const prior={v:1,model,effort:level,task:'existing task'},before=JSON.stringify(prior);
+  const next=decide({intent:'continue',difficulty,uncertain:false},prior);
+  const expected=difficulty==='simple'?'medium':difficulty==='critical'?'max':'high';
+  assert.equal(next.model,model==='strong'||difficulty!=='simple'?'strong':'small');
+  assert.equal(next.effort,['low','medium','high','xhigh','max'][Math.max(['low','medium','high','xhigh','max'].indexOf(level),['low','medium','high','xhigh','max'].indexOf(expected))]);
+  assert.equal(JSON.stringify(prior),before);
+ }
+});
+test('Pi explicit new tasks can downgrade while missing or incompatible ongoing state is evaluated afresh',()=>{
+ assert.deepEqual(decide({intent:'new',difficulty:'simple',uncertain:false},previous),{model:'small',effort:'medium'});
+ for(const prior of [undefined,{}, {...previous,v:2},{...previous,model:'unknown'},{...previous,effort:'unknown'}])assert.deepEqual(decide({intent:'continue',difficulty:'complex',uncertain:false},prior),{model:'strong',effort:'high'});
+ assert.deepEqual(decide({intent:'continue',difficulty:'critical',uncertain:true},{v:1,model:'small',effort:'xhigh'}),{model:'strong',effort:'xhigh'});
+});
+test('Pi actual virtual route escalates a continuing task and keeps that choice for tools and retries',async()=>{
+ const f=fixture({answer:{intent:'continue',difficulty:'complex',uncertain:false,reason:'implementation added'},state:{v:1,model:'small',effort:'medium',task:'same task'}});
+ const next=await f.route();assert.equal(next.model.id,'strong');assert.equal(next.thinkingLevel,'high');assert.equal(next.state.task,'same task');assert.equal(next.state.model,'strong');assert.equal(next.state.effort,'high');
+ for(const reason of ['continuation','retry']){const sticky=await f.route({reason,previous:next,failed:reason==='retry'?next:undefined,state:next.state});assert.equal(sticky.model.id,'strong');assert.equal(sticky.thinkingLevel,'high');}assert.equal(f.calls,1);
+});
+test('Pi critical continuation stays at high, simple followups retain it, and manual reasoning still wins',async()=>{
+ const critical=fixture({answer:{intent:'continue',difficulty:'critical',uncertain:false},state:{v:1,model:'strong',effort:'high'}});const high=await critical.route();assert.equal(high.model.id,'strong');assert.equal(high.thinkingLevel,'high');
+ const simple=fixture({answer:{intent:'continue',difficulty:'simple',uncertain:false},state:high.state});assert.equal((await simple.route()).thinkingLevel,'high');assert.equal((await simple.route()).model.id,'strong');
+ const manual=fixture({selected:'medium',answer:{intent:'continue',difficulty:'critical',uncertain:false},state:{v:1,model:'small',effort:'medium'}});const locked=await manual.route();assert.equal(locked.model.id,'strong');assert.equal(locked.thinkingLevel,'medium');
+});
+
+
+test('Pi reply model labels bind each native response to a display-only saved entry',async()=>{
+ const f=fixture();await f.ready;
+ const first={role:'assistant',provider:'p',model:'small',thinkingLevel:'medium',content:[{type:'text',text:'first answer'}],stopReason:'stop'};
+ const second={...first,model:'strong',thinkingLevel:'max',content:[{type:'text',text:'second answer'}]};
+ const saved=[first,second].map((message,i)=>f.handlers.turn_end({message,messageEntryId:`reply-${i}`,entries:[],toolResults:[]}));
+ assert.deepEqual(saved.map(r=>r.entries[0]),[
+  {type:'custom',customType:'yam.reply-model.v1',data:{messageId:'reply-0',model:'p/small',effort:'medium'}},
+  {type:'custom',customType:'yam.reply-model.v1',data:{messageId:'reply-1',model:'p/strong',effort:'max'}}
+ ]);
+ assert.ok(saved.every(r=>!('continue' in r)),'a display label must never trigger another model request');
+ assert.equal(f.calls,0);assert.equal(f.entries.length,0,'native boundary owns persistence, not message_end');
+ const renderer=f.renderers['yam.reply-model.v1'];assert.ok(renderer);
+ const reopened=fixture();await reopened.ready;
+ for(const result of saved){const entry=JSON.parse(JSON.stringify(result.entries[0]));assert.equal(reopened.renderers[entry.customType](entry,{}, {fg:(_color,text)=>text}).text,`${entry.data.model} · ${entry.data.effort}`);}
+});
+test('Pi reply labels do not invent metadata for old, incomplete or failed responses',async()=>{
+ const f=fixture();await f.ready;
+ for(const message of [{role:'user',content:'hi'},{role:'assistant',content:[]},{role:'assistant',content:[{type:'thinking',thinking:'private'}]},{role:'assistant',content:[{type:'text',text:'  '}]}])assert.equal(f.handlers.turn_end({message,messageEntryId:'m'}),undefined);
+ const partial={role:'assistant',provider:'p',model:'actual',stopReason:'error',content:[{type:'text',text:'partial response'}]};
+ const result=f.handlers.turn_end({message:partial,messageEntryId:'partial'});assert.equal(result.entries[0].data.model,'p/actual');assert.equal(result.entries[0].data.effort,'unknown');
+ const missing=f.handlers.turn_end({message:{role:'assistant',content:[{type:'text',text:'answer'}]},messageEntryId:'unknown'});
+ const renderer=f.renderers['yam.reply-model.v1'];assert.equal(renderer(missing.entries[0],{}, {fg:(_color,text)=>text}).text,'模型未记录 · 推理尚未确认');
+ assert.equal(renderer({data:null},{},{fg:(_color,text)=>text}),undefined);
+ const hostile=renderer({data:{messageId:'m',model:'p/\u001b[2Jbad\nname',effort:'\u001b[31mmax'}},{},{fg:(_color,text)=>text}).text;
+ assert.doesNotMatch(hostile,/[\u0000-\u001f\u007f]/);assert.match(hostile,/推理尚未确认/);
+ assert.equal(f.calls,0);
+});
+
+test('Pi cache retention uses recent observed cache tokens and both models prices, never task difficulty',async()=>{
+ const {preferCachedModel}=await import('../src-tauri/pi/policy.mjs');assert.equal(typeof preferCachedModel,'function');
+ const now=Date.now(),small={provider:'p',id:'small',cost:{input:1,output:1,cacheRead:.1}},strong={provider:'p',id:'strong',contextWindow:100000,maxTokens:1000,cost:{input:10,output:2,cacheRead:.1}};
+ const warm={role:'assistant',provider:'p',model:'strong',timestamp:now-1000,stopReason:'stop',content:[{type:'text',text:'previous'}],usage:{input:100,cacheRead:9900,cacheWrite:0,output:20}};
+ const messages=[{role:'user',content:'old task'},warm,{role:'user',content:'HTTP 404?'}],before=structuredClone(messages);
+ assert.equal(preferCachedModel('small',messages,small,strong,now),'strong');assert.deepEqual(messages,before);
+ assert.equal(preferCachedModel('strong',messages,strong,small,now),'strong','cache never lowers a safety floor');
+ for(const changed of [{usage:{...warm.usage,cacheRead:0}},{usage:{...warm.usage,cacheRead:NaN}},{usage:{...warm.usage,input:-1}},{usage:{...warm.usage,output:1e6}},{timestamp:now-301000},{timestamp:now+1},{stopReason:'error'},{model:'other'}])assert.equal(preferCachedModel('small',[{...warm,...changed},messages.at(-1)],small,strong,now),'small');
+ for(const cost of [undefined,{input:10,output:2},{input:10,output:2,cacheRead:10},{input:10,output:NaN,cacheRead:.1}])assert.equal(preferCachedModel('small',messages,small,{...strong,cost},now),'small');
+ assert.equal(preferCachedModel('small',messages,small,{...strong,cost:{...strong.cost,cacheRead:1}},now),'small','warm model must be meaningfully cheaper');
+});
+
+function feedbackFixture(options={}) {
+ const f=fixture({answer:{intent:'new',difficulty:'simple',uncertain:false,readOnly:true,reason:'pure explanation'},...options});
+ const classify=f.ctx.modelRegistry.complete,completions=[];
+ f.ctx.modelRegistry.complete=async(model,context,settings)=>{
+  if(model.id!=='strong')return classify(model,context,settings);
+  completions.push({model,context,settings});
+  return {role:'assistant',provider:'p',model:'strong',api:'openai-responses',content:[{type:'text',text:'A complete answer.'}],stopReason:'stop',timestamp:Date.now(),usage:{input:1,output:4,cacheRead:0,cacheWrite:0,totalTokens:5,cost:{total:0}}};
+ };
+ const weak={role:'assistant',provider:'p',model:'small',api:'openai-responses',thinkingLevel:'medium',content:[{type:'text',text:'I need a stronger model to answer this.'}],stopReason:'stop',timestamp:Date.now()};
+ return {...f,completions,weak};
+}
+test('Pi rejected correction retains all known usage costs instead of erasing them',async()=>{
+ const f=feedbackFixture(),api=await f.ready,original=f.ctx.modelRegistry.complete;
+ for(const m of [f.models.small,f.models.strong])m.cost={input:1,output:1,cacheRead:0,cacheWrite:0};
+ f.ctx.modelRegistry.complete=async(...args)=>{const r=await original(...args);return {...r,stopReason:args[0].id==='strong'?'length':'stop',usage:{cost:{input:.1,output:0,cacheRead:0,cacheWrite:0}}};};
+ await f.handlers.before_agent_start({},f.ctx);await f.route();const weak={...f.weak,usage:{cost:{input:.1,output:0,cacheRead:0,cacheWrite:0}}};await f.handlers.message_end({message:weak},f.ctx);
+ assert.equal(api.snapshot().decision.correctionCost,.1);assert.ok(Math.abs(api.snapshot().decision.totalCost-.3)<1e-10);
+});
+test('Pi read-only weak results regenerate once with original context, no tools and correct native reply metadata',async()=>{
+ const f=feedbackFixture(),runtime=await f.ready,abort=new AbortController();
+ const messages=[{role:'system',content:'Keep the supplied context.',toolsAdded:[{name:'write'}]},{role:'user',content:'Explain 404.'}];
+ await f.handlers.before_agent_start({},f.ctx);await f.route({messages,signal:abort.signal});
+ const result=await f.handlers.message_end({message:f.weak},f.ctx);assert.equal(result?.message?.model,'strong');assert.equal(result.message.thinkingLevel,'high');
+ assert.equal(f.completions.length,1);assert.equal(f.completions[0].context.messages[0].content,messages[0].content);assert.deepEqual(f.completions[0].context.messages[0].toolsAdded,[]);assert.equal(f.completions[0].context.messages[1].content,'Explain 404.');
+ assert.equal(runtime.snapshot().actual.model,'p/strong');assert.match(runtime.snapshot().target.reason,/升档/);
+ const label=f.handlers.turn_end({message:result.message,messageEntryId:'upgraded'});assert.equal(label.entries[0].data.model,'p/strong');
+ await f.handlers.message_end({message:f.weak},f.ctx);assert.equal(f.completions.length,1,'one correction per submitted task');
+});
+test('Pi outcome correction accepts truncation and empty stop, but never ordinary missing facts or provider failures',async()=>{
+ for(const [text,stopReason,expected] of [['','stop',1],['partial','length',1],['请提供日志，我还缺少信息。','stop',0],['I cannot access that file.','stop',0],['The quoted text says: I need a stronger model.','stop',0],['complete answer','stop',0],['I need a stronger model.','error',0],['','aborted',0]]){
+  const f=feedbackFixture();await f.handlers.before_agent_start({},f.ctx);await f.route();await f.handlers.message_end({message:{...f.weak,content:[{type:'text',text}],stopReason}},f.ctx);assert.equal(f.completions.length,expected,`${stopReason}: ${text}`);
+ }
+});
+test('Pi capacity protection never claims a cache saving without a cache observation',async()=>{
+ const f=feedbackFixture(),runtime=await f.ready;f.models.small.contextWindow=10;await f.route();assert.equal(runtime.snapshot().target.model,'p/strong');assert.doesNotMatch(runtime.snapshot().target.reason,/缓存/);
+});
+test('Pi cache economics is applied by the real route without changing manual model selection',async()=>{
+ const f=feedbackFixture(),runtime=await f.ready;f.models.small.cost={input:1,output:1,cacheRead:.1};f.models.strong.cost={input:10,output:2,cacheRead:.1};
+ await f.handlers.before_agent_start({},f.ctx);
+ const messages=[{role:'assistant',provider:'p',model:'strong',stopReason:'stop',timestamp:Date.now(),usage:{input:100,output:20,cacheRead:9900,cacheWrite:0},content:[{type:'text',text:'prior'}]},{role:'user',content:'HTTP 404?'}];
+ const r=await f.route({messages});assert.equal(r.model.id,'strong');assert.match(runtime.snapshot().target.reason,/缓存/);
+ await runtime.control({action:'set',revision:runtime.snapshot().revision,data:{model:'p/small',effort:'auto'}});assert.equal((await f.route({messages})).model.id,'small');
+});
+test('Pi cancellation during outcome correction aborts the native response and concurrent callbacks cannot repeat it',async()=>{
+ const f=feedbackFixture(),abort=new AbortController();await f.handlers.before_agent_start({},f.ctx);await f.route({signal:abort.signal});
+ let finish,calls=0;f.ctx.modelRegistry.complete=()=>{calls++;return new Promise(resolve=>finish=resolve);};
+ const pending=f.handlers.message_end({message:f.weak},f.ctx);await f.handlers.message_end({message:f.weak},f.ctx);assert.equal(calls,1);abort.abort();
+ finish({...f.weak,model:'strong',content:[{type:'text',text:'late'}]});const result=await pending;assert.equal(result.message.stopReason,'aborted');
+});
+test('Pi outcome correction respects manual choices, tool calls, cancellation and classifier uncertainty',async()=>{
+ for(const guard of ['fixed','tool_call','tool_execution_start','toolUse','aborted','uncertain','not-read-only']){
+  const f=feedbackFixture(guard==='uncertain'?{answer:{intent:'new',difficulty:'simple',uncertain:true,readOnly:true}}:guard==='not-read-only'?{answer:{intent:'new',difficulty:'simple',uncertain:false}}:{});
+  await f.handlers.before_agent_start({},f.ctx);
+  if(guard==='fixed'){const r=await f.ready;await r.control({action:'set',revision:r.snapshot().revision,data:{model:'p/small',effort:'auto'}});}
+  const abort=new AbortController();await f.route({signal:abort.signal});
+  if(guard==='tool_call'||guard==='tool_execution_start')await f.handlers[guard]?.({toolName:'read'},f.ctx);
+  if(guard==='aborted')abort.abort();
+  const message=guard==='toolUse'?{...f.weak,content:[...f.weak.content,{type:'toolCall',id:'t',name:'write',arguments:{}}]}:f.weak;
+  await f.handlers.message_end({message},f.ctx);assert.equal(f.completions.length,0,guard);
+ }
+});
+test('Pi a failed or unsafe correction keeps the original response and never retries the strong request',async()=>{
+ for(const bad of [Error('offline'),{role:'assistant',provider:'p',model:'strong',stopReason:'toolUse',content:[{type:'toolCall',name:'write'}]},{role:'assistant',provider:'p',model:'wrong',stopReason:'stop',content:[{type:'text',text:'wrong'}]}]){
+  const f=feedbackFixture(),warnings=[];f.ctx.ui.notify=(...args)=>warnings.push(args);let calls=0;
+  f.ctx.modelRegistry.complete=async(model)=>{if(model.id==='small')return {content:[{type:'text',text:JSON.stringify({intent:'new',task:'answer',context:'independent',action:'none',depth:'normal',uncertain:false,readOnly:true})}]};calls++;if(bad instanceof Error)throw bad;return bad;};
+  await f.handlers.before_agent_start({},f.ctx);await f.route();assert.equal(await f.handlers.message_end({message:f.weak},f.ctx),undefined);await f.handlers.message_end({message:f.weak},f.ctx);assert.equal(calls,1);assert.equal(warnings.length,1);
+ }
+});
+test('Pi incomplete classifier JSON is not accepted after timeout, cancellation or provider failure',async()=>{
+ for(const stopReason of ['aborted','length','error']){
+  const f=feedbackFixture();f.ctx.modelRegistry.complete=async()=>({stopReason,content:[{type:'text',text:JSON.stringify({intent:'new',task:'answer',context:'independent',action:'none',depth:'normal',uncertain:false,readOnly:true})}]});
+  assert.equal((await f.route()).model.id,'strong',stopReason);
+ }
+});
+test('Pi gateway omitted prices are unknown, while an explicitly quoted free cache remains usable',async()=>{
+ const argv=process.argv,fetch=globalThis.fetch;process.argv=[...argv,'--yam-gateway','http://127.0.0.1:3425'];
+ try{
+  for(const missing of ['input_cache_read','completion','prompt','explicit-free']){
+   const pricing={prompt:.00001,completion:.000002,input_cache_read:0};if(missing!=='explicit-free')delete pricing[missing];
+   globalThis.fetch=async()=>({ok:true,json:async()=>({data:[{id:'vendor/small',pricing:{prompt:.000001,completion:.000001,input_cache_read:.0000001}},{id:'vendor/strong',pricing}].map(m=>({...m,reasoning:true,context_window:500000,max_output_tokens:1000,reasoning_levels:['medium','high','max']}))})});
+   const f=feedbackFixture();f.flags['yam-small']='yam-gateway/vendor/small';f.flags['yam-strong']='yam-gateway/vendor/strong';
+   f.pi.registerProvider=(provider,config)=>{for(const m of config.models)f.models[m.id]={...m,provider,api:config.api};};await f.ready;
+   const messages=[{role:'assistant',provider:'yam-gateway',model:'vendor/strong',stopReason:'stop',timestamp:Date.now(),usage:{input:1,output:1,cacheRead:100000,cacheWrite:0},content:[{type:'text',text:'prior'}]},{role:'user',content:'404?'}];
+   assert.equal((await f.route({messages})).model.id,missing==='explicit-free'?'vendor/strong':'vendor/small',missing);
+  }
+ }finally{process.argv=argv;globalThis.fetch=fetch;}
+});
+test('Pi outcome correction uses native provider-neutral reasoning, including an explicit off lock',async()=>{
+ const f=feedbackFixture(),runtime=await f.ready;await f.handlers.before_agent_start({},f.ctx);await runtime.control({action:'set',revision:runtime.snapshot().revision,data:{model:'auto',effort:'off'}});
+ const calls=[],native=f.ctx.modelRegistry.streamSimple;f.ctx.modelRegistry.streamSimple=(...args)=>args[0].id==='small'?native(...args):({result:async()=>{calls.push(args);return {...f.weak,model:'strong',content:[{type:'text',text:'complete'}]};}});
+ await f.route();const result=await f.handlers.message_end({message:f.weak},f.ctx);assert.equal(calls.length,1);assert.equal(calls[0][2].reasoning,'off');assert.equal(calls[0][2].toolChoice,'none');assert.equal(result.message.thinkingLevel,'off');
+});
+test('Pi a corrected task keeps its strong model floor when reasoning is explicitly off or minimal',()=>{
+ for(const effort of ['off','minimal'])assert.equal(decide({intent:'continue',difficulty:'simple',uncertain:false},{v:1,model:'strong',effort,task:'corrected read-only answer'}).model,'strong');
+});
+test('Pi cheap warm cache never selects a strong model whose context cannot hold this request',async()=>{
+ const f=feedbackFixture(),runtime=await f.ready;await f.handlers.before_agent_start({},f.ctx);
+ f.models.small.cost={input:1,output:1,cacheRead:.1};f.models.strong.cost={input:10,output:2,cacheRead:0};f.models.strong.contextWindow=300;
+ const messages=[{role:'assistant',provider:'p',model:'strong',stopReason:'stop',timestamp:Date.now(),usage:{input:1,output:1,cacheRead:10000,cacheWrite:0},content:[{type:'text',text:'prior'}]},{role:'user',content:'x'.repeat(500)}];
+ assert.equal((await f.route({messages})).model.id,'small');assert.doesNotMatch(runtime.snapshot().target.reason,/缓存/);
+});
+test('Pi cache retention checks exact strong context headroom and rejects unknown limits',async()=>{
+ const {preferCachedModel}=await import('../src-tauri/pi/policy.mjs'),now=Date.now();
+ const small={provider:'p',id:'small',cost:{input:1,output:1,cacheRead:.1}},strong={provider:'p',id:'strong',maxTokens:10,cost:{input:10,output:2,cacheRead:0}};
+ const messages=[{role:'assistant',provider:'p',model:'strong',stopReason:'stop',timestamp:now,usage:{input:1,output:1,cacheRead:10000,cacheWrite:0},content:[{type:'text',text:'prior'}]},{role:'user',content:'404?'}];
+ const exact=new TextEncoder().encode(JSON.stringify(messages)).length+10;
+ assert.equal(preferCachedModel('small',messages,small,{...strong,contextWindow:exact},now),'strong');
+ for(const contextWindow of [exact-1,undefined,0,-1,Infinity])assert.equal(preferCachedModel('small',messages,small,{...strong,contextWindow},now),'small',String(contextWindow));
+});
+test('Pi classification uses native provider-neutral reasoning and a tool-free request',async()=>{
+ const f=fixture(),calls=[],native=f.ctx.modelRegistry.streamSimple;
+ f.ctx.modelRegistry.streamSimple=(...args)=>{calls.push(args);return native(...args);};
+ const result=await f.route();assert.equal(result.model.id,'small');assert.equal(calls.length,1);assert.equal(calls[0][2].reasoning,'medium');assert.equal(calls[0][2].toolChoice,'none');assert.equal(calls[0][2].maxTokens,512);assert.ok(calls[0][2].signal instanceof AbortSignal);
+});
+test('Pi translating or repeating a capacity statement does not trigger an unnecessary correction',async()=>{
+ for(const prompt of ['请翻译成英文：我需要更强的模型。','Repeat exactly: I need a stronger model.','引用这句话并原样回复：I need a stronger model.']){
+  const f=feedbackFixture();await f.handlers.before_agent_start({},f.ctx);await f.route({messages:[{role:'user',content:prompt}]});await f.handlers.message_end({message:{...f.weak,content:[{type:'text',text:'I need a stronger model.'}]}},f.ctx);assert.equal(f.completions.length,0,prompt);
+ }
+ for(const [text,stopReason] of [['','stop'],['partial','length']]){
+  const f=feedbackFixture();await f.handlers.before_agent_start({},f.ctx);await f.route({messages:[{role:'user',content:'Translate the supplied sentence.'}]});await f.handlers.message_end({message:{...f.weak,content:[{type:'text',text}],stopReason}},f.ctx);assert.equal(f.completions.length,1,'literal tasks still recover from objectively incomplete replies');
+ }
+});
+
+async function withGateway(data,run){
+ const argv=process.argv,fetch=globalThis.fetch;process.argv=[...argv,'--yam-gateway','http://127.0.0.1:3425'];
+ globalThis.fetch=async()=>data===null?{ok:false,status:503}:{ok:true,json:async()=>({data})};
+ try{await run();}finally{process.argv=argv;globalThis.fetch=fetch;}
+}
+function subscription(f){
+ for(const id of ['small','strong'])f.models[id].provider='openai';
+ f.flags['yam-small']='openai/small';f.flags['yam-strong']='openai/strong';
+ f.ctx.modelRegistry.isUsingOAuth=m=>m.provider==='openai';
+ f.ctx.modelRegistry.find=(provider,id)=>Object.values(f.models).find(m=>m.provider===provider&&m.id===id);
+}
+test('Pi merged catalog distinguishes subscription OAuth, API keys and Magpie without copying native auth',async()=>{
+ await withGateway([{id:'vendor/other',display_name:'Other',reasoning:false,context_window:64000,max_output_tokens:4000},{id:'broken',context_window:0,max_output_tokens:1}],async()=>{
+  const f=fixture();subscription(f);let registered;
+  f.models.api={...f.models.small,id:'api'};f.ctx.modelRegistry.isUsingOAuth=m=>m.provider==='openai'&&m.id!=='api';
+  f.pi.registerProvider=(provider,config)=>{registered=config;for(const m of config.models)f.models[m.id]={...m,provider,api:m.api??config.api};};
+  const api=await f.ready;await f.handlers.session_start({},f.ctx);
+  const catalog=api.catalog();assert.equal(catalog.find(m=>m.key==='openai/small').source,'chatgpt-subscription');assert.equal(catalog.find(m=>m.key==='openai/api').billing,'api');
+  const gateway=catalog.find(m=>m.key==='yam-gateway/vendor/other');assert.ok(gateway);assert.equal(gateway.source,'magpie');assert.equal(gateway.billing,'gateway');
+  assert.equal(f.models['vendor/other'].api,'openai-completions');assert.equal(f.models['vendor/other'].reasoning,false);assert.equal(registered.apiKey,'yam-local-gateway');assert.equal(registered.models.length,1);
+ });
+});
+test('Pi unavailable Magpie remains a warning for native selection, input, compaction, preview and refresh',async()=>{
+ await withGateway(null,async()=>{
+  const f=fixture(),api=await f.ready;subscription(f);await f.handlers.session_start({},f.ctx);
+  assert.equal(api.snapshot().error,null);assert.equal(api.snapshot().phase,'idle');assert.match(api.snapshot().gatewayError,/gateway|magpie/i);
+  assert.equal(f.handlers.input({text:'read',source:'interactive'},f.ctx),undefined);assert.equal(f.handlers.session_before_compact(),undefined);
+  assert.equal((await f.route()).model.provider,'openai');
+  await api.control({action:'preview',revision:api.snapshot().revision,data:{text:'read',rules:defaultRules}});assert.ok(api.snapshot().preview);
+  await api.control({action:'set',revision:api.snapshot().revision,data:{model:'openai/strong',effort:'high'}});assert.equal((await f.route()).model.id,'strong');
+  await api.control({action:'retry',revision:api.snapshot().revision});assert.equal(api.snapshot().error,null);assert.match(api.snapshot().gatewayError,/gateway|magpie/i);
+  const notices=[];f.flags['yam-catalog-probe']=true;f.ctx.ui.notify=v=>notices.push(JSON.parse(v));await f.handlers.session_start({},f.ctx);assert.equal(notices[0].error,null);assert.ok(notices[0].models.length);assert.ok(notices[0].warning);
+ });
+});
+test('Pi failed Magpie blocks only the selected dependency and cannot reuse a stale gateway model',async()=>{
+ await withGateway(null,async()=>{
+  const f=fixture({answer:{intent:'new',difficulty:'complex',uncertain:false,readOnly:false}}),api=await f.ready;subscription(f);
+  f.models.small.provider='yam-gateway';f.flags['yam-small']='yam-gateway/small';f.flags['yam-classifier']='openai/strong';
+  await f.handlers.session_start({},f.ctx);assert.equal(api.snapshot().error,null);assert.equal((await f.route()).model.provider,'openai');
+  assert.ok(!api.catalog().some(m=>m.key==='yam-gateway/small'));
+  await assert.rejects(api.control({action:'set',revision:api.snapshot().revision,data:{model:'yam-gateway/small',effort:'high'}}),/gateway|magpie/i);
+  await assert.rejects(f.route({reason:'retry',failed:{model:f.models.small,thinkingLevel:'high'}}),/gateway|magpie/i);
+  f.ctx.modelRegistry.complete=async()=>({content:[{type:'text',text:JSON.stringify({intent:'new',task:'answer',context:'independent',action:'none',depth:'normal',uncertain:false,readOnly:true})}]});
+  await assert.rejects(f.route(),/gateway|magpie/i);
+ });
+});
+test('Pi subscription classifier failure cannot switch to the configured Magpie execution role',async()=>{
+ const f=fixture({answer:Error('subscription quota exhausted')}),api=await f.ready;subscription(f);f.models.strong.provider='yam-gateway';f.flags['yam-strong']='yam-gateway/strong';
+ await assert.rejects(f.route(),/subscription/i);assert.equal(f.calls,1);assert.equal(api.snapshot().phase,'error');
+});
+test('Pi subscription usage never reports the API catalog price as money spent',async()=>{
+ const f=fixture(),api=await f.ready;subscription(f);for(const id of ['small','strong'])f.models[id].cost={input:1,output:1,cacheRead:0,cacheWrite:0};
+ await f.handlers.session_start({},f.ctx);await f.handlers.before_agent_start({},f.ctx);await f.route();
+ f.handlers.message_end({message:{role:'assistant',provider:'openai',model:'small',thinkingLevel:'medium',stopReason:'stop',timestamp:12,content:[{type:'text',text:'answer'}],usage:{input:10,output:20,cacheRead:5,cacheWrite:0,cost:{input:1,output:2,cacheRead:0,cacheWrite:0}}}});
+ assert.equal(api.snapshot().decision.executionCost,null);assert.equal(api.snapshot().decision.totalCost,null);assert.equal(api.snapshot().actual.source,'chatgpt-subscription');assert.equal(api.snapshot().actual.billing,'subscription');assert.deepEqual(api.snapshot().actual.usage,{input:10,output:20,cacheRead:5,cacheWrite:0});
+});
+
+test('Pi subscription classification rejects partial and malformed replies without a cross-channel fallback',async()=>{
+ for(const stopReason of ['error','aborted','length','stop']){
+  const f=fixture(),api=await f.ready;subscription(f);f.models.strong.provider='yam-gateway';f.flags['yam-strong']='yam-gateway/strong';
+  f.ctx.modelRegistry.complete=async()=>({stopReason,content:[{type:'text',text:stopReason==='stop'?'bad JSON':JSON.stringify({intent:'new',task:'answer',context:'independent',action:'none',depth:'normal',uncertain:false,readOnly:true})}]});
+  await assert.rejects(f.route(),/subscription/i,stopReason);assert.equal(api.snapshot().target,null);
+ }
+});
+test('Pi OAuth subscriptions do not use API price estimates to retain a different cached model',async()=>{
+ const f=fixture();await f.ready;subscription(f);f.models.small.cost={input:1,output:1,cacheRead:.1,cacheWrite:0};f.models.strong.cost={input:10,output:2,cacheRead:0,cacheWrite:0};
+ const messages=[{role:'assistant',provider:'openai',model:'strong',stopReason:'stop',timestamp:Date.now(),usage:{input:1,output:1,cacheRead:100000,cacheWrite:0},content:[{type:'text',text:'prior'}]},{role:'user',content:'404?'}];assert.equal((await f.route({messages})).model.id,'small');
+});
+
+test('Pi semantically invalid subscription JSON stops both routing and preview before a paid fallback',async()=>{
+ for(const answer of [null,{},[],{intent:'new',task:'invented',context:'independent',action:'none',depth:'normal',uncertain:false,readOnly:true}]){
+  const f=fixture({answer,raw:true}),api=await f.ready;subscription(f);f.models.strong.provider='yam-gateway';f.flags['yam-strong']='yam-gateway/strong';await f.handlers.session_start({},f.ctx);
+  await assert.rejects(f.route(),/subscription/i);assert.equal(api.snapshot().target,null);
+  await assert.rejects(api.control({action:'preview',revision:api.snapshot().revision,data:{text:'read',rules:defaultRules}}),/subscription/i);assert.equal(api.snapshot().preview,null);
+ }
+});
+
+test('Pi subscription weak replies never trigger automatic paid-channel correction',async()=>{
+ for(const provider of ['yam-gateway','custom-api'])for(const message of [{stopReason:'length',content:[{type:'text',text:'partial'}]},{stopReason:'stop',content:[]},{stopReason:'stop',content:[{type:'text',text:'I need a stronger model to answer this.'}]}]){
+  const f=feedbackFixture(),api=await f.ready;subscription(f);f.models.strong.provider=provider;f.flags['yam-strong']=provider+'/strong';await f.handlers.before_agent_start({},f.ctx);await f.route();
+  const reply={...f.weak,...message,provider:'openai'},result=await f.handlers.message_end({message:reply},f.ctx);
+  assert.equal(f.completions.length,0,provider+' '+message.stopReason);assert.equal(result,undefined);assert.equal(api.snapshot().actual?.model??'openai/small','openai/small');
+ }
+});
+test('Pi subscription correction still works within subscription roles',async()=>{
+ const f=feedbackFixture();await f.ready;subscription(f);const complete=f.ctx.modelRegistry.complete;f.ctx.modelRegistry.complete=async(...args)=>({...await complete(...args),provider:args[0].provider});
+ await f.handlers.before_agent_start({},f.ctx);await f.route();const result=await f.handlers.message_end({message:{...f.weak,provider:'openai'}},f.ctx);
+ assert.equal(f.completions.length,1);assert.equal(result.message.provider,'openai');assert.equal(result.message.model,'strong');
+});
+
+test('Pi native model selection, input and compaction cannot bypass an unavailable Magpie channel',async()=>{
+ await withGateway(null,async()=>{
+  const f=fixture(),api=await f.ready;subscription(f);await f.handlers.session_start({},f.ctx);f.models.small.provider='yam-gateway';f.ctx.model=f.models.small;
+  assert.equal(f.handlers.input({text:'do not send',source:'interactive'},f.ctx)?.action,'handled');assert.deepEqual(f.handlers.session_before_compact({},f.ctx),{cancel:true});
+  f.pi.setModel=async model=>{f.ctx.model=model;return true;};
+  await f.handlers.model_select({source:'user',previousModel:f.models.strong,model:f.models.small},f.ctx);
+  assert.equal(f.ctx.model.provider,'yam');assert.equal(api.snapshot().phase,'error');assert.equal(api.snapshot().preferences.model,'yam-gateway/small');
+  f.ctx.model=f.models.strong;await f.handlers.model_select({source:'user',previousModel:f.models.auto,model:f.models.strong},f.ctx);assert.equal(api.snapshot().error,null);
+ });
+});
+
+test('Pi gateway faults do not block image or known-capacity promotion to a native strong role',async()=>{
+ await withGateway(null,async()=>{
+  for(const kind of ['image','image-no-metadata','capacity']){
+   const f=fixture(),api=await f.ready;subscription(f);f.models.small.provider='yam-gateway';f.models.small.contextWindow=200;f.flags['yam-small']='yam-gateway/small';f.flags['yam-classifier']='openai/strong';if(kind==='image-no-metadata')delete f.models.small;
+   await f.handlers.session_start({},f.ctx);const content=kind==='capacity'?'x'.repeat(400):[{type:'text',text:'Explain this image'},{type:'image',data:'mock',mimeType:'image/png'}];
+   const result=await f.route({messages:[{role:'user',content}]});assert.equal(result.model.provider,'openai',kind);assert.equal(result.model.id,'strong',kind);assert.equal(api.snapshot().error,null);
+  }
+ });
+});
+
+test('Pi unsupported subscription reasoning cannot silently choose a paid strong role',async()=>{
+ for(const paid of [true,false]){
+  const f=fixture(),api=await f.ready;subscription(f);f.models.classifier={...f.models.strong,id:'classifier',provider:'p'};f.flags['yam-classifier']='p/classifier';f.models.small.thinkingLevelMap={low:'low'};
+  if(paid){f.models.strong.provider='yam-gateway';f.flags['yam-strong']='yam-gateway/strong';await assert.rejects(f.route(),/unsupported/i);assert.equal(api.snapshot().target,null);}
+  else {const selected=await f.route();assert.equal(selected.model.provider,'openai');assert.equal(selected.model.id,'strong');}
+ }
+});
+
+test('Pi interrupted subscription replies replace provisional tokens with final usage',async()=>{
+ for(const stopReason of ['length','error','aborted']){
+  const f=fixture(),api=await f.ready;subscription(f);f.models.strong.provider='yam-gateway';f.flags['yam-strong']='yam-gateway/strong';await f.handlers.before_agent_start({},f.ctx);await f.route();
+  const reply={role:'assistant',provider:'openai',model:'small',thinkingLevel:'medium',timestamp:42,content:[{type:'text',text:'partial'}],usage:{input:10,output:0,cacheRead:0,cacheWrite:0}};
+  f.handlers.message_update({message:reply});assert.equal(api.snapshot().actual.usage.output,0);
+  f.handlers.message_end({message:{...reply,stopReason,content:stopReason==='length'?reply.content:[],usage:{input:10,output:20,cacheRead:2,cacheWrite:0}}},f.ctx);
+  assert.equal(api.snapshot().phase,'error');assert.equal(api.snapshot().actual.usage.output,20,stopReason);assert.equal(api.snapshot().actual.usage.cacheRead,2);
+ }
+});
+test('Pi missing final usage clears provisional tokens and an empty failed attempt preserves the last reply',async()=>{
+ const f=fixture(),api=await f.ready;subscription(f);f.models.strong.provider='yam-gateway';f.flags['yam-strong']='yam-gateway/strong';await f.handlers.before_agent_start({},f.ctx);await f.route();
+ const reply={role:'assistant',provider:'openai',model:'small',thinkingLevel:'medium',timestamp:1,content:[{type:'text',text:'partial'}],usage:{input:10,output:0,cacheRead:0,cacheWrite:0}};
+ f.handlers.message_update({message:reply});f.handlers.message_end({message:{...reply,stopReason:'length',usage:undefined}},f.ctx);assert.equal(api.snapshot().actual.usage,undefined);
+ await f.handlers.before_agent_start({},f.ctx);f.handlers.message_end({message:{...reply,timestamp:2,stopReason:'error',content:[],usage:{input:0,output:0,cacheRead:0,cacheWrite:0}}},f.ctx);assert.equal(api.snapshot().actual.at,1);
+});
+
+test('Pi cancelled correction charges each provider response once including the aborted replacement',async()=>{
+ for(const received of [true,false]){
+  const f=feedbackFixture(),api=await f.ready,abort=new AbortController(),cost={input:.1,output:0,cacheRead:0,cacheWrite:0};
+  for(const model of [f.models.small,f.models.strong])model.cost={input:1,output:1,cacheRead:0,cacheWrite:0};
+  const complete=f.ctx.modelRegistry.complete;f.ctx.modelRegistry.complete=async(...args)=>({...await complete(...args),usage:{cost}});
+  await f.handlers.before_agent_start({},f.ctx);await f.route({signal:abort.signal});let finish;
+  f.ctx.modelRegistry.complete=()=>new Promise((resolve,reject)=>finish=()=>received?resolve({...f.weak,model:'strong',usage:{cost}}):reject(Error('interrupted')));
+  const weak={...f.weak,usage:{cost}},pending=f.handlers.message_end({message:weak},f.ctx);abort.abort();finish();const replacement=await pending;
+  assert.equal(replacement.message.stopReason,'aborted');assert.equal(api.snapshot().decision.executionCost,.1);
+  assert.equal(api.snapshot().decision.correctionCost,received?.1:null);if(received)assert.ok(Math.abs(api.snapshot().decision.totalCost-.3)<1e-10);else assert.equal(api.snapshot().decision.totalCost,null);
+  await f.handlers.message_end({message:replacement.message},f.ctx);assert.equal(api.snapshot().decision.executionCost,.1);
+ }
+});
+
+test('Pi explicit off lock never selects a model whose SDK would clamp off to an active level',async()=>{
+ const f=fixture(),api=await f.ready;await f.handlers.session_start({},f.ctx);await api.control({action:'set',revision:api.snapshot().revision,data:{model:'auto',effort:'off'}});
+ f.models.small.thinkingLevelMap={high:'high'};const selected=await f.route();assert.equal(selected.model.id,'strong');assert.equal(selected.thinkingLevel,'off');
+ await api.control({action:'set',revision:api.snapshot().revision,data:{model:'p/strong',effort:'off'}});f.models.strong.thinkingLevelMap={high:'high'};
+ for(const reason of ['user','direct'])await assert.rejects(f.route({reason}),/off.*unsupported|unsupported.*off/i);
+});
+
+test('ChatGPT classifier uses only the official execution adapter, including preview',async()=>{
+ const f=fixture(),api=await f.ready;subscription(f);await f.handlers.session_start({},f.ctx);
+ f.ctx.modelRegistry.streamSimple=()=>{throw Error('Pi OAuth HTTP must never be used');};
+ await f.route();assert.equal(f.nativeCalls.length,1);
+ await api.control({action:'preview',revision:api.snapshot().revision,data:{text:'read',rules:defaultRules}});assert.equal(f.nativeCalls.length,2);
+});
+test('subscription-only policy rejects API classification and physical model selection before inference',async()=>{
+ const f=fixture(),api=await f.ready;f.flags['yam-billing']='subscription';
+ await assert.rejects(f.route(),/subscription|billing/i);assert.equal(f.calls,0);
+ await f.handlers.session_start({},f.ctx);assert.ok(api.snapshot().error);
+ const result=f.handlers.input({text:'task',source:'interactive'},f.ctx);assert.equal(result.action,'handled');
+});
+test('known Magpie ChatGPT subscription IDs are rejected even when a stale model exists',async()=>{
+ const f=fixture();await f.ready;f.models.small.provider='yam-gateway';f.models.small.id='codex/old';f.flags['yam-small']='yam-gateway/codex/old';
+ await assert.rejects(f.route(),/official Codex|subscription.*gateway/i);assert.equal(f.calls,0);
+});
+test('legacy ChatGPT role identities are persisted as native CLI identities before auth can change',async()=>{
+ let f;
+ const native={resolveModel:(_ctx,m)=>{const alias={...m,provider:'yam-codex',api:'yam-native-codex'};f.models['native-'+m.id]=alias;return alias;},stream:()=>({result:async()=>({stopReason:'stop',content:[{type:'text',text:JSON.stringify({intent:'new',task:'answer',context:'independent',action:'none',depth:'normal',uncertain:false,readOnly:true})}]})})};
+ f=fixture({native});await f.ready;subscription(f);await f.handlers.session_start({},f.ctx);
+ const saved=f.entries.findLast(e=>e.customType==='yam.routing.config.v1').data;
+ assert.equal(saved.small,'yam-codex/small');assert.equal(saved.strong,'yam-codex/strong');assert.equal(saved.classifier,'yam-codex/small');
+ f.ctx.modelRegistry.isUsingOAuth=()=>false;
+ const selected=await f.route();assert.equal(selected.model.provider,'yam-codex');
+});
+
+test('Pi local exit aliases bypass routing errors and never call a model',async()=>{
+ for(const text of ['exit',' quit ','EXIT'])for(const busy of [false,true]){
+  const f=fixture();await f.ready;const calls=[];
+  f.ctx.isIdle=()=>!busy;f.ctx.abort=()=>calls.push('abort');f.ctx.shutdown=()=>calls.push('shutdown');
+  f.flags['yam-rules']='{}';await f.handlers.session_start({},f.ctx);
+  assert.deepEqual(await f.handlers.input({source:'interactive',text},f.ctx),{action:'handled'});
+  assert.deepEqual(calls,busy?['abort','shutdown']:['shutdown']);assert.equal(f.calls,0);
+ }
+});
+test('Pi slash exit uses graceful shutdown while ordinary text and images stay tasks',async()=>{
+ const f=fixture();await f.ready;let shutdowns=0;f.ctx.shutdown=()=>shutdowns++;f.ctx.abort=()=>assert.fail('idle exit must not abort');
+ assert.ok(f.commands.exit,'/exit must be registered');await f.commands.exit.handler('',f.ctx);assert.equal(shutdowns,1);
+ for(const event of [{source:'interactive',text:'解释 exit 命令'},{source:'interactive',text:'exit\nprint hello'},{source:'extension',text:'exit'},{source:'interactive',text:'exit',images:[{type:'image',data:'fixture',mimeType:'image/png'}]}]){
+  assert.notDeepEqual(await f.handlers.input(event,f.ctx),{action:'handled'});
+ }
+ assert.equal(shutdowns,1);assert.equal(f.calls,0);
 });

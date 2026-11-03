@@ -1,5 +1,7 @@
 import {ProjectWorkspace} from './ProjectWorkspace';
 import {PiRoutingConfig,PiRoutingBar} from './PiRouting';
+import {defaultPiArgs} from './pi-routing';
+import {PiPlugins} from "./PiPlugins";
 import DataSettings from './DataSettings';
 import {createPreferencesBackup,preferencesImportWrites,applyPreferencesImport,type PreferencesBackup} from './preferences-backup';
 import {startupTimings} from './startup-timings';
@@ -37,6 +39,7 @@ import {loadZshCommandReporting,saveZshCommandReporting,zshCommandReportingEligi
 import {loadZshDirectoryReporting,saveZshDirectoryReporting,zshDirectoryReportingEligible} from "./zsh-directory-reporting";
 import {installTerminalLinks} from "./terminal-links";
 import {openUrl} from "@tauri-apps/plugin-opener";
+import {cliInstaller} from "./cli-setup";
 import {TerminalPastePreview,TerminalPasteSettings} from "./TerminalPastePreview";
 import {loadTerminalPaste,saveTerminalPaste,inspectTerminalPaste,terminalPasteInputEligible,sameTerminalPasteTarget,type TerminalPasteMode,type TerminalPasteText,type PendingTerminalPaste,type TerminalPasteTarget} from "./terminal-paste";
 import {SearchAddon} from "@xterm/addon-search";
@@ -57,7 +60,7 @@ import SystemEntrySettings from "./SystemEntrySettings";
 import {SystemEntryController,type NotificationPauseState} from "./system-entry";
 import {saveTerminalLayout} from "./terminal-layout-persistence";
 import {TerminalLayout} from "./TerminalLayout";
-import {createTerminalLayout,changeTerminalLayout,assignTerminalPane,replaceTerminalSession,removeTerminalPane,isTerminalProtocolResponse,resizeTerminalNode,clampSplitPercent,swapTerminalPanes,terminalPaneId,terminalPaneIndex,terminalLeaves,terminalLayoutRoot,splitTerminalPane,terminalTabs,terminalMembers,terminalSessionPane,removeTerminalTab,splitAndMoveTerminalTab,type TerminalPaneEdge,moveTerminalTab,terminalDirectionPane,type TerminalPaneDirection,type TerminalPaneRect,type TerminalLayoutMode} from "./terminal-layout";
+import {createTerminalLayout,changeTerminalLayout,assignTerminalPane,replaceTerminalSession,removeTerminalPane,isTerminalProtocolResponse,isTerminalMouseReport,resizeTerminalNode,clampSplitPercent,swapTerminalPanes,terminalPaneId,terminalPaneIndex,terminalLeaves,terminalLayoutRoot,splitTerminalPane,terminalTabs,terminalMembers,terminalSessionPane,removeTerminalTab,splitAndMoveTerminalTab,type TerminalPaneEdge,moveTerminalTab,terminalDirectionPane,type TerminalPaneDirection,type TerminalPaneRect,type TerminalLayoutMode} from "./terminal-layout";
 import {GitContextPolling,gitContextLabel,type GitContext} from "./git-context";
 import {historyRequest,capacityLevel,type HistoryItem,type HistoryCursor,type HistoryPage,type HistoryOverview,type InboxItem,type PendingKey,type HistoryCapacity} from "./history";
 import { useEffect, useLayoutEffect, useRef, useState, type DragEvent } from "react";
@@ -127,7 +130,7 @@ import {HistoryArchive} from "./HistoryArchive";
 import { SessionLogSearch } from "./SessionLogSearch";
 import { SessionLogExport } from "./SessionLogExport";
 import {sessionRecovery,type SessionAvailability} from "./session-recovery";
-import {AttentionCard} from "./AttentionCard";
+import {SessionInbox} from "./SessionInbox";
 import {captureAttention,isCurrentAttention} from "./attention-actions";
 import {agentLabel,type AgentState,type AgentReceipt} from "./agent-events";
 import {sessionRuntimeInfo} from "./session-runtime-info";
@@ -244,9 +247,10 @@ function App() {
   const windowPreferenceKey=(name:string)=>slotPreferenceKey(desktopWindow.slot,name);
   function openMainSettings(target:string="settings"){void invoke("open_main_settings",{target}).catch(()=>setError("Main settings window is unavailable."));}
   const terminalMoveTaskRef=useRef<PendingTerminalMove|null>(null),terminalMoveIncomingRef=useRef<TerminalMoveReceipt|null>(null),terminalMoveOperationRef=useRef(false);
+  const [layoutMenuHost,setLayoutMenuHost]=useState<HTMLDivElement|null>(null);
   const [movePending,setMovePending]=useState(false),[moveBusy,setMoveBusy]=useState(false);
   function terminalMoveSourceCurrent(task:PendingTerminalMove){return terminalMoveTaskRef.current===task&&terminalMounted.current&&terminalViews.current.get(task.id)===task.view&&!task.view.disposed&&task.view.instance===task.instance&&task.view.desktopGeneration===task.generation&&task.view.attachVersion===task.attachment&&ownerConnectionAvailable.current.version===task.connection;}
-  function suspendTerminalMove(task:PendingTerminalMove){const view=task.view;view.moveListenerRevision=(view.moveListenerRevision??0)+1;view.moving=true;view.clearDisplayVersion=null;view.reportedPromptNavigation=null;view.reportedCommand=null;view.reportedCommandSequence=-1;view.reportedCommandPair=null;view.writable=false;view.resizePending=null;view.scrollReturnPending=false;view.lifecycleRevision++;view.viewportRevision++;view.attachVersion=(view.attachVersion??0)+1;task.attachment=view.attachVersion;cancelTerminalPaste(false);cancelTerminalFile();cancelTerminalFileDrop();setTerminalNotice("Moving tab: input and terminal updates are paused. Use Check/Continue move if the result is unavailable.");setMovePending(true);setRecoveryRevision(v=>v+1);}
+  function suspendTerminalMove(task:PendingTerminalMove){const view=task.view;view.moveListenerRevision=(view.moveListenerRevision??0)+1;view.moving=true;view.clearDisplayVersion=null;view.reportedPromptNavigation=null;view.reportedCommand=null;view.reportedCommandSequence=-1;view.reportedCommandPair=null;view.writable=false;view.resizePending=null;view.scrollReturnPending=false;view.lifecycleRevision++;view.viewportRevision++;view.attachVersion=(view.attachVersion??0)+1;task.attachment=view.attachVersion;cancelTerminalPaste(false);cancelTerminalFile();cancelTerminalFileDrop();setTerminalNotice("Moving session: input and terminal updates are paused. Use Check/Continue move if the result is unavailable.");setMovePending(true);setRecoveryRevision(v=>v+1);}
   function resumeTerminalMove(task:PendingTerminalMove,generation:number){if(!terminalMoveSourceCurrent(task))return;const view=task.view;view.desktopGeneration=generation;view.lifecycleRevision++;view.viewportRevision++;view.attachVersion=(view.attachVersion??0)+1;view.moving=false;view.writable=task.writable;view.dirty=true;view.refreshMoveListeners?.();terminalMoveTaskRef.current=null;setMovePending(false);setTerminalNotice(null);setRecoveryRevision(v=>v+1);}
   function canMoveTerminalTab(){const id=sessionId.current,view=id?terminalViews.current.get(id):null;return !terminalMoveTaskRef.current&&!terminalMoveOperationRef.current&&!!id&&!!view&&!view.disposed&&!view.moving&&view.ready&&view.live&&view.projection&&!view.attaching&&!view.parsing&&!view.updating&&!view.resizing&&view.availability!=="owner_unavailable"&&view.availability!=="terminal_unavailable"&&ownerConnectionAvailable.current.available&&terminalPaneVisible(id)&&view.element.isConnected&&!view.element.inert&&view.element.style.visibility!=="hidden"&&view.instance.modes.mouseTrackingMode==="none"&&!document.querySelector('dialog[open],[role="dialog"][aria-modal="true"],.modal-backdrop');}
   async function disposeMoveSource(task:PendingTerminalMove,receipt:TerminalMoveReceipt){
@@ -254,7 +258,7 @@ function App() {
     task.receipt=receipt;if(receipt.phase!=="awaiting_source")return;
     if(terminalViews.current.get(task.id)===task.view){if(!terminalMoveSourceCurrent(task)&&!task.view.disposed)throw Error("Terminal move source attachment changed.");task.view.moveDisposal=true;terminalViews.current.retain(view=>view!==task.view);}
     if(!task.view.disposed||task.view.element.isConnected||terminalViews.current.get(task.id)===task.view)throw Error("Source terminal disposal is incomplete. Check/Continue move to retry.");
-    const layout=terminalLayoutRef.current,pane=terminalSessionPane(layout,task.id);if(pane>=0){const next=removeTerminalTab(layout,pane,task.id);terminalLayoutRef.current=next;setTerminalLayout(next);showTerminalLayout();try{localStorage.setItem(windowPreferenceKey("lastSession"),JSON.stringify(next.panes[next.focused]));}catch{setError("Moved tab layout could not be saved. Current GUI ownership is retained.");}}
+    const layout=terminalLayoutRef.current,pane=terminalSessionPane(layout,task.id);if(pane>=0){const next=removeTerminalTab(layout,pane,task.id);terminalLayoutRef.current=next;setTerminalLayout(next);showTerminalLayout();try{localStorage.setItem(windowPreferenceKey("lastSession"),JSON.stringify(next.panes[next.focused]));}catch{setError("Moved session layout could not be saved. Current GUI ownership is retained.");}}
     const reply=terminalMoveReply(await invoke("release_terminal_view",{sessionId:task.id,desktopGeneration:task.generation,moveToken:receipt.token}));
     if(reply.status!=="pending"&&reply.status!=="completed")throw Error("Move disposal acknowledgment is pending. Check/Continue move.");task.receipt=reply.receipt;
     recoverRevealedTerminals(layout);
@@ -262,7 +266,7 @@ function App() {
   async function moveTerminalTabToOtherWindow(){
     if(!canMoveTerminalTab())return;const id=sessionId.current!,view=terminalViews.current.get(id)!;
     const task:PendingTerminalMove={id,view,instance:view.instance,generation:view.desktopGeneration,connection:ownerConnectionAvailable.current.version,attachment:view.attachVersion,appearance:{...view.appearance},writable:view.writable,receipt:null};terminalMoveTaskRef.current=task;terminalMoveOperationRef.current=true;setMoveBusy(true);suspendTerminalMove(task);
-    try{const reply=terminalMoveReply(await invoke("prepare_terminal_move",{sessionId:id,desktopGeneration:task.generation,appearance:task.appearance}));if(!terminalMounted.current)return;if(reply.status==="pending"){if(!terminalMoveSourceCurrent(task))throw Error("Move is pending after source attachment changed.");await disposeMoveSource(task,reply.receipt);}else if(reply.status==="busy"||reply.status==="unavailable"||reply.status==="stale"){resumeTerminalMove(task,task.generation);setError("Terminal move is busy or unavailable. The source tab was preserved.");}else if(reply.status==="completed"){terminalMoveTaskRef.current=null;setMovePending(false);}else{throw Error("Terminal move result is pending.");}}
+    try{const reply=terminalMoveReply(await invoke("prepare_terminal_move",{sessionId:id,desktopGeneration:task.generation,appearance:task.appearance}));if(!terminalMounted.current)return;if(reply.status==="pending"){if(!terminalMoveSourceCurrent(task))throw Error("Move is pending after source attachment changed.");await disposeMoveSource(task,reply.receipt);}else if(reply.status==="busy"||reply.status==="unavailable"||reply.status==="stale"){resumeTerminalMove(task,task.generation);setError("Terminal move is busy or unavailable. The source session was preserved.");}else if(reply.status==="completed"){terminalMoveTaskRef.current=null;setMovePending(false);}else{throw Error("Terminal move result is pending.");}}
     catch{setError("Terminal move result is unavailable. The task was preserved; use Check/Continue move.");}
     finally{terminalMoveOperationRef.current=false;setMoveBusy(false);}
   }
@@ -284,7 +288,7 @@ function App() {
       const attachment=await openHistory(record,false,undefined,undefined,current,receipt.appearance,receipt);
       if(!current()||!attachment||attachment.view.disposed||!attachment.view.ready||attachment.view.desktopGeneration!==receipt.target_generation)throw Error();
       const completed=terminalMoveReply(await invoke("complete_terminal_move",{token:receipt.token}));if(completed.status!=="completed")throw Error();terminalMoveIncomingRef.current=null;setMovePending(!!terminalMoveTaskRef.current);
-    }catch{setError("Moved tab is still pending. Use Open moved tab to retry; the process was not restarted.");}finally{terminalMoveOperationRef.current=false;setMoveBusy(false);}
+    }catch{setError("Moved session is still pending. Use Open moved session to retry; the process was not restarted.");}finally{terminalMoveOperationRef.current=false;setMoveBusy(false);}
   }
   async function receiveTerminalMove(autoOpen=false){if(!terminalMounted.current)return;try{const reply=terminalMoveReply(await invoke("query_terminal_move",{sessionId:null}));if(!terminalMounted.current)return;if(reply.status==="pending"){terminalMoveIncomingRef.current=reply.receipt;setMovePending(true);if(autoOpen&&reply.receipt.target===desktopWindow.slot&&reply.receipt.target_epoch===desktopWindow.epoch&&reply.receipt.phase==="awaiting_target")await openMovedTerminalTab();}}catch{setError("Pending window moves are unavailable. Use Check/Continue move to query again.");}}
   useEffect(()=>{let active=true,unlisten:UnlistenFn|null=null;void listen("terminal-tab-move",()=>{if(active)void receiveTerminalMove(true);}).then(dispose=>{if(!active){dispose();return;}unlisten=dispose;void receiveTerminalMove(false);}).catch(()=>{if(active)setError("Move events unavailable. Use Check/Continue move to query pending tasks.");});return()=>{active=false;unlisten?.();};},[]);
@@ -300,6 +304,7 @@ function App() {
   const updaterIntent=useRef(0);
   const [updaterOpen,setUpdaterOpen]=useState(false);
   const [dataSettingsOpen,setDataSettingsOpen]=useState(false);
+  const [piPluginsOpen,setPiPluginsOpen]=useState(false),[piPluginsBusy,setPiPluginsBusy]=useState(false);
   const [updaterSnapshot,setUpdaterSnapshot]=useState<UpdaterSnapshot|null>(null);
   const [updaterAutomatic,setUpdaterAutomatic]=useState(updaterPreferenceLoad.automatic);
   const updaterAutomaticRef=useRef(updaterAutomatic);updaterAutomaticRef.current=updaterAutomatic;
@@ -673,6 +678,8 @@ function App() {
   const [launchWorktreeAttempt,setLaunchWorktreeAttempt]=useState<string|undefined>(undefined);
   const [launchDraft,setLaunchDraft]=useState<LaunchDefaults>({adapter:"codex",mode:"interactive",extra_args:"",prompt:null,command:null,provider:null});
   const [adapters, setAdapters] = useState<AgentAdapter[]>([]);
+  const adapterDiscoveryEpoch=useRef(0),cliInstallPending=useRef(false);
+  const [adapterChecking,setAdapterChecking]=useState(false),[adapterInstalling,setAdapterInstalling]=useState(false);
   const [globalLaunchDefaults,setGlobalLaunchDefaults]=useState<LaunchDefaults>(launchDraft);
   const launchSettingsDialog=useRef<HTMLDialogElement>(null);
   const [projectToolsPath,setProjectToolsPath]=useState("");
@@ -711,6 +718,8 @@ function App() {
   const [piValidation,setPiValidation]=useState({valid:false,scope:""});
   const piFormValid=piValidation.valid&&piValidation.scope===JSON.stringify([cwd,formLaunch.extra_args]);
   const formAdapter=formLaunch.adapter==="custom"?"shell":formLaunch.adapter;
+  const selectedCliMissing=formAdapter!=="shell"&&adapters.some(a=>a.id===formAdapter&&!a.available);
+  const selectedCliInstaller=cliInstaller(formAdapter);
   const selectedAdapter=formAdapter,command=formLaunch.command??"",prompt=formLaunch.prompt??"",adapterArgs=formLaunch.extra_args,providerConfig=formLaunch.provider??null;
   function editLaunch(fields:Partial<LaunchDefaults>){
     if(fields.adapter&&fields.adapter!=="codex"&&formLaunch.codex)fields={...fields,codex:undefined};
@@ -754,7 +763,7 @@ function App() {
       const to=providerPreset(adapter==='claude'?'deepseek-claude':'deepseek').provider;
       if(current.base_url===from?.base_url&&to)provider={...current,base_url:to.base_url};
     }
-    editLaunch({adapter,...(provider!==current?{provider}:{}),...(adapter!=="shell"&&formAdapter==="shell"?{command:null}:{}),...(adapter!==formAdapter&&(adapter==="pi"||formAdapter==="pi")?{extra_args:adapter==="pi"?"--yam-gateway http://127.0.0.1:3425 --yam-small yam-gateway/codex/gpt-6-luna --yam-strong yam-gateway/codex/gpt-6.1-sol":""}:{})});
+    editLaunch({adapter,...(provider!==current?{provider}:{}),...(adapter!=="shell"&&formAdapter==="shell"?{command:null}:{}),...(adapter!==formAdapter&&(adapter==="pi"||formAdapter==="pi")?{extra_args:adapter==="pi"?defaultPiArgs:""}:{})});
     if(adapter!==formAdapter&&!useProjectSettings&&!launchWorktreeAttempt&&launchDirectoryOverride===undefined){
       try{setCwd(adapter==="shell"?terminalDirectory(undefined,launchTerminalProfile):currentProject?.path||session?.cwd||activeProject||"");}
       catch(reason){setError(reason instanceof Error?reason.message:"Terminal profile is unavailable.");}
@@ -1013,7 +1022,7 @@ function App() {
       const record=await invoke<SessionRecord>("get_session",{sessionId:id});
       if(!current())return false;
       const inspect=recordedOnly||terminalStatuses.has(record.status);
-      const receipt=inspect?await openHistory(record,false,pane,undefined,onAttached?valid:undefined,undefined,undefined,undefined,true):await openTerminal(record,pane,undefined,onAttached?valid:undefined);
+      const receipt=inspect?await openHistory(record,false,pane,undefined,onAttached?valid:undefined,undefined,undefined,undefined,true,undefined,true):await openTerminal(record,pane,undefined,onAttached?valid:undefined);
       if(!receipt)return false;
       const {view,attachment,detail,intent:attachmentIntent}=receipt;
       const attachedId=view.record?.summary.session_id;
@@ -1123,16 +1132,32 @@ function App() {
       });
   }, []);
 
-  useEffect(() => {
-    invoke<AgentAdapter[]>("list_adapters")
-      .then((next) => {
-        setAdapters(next);
-        setLaunchDraft(previous=>next.some(adapter=>adapter.id===previous.adapter&&adapter.available)?previous:{...previous,adapter:next.find(adapter=>adapter.available&&adapter.id!=="shell")?.id??"shell"});
-      })
-      .catch((reason: unknown) => {
-        setError(reason instanceof Error ? reason.message : String(reason));
-      });
-  }, []);
+  async function refreshAdapters():Promise<AgentAdapter[]|null> {
+    const epoch=++adapterDiscoveryEpoch.current;setAdapterChecking(true);
+    try {
+      const next=await invoke<AgentAdapter[]>("list_adapters");
+      if(epoch!==adapterDiscoveryEpoch.current)return null;
+      setAdapters(next);return next;
+    } catch(reason) {
+      if(epoch===adapterDiscoveryEpoch.current)setError(reason instanceof Error?reason.message:String(reason));
+      return null;
+    } finally {if(epoch===adapterDiscoveryEpoch.current)setAdapterChecking(false);}
+  }
+  useEffect(()=>{void refreshAdapters();return()=>{adapterDiscoveryEpoch.current++;};},[]);
+  async function installSelectedCli() {
+    const installer=cliInstaller(formAdapter);
+    if(cliInstallPending.current||!installer)return;
+    cliInstallPending.current=true;setAdapterInstalling(true);
+    try {
+      const next=await refreshAdapters();
+      if(!next?.some(a=>a.id===formAdapter&&!a.available))return;
+      const created=await startSession({cwd:"",command:installer.command,launch:null});
+      if(created)try {
+        const title=saveSessionName(localStorage,created.session_id,t("Install {{name}}",{name:installer.name}));
+        setSessionTitles(previous=>({...previous,[created.session_id]:title!}));
+      }catch{setError("Installer started, but its session name could not be saved. Use the existing terminal.");}
+    }finally{cliInstallPending.current=false;setAdapterInstalling(false);}
+  }
 
   useEffect(() => {
     void refreshHistory();
@@ -1170,9 +1195,9 @@ function App() {
       };
       const bindData=()=>{const generation=view.desktopGeneration,listenerRevision=view.moveListenerRevision??0;return instance.onData(data => {
         if(view.desktopGeneration!==generation||(view.moveListenerRevision??0)!==listenerRevision)return;
-        const protocol=isTerminalProtocolResponse(data);
+        const protocol=isTerminalProtocolResponse(data),mouse=isTerminalMouseReport(data);
         const connected=ownerConnectionAvailable.current.available&&view.availability!=="owner_unavailable";
-        if(!view.live&&!protocol){continueTerminalInput(id,view,data);return;}
+        if(!view.live&&!protocol){if(!mouse)continueTerminalInput(id,view,data);return;}
         if (!view.disposed && !view.moving && connected && !(view.projection&&protocol) && view.live && (view.projection || (view.cursor !== null && (view.ready || view.firstAttachment)))
           && (terminalHasInputFocus(id) || (!view.projection && protocol))){
           const owner=view.frameInstance,attachment=view.attachVersion,connectionVersion=ownerConnectionAvailable.current.version;
@@ -1186,7 +1211,7 @@ function App() {
           const write=async()=>{
             if(version!==queue.version||!valid())return;
             try{await invoke("write_session",{desktopGeneration:generation,sessionId:id,data});if(version===queue.version&&valid()){view.writable=true;syncViewSize(view);}}
-            catch(reason){if(version===queue.version)queue.version++;if(valid()){view.writable=false;if(terminalHasInputFocus(id))setError(`${String(reason)}. Pending terminal input was discarded; check the prompt before typing again.`);}}
+            catch(reason){if(version===queue.version)queue.version++;if(valid()){view.writable=false;if((!protocol&&!mouse||queue.count>1)&&terminalHasInputFocus(id))setError(`${String(reason)}. Pending terminal input was discarded; check the prompt before typing again.`);}}
           };
           const pending=queue.write?queue.write.then(write):write();
           queue.write=pending;
@@ -1608,10 +1633,10 @@ function App() {
         const id=endedView.element.dataset.sessionId!,generation=endedView.desktopGeneration;
         endedView.moving=true;
         try{await invoke("release_terminal_view",{sessionId:id,desktopGeneration:generation});}finally{endedView.moving=false;}
-        if(!terminalMounted.current||terminalViews.current.get(id)!==endedView||endedView.desktopGeneration!==generation||!releasable(endedView))throw Error("Terminal views changed while releasing capacity. Review the current tabs and try again.");
+        if(!terminalMounted.current||terminalViews.current.get(id)!==endedView||endedView.desktopGeneration!==generation||!releasable(endedView))throw Error("Terminal views changed while releasing capacity. Review the current sessions and try again.");
         // Keep its saved scene until the new renderer exists, even when startup fails.
         endedView.moveDisposal=true;
-      }else if(!endedView&&terminalViews.current.size>=16)throw Error("Terminal views are active, visible, or still being saved. Close an ended tab and wait for its output to finish saving.");
+      }else if(!endedView&&terminalViews.current.size>=16)throw Error("Terminal views are active, visible, or still being saved. Close an ended session and wait for its output to finish saving.");
       const reply = await invoke<SessionSummary & {directory_reporting_warning?:string;command_reporting_warning?:string}>("create_session", worktreeAttempt ? {...argumentsForStart,worktreeAttempt} : argumentsForStart);
       if(performance.getEntriesByName("yam.start.create").length>=32)performance.clearMeasures("yam.start.create");
       performance.measure("yam.start.create",{start:clickStarted,end:performance.now()});
@@ -1647,7 +1672,7 @@ function App() {
       return next;
     } catch (reason: unknown) {
       const failure=reason instanceof Error?reason.message:String(reason);
-      if(failure==="terminal_view_limit"){setError("The 16-view limit is shared by both windows. Close an ended tab in either window and wait for its output to finish saving.");return;}
+      if(failure==="terminal_view_limit"){setError("The 16-view limit is shared by both windows. Close an ended session in either window and wait for its output to finish saving.");return;}
       const unknownStart=failure==="terminal_start_outcome_unknown";
       if(launchWasOpen&&!unknownStart&&!dialog?.open&&(document.activeElement===focusOrigin||document.activeElement===document.body)&&!document.querySelector?.('dialog[open]'))dialog?.showModal();
       const message=unknownStart?"Start outcome unknown. New starts in the current window are paused. Check existing sessions; do not retry automatically.":overrides?.ssh?"SSH start unavailable. Check the terminal owner and macOS OpenSSH. The start outcome may be unknown; do not retry automatically.":overrides?.commandReporting?"Command status reporting could not be started. Update the terminal owner before trying again.":overrides?.directoryReporting?"Zsh directory reporting could not be started. Check terminal owner compatibility.":overrides?.envRefs&&Object.keys(overrides.envRefs).length?"Terminal environment references could not be applied. Check the profile and terminal owner compatibility.":overrides?.shell?shellStartError(reason):reason instanceof Error?reason.message:String(reason);
@@ -2228,10 +2253,10 @@ function App() {
       }
     }catch{setError("Session name, pin, or launch settings could not be saved. The terminal is running.");}
   }
-  async function openTerminal(record:SessionRecord,pane?:number|string,restoreVersion?:number,scopeValid?:()=>boolean,appearance?:TerminalSettings){
-    return openHistory(record,false,pane,restoreVersion,scopeValid,appearance,undefined,undefined,terminalStatuses.has(record.status));
+  async function openTerminal(record:SessionRecord,pane?:number|string,restoreVersion?:number,scopeValid?:()=>boolean,appearance?:TerminalSettings,replaceView=true){
+    return openHistory(record,false,pane,restoreVersion,scopeValid,appearance,undefined,undefined,terminalStatuses.has(record.status),undefined,replaceView);
   }
-  async function openHistory(record: SessionRecord, firstAttachment=false, pane?:number|string, restoreVersion?:number, scopeValid?:()=>boolean,appearance?:TerminalSettings,moveReceipt?:TerminalMoveReceipt,replaceFrom?:string,recordedOnly?:boolean,onSelected?:()=>void) {
+  async function openHistory(record: SessionRecord, firstAttachment=false, pane?:number|string, restoreVersion?:number, scopeValid?:()=>boolean,appearance?:TerminalSettings,moveReceipt?:TerminalMoveReceipt,replaceFrom?:string,recordedOnly?:boolean,onSelected?:()=>void,replaceView=false) {
     if(scopeValid&&!scopeValid())return;
     if(restoreVersion===undefined)cancelLayoutRestore();
     const connectionVersion=ownerConnectionAvailable.current.version;
@@ -2266,7 +2291,7 @@ function App() {
     const target=typeof pane==="string"?terminalPaneIndex(baseLayout,pane):pane??baseLayout.focused;
     if(target<0)return;
     let nextLayout;
-    try{nextLayout=restoreVersion===undefined?assignTerminalPane(baseLayout,target,id):baseLayout;}catch(reason){setError(String(reason));return;}
+    try{nextLayout=restoreVersion===undefined?assignTerminalPane(baseLayout,target,id,replaceView||firstAttachment):baseLayout;}catch(reason){setError(String(reason));return;}
     if(restoreVersion!==undefined||openingClaim!==viewClaimSelection.current)nextLayout.focused=currentLayout.focused;
     const slot=terminalSessionPane(nextLayout,id),attachedPane=terminalPaneId(nextLayout,slot);
     if(restoreVersion===undefined&&zoomedPaneIdRef.current&&attachedPane!==zoomedPaneIdRef.current)setTerminalPaneZoom(null);
@@ -2673,7 +2698,7 @@ function App() {
     const available=adapters.filter(item=>item.available||item.id==="shell");
     const preferred=readPreference("yam.lastSessionCli",defaults.adapter==="custom"?"shell":defaults.adapter,(value):value is string=>typeof value==="string"&&available.some(item=>item.id===value));
     const adapter=profileId!==undefined?"shell":available.some(item=>item.id===preferred)?preferred:available.find(item=>item.id!=="shell")?.id??"shell";
-    setLaunchDraft({...defaults,adapter,mode:"interactive",...(adapter==="pi"&&defaults.adapter!=="pi"?{extra_args:"--yam-gateway http://127.0.0.1:3425 --yam-small yam-gateway/codex/gpt-6-luna --yam-strong yam-gateway/codex/gpt-6.1-sol"}:{}),...(defaults.provider&&!supportsProvider(adapter,defaults.provider)?{provider:null}:{}),...(adapter!=="shell"||!isMainWindow?{command:null}:{}),...(profileId!==undefined?{command:null,provider:null,prompt:null,extra_args:""}:{})});
+    setLaunchDraft({...defaults,adapter,mode:"interactive",...(adapter==="pi"&&defaults.adapter!=="pi"?{extra_args:defaultPiArgs}:{}),...(defaults.provider&&!supportsProvider(adapter,defaults.provider)?{provider:null}:{}),...(adapter!=="shell"||!isMainWindow?{command:null}:{}),...(profileId!==undefined?{command:null,provider:null,prompt:null,extra_args:""}:{})});
     let directory=path??currentProject?.path??session?.cwd??activeProject??"";
     if(adapter==="shell"&&!worktreeAttempt)try{directory=terminalDirectory(path,profileId);}catch(reason){setError(reason instanceof Error?reason.message:"Terminal profile is unavailable.");}
     setCwd(directory);
@@ -2684,6 +2709,13 @@ function App() {
   const reviewRecord=session?{summary:session,status:sessionStatus,agent:currentAgent}:null;
   const currentReviewOrigin=reviewOrigin(reviewRecord);
   const unreadTotal=historyOverview.unread_receipts;
+  async function markReceiptRead(record:HistoryItem,entry:AgentReceipt){
+    const owner=ownerConnectionAvailable.current.version;
+    const valid=()=>terminalMounted.current&&ownerConnectionAvailable.current.available&&ownerConnectionAvailable.current.version===owner;
+    if(!valid()){if(terminalMounted.current)setError("Background connection unavailable. Reconnect using the existing recovery controls.");return;}
+    try{await invoke("read_agent_receipt",{sessionId:record.summary.session_id,receipt:entry.id,revision:entry.revision});if(valid())await refreshHistory(valid);}
+    catch(reason){if(valid())setError(String(reason));}
+  }
   async function openReceipt(record:HistoryItem,entry:AgentReceipt,agent?:AgentState){
     const action=captureAttention(record,entry,agent),focusOrigin=document.activeElement;
     const operation=++attentionOperation.current,owner=ownerConnectionAvailable.current.version;
@@ -2701,10 +2733,11 @@ function App() {
       &&attachment.view.availability!=="terminal_unavailable";
     const current=()=>attached()&&attachment.view.live&&["starting","running"].includes(attachment.view.status??"");
     if(!attached())return;
-    if(action.state!=="current"||!current()){showConversation(false,focusOrigin);return;}
+    if(action.state==="historical"||!current()){showConversation(false,focusOrigin);return;}
     try {
       const fresh=await invoke<SessionRecord>("get_session",{sessionId:action.sessionId});
-      if(!current()||!isCurrentAttention(action,fresh))return;
+      const confirmed=action.state==="unknown"?captureAttention(fresh,action.receipt,fresh.agent):action;
+      if(!current()||fresh.summary.session_id!==action.sessionId||!isCurrentAttention(confirmed,fresh))return;
       await invoke("read_agent_receipt",{sessionId:action.sessionId,receipt:action.receipt.id,revision:action.receipt.revision});
       if(current())await refreshHistory(current);
     }catch(reason){if(current())setError(String(reason));}
@@ -2750,7 +2783,7 @@ function App() {
       hide:()=>{const layout=terminalLayoutRef.current,id=layout.panes[layout.focused];if(id)closeTerminalTab(layout.focused,id);},reopen:()=>void reopenTerminalTab(),sidebar:()=>setSidebarOpen(value=>!value),palette:()=>openCommandPalette(),find:()=>openTerminalFind(),
       larger:()=>zoomTerminal("larger"),smaller:()=>zoomTerminal("smaller"),reset:()=>zoomTerminal("reset"),"split-horizontal":()=>splitFocusedTerminalPane("horizontal"),"split-vertical":()=>splitFocusedTerminalPane("vertical"),zoom:()=>toggleTerminalPaneZoom(),
       previous:()=>{if(previousSession.current)void openSession(previousSession.current);},attention:()=>void jumpToAttention(),logs:()=>setLogSearchOpen(true),appearance:()=>(isMainWindow?setAppearanceOpen(true):openMainSettings("appearance")),settings:()=>(isMainWindow?setTerminalSettingsOpen(true):openMainSettings("settings")),profiles:()=>(isMainWindow?setTerminalProfilesOpen(true):openMainSettings("profiles")),"keyboard-shortcuts":()=>(isMainWindow?setKeyboardShortcutsOpen(true):openMainSettings("keyboard-shortcuts")),updates:()=>{if(isMainWindow){setUpdaterOpen(true);const current=updaterController.current.snapshot;if(current?.configured&&!updaterBusy(current.state)&&current.state!=="verified")void runUpdaterAction("check");}else openMainSettings("updates");}
-     ,"paste-settings":()=>(isMainWindow?setPasteSettingsOpen(true):openMainSettings("paste-settings")),"system-entry":()=>{if(isMainWindow){setSystemEntryOpen(true);void refreshSystemEntry();}else openMainSettings("system-entry");},"directory-reporting":()=>(isMainWindow?setDirectoryReportingOpen(true):openMainSettings("directory-reporting")),"command-reporting":()=>(isMainWindow?setCommandReportingOpen(true):openMainSettings("command-reporting")),"launch-settings":()=>{if(isMainWindow){setLaunchDefaultsNotice(null);launchSettingsDialog.current?.showModal();}else openMainSettings("launch-settings");}
+     ,"pi-plugins":()=>(isMainWindow?setPiPluginsOpen(true):openMainSettings("pi-plugins")),"paste-settings":()=>(isMainWindow?setPasteSettingsOpen(true):openMainSettings("paste-settings")),"system-entry":()=>{if(isMainWindow){setSystemEntryOpen(true);void refreshSystemEntry();}else openMainSettings("system-entry");},"directory-reporting":()=>(isMainWindow?setDirectoryReportingOpen(true):openMainSettings("directory-reporting")),"command-reporting":()=>(isMainWindow?setCommandReportingOpen(true):openMainSettings("command-reporting")),"launch-settings":()=>{if(isMainWindow){setLaunchDefaultsNotice(null);launchSettingsDialog.current?.showModal();}else openMainSettings("launch-settings");}
     } satisfies Record<NativeMenuAction,()=>unknown>,blocked);
   };
   useEffect(()=>{
@@ -2850,7 +2883,7 @@ function App() {
   const projectDeleteDialog=useRef<HTMLDialogElement>(null),projectDeleteRef=useRef<Project|null>(null);
   const [projectDelete,setProjectDelete]=useState<Project|null>(null);
   const sessionDeleteDialog=useRef<HTMLDialogElement>(null);
-  type SessionDeleteTarget={id:string;title:string;archived:boolean;previewId:string|null};
+  type SessionDeleteTarget={id:string;title:string;stopBeforeDelete:boolean;archived:boolean;previewId:string|null};
   const sessionDeleteRef=useRef<SessionDeleteTarget|null>(null),sessionDeleteBusyRef=useRef(false);
   const [sessionDelete,setSessionDelete]=useState<SessionDeleteTarget|null>(null);
   const [sessionDeleteBusy,setSessionDeleteBusy]=useState(false),[sessionDeleteError,setSessionDeleteError]=useState<string|null>(null);
@@ -2886,8 +2919,8 @@ function App() {
   }
   function beginSessionDeletion(record:HistoryItem|SessionRecord|null=selectedRecord.current){
     if(!isMainWindow||sessionDeleteBusyRef.current||!record)return;
-    if(!["succeeded","failed","stopped"].includes(record.status)){setError("Stop the session before deleting it.");return;}
-    const target={id:record.summary.session_id,title:titleFor(record.summary),archived:false,previewId:null};
+    if(!["starting","running","succeeded","failed","stopped"].includes(record.status)){setError("Stop the session before deleting it.");return;}
+    const target={id:record.summary.session_id,title:titleFor(record.summary),stopBeforeDelete:["starting","running"].includes(record.status),archived:false,previewId:null};
     sessionDeleteRef.current=target;setSessionDelete(target);setSessionDeleteError(null);sessionDeleteDialog.current?.showModal();
   }
   function closeSessionDeletion(){
@@ -2900,6 +2933,30 @@ function App() {
     sessionDeleteBusyRef.current=true;setSessionDeleteBusy(true);setSessionDeleteError(null);
     let complete=false;
     try{
+      if(target.stopBeforeDelete&&!target.archived){
+        let record=await invoke<SessionRecord>("get_session",{sessionId:target.id});
+        if(["starting","running"].includes(record.status)){
+          try{await invoke("stop_session",{sessionId:target.id});}
+          catch(reason){
+            record=await invoke<SessionRecord>("get_session",{sessionId:target.id});
+            if(!["succeeded","failed","stopped"].includes(record.status))throw reason;
+          }
+        }
+        // Stop acknowledges termination before final log/frame persistence completes.
+        for(let attempt=0;attempt<100;attempt++){
+          record=await invoke<SessionRecord>("get_session",{sessionId:target.id});
+          if(["succeeded","failed","stopped"].includes(record.status)){
+            if(record.notification_pending)await invoke("acknowledge_notification",{sessionId:target.id,expectedStatus:record.status});
+            for(const receipt of record.agent?.inbox??[]){
+              if(!receipt.read||["pending","failed"].includes(receipt.delivery))await invoke("read_agent_receipt",{sessionId:target.id,receipt:receipt.id,revision:receipt.revision});
+            }
+            try{await invoke("archive_session",{sessionId:target.id});target.archived=true;break;}
+            catch(reason){if(String(reason)!=="Session is still finalizing")throw reason;}
+          }else if(!["starting","running"].includes(record.status))throw Error("This session cannot be deleted in its current state.");
+          if(attempt===99)throw Error("The session is still stopping. Nothing was deleted. Retry when it has stopped.");
+          await new Promise(resolve=>setTimeout(resolve,100));
+        }
+      }
       if(!target.archived){await invoke("archive_session",{sessionId:target.id});target.archived=true;}
       if(!target.previewId){
         const preview=await invoke<{preview_id:string;session_ids:string[]}>("preview_archive_deletion",{sessionIds:[target.id]});
@@ -2976,10 +3033,10 @@ function App() {
 
   function openSettingsSection(page:SettingsPage){
     if(!isMainWindow){openMainSettings(page);return;}
-    if(starting||systemEntryBusy)return;
+    if(starting||systemEntryBusy||piPluginsBusy)return;
     if(terminalProfilesOpen){if(terminalProfileCollection.selectedId)selectTerminalProfile(terminalProfileCollection.selectedId);else newTerminalProfile();}
-    setDataSettingsOpen(false);setAppearanceOpen(false);setTerminalSettingsOpen(false);setTerminalProfilesOpen(false);setKeyboardShortcutsOpen(false);setPasteSettingsOpen(false);setUpdaterOpen(false);setSystemEntryOpen(false);setDirectoryReportingOpen(false);setCommandReportingOpen(false);launchSettingsDialog.current?.close();
-    const pages:Record<SettingsPage,()=>void>={support:()=>setDataSettingsOpen(true),appearance:()=>setAppearanceOpen(true),settings:()=>setTerminalSettingsOpen(true),profiles:()=>setTerminalProfilesOpen(true),"keyboard-shortcuts":()=>setKeyboardShortcutsOpen(true),"paste-settings":()=>setPasteSettingsOpen(true),updates:()=>setUpdaterOpen(true),"system-entry":()=>{setSystemEntryOpen(true);void refreshSystemEntry();},"directory-reporting":()=>setDirectoryReportingOpen(true),"command-reporting":()=>setCommandReportingOpen(true),"launch-settings":()=>{setLaunchDefaultsNotice(null);requestAnimationFrame(()=>launchSettingsDialog.current?.showModal());}};
+    setPiPluginsOpen(false);setDataSettingsOpen(false);setAppearanceOpen(false);setTerminalSettingsOpen(false);setTerminalProfilesOpen(false);setKeyboardShortcutsOpen(false);setPasteSettingsOpen(false);setUpdaterOpen(false);setSystemEntryOpen(false);setDirectoryReportingOpen(false);setCommandReportingOpen(false);launchSettingsDialog.current?.close();
+    const pages:Record<SettingsPage,()=>void>={"pi-plugins":()=>setPiPluginsOpen(true),support:()=>setDataSettingsOpen(true),appearance:()=>setAppearanceOpen(true),settings:()=>setTerminalSettingsOpen(true),profiles:()=>setTerminalProfilesOpen(true),"keyboard-shortcuts":()=>setKeyboardShortcutsOpen(true),"paste-settings":()=>setPasteSettingsOpen(true),updates:()=>setUpdaterOpen(true),"system-entry":()=>{setSystemEntryOpen(true);void refreshSystemEntry();},"directory-reporting":()=>setDirectoryReportingOpen(true),"command-reporting":()=>setCommandReportingOpen(true),"launch-settings":()=>{setLaunchDefaultsNotice(null);requestAnimationFrame(()=>launchSettingsDialog.current?.showModal());}};
     pages[page]();
   }
   async function exportPreferences(){return invoke<boolean>("export_preferences",{backup:createPreferencesBackup(key=>window.localStorage.getItem(key),launchTemplateCollection.templates,shortcutMac)});}
@@ -2995,8 +3052,8 @@ function App() {
     launchTemplateCollection.load();refreshLaunchTemplateUi();
     for(const [key,value]of Object.entries(writes))await publishWindowPreference(nativeInvoke,desktopWindow,key,value);
   }
-  function settingsNavigation(page:SettingsPage){return (dirty:boolean)=><SettingsNavigation current={page} dirty={dirty} blocked={starting||systemEntryBusy} onSelect={openSettingsSection}/>;}
-  const settingsOpen=appearanceOpen||terminalSettingsOpen||terminalProfilesOpen||keyboardShortcutsOpen||pasteSettingsOpen||updaterOpen||systemEntryOpen||directoryReportingOpen||commandReportingOpen||dataSettingsOpen||capacityOpen;
+  function settingsNavigation(page:SettingsPage){return (dirty:boolean)=><SettingsNavigation current={page} dirty={dirty} blocked={starting||systemEntryBusy||piPluginsBusy} onSelect={openSettingsSection}/>;}
+  const settingsOpen=piPluginsOpen||appearanceOpen||terminalSettingsOpen||terminalProfilesOpen||keyboardShortcutsOpen||pasteSettingsOpen||updaterOpen||systemEntryOpen||directoryReportingOpen||commandReportingOpen||dataSettingsOpen||capacityOpen;
   const settingsOrigin=useRef<HTMLElement|null>(null);
   useLayoutEffect(()=>{
     if(settingsOpen){settingsOrigin.current=document.activeElement instanceof HTMLElement&&document.activeElement!==document.body?document.activeElement:null;return;}
@@ -3015,6 +3072,7 @@ function App() {
     <div className={`app-shell ${sidebarOpen ? "" : "sidebar-collapsed"} ${projectToolsOpen?"project-tools-open":""}`}>
       {!conversationOpen&&scrollView?.find?.state.visible&&<TerminalFindBar key={session!.session_id} controller={scrollView.find} onClose={()=>closeTerminalFind(scrollView,session!.session_id)} onLogSearch={()=>setLogSearchOpen(true)}/>}
       {terminalSettingsError&&<p role="alert" className="terminal-preference-error">{t(terminalSettingsError)}</p>}
+      {piPluginsOpen&&<PiPlugins navigation={settingsNavigation("pi-plugins")} invoke={invoke} onBusyChange={setPiPluginsBusy} onClose={()=>setPiPluginsOpen(false)} onOpenCatalog={()=>openUrl("https://pi.dev/packages")}/>}
       {dataSettingsOpen&&<DataSettings navigation={settingsNavigation("support")} mac={shortcutMac} onClose={()=>setDataSettingsOpen(false)} onExport={exportPreferences} onImport={importPreferences} onDiagnostics={()=>void exportDiagnostics()} diagnosticsStatus={diagnosticsMessage} diagnosticsBusy={diagnosticsExporting} onNotification={()=>void testNotification()} notificationStatus={notificationTestStatus} canNotify={!!session&&!notificationTestBusy.current}/>}
       {updaterOpen&&<UpdaterSettings navigation={settingsNavigation("updates")} snapshot={updaterSnapshot} automatic={updaterAutomatic} busy={updaterBusyAction} error={updaterError} onAutomatic={value=>void changeUpdaterAutomatic(value)} onAction={action=>void runUpdaterAction(action)} onClose={closeUpdaterSettings}/>}
       {systemEntryOpen&&<dialog ref={systemEntryDialog} className="app-dialog system-entry-dialog settings-surface" aria-label={t("System entry")} onCancel={event=>{event.preventDefault();if(!systemEntryBusy)setSystemEntryOpen(false);}}><header className="dialog-header"><h2>{t("System entry")}</h2></header>{settingsNavigation("system-entry")(false)}<div className="settings-page-body"><SystemEntrySettings showTitle={false} enabled={systemEntry.global_shortcut_enabled} registered={systemEntry.global_shortcut_registered} available={systemEntry.shortcut_available} busy={systemEntryBusy} warning={systemEntry.warning} onChange={enabled=>void setGlobalShortcut(enabled)}/></div><footer className="dialog-actions"><button type="button" disabled={systemEntryBusy} onClick={()=>setSystemEntryOpen(false)}>{t("Close")}</button></footer></dialog>}
@@ -3048,8 +3106,23 @@ function App() {
       {archiveOpen&&<HistoryArchive titleFor={titleFor} history={history} onDeleted={clearDeletedSessionNames} onClose={()=>{setArchiveOpen(false);void refreshHistory();}} onChanged={async()=>{await refreshHistory();if(capacityOpen)await scanCapacity();}} onSelect={async id=>{if(!await openSession(id))throw Error("Session selection was superseded or unavailable");}}/>}
       {logSearchOpen&&<SessionLogSearch sessions={history.map(record=>({id:record.summary.session_id,title:titleFor(record.summary),cwd:record.summary.cwd}))} selected={session?.session_id??null} onClose={()=>setLogSearchOpen(false)} onSelect={async id=>{if(!await openSession(id))throw Error("Session selection was superseded or unavailable");}}/>}
       {logExportOpen&&session&&<SessionLogExport sessionId={session.session_id} title={titleFor(session)} onClose={()=>setLogExportOpen(false)}/>}
-      <dialog ref={projectDeleteDialog} className="app-dialog" aria-label={t("Delete project")} onCancel={event=>{event.preventDefault();closeProjectDeletion();}}><h2>{t("Delete project")}</h2><p>{t("Delete project {{value0}} from the sidebar?",{value0:projectDelete?.name??""})}</p><p>{t("Project files and session history are kept. Add the directory again to show it in the sidebar.")}</p><div className="dialog-actions"><button type="button" onClick={closeProjectDeletion}>{t("Cancel")}</button><button type="button" onClick={()=>confirmProjectDeletion(projectDelete)}>{t("Delete")}</button></div></dialog>
-      <dialog ref={sessionDeleteDialog} className="app-dialog session-delete-dialog" aria-label={t("Delete session")} aria-describedby="session-delete-description" onCancel={event=>{event.preventDefault();closeSessionDeletion();}}><header className="dialog-header"><h2>{t("Delete session")}</h2></header><div className="dialog-body" id="session-delete-description"><p>{t("Delete session {{value0}}?",{value0:sessionDelete?.title??""})}</p><p>{t("Permanently deletes this session's YAM history, log and saved terminal scene. This cannot be undone. Project files and native CLI history are kept.")}</p><p>{t("If deletion cannot finish, the session remains in archived history. Retry here or open archived sessions.")}</p>{sessionDeleteError&&<p role="alert">{t(sessionDeleteError)}</p>}</div><div className="dialog-actions"><button type="button" disabled={sessionDeleteBusy} onClick={closeSessionDeletion}>{t("Cancel")}</button><button type="button" disabled={sessionDeleteBusy} onClick={()=>void confirmSessionDeletion()}>{t("Delete")}</button></div></dialog>
+      <dialog ref={projectDeleteDialog} className="app-dialog confirmation-dialog" aria-label={t("Delete project")} aria-describedby="project-delete-description" onCancel={event=>{event.preventDefault();closeProjectDeletion();}}>
+        <header className="dialog-header"><h2>{t("Delete project")}</h2></header>
+        <div className="dialog-body" id="project-delete-description"><p>{t("Delete project {{value0}} from the sidebar?",{value0:projectDelete?.name??""})}</p><p className="confirmation-note">{t("Project files and session history are kept. Add the directory again to show it in the sidebar.")}</p></div>
+        <div className="dialog-actions"><button type="button" onClick={closeProjectDeletion}>{t("Cancel")}</button><button type="button" className="danger-button" onClick={()=>confirmProjectDeletion(projectDelete)}>{t("Delete")}</button></div>
+      </dialog>
+      <dialog ref={sessionDeleteDialog} className="app-dialog session-delete-dialog confirmation-dialog" aria-label={t("Delete session")} aria-describedby="session-delete-description" onCancel={event=>{event.preventDefault();closeSessionDeletion();}}>
+        <header className="dialog-header"><h2>{t("Delete session")}</h2></header>
+        <div className="dialog-body" id="session-delete-description">
+          <p>{t("Delete session {{value0}}?",{value0:sessionDelete?.title??""})}</p>
+          {sessionDelete?.stopBeforeDelete&&<p className="confirmation-warning">{t("This session is running. It will be stopped before its history is deleted.")}</p>}
+          <p>{t("Permanently delete history, logs and the saved terminal scene. This cannot be undone.")}</p>
+          <p className="confirmation-note">{t("Project files and native CLI history are kept.")}</p>
+          <details className="confirmation-details"><summary>{t("Deletion details")}</summary><p>{t("If deletion cannot finish, the session remains in archived history. Retry here or open archived sessions.")}</p></details>
+          {sessionDeleteError&&<p role="alert">{t(sessionDeleteError)}</p>}
+        </div>
+        <div className="dialog-actions"><button type="button" disabled={sessionDeleteBusy} onClick={closeSessionDeletion}>{t("Cancel")}</button><button type="button" className="danger-button" disabled={sessionDeleteBusy} onClick={()=>void confirmSessionDeletion()}>{sessionDeleteBusy?t("Deleting…"):sessionDelete?.stopBeforeDelete?t("Stop and delete"):t("Delete")}</button></div>
+      </dialog>
       <aside
         className="sidebar"
         aria-label={t("Projects and sessions")}
@@ -3111,10 +3184,7 @@ function App() {
           {historyOverview.attention_sessions>0&&<button type="button" className={unreadTotal>0?"icon-button small":"inbox-toggle"} onClick={jumpToAttention} aria-label={t("Next attention")} title={t("Next attention")+(shortcutHint(shortcuts.attention,shortcutMac)?" · "+shortcutHint(shortcuts.attention,shortcutMac):"")}>{unreadTotal>0?<ChevronRight aria-hidden="true"/>:t("Next attention")}</button>}
         </div>}
         {inboxOpen && <section className="agent-inbox" aria-label={t("Agent round inbox")}>
-          {inbox.map(({session:record,receipt:entry})=>{
-            const agent=sessionId.current===record.summary.session_id?currentAgent:undefined;
-            return <AttentionCard key={`${record.summary.session_id}:${entry.id}`} record={record} entry={entry} agent={agent} title={titleFor(record.summary)} onOpen={()=>void openReceipt(record,entry,agent)}/>;
-          })}
+          <SessionInbox items={inbox} titleFor={titleFor} selectedId={sessionId.current} currentAgent={currentAgent} onOpen={(record,entry,agent)=>void openReceipt(record,entry,agent)} onMarkRead={(record,entry)=>void markReceiptRead(record,entry)}/>
           {inboxCursor&&<button type="button" onClick={()=>void refreshInbox(true)}>{t("Load more unread rounds")}</button>}
           {!unreadTotal && <p>{t("No unread rounds")}</p>}
         </section>}
@@ -3158,7 +3228,7 @@ function App() {
                           {titleFor(record.summary)}
                         </span>
                         {record.agent?.unread_count>0&&<span className="session-unread" aria-label={t("{{value0}} unread",{value0:record.agent.unread_count})}>{record.agent.unread_count}</span>}
-                      </button><details className="toolbar-more session-context-menu" onKeyDown={event=>{if(event.key==="Escape"&&!event.nativeEvent?.isComposing&&event.keyCode!==229){event.preventDefault();event.stopPropagation();event.currentTarget.open=false;const target=event.currentTarget.parentElement?.querySelector<HTMLButtonElement>(".session-row")??event.currentTarget.querySelector("summary");target?.focus();}}}><summary className="sr-only" tabIndex={-1} onFocus={event=>event.currentTarget.closest(".session-item")?.querySelector<HTMLButtonElement>(".session-row")?.focus()}>{t("Session actions")}</summary><div className="toolbar-more-actions" role="menu" aria-label={t("Session actions")}><button type="button" role="menuitem" disabled={starting} onClick={()=>void duplicateSession(record.summary.session_id,true)}>{t("New with these settings")}</button><button type="button" role="menuitem" onClick={()=>void duplicateSession(record.summary.session_id)}>{t("Duplicate session…")}</button><button type="button" role="menuitem" onClick={()=>beginRename(record.summary.session_id,titleFor(record.summary))}>{t("Rename session")}</button><button type="button" role="menuitem" onClick={()=>toggleSessionPin(record.summary.session_id)}>{pinnedSessions.includes(record.summary.session_id)?t("Unpin"):t("Pin")}</button>{isMainWindow&&<button type="button" role="menuitem" className="session-delete-action" disabled={!["succeeded","failed","stopped"].includes(record.status)} onClick={()=>beginSessionDeletion(record)}>{t("Delete")}</button>}</div></details>{!!record.previous_runs?.length&&<details className="session-runs"><summary>{t("Previous runs (")}{record.previous_runs.length})</summary>{record.previous_runs.map((id,index)=><button key={id} type="button" onClick={()=>void openSession(id,undefined,undefined,true)}>{t("Open run")+" "}{record.previous_runs!.length-index}</button>)}</details>}</div>
+                      </button><details className="toolbar-more session-context-menu" onToggle={event=>positionProjectMenu(event.currentTarget)} onKeyDown={event=>{if(event.key==="Escape"&&!event.nativeEvent?.isComposing&&event.keyCode!==229){event.preventDefault();event.stopPropagation();event.currentTarget.open=false;event.currentTarget.querySelector("summary")?.focus();}}}><summary className="session-menu-trigger" aria-label={t("Actions for session {{value0}}",{value0:titleFor(record.summary)})} title={t("Session actions")}><Ellipsis aria-hidden="true"/></summary><div className="toolbar-more-actions desktop-menu" role="menu" aria-label={t("Session actions")}><button type="button" role="menuitem" disabled={starting} onClick={()=>void duplicateSession(record.summary.session_id,true)}><Plus aria-hidden="true"/><span>{t("New with these settings")}</span></button><button type="button" role="menuitem" onClick={()=>void duplicateSession(record.summary.session_id)}><Copy aria-hidden="true"/><span>{t("Duplicate session…")}</span></button><div className="menu-separator" role="separator"/><button type="button" role="menuitem" onClick={()=>beginRename(record.summary.session_id,titleFor(record.summary))}><Pencil aria-hidden="true"/><span>{t("Rename session")}</span></button><button type="button" role="menuitem" onClick={()=>toggleSessionPin(record.summary.session_id)}>{pinnedSessions.includes(record.summary.session_id)?<PinOff aria-hidden="true"/>:<Pin aria-hidden="true"/>}<span>{pinnedSessions.includes(record.summary.session_id)?t("Unpin"):t("Pin")}</span></button>{isMainWindow&&<><div className="menu-separator" role="separator"/><button type="button" role="menuitem" className="session-delete-action menu-danger" disabled={!["starting","running","succeeded","failed","stopped"].includes(record.status)} onClick={()=>beginSessionDeletion(record)}><Trash2 aria-hidden="true"/><span>{t("Delete")}</span></button></>}</div></details>{!!record.previous_runs?.length&&<details className="session-runs"><summary>{t("Previous runs (")}{record.previous_runs.length})</summary>{record.previous_runs.map((id,index)=><button key={id} type="button" onClick={()=>void openSession(id,undefined,undefined,true)}>{t("Open run")+" "}{record.previous_runs!.length-index}</button>)}</details>}</div>
             );
             return (
               <div className="project-group" key={key}>
@@ -3282,7 +3352,7 @@ function App() {
               <summary className="icon-button" aria-label={t("More actions")} title={t("More actions")}><Ellipsis aria-hidden="true" /></summary>
               <div className="toolbar-more-actions">
                 <strong>{t("Session actions")}</strong>
-                <small>{t("Hide tab keeps the task running. Closing this GUI keeps background tasks running. Stop session affects only the current task. Stop all tasks ends every background task.")}</small>
+                <small>{t("Hide session keeps the task running. Closing this GUI keeps background tasks running. Stop session affects only the current task. Stop all tasks ends every background task.")}</small>
 
             <button className="icon-button" aria-label={t("Export session log")} title={t("Export session log")} disabled={!session} onClick={()=>setLogExportOpen(true)}><Copy/> {t("Export session log")}</button>
 
@@ -3343,9 +3413,9 @@ function App() {
 
 
 
-                <button type="button" aria-label={t("Move tab to other window")} disabled={!canMoveTerminalTab()||moveBusy} onClick={event=>{event.currentTarget.closest("details")?.removeAttribute("open");void moveTerminalTabToOtherWindow();}}>{t("Move tab to other window")}</button>
+                <button type="button" aria-label={t("Move session to other window")} disabled={!canMoveTerminalTab()||moveBusy} onClick={event=>{event.currentTarget.closest("details")?.removeAttribute("open");void moveTerminalTabToOtherWindow();}}>{t("Move session to other window")}</button>
                 <button type="button" aria-label={t("Check/Continue move")} disabled={moveBusy} onClick={()=>void continueTerminalMove()}>{t("Check/Continue move")}</button>
-                {movePending&&terminalMoveIncomingRef.current?.target===desktopWindow.slot&&<button type="button" disabled={moveBusy} onClick={()=>void openMovedTerminalTab()}>{t("Open moved tab")}</button>}
+                {movePending&&terminalMoveIncomingRef.current?.target===desktopWindow.slot&&<button type="button" disabled={moveBusy} onClick={()=>void openMovedTerminalTab()}>{t("Open moved session")}</button>}
                 <button type="button" aria-label={t("Second terminal window")} onClick={event=>{event.currentTarget.closest("details")?.removeAttribute("open");void openSecondWindow();}}>{t("Second terminal window")}</button>
                 {isMainWindow&&<button type="button" aria-label={t("Connect SSH")} onClick={event=>{event.currentTarget.closest("details")?.removeAttribute("open");setSshError(null);setSshOpen(true);}}>{t("Connect SSH")}</button>}
                 {isMainWindow&&<button type="button" aria-label={t("Browser")} onClick={event=>{event.currentTarget.closest("details")?.removeAttribute("open");void openBrowserDialog();}}>{t("Browser")}</button>}
@@ -3405,7 +3475,8 @@ function App() {
             <button type="button" aria-pressed={!conversationOpen} onClick={()=>showConversation(false)}>{t("Terminal")}</button><button type="button" aria-pressed={conversationOpen} onClick={()=>showConversation(true)}>{t("Conversation")}</button>
             <button type="button" className="icon-button small terminal-find-button" aria-label={t("Find in terminal")} title={t("Find in terminal")} disabled={conversationOpen||!scrollView?.ready||!!scrollView.disposed} onClick={openTerminalFind}><Search aria-hidden="true"/><span className="sr-only">{t("Find in terminal")}</span></button>
           </div>
-          {session.launch?.mode==="interactive"&&<span className="session-agent">{session.launch.adapter}</span>}
+          {session.launch?.mode==="interactive"&&<span className="session-agent">{currentAgent?.phase==="shell"?"Shell":session.launch.adapter}</span>}
+          <div className="workspace-layout-slot" hidden={conversationOpen} ref={setLayoutMenuHost}/>
           <div className="workspace-actions">
             {isMainWindow&&session&&!session.ssh&&<button type="button" onClick={()=>{setProjectToolsTab("files");setProjectToolsPath(visibleGitContext?.root||session.cwd);setProjectToolsOpen(true);}}>{t("Files")}</button>}
             {session&&visibleGitContext?.branch&&<button type="button" className="workspace-changes" title={gitContextLabel(visibleGitContext,t)} onClick={()=>{if(!isMainWindow){openMainSettings();return;}setProjectToolsTab("changes");setProjectToolsPath(visibleGitContext.root||gitProjectPath);setProjectToolsOpen(true);}}>{t("Changes")}{visibleGitContext.dirty&&<span className="changes-dot" aria-label={t("Uncommitted changes")}/>}</button>}
@@ -3425,14 +3496,14 @@ function App() {
                     : t("Memory sampling unavailable or incomplete. Refreshes every 5 seconds while visible.")}>{memoryLabel(memory,Date.now(),t)}</span>
         </footer>
 
-        {session?.launch?.adapter==="pi"&&<PiRoutingBar key={`${session.session_id}:${currentAgent?.generation??''}`} sessionId={session.session_id} generation={currentAgent?.generation??''} active={isRunning} available={ownerConnectionAvailable.current.available} invoke={invoke}/>}
+        {session?.launch?.adapter==="pi"&&currentAgent?.phase!=="shell"&&<PiRoutingBar key={`${session.session_id}:${currentAgent?.generation??''}`} sessionId={session.session_id} generation={currentAgent?.generation??''} active={isRunning} available={ownerConnectionAvailable.current.available} invoke={invoke}/>}
         <section
           className={`terminal-area ${terminalLayout.panes.some(Boolean) ? "" : "terminal-empty"} ${terminalLayout.mode==="single"&&!terminalLayout.panes.some(Boolean)?"terminal-whole-empty":""}`}
           aria-label={t("Terminal")}
           hidden={conversationOpen} inert={conversationOpen}
         >
           <div className="terminal-host terminal-cache-host" ref={terminalHost} aria-hidden="true" />
-          <TerminalLayout tabAttention={id=>(history.find(record=>record.summary.session_id===id)?.agent?.unread_count??0)>0} onRenameTab={renameTab} onDuplicateTab={id=>void duplicateSession(id)} canReopen={canReopenTerminalTab()} onReopen={()=>void reopenTerminalTab()} ownerVersion={ownerConnectionAvailable.current.version} onTabDragStart={beginTerminalTabDrag} onTabDragCancel={cancelTerminalTabDrag} onTabDrop={commitTerminalTabDrag} onReorderTab={reorderTerminalSession} zoomedPaneId={zoomedPaneId} zoomRevision={terminalPaneZoomIntent.current} onDirection={focusTerminalPaneDirection} onZoom={toggleTerminalPaneZoom} tabLabel={id=>titleFor(terminalViews.current.get(id)?.record?.summary??{session_id:id,cwd:"",command:null,status:"unknown"})} onTab={selectTerminalTab} onHideTab={closeTerminalTab} onMoveTab={moveTerminalSession} onSplit={splitFocusedTerminalPane} layout={terminalLayout} labels={terminalLayout.panes.map(id=>id?titleFor(terminalViews.current.get(id)?.record?.summary??{session_id:id,cwd:"",command:null,status:"unknown"}):null)} splitPercent={splitPercent} swapDisabled={target=>!canSwapTerminalPanes(target)} onMode={changeLayoutMode} onFocus={focusTerminalPane} onClose={closeTerminalPane} onHost={mountTerminalPane} onSplitChange={commitTerminalSplit} onSplitPreview={value=>previewTerminalSplit(value,paneZoomGeneration)} onNodeSplitChange={(nodeId,value)=>commitTerminalNodeSplit(nodeId,value,paneZoomGeneration)} onSwap={swapTerminalPane} onCancelFit={()=>cancelTerminalLayoutFit(paneZoomGeneration)} />
+          <TerminalLayout toolbarHost={layoutMenuHost} tabAttention={id=>(history.find(record=>record.summary.session_id===id)?.agent?.unread_count??0)>0} onRenameTab={renameTab} onDuplicateTab={id=>void duplicateSession(id)} canReopen={canReopenTerminalTab()} onReopen={()=>void reopenTerminalTab()} ownerVersion={ownerConnectionAvailable.current.version} onTabDragStart={beginTerminalTabDrag} onTabDragCancel={cancelTerminalTabDrag} onTabDrop={commitTerminalTabDrag} onReorderTab={reorderTerminalSession} zoomedPaneId={zoomedPaneId} zoomRevision={terminalPaneZoomIntent.current} onDirection={focusTerminalPaneDirection} onZoom={toggleTerminalPaneZoom} tabLabel={id=>titleFor(terminalViews.current.get(id)?.record?.summary??{session_id:id,cwd:"",command:null,status:"unknown"})} onTab={selectTerminalTab} onHideTab={closeTerminalTab} onMoveTab={moveTerminalSession} onSplit={splitFocusedTerminalPane} layout={terminalLayout} labels={terminalLayout.panes.map(id=>id?titleFor(terminalViews.current.get(id)?.record?.summary??{session_id:id,cwd:"",command:null,status:"unknown"}):null)} splitPercent={splitPercent} swapDisabled={target=>!canSwapTerminalPanes(target)} onMode={changeLayoutMode} onFocus={focusTerminalPane} onClose={closeTerminalPane} onHost={mountTerminalPane} onSplitChange={commitTerminalSplit} onSplitPreview={value=>previewTerminalSplit(value,paneZoomGeneration)} onNodeSplitChange={(nodeId,value)=>commitTerminalNodeSplit(nodeId,value,paneZoomGeneration)} onSwap={swapTerminalPane} onCancelFit={()=>cancelTerminalLayoutFit(paneZoomGeneration)} />
           {!terminalLayout.panes.some(Boolean) && terminalLayout.mode==="single" && (
             <div className="empty-state">
               <TerminalSquare className="empty-icon" aria-hidden="true" />
@@ -3522,8 +3593,9 @@ function App() {
         ref={launchDialog}
         className="app-dialog"
         aria-labelledby="launch-title"
+        onFocusCapture={event=>{if(!event.currentTarget.contains(event.relatedTarget as Node|null))void refreshAdapters();}}
         onCancel={(event) => {
-          if (starting) event.preventDefault();
+          if (starting||adapterInstalling) event.preventDefault();
         }}
         onClose={() => {
           cancelProjectPreview();
@@ -3533,7 +3605,7 @@ function App() {
         <form
           onSubmit={(event) => {
             event.preventDefault();
-            void startNewSession();
+            if(selectedCliMissing)void installSelectedCli();else void startNewSession();
           }}
         >
           <header className="dialog-header">
@@ -3553,12 +3625,18 @@ function App() {
             <div className="startup-program-field">
               <span>{t("Startup program")}</span>
               <div className="startup-programs" role="group" aria-label={t("Startup program")}>
-                {adapters.map(adapter => <button type="button" key={adapter.id} aria-pressed={formAdapter===adapter.id||(formAdapter==="custom"&&adapter.id==="shell")} title={!adapter.available&&adapter.id!=="shell"?t("{{value0}} was not found on PATH", {value0:adapter.label}):formLaunch.provider&&!supportsProvider(adapter.id,formLaunch.provider)?t("Switch Model connection to existing CLI configuration to choose this program."):adapter.label}
-                  disabled={(!adapter.available && adapter.id!=="shell") || (!!formLaunch.provider&&!supportsProvider(adapter.id,formLaunch.provider))}
+                {adapters.map(adapter => <button type="button" key={adapter.id} aria-pressed={formAdapter===adapter.id||(formAdapter==="custom"&&adapter.id==="shell")} title={formLaunch.provider&&!supportsProvider(adapter.id,formLaunch.provider)?t("Switch Model connection to existing CLI configuration to choose this program."):!adapter.available&&adapter.id!=="shell"?t("Not detected. Select to install."):adapter.label}
+                  disabled={starting || adapterInstalling || (!!formLaunch.provider&&!supportsProvider(adapter.id,formLaunch.provider))}
                   onClick={()=>changeAdapter(adapter.id)}>{adapter.id==="shell"?t("Terminal"):adapter.id==="codex"?t("Codex"):adapter.id==="claude"?t("Claude"):adapter.id==="gemini"?t("Gemini"):adapter.label}</button>)}
               </div>
             </div>
-            {formAdapter==="pi"&&<PiRoutingConfig args={formLaunch.extra_args} cwd={cwd} invoke={invoke} onChange={args=>editLaunch({extra_args:args})} onValidity={setPiValidation}/>}
+            {selectedCliMissing&&selectedCliInstaller&&<section className="cli-setup" aria-label={t("CLI setup")}>
+              <div><p role="status">{t("{{name}} was not detected.",{name:selectedCliInstaller.name})}</p><button type="button" disabled={adapterChecking||adapterInstalling} onClick={()=>void refreshAdapters()}>{t(adapterChecking?"Checking…":"Check again")}</button></div>
+              <p className="settings-help">{t("Install runs in a YAM terminal. When it finishes, open New session again to detect the CLI.")}</p>
+              {selectedCliInstaller.requiresNode&&<p className="settings-help">{t("This installer requires Node.js with npm. Install Node.js first if it is not available.")}</p>}
+              <details><summary>{t("View installation command")}</summary><code>{selectedCliInstaller.command}</code></details>
+            </section>}
+            {formAdapter==="pi"&&!selectedCliMissing&&<PiRoutingConfig args={formLaunch.extra_args} cwd={cwd} invoke={invoke} onChange={args=>editLaunch({extra_args:args})} onValidity={setPiValidation} installedGateways={installedGateways}/>}
             {installedTerminals.length>0&&<label><span>{t("Open in")}</span><Select aria-label={t("Open session in")} value={sessionTerminal} onChange={event=>setSessionTerminal(event.target.value)}>
               <option value="yam">{t("YAM")}</option>
               {installedTerminals.includes("terminal")&&<option value="terminal">{t("System Terminal")}</option>}
@@ -3629,17 +3707,17 @@ function App() {
             <button
               className="secondary-button"
               type="button"
-              disabled={starting}
+              disabled={starting||adapterInstalling}
               onClick={() => launchDialog.current?.close()}
             >
               {t("Cancel")}</button>
             <button
               className="primary-button"
               type="submit"
-              disabled={starting || (formAdapter==="pi"&&!piFormValid) || adapters.length === 0 || projectConfigBusy || (useProjectSettings&&!projectPreview?.trusted)}
+              disabled={starting || adapterInstalling || adapterChecking || adapters.length === 0 || (selectedCliMissing?!selectedCliInstaller:((formAdapter==="pi"&&!piFormValid) || projectConfigBusy || (useProjectSettings&&!projectPreview?.trusted)))}
             >
               <Play aria-hidden="true" />
-              {starting ? t("Starting...") : t("Start session")}
+              {starting||adapterInstalling ? t("Starting...") : selectedCliMissing&&selectedCliInstaller?t("Install {{name}}",{name:selectedCliInstaller.name}):t("Start session")}
             </button>
           </footer>
         </form>

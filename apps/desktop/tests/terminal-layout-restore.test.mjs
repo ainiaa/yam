@@ -405,6 +405,7 @@ for(const via of ['tab','pane','sidebar','reader','terminal'])test('followup war
  let latest=false;const fresh={generation:'g',agent_session_id:'native-after-hidden',phase:'waiting',last_receipt:{revision:7}};
  const h=fixture(via==='pane'?snapshot('horizontal',ids.slice(0,2),ids[1]):null,{rpc:(name,args)=>name==='get_session'?Promise.resolve({...record(args.sessionId),agent:latest&&args.sessionId===ids[0]?fresh:{phase:'working'}}):undefined});await h.mount();
  if(via!=='pane'){await h.actual.openSession(ids[0]);await h.actual.openSession(ids[1]);}await h.flush();const a=h.refs.terminalViews.current.get(ids[0]),version=a.attachVersion;
+ if(['tab','reader','terminal'].includes(via)){let saved=assignTerminalPane(h.layout(),0,ids[0]);saved=assignTerminalPane(saved,0,ids[1]);h.actual.terminalLayoutRef.current=saved;}
  latest=true;h.refs.conversationOpenRef.current=!['reader','terminal'].includes(via);
  if(via==='sidebar')await h.actual.openSession(ids[0]);else if(via==='pane')h.actual.focusTerminalPane(0);else {h.actual.selectTerminalTab(0,ids[0]);await h.flush();if(via==='reader')h.actual.showConversation(true);}
  await h.flush();assert.deepEqual(h.state.agent,fresh);assert.deepEqual(a.record.agent,fresh);assert.equal(a.attachVersion,version);noTaskMutation(h);h.cleanup();

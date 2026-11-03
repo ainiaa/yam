@@ -33,6 +33,7 @@ const ACTIONS: &[&str] = &[
     "directory-reporting",
     "command-reporting",
     "launch-settings",
+    "pi-plugins",
 ];
 fn group(
     app: &tauri::AppHandle,
@@ -224,6 +225,7 @@ pub(super) fn build(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             ("paste-settings", "Paste settings"),
             ("keyboard-shortcuts", "Keyboard shortcuts…"),
             ("launch-settings", "Launch templates and defaults"),
+            ("pi-plugins", "Pi plugins"),
             ("", ""),
             ("directory-reporting", "Zsh directory reporting…"),
             ("command-reporting", "Zsh command status reporting…"),
@@ -254,6 +256,7 @@ fn target<'a>(action: &str, focused: &'a str) -> &'a str {
             | "directory-reporting"
             | "command-reporting"
             | "launch-settings"
+            | "pi-plugins"
     ) {
         "main"
     } else {

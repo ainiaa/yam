@@ -21,6 +21,8 @@ pub struct AgentState {
     pub cli_platform: Option<String>,
     pub agent_session_id: Option<String>,
     pub turn_id: Option<String>,
+    #[serde(default)]
+    pub process_run: Option<String>,
     pub phase: String,
     pub background: String,
     pub integration: String,
@@ -40,6 +42,7 @@ impl Default for AgentState {
             cli_platform: None,
             agent_session_id: None,
             turn_id: None,
+            process_run: None,
             phase: "unknown".into(),
             background: "unknown".into(),
             integration: "unavailable".into(),
@@ -90,6 +93,37 @@ impl AgentState {
             || event.permission_key.as_deref().is_some_and(|id| !valid(id))
         {
             return Err("Invalid agent event identity".into());
+        }
+        if matches!(event.kind.as_str(), "ProcessStart" | "ProcessExit") {
+            let run = event
+                .turn_id
+                .as_deref()
+                .filter(|v| valid(v))
+                .ok_or("Missing Agent process identity")?;
+            if event.kind == "ProcessStart" {
+                if self.process_run.is_some() && self.phase != "shell" {
+                    return Err("An Agent is already running or its exit is unconfirmed".into());
+                }
+                self.process_run = Some(run.into());
+                self.agent_session_id = (event.agent_session_id != self.generation)
+                    .then(|| event.agent_session_id.clone());
+                self.turn_id = None;
+                self.permission_keys.clear();
+                self.phase = "idle".into();
+                self.integration = "connecting".into();
+            } else {
+                if self.process_run.as_deref() != Some(run) {
+                    return Ok(None);
+                }
+                self.phase = "shell".into();
+                self.integration = "disconnected".into();
+                self.permission_keys.clear();
+            }
+            self.revision = self
+                .revision
+                .checked_add(1)
+                .ok_or("Agent revision exhausted")?;
+            return Ok(None);
         }
         if ![
             "SessionStart",
@@ -321,6 +355,10 @@ impl AgentState {
             return Err("Stale agent receipt revision".into());
         }
         entry.read = true;
+        if ["pending", "failed"].contains(&entry.delivery.as_str()) {
+            entry.delivery = "suppressed".into();
+            entry.error = None;
+        }
         Ok(())
     }
 }
@@ -356,6 +394,10 @@ impl super::HistoryStore {
         cli_path: Option<&str>,
     ) -> Result<(), String> {
         self.edit_agent(id, |state| {
+            let historical = state
+                .process_run
+                .as_ref()
+                .map(|_| (state.inbox.clone(), state.revision));
             *state = AgentState {
                 generation: generation.into(),
                 cli_version: cli_version.map(str::to_string),
@@ -364,6 +406,10 @@ impl super::HistoryStore {
                 integration: "connecting".into(),
                 ..Default::default()
             };
+            if let Some((inbox, revision)) = historical {
+                state.inbox = inbox;
+                state.revision = revision.checked_add(1).ok_or("Agent revision exhausted")?;
+            }
             Ok(())
         })
     }
@@ -376,6 +422,12 @@ impl super::HistoryStore {
             if state.generation.is_empty() {
                 state.generation = format!("resume-{id}");
             }
+            Ok(())
+        })
+    }
+    pub(super) fn agent_shell(&self, id: &str) -> Result<(), String> {
+        self.edit_agent(id, |state| {
+            state.phase = "shell".into();
             Ok(())
         })
     }
@@ -409,11 +461,21 @@ impl super::HistoryStore {
         *records = next;
         Ok(())
     }
+    #[cfg(test)]
     pub(super) fn ingest_agent(
         &self,
         id: &str,
         generation: &str,
         event: &AgentEvent,
+    ) -> Result<Option<String>, String> {
+        self.ingest_agent_run(id, generation, event, None)
+    }
+    pub(super) fn ingest_agent_run(
+        &self,
+        id: &str,
+        generation: &str,
+        event: &AgentEvent,
+        run: Option<&str>,
     ) -> Result<Option<String>, String> {
         // Lifecycle and launch identity are checked inside the same lock as the atomic commit.
         let mut records = self.lock_records()?;
@@ -426,6 +488,16 @@ impl super::HistoryStore {
             || !["starting", "running"].contains(&record.status.as_str())
         {
             return Err("Expired agent launch".into());
+        }
+        if event.kind == "ProcessStart" {
+            if run.is_none() || run != event.turn_id.as_deref() {
+                return Err("Missing Agent process identity".into());
+            }
+        } else if record.agent.process_run.is_some()
+            && (run != record.agent.process_run.as_deref()
+                || (record.agent.phase == "shell" && event.kind != "ProcessExit"))
+        {
+            return Ok(None);
         }
         let result = record.agent.apply(event)?;
         if next != *records {
@@ -462,8 +534,13 @@ impl super::HistoryStore {
             if entry.revision != revision {
                 return Err("Stale agent receipt revision".into());
             }
-            entry.delivery = delivery.into();
-            entry.error = error;
+            if entry.read && delivery == "failed" {
+                entry.delivery = "suppressed".into();
+                entry.error = None;
+            } else {
+                entry.delivery = delivery.into();
+                entry.error = error;
+            }
             Ok(())
         })
     }
@@ -1397,6 +1474,33 @@ mod tests {
         assert_eq!(s.agent_session_id.as_deref(), Some("main-thread"));
     }
     #[test]
+    fn reading_a_receipt_suppresses_pending_delivery_without_waiting_for_the_queue() {
+        for delivery in ["pending", "failed", "accepted", "suppressed"] {
+            let mut s = state();
+            s.apply(&event("UserPromptSubmit", Some("one"))).unwrap();
+            s.apply(&event("TurnComplete", Some("one"))).unwrap();
+            s.inbox[0].delivery = delivery.into();
+            s.inbox[0].error = Some("previous delivery error".into());
+            let receipt = s.inbox[0].clone();
+            let before = s.clone();
+            assert!(s.read(&receipt.id, receipt.revision + 1).is_err());
+            assert_eq!(s, before);
+            s.read(&receipt.id, receipt.revision).unwrap();
+            assert!(s.inbox[0].read);
+            assert_eq!(
+                s.inbox[0].delivery,
+                if delivery == "accepted" {
+                    "accepted"
+                } else {
+                    "suppressed"
+                }
+            );
+            if ["pending", "failed"].contains(&delivery) {
+                assert!(s.inbox[0].error.is_none());
+            }
+        }
+    }
+    #[test]
     fn old_read_receipt_cannot_acknowledge_the_next_round() {
         let mut s = state();
         s.apply(&event("UserPromptSubmit", Some("one"))).unwrap();
@@ -1460,6 +1564,80 @@ mod tests {
             .unwrap();
         assert!(s.apply(&event("TurnComplete", Some("overflow"))).is_err());
         assert_eq!(s.inbox.len(), 512);
+    }
+    #[test]
+    fn acknowledged_agent_receipts_allow_archive_even_while_notifications_are_paused() {
+        let root = std::env::temp_dir().join(format!(
+            "yam-delete-agent-{}",
+            super::super::next_session_id()
+        ));
+        let history = super::super::HistoryStore::open(root.clone()).unwrap();
+        history
+            .start(&super::super::SessionSummary {
+                ssh: None,
+                session_id: "s-one".into(),
+                cwd: "/tmp".into(),
+                command: None,
+                status: "running".into(),
+                launch: None,
+            })
+            .unwrap();
+        history.configure_agent("s-one", "g").unwrap();
+        for (kind, turn) in [
+            ("SessionStart", None),
+            ("UserPromptSubmit", Some("one")),
+            ("TurnComplete", Some("one")),
+        ] {
+            history
+                .ingest_agent("s-one", "g", &event(kind, turn))
+                .unwrap();
+        }
+        history
+            .update(
+                "s-one",
+                "stopped",
+                None,
+                Some("Stopped by user".into()),
+                None,
+            )
+            .unwrap();
+        assert!(history
+            .archive("s-one", &Default::default(), &Default::default())
+            .is_err());
+        let receipt = history.list().unwrap()[0].agent.inbox[0].clone();
+        history
+            .read_agent_receipt("s-one", &receipt.id, receipt.revision)
+            .unwrap();
+        history
+            .agent_delivery(
+                "s-one",
+                &receipt.id,
+                receipt.revision,
+                "failed",
+                Some("late network error".into()),
+            )
+            .unwrap();
+        assert_eq!(
+            history.list().unwrap()[0].agent.inbox[0].delivery,
+            "suppressed"
+        );
+        DeliveryQueue::default()
+            .tick(&history, 0, None, true, |_, _| {
+                panic!("paused queue must not send")
+            })
+            .unwrap();
+        assert!(history
+            .archive(
+                "s-one",
+                &Default::default(),
+                &std::collections::HashSet::from(["s-one".into()])
+            )
+            .is_err());
+        history
+            .archive("s-one", &Default::default(), &Default::default())
+            .unwrap();
+        assert!(history.list().unwrap().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn event_commit_read_and_send_receipts_survive_reopen_without_ending_process() {

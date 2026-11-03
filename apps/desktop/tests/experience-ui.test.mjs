@@ -2,7 +2,7 @@
 import test from 'node:test';import assert from 'node:assert/strict';import {readFileSync} from 'node:fs';
 const app=readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8'),layout=readFileSync(new URL('../src/TerminalLayout.tsx',import.meta.url),'utf8');
 test('experience status filter and session finder remain reachable beside search',()=>{assert.match(app,/className="sidebar-search"/);assert.match(app,/aria-label=\{t\("Filter sessions by status"\)\}/);assert.match(app,/onClick=\{openCommandPalette\}[^>]*>\{t\("Find session"\)\}/);});
-test('experience unread tabs expose a visible and accessible attention indicator',()=>{assert.match(layout,/tabAttention\?\.\(tab\)/);assert.match(layout,/aria-label=\{t\("Unread activity"\)\}/);assert.match(app,/tabAttention=\{/);});
+test('experience unread pane titles expose a visible and accessible attention indicator',()=>{assert.match(layout,/tabAttention\?\.\(id\)/);assert.match(layout,/aria-label=\{t\("Unread activity"\)\}/);assert.match(app,/tabAttention=\{/);});
 
 test('experience Git changes, selected-file tools and shared-directory warnings remain reachable',()=>{assert.match(app,/className="workspace-actions"/);assert.match(app,/setProjectToolsTab\("changes"\)/);assert.ok(app.includes('previewSelectedTerminalFile'));assert.ok(app.includes('Another loaded session uses this directory.'));});
 

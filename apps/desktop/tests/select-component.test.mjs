@@ -35,3 +35,8 @@ test('disabled control and stale disabled choices cannot dispatch; IME stays nat
 test('portal stays in current dialog, scrolls only its menu, cleans listeners',()=>{const f=fixture();f.open();assert.ok(f.portalTargets.every(target=>target===f.dialog));assert.ok(f.menu.scrollTop>0);assert.equal(f.listeners.size,3);f.listeners.get('document:pointerdown')({target:{}});f.refresh();assert.equal(f.listeners.size,0);f.open();f.unmount();assert.equal(f.listeners.size,0);});
 test('closed typeahead chooses enabled labels; empty lists stay safe',()=>{const f=fixture();f.key('c');assert.equal(f.changes[0].value,'c');const g=fixture({children:[]});g.open();g.key('ArrowDown');g.key('Enter');assert.deepEqual(g.changes,[]);});
 test('reselecting the current value and unmatched typeahead do not emit spurious changes',()=>{const f=fixture();f.key('z');assert.deepEqual(f.changes,[]);f.open();f.choices()[0].props.onClick();f.refresh();assert.deepEqual(f.changes,[]);assert.equal(f.button().props['aria-expanded'],false);});
+test('pointer opening explicitly focuses the combobox for macOS keyboard navigation',()=>{
+ const f=fixture();assert.equal(f.trigger.focused,undefined);f.open();assert.equal(f.trigger.focused,true);
+ f.key('ArrowDown');f.key('Enter');assert.deepEqual(f.changes,[{value:'c',type:'change',bubbles:true}]);
+ const disabled=fixture({disabled:true});disabled.open();assert.equal(disabled.trigger.focused,undefined);
+});

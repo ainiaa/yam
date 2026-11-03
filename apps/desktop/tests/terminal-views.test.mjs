@@ -9,7 +9,7 @@ import {terminalPaneId,terminalPaneIndex} from '../src/terminal-layout.ts';
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {TerminalViews} from '../src/terminal-views.ts';
-import {createTerminalLayout,assignTerminalPane,isTerminalProtocolResponse} from '../src/terminal-layout.ts';
+import {createTerminalLayout,assignTerminalPane,isTerminalProtocolResponse,isTerminalMouseReport} from '../src/terminal-layout.ts';
 
 test('switching reuses the exact active terminal and preserves its state',()=>{
  const pool=new TerminalViews(2);let created=0,disposed=0;
@@ -114,7 +114,7 @@ test('refused admission leaves the previous in-flight selection able to complete
 let inputCode;
 function findInput(node){if(ts.isVariableDeclaration(node)&&node.name.getText(source)==='bindData')inputCode='(()=>{const instance={onData:handler=>handler};return ('+node.initializer.getText(source)+')();})()';ts.forEachChild(node,findInput)}
 findInput(source);
-const inputJs=ts.transpileModule('const terminalHasInputFocus=()=>false;const terminalPaneVisible=()=>true;const terminalPaneHasSize=()=>true;const isTerminalProtocolResponse='+isTerminalProtocolResponse.toString()+';\n'+syncCode+'\nconst handler='+inputCode,{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText;
+const inputJs=ts.transpileModule('const terminalHasInputFocus=()=>false;const terminalPaneVisible=()=>true;const terminalPaneHasSize=()=>true;const isTerminalProtocolResponse='+isTerminalProtocolResponse.toString()+';const isTerminalMouseReport='+isTerminalMouseReport.toString()+';\n'+syncCode+'\nconst handler='+inputCode,{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText;
 test('hidden live terminal protocol answers return to their own PTY',async()=>{
  const writes=[];
  const handler=new Function('queueTerminalResize','sessionId','view','invoke','id','setError','ownerConnectionAvailable',inputJs+';return handler')(queueTerminalResize,{current:'b'},{cursor:10,ready:true,live:true,instance:{refresh(){},cols:0,rows:0},element:{dataset:{sessionId:'a'}}},async(name,args)=>{if(name!=="resize_session")writes.push({name,...args});},'a',()=>{},{current:{available:true,version:0}});

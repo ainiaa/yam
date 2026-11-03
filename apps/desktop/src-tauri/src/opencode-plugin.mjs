@@ -32,7 +32,7 @@ export default async function Plugin({client}) {
   return delivery;
  }
  function sendOnce(event){
-  const wire=JSON.stringify({version:1,token,event});
+  const wire=JSON.stringify({version:1,token,event,run:process.env.YAM_AGENT_RUN});
   if(Buffer.byteLength(wire)>4096)return Promise.reject(Error('YAM event too large'));
   return new Promise((resolve,reject)=>{
    const socket=net.createConnection({host:'127.0.0.1',port:Number(address[1])});let reply='',done=false;

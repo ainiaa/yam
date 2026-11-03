@@ -324,7 +324,7 @@ function layoutTree(props,hookState={states:[],refs:[]}){
  const useState=value=>{const index=stateIndex++;if(!(index in hookState.states))hookState.states[index]=typeof value==='function'?value():value;return [hookState.states[index],next=>{hookState.states[index]=typeof next==='function'?next(hookState.states[index]):next;}];};
  const useRef=current=>{const index=refIndex++;if(!(index in hookState.refs))hookState.refs[index]={current};return hookState.refs[index];};
  const useEffect=effect=>{const cleanup=effect();if(typeof cleanup==='function')cleanups.push(cleanup);};
- const tree=new Function('React','useState','useRef','useEffect','document',...Object.keys(layoutOperations),js+';return TerminalLayout')(React,useState,useRef,useEffect,hookState.document,...Object.values(layoutOperations))(props);
+ const tree=new Function('React','createPortal','useState','useRef','useEffect','document',...Object.keys(layoutOperations),js+';return TerminalLayout')(React,(child,target)=>({type:'portal',props:{target,children:[child]}}),useState,useRef,useEffect,hookState.document,...Object.values(layoutOperations))(props);
  tree.cleanups=cleanups;tree.rerender=nextProps=>layoutTree(nextProps,hookState);return tree;
 }
 function actualComponentProp(componentName,propName,args){
@@ -646,7 +646,7 @@ test('B02a recursive component renders asymmetric three leaves and preserves sib
  layout=layoutOperations.splitTerminalPane({...layout,focused:0},'vertical');tree=tree.rerender(props());hosts=nodes(tree,n=>n.props?.className==='terminal-pane-host');
  assert.equal(hosts.length,3);assert.equal(hosts[2].props.ref,sibling);
  const branches=nodes(tree,n=>n.props?.className?.startsWith('terminal-layout-node'));assert.equal(branches.length,2);
- assert.equal(branches[0].props.style.minWidth,486);assert.equal(branches[0].props.style.minHeight,366);
+ assert.equal(branches[0].props.style.minWidth,'min(100%, 486px)');assert.equal(branches[0].props.style.minHeight,'min(100%, 366px)');
 });
 
 // B02b actual callbacks preserve warm member identity; these are not native GUI tests.
@@ -993,7 +993,7 @@ test('B02d late new-pane host mount after first RAF still consumes pending input
  const form={name:'user form'};h.document.activeElement=form;h.raf.length=0;actual('mountTerminalPane',h.args)(newId,host);[...h.raf].forEach(fn=>fn());assert.equal(h.document.activeElement,form,'consumed intent cannot steal later form focus');
 });
 
-test('Reopen actual toolbar remains reachable with last empty tab and guards disabled activation',()=>{const props={layout:{mode:'single',panes:[null],focused:0,revision:0},labels:[null],splitPercent:50,swapDisabled:false,onHost(){},onFocus(){},onClose(){},onMode(){},onSplitChange(){},onSplitPreview(){},onSwap(){},onCancelFit(){}};let calls=0;let tree=layoutTree({...props,onReopen:()=>calls++});let button=nodes(tree,n=>n.type==='button'&&n.props['aria-label']==='Reopen last hidden tab')[0];assert.ok(button);assert.equal(button.props.disabled,true);button.props.onClick();assert.equal(calls,0);tree=layoutTree({...props,canReopen:true,onReopen:()=>calls++});button=nodes(tree,n=>n.type==='button'&&n.props['aria-label']==='Reopen last hidden tab')[0];assert.equal(button.props.disabled,false);button.props.onClick();assert.equal(calls,1);});
+test('Reopen actual toolbar remains reachable with last empty tab and guards disabled activation',()=>{const props={layout:{mode:'single',panes:[null],focused:0,revision:0},labels:[null],splitPercent:50,swapDisabled:false,onHost(){},onFocus(){},onClose(){},onMode(){},onSplitChange(){},onSplitPreview(){},onSwap(){},onCancelFit(){}};let calls=0;let tree=layoutTree({...props,onReopen:()=>calls++});let button=nodes(tree,n=>n.type==='button'&&n.props['aria-label']==='Reopen last hidden session')[0];assert.ok(button);assert.equal(button.props.disabled,true);button.props.onClick();assert.equal(calls,0);tree=layoutTree({...props,canReopen:true,onReopen:()=>calls++});button=nodes(tree,n=>n.type==='button'&&n.props['aria-label']==='Reopen last hidden session')[0];assert.equal(button.props.disabled,false);button.props.onClick();assert.equal(calls,1);});
 
 for(const state of ['ready','hidden','unmounted','form','owner'])test(`window surface restoration handles ${state} without task creation or focus theft`,()=>{
  const h=harness(['s-a-1']),view=h.add('s-a-1');let fits=0;
@@ -1019,27 +1019,20 @@ test('surface restoration hooks are removed together on unmount',()=>{
  }
 });
 
-test('tab double-click edits its own title, Enter saves, Esc cancels, failed save retains input',async()=>{
- const layout=layoutOperations.assignTerminalPane(layoutOperations.createTerminalLayout(),0,'s-tab-1');
- const calls=[];let fail=false;const props={layout,labels:['Before'],tabLabel:()=> 'Before',onRenameTab:async(id,title)=>{if(fail)throw Error('storage');calls.push([id,title]);},onDuplicateTab:id=>calls.push(['copy',id]),onFocus(){},onHost(){},splitPercent:50,swapDisabled:false};
- let tree=layoutTree(props);let tab=nodes(tree,n=>n.props?.role==='tab')[0];assert.equal(typeof tab.props.onDoubleClick,'function');
- tab.props.onDoubleClick({preventDefault(){},stopPropagation(){}});tree=tree.rerender(props);let input=nodes(tree,n=>n.type==='input'&&n.props['aria-label']==='Session name')[0];assert.ok(input);
- input.props.onChange({target:{value:'After'}});tree=tree.rerender(props);input=nodes(tree,n=>n.type==='input')[0];await input.props.onKeyDown({key:'Enter',preventDefault(){},stopPropagation(){}});tree=tree.rerender(props);assert.deepEqual(calls,[['s-tab-1','After']]);assert.equal(nodes(tree,n=>n.type==='input').length,0);
- nodes(tree,n=>n.props?.role==='tab')[0].props.onDoubleClick({preventDefault(){},stopPropagation(){}});tree=tree.rerender(props);await nodes(tree,n=>n.type==='input')[0].props.onKeyDown({key:'Escape',preventDefault(){},stopPropagation(){}});tree=tree.rerender(props);assert.equal(nodes(tree,n=>n.type==='input').length,0);assert.equal(calls.length,1);
- nodes(tree,n=>n.props?.role==='tab')[0].props.onDoubleClick({preventDefault(){},stopPropagation(){}});tree=tree.rerender(props);fail=true;await nodes(tree,n=>n.type==='input')[0].props.onKeyDown({key:'Enter',preventDefault(){},stopPropagation(){}});tree=tree.rerender(props);assert.equal(nodes(tree,n=>n.type==='input').length,1);assert.equal(nodes(tree,n=>n.props?.role==='alert').length,1);const strip=nodes(tree,n=>n.props?.role==='tablist')[0];assert.equal(nodes(strip,n=>n.props?.role==='alert').length,0,'error stays outside the clipped tab strip');
+test('single terminal has no repeated session strip, inline rename or pane heading',()=>{
+ const layout=layoutOperations.assignTerminalPane(layoutOperations.createTerminalLayout(),0,'s-only-1');const tree=layoutTree({layout,labels:['Current'],splitPercent:50,swapDisabled:false,onHost(){},onFocus(){}});
+ assert.equal(nodes(tree,n=>n.props?.role==='tab'||n.props?.role==='tablist').length,0);
+ assert.equal(nodes(tree,n=>n.props?.className==='terminal-pane-header').length,0);
+ assert.equal(nodes(tree,n=>n.type==='input').length,0);
+ assert.equal(nodes(tree,n=>n.props?.className==='terminal-pane-host').length,1);
 });
-
-test('inline rename leaves Enter and Escape to IME composition before saving the committed name',async()=>{
- const layout=layoutOperations.assignTerminalPane(layoutOperations.createTerminalLayout(),0,'s-ime-1'),calls=[];
- const props={layout,labels:['Before'],tabLabel:()=> 'Before',onRenameTab:async(id,title)=>calls.push([id,title]),onFocus(){},onHost(){},splitPercent:50,swapDisabled:false};
- let tree=layoutTree(props);nodes(tree,n=>n.props?.role==='tab')[0].props.onDoubleClick({preventDefault(){},stopPropagation(){}});tree=tree.rerender(props);
- let input=nodes(tree,n=>n.type==='input')[0];input.props.onChange({target:{value:'中文名称'}});tree=tree.rerender(props);input=nodes(tree,n=>n.type==='input')[0];
- for(const key of ['Enter','Escape'])for(const flags of [{nativeEvent:{isComposing:true}},{nativeEvent:{isComposing:false},keyCode:229}]){
-  await input.props.onKeyDown({key,...flags,stopPropagation(){},preventDefault:()=>assert.fail('composition must retain its key')});tree=tree.rerender(props);input=nodes(tree,n=>n.type==='input')[0];assert.ok(input);assert.equal(input.props.value,'中文名称');assert.deepEqual(calls,[]);
- }
- assert.equal(typeof input.props.onCompositionStart,'function');input.props.onCompositionStart();
- for(const key of ['Enter','Escape'])await input.props.onKeyDown({key,nativeEvent:{isComposing:false},keyCode:13,stopPropagation(){},preventDefault:()=>assert.fail('active composition must retain its key')});
- input.props.onCompositionEnd();await input.props.onKeyDown({key:'Enter',nativeEvent:{isComposing:false},keyCode:13,stopPropagation(){},preventDefault(){}});tree=tree.rerender(props);assert.deepEqual(calls,[['s-ime-1','中文名称']]);assert.equal(nodes(tree,n=>n.type==='input').length,0);
+test('split terminals show only the active session name and focus the selected pane',()=>{
+ let layout=layoutOperations.changeTerminalLayout(layoutOperations.createTerminalLayout(),'horizontal');layout=layoutOperations.assignTerminalPane(layout,0,'s-old-1');layout=layoutOperations.assignTerminalPane(layout,0,'s-current-2');layout=layoutOperations.assignTerminalPane(layout,1,'s-other-3');const calls=[];
+ const tree=layoutTree({layout,labels:['Current','Other'],splitPercent:50,swapDisabled:false,onHost(){},onFocus:(...args)=>calls.push(args),onClose(){}});
+ assert.equal(nodes(tree,n=>n.props?.role==='tab'||n.props?.role==='tablist').length,0);
+ const headers=nodes(tree,n=>n.props?.className==='terminal-pane-header');assert.equal(headers.length,2);
+ const current=nodes(tree,n=>n.props?.['data-pane-session-id']==='s-current-2')[0];assert.ok(current);current.props.onClick({stopPropagation(){}});assert.deepEqual(calls,[[0,true]]);
+ assert.equal(nodes(tree,n=>n.props?.['data-pane-session-id']==='s-old-1').length,0);
 });
 
  test('native CLI exit input is forwarded unchanged and never creates a process',async()=>{
@@ -1049,3 +1042,32 @@ test('inline rename leaves Enter and Escape to IME composition before saving the
  assert.deepEqual(h.calls.filter(v=>v.name==='write_session').map(v=>v.data),['\x03','\x04','/exit\r']);
  assert.equal(h.calls.some(v=>v.name==='create_session'),false);
  });
+
+test('actual sidebar replacement can switch running sessions twenty times without stopping or restarting them',async()=>{
+ const h=harness([null]);
+ for(let i=1;i<=20;i++){const id=`s-a-${i%2+1}`;await h.open(record(id),false,0,...Array(7).fill(undefined),true);assert.equal(h.refs.sessionId.current,id);assert.deepEqual(layoutOperations.terminalMembers(h.refs.terminalLayoutRef.current),[id]);}
+ assert.deepEqual(h.errors,[]);assert.equal(h.calls.some(c=>['create_session','stop_session','resume_session','archive_session','delete_session'].includes(c.name)),false);
+});
+test('late sidebar attachment cannot revive a replaced session or steal later form focus',async()=>{
+ let release;const h=harness([null], (name,args)=>name==='read_terminal_frame'&&args.sessionId==='s-a-1'?new Promise(resolve=>release=resolve):name==='read_terminal_frame'?frame(args.sessionId):null);
+ const select=id=>h.open(record(id),false,0,...Array(7).fill(undefined),true);const first=select('s-a-1');await turn();await select('s-b-2');const form={name:'form'};h.document.activeElement=form;release(frame('s-a-1'));await first;
+ assert.equal(h.refs.sessionId.current,'s-b-2');assert.equal(h.document.activeElement,form);assert.deepEqual(layoutOperations.terminalMembers(h.refs.terminalLayoutRef.current),['s-b-2']);assert.equal(h.calls.some(c=>c.name==='stop_session'),false);
+});
+
+test('layout menu portal can change hosts without replacing the terminal pane host',()=>{
+ const target={},props={layout:layoutOperations.createTerminalLayout(),labels:[null],splitPercent:50,swapDisabled:false,onFocus(){},onHost(){}};
+ const first=layoutTree({...props,toolbarHost:target}),portal=nodes(first,n=>n.type==='portal')[0];assert.equal(portal.props.target,target);
+ const host=nodes(first,n=>n.props?.className==='terminal-pane-host')[0].props.ref;
+ const next=first.rerender({...props,toolbarHost:null});assert.equal(nodes(next,n=>n.type==='portal').length,0);assert.equal(nodes(next,n=>n.props?.className==='terminal-pane-host')[0].props.ref,host);
+ assert.equal(nodes(next,n=>n.props?.role==='tablist').length,0);
+});
+
+test('split node minimums are capped by the available viewport for narrow and short windows',()=>{
+ const props={layout:layoutOperations.changeTerminalLayout(layoutOperations.createTerminalLayout(),'horizontal'),labels:[null,null],splitPercent:50,swapDisabled:false,onFocus(){},onHost(){}};
+ for(const mode of ['horizontal','vertical']){const tree=layoutTree({...props,layout:layoutOperations.changeTerminalLayout(props.layout,mode)});const split=nodes(tree,n=>n.props?.className?.startsWith('terminal-layout-node'))[0];assert.ok(split);assert.match(split.props.style.minWidth,/^min\(100%, \d+px\)$/);assert.match(split.props.style.minHeight,/^min\(100%, \d+px\)$/);}
+});
+
+test('split pane CSS allows both dimensions to shrink inside the capped viewport',()=>{
+ const css=readFileSync(new URL('../src/App.css',import.meta.url),'utf8');
+ assert.match(css,/\.terminal-layout-node > \.terminal-pane\s*\{[^}]*min-width:\s*0;[^}]*min-height:\s*0;/);
+});

@@ -1683,6 +1683,7 @@ mod tests {
         );
         std::sync::Arc::new(crate::Session {
             _directory_reporting_assets: None,
+            _interactive_assets: None,
             _resume_claim: None,
             summary: crate::SessionSummary {
                 ssh: None,

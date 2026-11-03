@@ -35,6 +35,7 @@ export function Select({ref,children,style,className,...props}:Props) {
  useEffect(()=>{if(open)setActive(index=>options[index]?.disabled||!options[index]?nextSelectIndex(options,-1,"first"):index);},[options,open]);
  function begin(){
   if(!native.current||native.current.matches(":disabled"))return;
+  trigger.current?.focus();
   typed.current={text:"",at:0};const selected=native.current.selectedIndex;
   setActive(options[selected]&&!options[selected].disabled?selected:nextSelectIndex(options,-1,"first"));setOpen(true);
  }

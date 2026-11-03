@@ -19,6 +19,30 @@ const source=ts.createSourceFile('App.tsx',readFileSync(new URL('../src/App.tsx'
 function functions(names){const found=[];function visit(n){if(ts.isFunctionDeclaration(n)&&names.includes(n.name?.text))found.push(n.getText(source));ts.forEachChild(n,visit)}visit(source);assert.equal(found.length,names.length);return ts.transpileModule(found.join('\n'),{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText;}
 const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b});return {promise,resolve,reject}};
 const tick=()=>new Promise(setImmediate);
+test('explicit historical read targets only the selected receipt and refreshes without navigation',async()=>{
+ const calls=[],errors=[],refresh=[];
+ const bindings={invoke:async(command,args)=>calls.push({command,args}),refreshHistory:async()=>refresh.push(true),setError:error=>errors.push(error),terminalMounted:{current:true},ownerConnectionAvailable:{current:{version:1,available:true}}};
+ const mark=new Function(...Object.keys(bindings),functions(['markReceiptRead'])+';return markReceiptRead')(...Object.values(bindings));
+ await mark(record(),receipt());
+ assert.deepEqual(calls,[{command:'read_agent_receipt',args:{sessionId:'s-one',receipt:receipt().id,revision:3}}]);assert.deepEqual(refresh,[true]);assert.deepEqual(errors,[]);
+});
+test('explicit historical read reports stale rejection and does not refresh',async()=>{
+ const errors=[],refresh=[];
+ const bindings={invoke:async()=>{throw Error('Stale agent receipt revision')},refreshHistory:async()=>refresh.push(true),setError:error=>errors.push(error),terminalMounted:{current:true},ownerConnectionAvailable:{current:{version:1,available:true}}};
+ const mark=new Function(...Object.keys(bindings),functions(['markReceiptRead'])+';return markReceiptRead')(...Object.values(bindings));
+ await mark(record(),receipt());assert.match(errors[0],/Stale agent receipt revision/);assert.deepEqual(refresh,[]);
+});
+test('explicit read does not refresh a replacement owner after delayed acknowledgement',async()=>{
+ const gate=deferred(),refresh=[],ownerConnectionAvailable={current:{version:1,available:true}};
+ const bindings={invoke:()=>gate.promise,refreshHistory:async()=>refresh.push(true),setError:()=>assert.fail('stale error'),terminalMounted:{current:true},ownerConnectionAvailable};
+ const mark=new Function(...Object.keys(bindings),functions(['markReceiptRead'])+';return markReceiptRead')(...Object.values(bindings));
+ const pending=mark(record(),receipt());ownerConnectionAvailable.current={version:2,available:true};gate.resolve();await pending;assert.deepEqual(refresh,[]);
+});
+test('explicit read reports an unavailable owner without sending a request',async()=>{
+ const calls=[],errors=[],bindings={invoke:async()=>calls.push(true),refreshHistory:async()=>assert.fail('unexpected refresh'),setError:error=>errors.push(error),terminalMounted:{current:true},ownerConnectionAvailable:{current:{version:1,available:false}}};
+ const mark=new Function(...Object.keys(bindings),functions(['markReceiptRead'])+';return markReceiptRead')(...Object.values(bindings));
+ await mark(record(),receipt());assert.deepEqual(calls,[]);assert.match(errors[0],/unavailable/i);
+});
 function harness(options={}){
  const calls=[],errors=[],writes=[],views=new Map(),conversationOpenRef={current:options.conversation??false};
  const detailVersion={current:0},layoutRestore={current:{version:0}},sessionId={current:null},selectedRecord={current:null},ownerConnectionAvailable={current:{available:true,version:0}},terminalMounted={current:true},attentionOperation={current:0};
@@ -47,7 +71,11 @@ for(const [name,change] of [
  ['missing generation',r=>delete r.agent.generation],['missing turn',r=>delete r.agent.turn_id],['invalid revision',r=>r.agent.inbox[0].revision=-1],['phase advanced',r=>r.agent.phase='working'],['turn advanced',r=>r.agent.turn_id='new'],['generation advanced',r=>r.agent.generation='new'],['ended',r=>r.status='stopped'],['integration unavailable',r=>r.agent.integration='unavailable'],['unsupported kind',r=>r.agent.inbox[0].kind='mystery']
 ])test('F5 provenance rejects '+name,()=>{const original=record(),a=captureAttention(original,receipt(),original.agent),fresh=record();change(fresh);assert.equal(isCurrentAttention(a,fresh),false)});
 test('F5 missing card proof remains unknown and does not infer generation from receipt text',()=>{const r=record();assert.equal(captureAttention(r,receipt()).state,'unknown');});
-test('F5 actual App historical card navigates without any receipt ACK',async()=>{const h=harness();await h.openReceipt(record(),receipt());assert.equal(h.sessionId.current,'s-one');assert.deepEqual(h.calls.filter(c=>c.command==='read_agent_receipt'),[])});
+test('nonselected current receipt is read after attachment and fresh identity check',async()=>{const h=harness(),r=record();h.sessionId.current='other';await h.openReceipt(r,receipt());assert.equal(h.sessionId.current,'s-one');assert.equal(h.calls.filter(c=>c.command==='read_agent_receipt').length,1);});
+test('nonselected stale receipt is not read after attachment',async()=>{const h=harness({invoke:async command=>{if(command==='get_session'){const r=record();r.agent.turn_id='new';return r;}}}),r=record();await h.openReceipt(r,receipt());assert.equal(h.calls.filter(c=>c.command==='read_agent_receipt').length,0);});
+test('nonselected receipt rejects a fresh record from a different session',async()=>{let reads=0;const h=harness({invoke:async command=>{if(command==='get_session'){const r=record();if(++reads===2)r.summary.session_id='s-other';return r;}}}),r=record();await h.openReceipt(r,receipt());assert.equal(h.calls.filter(c=>c.command==='read_agent_receipt').length,0);});
+test('nonselected receipt is not read when selection changes during fresh lookup',async()=>{const gate=deferred();let reads=0;const h=harness({invoke:async command=>command==='get_session'?(++reads===2?gate.promise:record()):undefined}),r=record();const pending=h.openReceipt(r,receipt());await tick();h.detailVersion.current++;gate.resolve(r);await pending;assert.equal(h.calls.filter(c=>c.command==='read_agent_receipt').length,0);});
+test('F5 actual App historical card navigates without any receipt ACK',async()=>{const h=harness(),r=record();await h.openReceipt(r,receipt(),{...r.agent,phase:'working'});assert.equal(h.sessionId.current,'s-one');assert.deepEqual(h.calls.filter(c=>c.command==='read_agent_receipt'),[])});
 test('F5 actual App current card requires postattachment fresh get_session before exact ACK',async()=>{const h=harness();const r=record();await h.openReceipt(r,receipt(),r.agent);assert.deepEqual(h.calls.map(c=>c.command),['get_session','get_session','read_agent_receipt']);assert.deepEqual(h.calls[2].args,{sessionId:'s-one',receipt:receipt().id,revision:3});assert.deepEqual(h.writes,['refresh']);});
 test('F5 actual App fresh phase advancement preserves original and newer unread',async()=>{let n=0;const h=harness({invoke:async command=>{if(command==='get_session'){const r=record();if(++n===2){r.agent.phase='working';r.agent.turn_id='new';r.agent.inbox.push({...receipt(),id:'generation:new:TurnComplete',revision:4,turn_id:'new'});}return r;}}});const r=record();await h.openReceipt(r,receipt(),r.agent);assert.equal(n,2);assert.equal(h.calls.filter(c=>c.command==='read_agent_receipt').length,0);});
 for(const transition of ['away-back','same-id-attach','owner-error','unmount','disposed'])test('F5 actual App pending freshness fences '+transition,async()=>{
@@ -105,15 +133,19 @@ test('F5 actual openHistory waits for projection parser then fresh owner read be
 for(const transition of ['reattach','owner-error','away-back'])test('F5 actual openHistory parser pending '+transition+' cannot authorize receipt',async()=>{
  const gate=deferred();const h=harness({realAttach:true,attach:gate,invoke:async command=>command==='claim_terminal_view'?1:command==='get_session'?record():command==='read_terminal_frame'?{kind:'projection'}:undefined});const r=record();const running=h.openReceipt(r,receipt(),r.agent);await tick();if(transition==='reattach')h.view.attachVersion++;if(transition==='owner-error'){h.ownerConnectionAvailable.current.version++;h.ownerConnectionAvailable.current.available=false;}if(transition==='away-back')h.detailVersion.current+=2;gate.resolve();await running;assert.equal(h.calls.filter(c=>c.command==='read_agent_receipt').length,0);assert.deepEqual(h.errors,[]);
 });
-test('F5 actual App inbox renders AttentionCard with current selected proof and real openReceipt callback',async()=>{
- let expression;function visit(n){if(ts.isCallExpression(n)&&n.expression.getText(source)==='inbox.map')expression=n.getText(source);ts.forEachChild(n,visit)}visit(source);assert.ok(expression);
+test('F5 actual App grouped inbox retains selected proof and the real openReceipt callback',async()=>{
+ let expression;function visit(n){if(ts.isJsxSelfClosingElement(n)&&n.tagName.getText(source)==='SessionInbox')expression=n.getText(source);ts.forEachChild(n,visit)}visit(source);assert.ok(expression);
  const require=createRequire(import.meta.url),runtime=require('react/jsx-runtime');
- const code=ts.transpileModule('const cards='+expression+';', {compilerOptions:{target:ts.ScriptTarget.ESNext,module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX}}).outputText;
+ const code=ts.transpileModule('const widget='+expression+';', {compilerOptions:{target:ts.ScriptTarget.ESNext,module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX}}).outputText;
  const h=harness(),r=record(),inbox=[{session:r,receipt:receipt()}];h.sessionId.current='s-one';
- const args={isMainWindow:true,desktopWindow:{slot:"main",epoch:1,main_epoch:1,restore_blocked:false,requested_session:null,owned_ids:[]},windowPreferenceKey:name=>windowContext.windowPreferenceKey("main",name),...layoutOperations,terminalPaneId,terminalPaneIndex,inbox,sessionId:h.sessionId,currentAgent:r.agent,titleFor:()=>r.summary.title,AttentionCard:()=>{},openReceipt:h.openReceipt};
- const cards=new Function('require','exports',...Object.keys(args),code+';return cards')(id=>id==='react/jsx-runtime'?runtime:require(id),{},...Object.values(args));
- assert.equal(cards.length,1);assert.equal(cards[0].type,args.AttentionCard);assert.equal(cards[0].props.agent,r.agent);assert.equal(cards[0].props.entry.id,receipt().id);cards[0].props.onOpen();await tick();assert.equal(h.calls.filter(c=>c.command==='read_agent_receipt').length,1);
- h.sessionId.current='other';const old=new Function('require','exports',...Object.keys(args),code+';return cards')(id=>id==='react/jsx-runtime'?runtime:require(id),{},...Object.values(args));assert.equal(old[0].props.agent,undefined);
+ const args={inbox,sessionId:h.sessionId,currentAgent:r.agent,titleFor:()=>r.summary.title,SessionInbox:()=>{},openReceipt:h.openReceipt};
+ const widget=()=>new Function('require','exports',...Object.keys(args),code+';return widget')(id=>id==='react/jsx-runtime'?runtime:require(id),{},...Object.values(args));
+ const groupSource=readFileSync(new URL('../src/SessionInbox.tsx',import.meta.url),'utf8'),groupCode=ts.transpileModule(groupSource,{compilerOptions:{target:ts.ScriptTarget.ESNext,module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX}}).outputText;
+ const history=await import('../src/history.ts'),exports={},Card=()=>{};
+ new Function('require','exports',groupCode)(id=>id==='react/jsx-runtime'?runtime:id==='./history'?history:id==='./AttentionCard'?{AttentionCard:Card}:id==='./i18n'?{t:x=>x}:require(id),exports);
+ const card=()=>exports.SessionInbox(widget().props).props.children[0].props.children[1];
+ assert.equal(widget().type,args.SessionInbox);assert.equal(card().type,Card);assert.equal(card().props.agent,r.agent);assert.equal(card().props.entry.id,receipt().id);card().props.onOpen();await tick();assert.equal(h.calls.filter(c=>c.command==='read_agent_receipt').length,1);
+ h.sessionId.current='other';assert.equal(card().props.agent,undefined);
 });
 
 test('F5 fresh reply from before terminal end cannot acknowledge the ended attachment',async()=>{
@@ -148,6 +180,6 @@ test('F5 R1 actual nested focus cancellation freezes scope after setup and does 
  const h=harness({realAttach:true,realRaw:true,realFocus:true,attach:deferred(),invoke:async command=>command==='claim_terminal_view'?1:command==='get_session'?record():command==='read_terminal_frame'?null:command==='read_session_snapshot'?{data:'raw',offset:0,end_offset:3,status:'running'}:undefined});const r=record();const running=h.openReceipt(r,receipt(),r.agent);await tick();assert.ok(h.layoutRestore.current.version>=3);assert.equal(h.parserCallbacks.length,1);h.parserCallbacks[0]();await running;assert.equal(h.calls.filter(c=>c.command==='read_agent_receipt').length,1);assert.equal(h.view.ready,true);assert.deepEqual(h.errors,[]);
 });
 
-for(const historical of [false,true])test('P1 Inbox navigation opens Terminal from Conversation historical='+historical,async()=>{const h=harness({conversation:true}),r=record();await h.openReceipt(r,receipt(),historical?undefined:r.agent);assert.equal(h.conversationOpenRef.current,false);assert.equal(h.sessionId.current,'s-one');assert.equal(h.calls.filter(c=>c.command==='read_agent_receipt').length,historical?0:1);});
+for(const historical of [false,true])test('P1 Inbox navigation opens Terminal from Conversation historical='+historical,async()=>{const h=harness({conversation:true}),r=record();await h.openReceipt(r,receipt(),historical?{...r.agent,phase:'working'}:r.agent);assert.equal(h.conversationOpenRef.current,false);assert.equal(h.sessionId.current,'s-one');assert.equal(h.calls.filter(c=>c.command==='read_agent_receipt').length,historical?0:1);});
 
 for(const transition of ['selection','owner'])test('P1 obsolete Inbox navigation preserves the newer Conversation view '+transition,async()=>{const wait=deferred();let reads=0;const h=harness({conversation:true,invoke:async command=>command==='get_session'?(++reads===2?wait.promise:record()):undefined}),r=record();const opening=h.openReceipt(r,receipt(),r.agent);await tick();if(transition==='selection')h.detailVersion.current++;else h.ownerConnectionAvailable.current.version++;wait.resolve(record());await opening;assert.equal(h.conversationOpenRef.current,true);assert.equal(h.calls.some(c=>c.command==='read_agent_receipt'),false);});

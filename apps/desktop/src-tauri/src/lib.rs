@@ -1,4 +1,5 @@
 mod agent_bridge;
+mod agent_cli;
 mod agent_events;
 mod background;
 mod browser_window;
@@ -18,9 +19,11 @@ mod git_context;
 #[cfg(target_os = "macos")]
 mod gui_startup;
 mod history;
+mod interactive_shell;
 mod memory;
 mod native_menu;
 mod node_runtime;
+mod pi_packages;
 mod pi_router;
 mod preferences_backup;
 mod project_config;
@@ -68,6 +71,16 @@ pub fn background_entry() -> bool {
 }
 pub fn binary_entry() {
     let args: Vec<_> = std::env::args_os().collect();
+    if let Some(result) = interactive_shell::entry(&args[1..]) {
+        let code = match result {
+            Ok(code) => code,
+            Err(error) => {
+                eprintln!("[YAM] {error}");
+                1
+            }
+        };
+        std::process::exit(code);
+    }
     if let Some(result) = external_terminal::entry(&args[1..]) {
         if let Err(error) = result {
             eprintln!("[YAM] {error}");
@@ -175,7 +188,9 @@ fn parse_agent_args(input: &str) -> Result<Vec<String>, String> {
         } else if ch == '\\'
             && quote != Some('\'')
             && chars.peek().is_some_and(|next| {
-                *next == '"' || *next == '\\' || (quote.is_none() && next.is_whitespace())
+                *next == '"'
+                    || *next == '\\'
+                    || (quote.is_none() && (*next == '\'' || next.is_whitespace()))
             })
         {
             current.push(chars.next().expect("peeked argument character"));
@@ -876,6 +891,7 @@ struct PendingSessionFinish {
 
 struct Session {
     _directory_reporting_assets: Option<zsh_directory_reporting::Assets>,
+    _interactive_assets: Option<interactive_shell::Assets>,
     _resume_claim: Option<ResumeClaim>,
     summary: SessionSummary,
     master: Mutex<Option<Box<dyn MasterPty + Send>>>,
@@ -1956,6 +1972,7 @@ fn shell_command(command: Option<&str>) -> CommandBuilder {
         let mut builder = CommandBuilder::new(shell);
         builder.arg("-l");
         if let Some(command) = command {
+            builder.env("PATH", agent_path());
             builder.arg("-c");
             builder.arg(command);
         }
@@ -2187,53 +2204,126 @@ fn agent_path() -> std::ffi::OsString {
 
 #[cfg(unix)]
 fn agent_path_with_home(path: &std::ffi::OsStr, home: Option<&Path>) -> std::ffi::OsString {
-    let mut directories: Vec<_> = std::env::split_paths(path).collect();
-    // ponytail: common CLI install locations only; custom prefixes still require
-    // a configured PATH or an explicit Custom command, without running shell startup scripts.
-    let mut fallback = vec![PathBuf::from("/usr/local/bin")];
-    #[cfg(target_os = "macos")]
-    fallback.push(PathBuf::from("/opt/homebrew/bin"));
-    if let Some(home) = home.filter(|home| home.is_absolute()) {
-        fallback.extend([home.join(".local/bin"), home.join(".npm-global/bin")]);
-    }
-    for directory in fallback {
-        if !directories.contains(&directory) {
-            directories.push(directory);
-        }
-    }
-    std::env::join_paths(directories).unwrap_or_else(|_| path.to_os_string())
+    agent_cli::search_path(path, home)
 }
 
 fn find_executable(name: &str) -> Option<PathBuf> {
-    find_executable_on_path(name, &agent_path())
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    agent_cli::find(name, &agent_path(), home.as_deref())
 }
 
+#[cfg(test)]
 fn find_executable_on_path(name: &str, path: &std::ffi::OsStr) -> Option<PathBuf> {
-    for directory in std::env::split_paths(path) {
-        let candidate = directory.join(name);
-        if candidate.is_file() {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if candidate
-                    .metadata()
-                    .is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0)
-                {
-                    return Some(candidate);
-                }
-            }
-            #[cfg(not(unix))]
-            return Some(candidate);
-        }
-        #[cfg(windows)]
-        for extension in [".exe", ".cmd", ".bat"] {
-            let candidate = directory.join(format!("{name}{extension}"));
-            if candidate.is_file() {
-                return Some(candidate);
-            }
+    agent_cli::find_on_path(name, path)
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn cold_gui_path_finds_manager_installs_without_private_cli_caches() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = std::env::temp_dir().join(format!("yam-portable-path-{}", next_session_id()));
+    for directory in [
+        ".volta/bin",
+        ".bun/bin",
+        "Library/pnpm",
+        "Library/pnpm/bin",
+        ".local/share/pnpm",
+        ".local/share/pnpm/bin",
+        ".opencode/bin",
+        ".asdf/shims",
+        ".local/share/mise/shims",
+        "Library/Application Support/fnm/aliases/default/bin",
+    ] {
+        let home = root.join(directory.replace('/', "_"));
+        let bin = home.join(directory);
+        std::fs::create_dir_all(&bin).unwrap();
+        let cli = bin.join("yam-portable-test-cli");
+        std::fs::write(&cli, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = agent_path_with_home(std::ffi::OsStr::new("/usr/bin:/bin"), Some(&home));
+        assert_eq!(
+            find_executable_on_path("yam-portable-test-cli", &path),
+            Some(cli),
+            "{directory}"
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn cold_gui_path_respects_nvm_default_and_rejects_alias_cycles() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = std::env::temp_dir().join(format!("yam-nvm-path-{}", next_session_id()));
+    let nvm = root.join(".nvm");
+    std::fs::create_dir_all(nvm.join("alias/lts")).unwrap();
+    for version in ["v20.9.0", "v20.10.0", "v22.0.0"] {
+        let bin = nvm.join("versions/node").join(version).join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        for name in ["node", "yam-nvm-test-cli"] {
+            let p = bin.join(name);
+            let script = if name == "node" {
+                format!("#!/bin/sh\nprintf '%s\\n' '{version}'\n")
+            } else {
+                "#!/usr/bin/env node\n".into()
+            };
+            std::fs::write(&p, script).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
     }
-    None
+    let minimal = std::ffi::OsStr::new("/nonexistent-yam-cold-path");
+    for (alias, expected) in [
+        ("20", "v20.10.0"),
+        ("v20.9.0", "v20.9.0"),
+        ("node", "v22.0.0"),
+        ("lts/*", "v20.10.0"),
+    ] {
+        std::fs::write(nvm.join("alias/default"), alias).unwrap();
+        std::fs::write(nvm.join("alias/lts/*"), "20").unwrap();
+        let path = agent_path_with_home(minimal, Some(&root));
+        let bin = nvm.join("versions/node").join(expected).join("bin");
+        assert_eq!(
+            find_executable_on_path("yam-nvm-test-cli", &path),
+            Some(bin.join("yam-nvm-test-cli")),
+            "{alias}"
+        );
+        let output = std::process::Command::new(bin.join("yam-nvm-test-cli"))
+            .env("PATH", &path)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap().trim(),
+            expected,
+            "CLI must launch with the selected Node runtime"
+        );
+    }
+    for alias in [
+        "default",
+        "../versions/node/v22.0.0",
+        "no-such-alias",
+        "999",
+    ] {
+        std::fs::write(nvm.join("alias/default"), alias).unwrap();
+        assert_eq!(
+            find_executable_on_path(
+                "yam-nvm-test-cli",
+                &agent_path_with_home(minimal, Some(&root))
+            ),
+            None,
+            "{alias}"
+        );
+    }
+    std::fs::remove_file(nvm.join("alias/default")).unwrap();
+    assert_eq!(
+        find_executable_on_path(
+            "yam-nvm-test-cli",
+            &agent_path_with_home(minimal, Some(&root))
+        ),
+        None,
+        "do not guess an unconfigured Node version"
+    );
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[cfg(all(test, unix))]
@@ -4285,7 +4375,7 @@ fn create_session_with_effects<R: tauri::Runtime>(
                 let session = active
                     .get(&record.summary.session_id)
                     .ok_or("The terminal process is unavailable; reconnect the terminal owner")?;
-                let mut summary = session.summary.clone();
+                let mut summary = record.summary.clone();
                 summary.status = session
                     .status
                     .lock()
@@ -4519,6 +4609,9 @@ fn create_session_with_effects<R: tauri::Runtime>(
             return Err(format!("Pi routing preflight failed: {reason}"));
         }
     }
+    #[cfg(unix)]
+    let integration =
+        integration.map(|result| result.or_else(|_| agent_bridge::Prepared::lifecycle()));
     let summary = SessionSummary {
         ssh: ssh.clone(),
         session_id: id,
@@ -4625,6 +4718,7 @@ fn create_session_with_effects<R: tauri::Runtime>(
             Some(restored_offset),
         )?;
     }
+    let mut interactive_assets = None;
     if let Some(integration) = integration {
         match integration {
             Ok(prepared) => {
@@ -4639,10 +4733,49 @@ fn create_session_with_effects<R: tauri::Runtime>(
                     &mut builder,
                 ) {
                     history.unavailable_agent(&summary.session_id, &reason)?;
+                    history.agent_shell(&summary.session_id)?;
+                }
+                #[cfg(unix)]
+                {
+                    let (shell, assets) = interactive_shell::wrap(
+                        &history.root,
+                        builder,
+                        summary.launch.as_ref(),
+                        Some(&prepared),
+                        &summary.session_id,
+                        (false, false),
+                    )?;
+                    builder = shell;
+                    interactive_assets = Some(assets);
                 }
             }
             Err(reason) => history.unavailable_agent(&summary.session_id, &reason)?,
         }
+    }
+    #[cfg(unix)]
+    if ordinary
+        && matches!(
+            builder
+                .get_argv()
+                .first()
+                .and_then(|p| Path::new(p).file_name())
+                .and_then(|p| p.to_str()),
+            Some("zsh" | "bash")
+        )
+    {
+        let (shell, assets) = interactive_shell::wrap(
+            &history.root,
+            builder,
+            None,
+            None,
+            &summary.session_id,
+            (
+                directory_reporting == Some(true),
+                command_reporting == Some(true),
+            ),
+        )?;
+        builder = shell;
+        interactive_assets = Some(assets);
     }
     if let Some(native_id) = resume_id
         .as_deref()
@@ -4660,8 +4793,8 @@ fn create_session_with_effects<R: tauri::Runtime>(
     ) = match zsh_directory_reporting::spawn(
         private_root,
         builder,
-        directory_reporting == Some(true),
-        command_reporting == Some(true),
+        directory_reporting == Some(true) && interactive_assets.is_none(),
+        command_reporting == Some(true) && interactive_assets.is_none(),
         |builder| {
             if let Some((source, cwd_identity)) = &project_source {
                 project_config::revalidate(source, &initial_cwd, cwd_identity, private_root)?;
@@ -4728,6 +4861,7 @@ fn create_session_with_effects<R: tauri::Runtime>(
     };
     let session = Arc::new(Session {
         _directory_reporting_assets: directory_reporting_assets,
+        _interactive_assets: interactive_assets,
         _resume_claim: resume_claim,
         summary: summary.clone(),
         master: Mutex::new(Some(pair.master)),
@@ -5400,18 +5534,46 @@ async fn pi_routing_catalog(
     manager: State<'_, SessionManager>,
     cwd: String,
     gateway: Option<String>,
+    probe_model: Option<String>,
 ) -> Result<serde_json::Value, String> {
     proxy!(
         manager,
         "pi_routing_catalog",
-        serde_json::json!({"cwd":cwd,"gateway":gateway})
+        serde_json::json!({"cwd":cwd,"gateway":gateway,"probe_model":probe_model})
     );
     let root = manager.history(&app)?.root.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        pi_router::catalog(&root, gateway.as_deref(), Path::new(&cwd))
+        pi_router::catalog(
+            &root,
+            gateway.as_deref(),
+            Path::new(&cwd),
+            probe_model.as_deref(),
+        )
     })
     .await
     .map_err(|_| "Pi catalog worker failed")?
+}
+#[tauri::command]
+async fn pi_packages(
+    app: AppHandle,
+    manager: State<'_, SessionManager>,
+    request: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let client = manager
+        .background_client
+        .lock()
+        .map_err(|_| "Background client lock poisoned")?
+        .clone();
+    let home = app
+        .path()
+        .home_dir()
+        .map_err(|_| "Home directory unavailable")?;
+    tauri::async_runtime::spawn_blocking(move || match client {
+        Some(client) => client.call("pi_packages", serde_json::json!({"request":request})),
+        None => pi_packages::handle(&home, request),
+    })
+    .await
+    .map_err(|_| String::from("Pi package worker failed"))?
 }
 #[tauri::command]
 fn get_session<R: tauri::Runtime>(
@@ -6239,6 +6401,7 @@ pub fn run() {
                     get_pi_routing,
                     pi_routing_control,
                     pi_routing_catalog,
+                    pi_packages,
                 ],
                 |invoke| invoke.resolver.reject("webview_command_forbidden"),
             )
@@ -7677,6 +7840,7 @@ mod tests {
             .unwrap();
         let session = std::sync::Arc::new(super::Session {
             _directory_reporting_assets: None,
+            _interactive_assets: None,
             _resume_claim: None,
             summary,
             master: std::sync::Mutex::new(Some(pair.master)),
@@ -8432,6 +8596,10 @@ mod tests {
     #[test]
     fn agent_arguments_preserve_windows_paths_and_reject_invalid_quotes() {
         assert_eq!(
+            super::parse_agent_args(r#"--skill 'one'\''s skill' --label "a\'b""#).unwrap(),
+            vec!["--skill", "one's skill", "--label", r"a\'b"]
+        );
+        assert_eq!(
             super::parse_agent_args(r#"--cwd C:\work\app --label "hello world" ''"#).unwrap(),
             vec!["--cwd", r"C:\work\app", "--label", "hello world", ""]
         );
@@ -8643,6 +8811,16 @@ mod tests {
         assert_eq!(record.output_end_offset, 123);
         assert!(record.ended_at.is_some());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn custom_commands_inherit_cli_discovery_path() {
+        let builder = shell_command(Some("npm --version"));
+        assert_eq!(
+            builder.get_env("PATH"),
+            Some(crate::agent_path().as_os_str())
+        );
     }
 
     #[cfg(not(windows))]

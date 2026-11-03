@@ -1291,8 +1291,8 @@ fn closure_t01_native_resume_claim_bridge_failure_and_retry_use_private_owned_pr
         Some(fixture.id()),
         None,
         |_, builder| {
-            let args: Vec<_> = builder
-                .get_argv()
+            let native_argv=super::interactive_shell::initial_argv(&builder).unwrap_or_else(||builder.get_argv().to_vec());
+            let args: Vec<_> = native_argv
                 .iter()
                 .map(|v| v.to_string_lossy().into_owned())
                 .collect();
@@ -1308,7 +1308,7 @@ fn closure_t01_native_resume_claim_bridge_failure_and_retry_use_private_owned_pr
     )
     .err()
     .unwrap();
-    assert!(failed.contains("owned native spawn refusal"));
+    assert!(failed.contains("owned native spawn refusal"),"unexpected error: {failed}");
     assert_eq!(connections.get(), 1);
     assert!(manager.resume_claims.lock().unwrap().is_empty());
     assert!(manager.sessions.lock().unwrap().is_empty());
@@ -1336,8 +1336,8 @@ fn closure_t01_native_resume_claim_bridge_failure_and_retry_use_private_owned_pr
         None,
         |slave, builder| {
             spawns.set(spawns.get() + 1);
-            let args: Vec<_> = builder
-                .get_argv()
+            let native_argv=super::interactive_shell::initial_argv(&builder).unwrap_or_else(||builder.get_argv().to_vec());
+            let args: Vec<_> = native_argv
                 .iter()
                 .map(|v| v.to_string_lossy().into_owned())
                 .collect();
@@ -2092,7 +2092,7 @@ fn terminal_environment_production_spawn_defaults_unusable_owner_term() {
         |_, _, _, _, _| panic!("ordinary shell has no agent probe"),
         &started,
     );
-    assert!(result.err().unwrap().contains("owned TERM spawn boundary"));
+    let error=result.err().unwrap();assert!(error.contains("owned TERM spawn boundary"),"unexpected error: {error}");
     assert!(started.borrow().is_empty());
 }
 
@@ -2912,7 +2912,7 @@ fn runtime_info_launch_snapshot_is_independent_of_hook_availability() {
             |name| { assert_eq!(name, adapter); Some(std::path::PathBuf::from("/bin/sh")) },
             |size| super::native_pty_system().openpty(size).map_err(|e| e.to_string()),
             |_, _| Err("owned spawn refusal".into()),
-            |_, _, _, _, _| panic!("task and unsupported hook launches cannot connect"),
+            |_, _, _, _, _| {assert_eq!(mode,"interactive");Err("owned unavailable native hooks".into())},
             |_, _, _| {}, |_, _, _, _| panic!("refused spawn cannot start workers"),
         );
         assert!(result.err().unwrap().contains("owned spawn refusal"));

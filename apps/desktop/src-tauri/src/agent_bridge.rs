@@ -14,6 +14,8 @@ struct Wire {
     version: u8,
     token: String,
     event: AgentEvent,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    run: Option<String>,
 }
 fn read_wire(reader: impl Read) -> Result<Wire, String> {
     let mut bytes = Vec::new();
@@ -434,8 +436,15 @@ impl Bridge {
                                 .get(&wire.token)
                                 .cloned()
                                 .ok_or("Unknown agent credential")?;
-                            if let Err(error) = store.ingest_agent(&id, &generation, &wire.event) {
-                                let _ = store.agent_failure(&id, &generation, &error);
+                            if let Err(error) = store.ingest_agent_run(
+                                &id,
+                                &generation,
+                                &wire.event,
+                                wire.run.as_deref(),
+                            ) {
+                                if wire.event.kind != "ProcessStart" {
+                                    let _ = store.agent_failure(&id, &generation, &error);
+                                }
                                 changed(
                                     &id,
                                     Some(format!("Agent event could not be saved: {error}")),
@@ -636,11 +645,20 @@ impl Drop for Bridge {
         self.stop();
     }
 }
-fn submit(address: SocketAddr, token: &str, event: AgentEvent) -> Result<(), String> {
+pub(super) fn submit(address: SocketAddr, token: &str, event: AgentEvent) -> Result<(), String> {
+    submit_run(address, token, event, std::env::var("YAM_AGENT_RUN").ok())
+}
+pub(super) fn submit_run(
+    address: SocketAddr,
+    token: &str,
+    event: AgentEvent,
+    run: Option<String>,
+) -> Result<(), String> {
     let address = local_address(&address.to_string())?;
     let bytes = serde_json::to_vec(&Wire {
         version: 1,
         token: token.into(),
+        run,
         event,
     })
     .map_err(|e| e.to_string())?;
@@ -1340,6 +1358,7 @@ pub(super) fn validate_resume(
     };
     validate_resume_metadata(&thread, id, cwd, provider)
 }
+#[derive(Clone, Serialize, Deserialize)]
 pub(super) struct Prepared {
     pub(super) token: String,
     pub(super) generation: String,
@@ -1486,6 +1505,16 @@ pub(super) fn prepare(
     }
 }
 impl Prepared {
+    pub(super) fn lifecycle() -> Result<Self, String> {
+        Ok(Self {
+            token: credential()?,
+            generation: credential()?,
+            cli_version: None,
+            args: vec![],
+            original: vec![],
+            opencode: None,
+        })
+    }
     pub(super) fn install(
         &self,
         builder: &mut portable_pty::CommandBuilder,
@@ -2424,6 +2453,7 @@ mod tests {
         bridge.register("b", &other, "b").unwrap();
         let bytes = serde_json::to_vec(&Wire {
             version: 1,
+            run: None,
             token: token.clone(),
             event: AgentEvent {
                 kind: "SessionStart".into(),

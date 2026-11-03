@@ -36,7 +36,7 @@ test('primary ended Agent openTerminal delegates every cold/layout browse to rec
   const open=new Function(...Object.keys(bindings),transpile(functions.get('openTerminal'))+';return openTerminal;')(...Object.values(bindings));
   const valid=()=>true,appearance={fontSize:16};
   assert.equal(await open(record,'pane-id',7,valid,appearance),'recorded');
-  assert.deepEqual(calls,[[record,false,'pane-id',7,valid,appearance,undefined,undefined,true]]);
+  assert.deepEqual(calls,[[record,false,'pane-id',7,valid,appearance,undefined,undefined,true,undefined,true]]);
  }
 });
 
@@ -47,7 +47,7 @@ test('primary browse guard attaches live Agents and opens ended Shell history wi
  const bindings={terminalStatuses:new Set(['stopped']),openHistory:(...args)=>{opened.push(args);},cancelLayoutRestore(){},detailVersion:{current:0},layoutRestore:{current:{version:0}},ownerConnectionAvailable:{current:{available:true,version:0}},terminalMounted:{current:true},terminalViews:{current:{get:()=>null}},creatingSession:{current:false},desktopWindow:{restore_blocked:false},terminalLayoutRef:{current:{panes:['ended']}},terminalMembers:()=>['ended'],async invoke(name,args){calls.push([name,args]);if(name==='create_session')return next.summary;if(name==='get_session')return next;assert.fail(name);},refreshHistory(){},setError:reason=>assert.fail(String(reason))};
  const open=new Function(...Object.keys(bindings),transpile(functions.get('openTerminal'))+';return openTerminal;')(...Object.values(bindings));
  const active={summary:{session_id:'active',launch:{adapter:'claude',mode:'interactive'}},status:'running'};
- await open(active);assert.equal(calls.length,0);assert.deepEqual(opened.shift(),[active,false,undefined,undefined,undefined,undefined,undefined,undefined,false]);
+ await open(active);assert.equal(calls.length,0);assert.deepEqual(opened.shift(),[active,false,undefined,undefined,undefined,undefined,undefined,undefined,false,undefined,true]);
  await open(shell);assert.deepEqual(calls,[]);
  assert.equal(opened[0][0],shell);assert.equal(opened[0][8],true);
 });

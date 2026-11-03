@@ -114,3 +114,39 @@ test('ended local terminal captures a safe native paste for recovery instead of 
 test('ended terminal multiline paste opens preview and only explicit confirmation recovers it',()=>{
  for(const confirm of [false,true]){const recovered=[];const h=harness({view:{live:false,ready:true},bindings:{canContinueTerminalInput:()=>true,continueTerminalInput:(...args)=>recovered.push(args)}});h.native('echo one\necho two');assert.ok(h.preview);assert.deepEqual(recovered,[]);h.document.activeElement={dialog:true};if(confirm)h.confirm();else h.cancel();assert.equal(recovered.length,confirm?1:0);if(confirm){assert.equal(recovered[0][2],'echo one\necho two');assert.equal(recovered[0][3],true);}assert.deepEqual(h.sends,[]);}
 });
+
+test('a rejected automatic terminal response alone does not claim typed input was discarded',async()=>{
+ const h=harness({bindings:{invoke:async()=>{throw Error('Terminal input cancelled; no bytes were accepted');}}});
+ h.view.instance.data('\x1b[1;1R');await new Promise(setImmediate);
+ assert.deepEqual(h.errors,[]);assert.equal(h.view.inputQueue.count,0);
+});
+test('a rejected terminal response still warns when real input is queued behind it',async()=>{
+ let rejectFirst;const sent=[];
+ const h=harness({bindings:{invoke:(name,args)=>{sent.push(args.data);return new Promise((_,reject)=>rejectFirst=reject);}}});
+ h.view.instance.data('\x1b[1;1R');h.view.instance.data('typed');rejectFirst(Error('Terminal input cancelled; no bytes were accepted'));
+ await new Promise(setImmediate);assert.deepEqual(sent,['\x1b[1;1R']);assert.match(h.errors.at(-1),/Pending terminal input was discarded/);
+});
+
+test('saved terminal focus reports never reopen a shell while explicit typing still does',()=>{
+ const continued=[];const h=harness({view:{live:false},bindings:{continueTerminalInput:(_id,_view,data)=>continued.push(data)}});
+ for(const data of ['\x1b[I','\x1b[O'])h.view.instance.data(data);
+ assert.deepEqual(continued,[]);assert.deepEqual(h.sends,[]);
+ h.view.instance.data('typed');assert.deepEqual(continued,['typed']);
+});
+test('live terminal focus reports stay protocol responses even after focus moved away',async()=>{
+ const h=harness();h.document.activeElement={};h.view.instance.data('\x1b[O');await new Promise(setImmediate);
+ assert.deepEqual(h.sends.map(s=>s[1].data),['\x1b[O']);
+});
+
+test('saved TUI mouse reports never reopen a shell; text, Enter and Tab remain explicit input',()=>{
+ const continued=[];const h=harness({view:{live:false},bindings:{continueTerminalInput:(_id,_view,data)=>continued.push(data)}});
+ for(const data of ['\x1b[<0;12;4M','\x1b[<0;12;4m','\x1b[<35;12;4M','\x1b[M !!','\x1b[32;12;4M'])h.view.instance.data(data);
+ assert.deepEqual(continued,[]);assert.deepEqual(h.sends,[]);
+ for(const data of ['typed','\r','\t'])h.view.instance.data(data);assert.deepEqual(continued,['typed','\r','\t']);
+});
+test('live raw and projected TUI mouse reports remain interactive',async()=>{
+ for(const projection of [false,true]){const h=harness({view:{projection}});h.view.instance.data('\x1b[<0;12;4M');await new Promise(setImmediate);assert.deepEqual(h.sends.map(s=>s[1].data),['\x1b[<0;12;4M']);}
+});
+test('a cancelled mouse report alone does not report lost typed input',async()=>{
+ const h=harness({bindings:{invoke:async()=>{throw Error('Terminal input cancelled; no bytes were accepted');}}});h.view.instance.data('\x1b[<35;12;4M');await new Promise(setImmediate);assert.deepEqual(h.errors,[]);
+});

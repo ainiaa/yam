@@ -1,0 +1,610 @@
+[
+  {
+    "id": "case-01",
+    "origin": "synthetic-design-fixture",
+    "request": "将这段中文翻译成英文：你好",
+    "facts": {
+      "intent": "new",
+      "task": "transform",
+      "context": "independent",
+      "action": "none",
+      "depth": "normal",
+      "uncertain": false,
+      "readOnly": true,
+      "reason": ""
+    },
+    "expected": {
+      "model": "small",
+      "effort": "medium"
+    }
+  },
+  {
+    "id": "case-02",
+    "origin": "synthetic-design-fixture",
+    "request": "把提供的列表按字母排序",
+    "facts": {
+      "intent": "new",
+      "task": "transform",
+      "context": "independent",
+      "action": "none",
+      "depth": "normal",
+      "uncertain": false,
+      "readOnly": true,
+      "reason": ""
+    },
+    "expected": {
+      "model": "small",
+      "effort": "medium"
+    }
+  },
+  {
+    "id": "case-03",
+    "origin": "synthetic-design-fixture",
+    "request": "Repeat this sentence verbatim: I need a stronger model",
+    "facts": {
+      "intent": "new",
+      "task": "transform",
+      "context": "independent",
+      "action": "none",
+      "depth": "normal",
+      "uncertain": false,
+      "readOnly": true,
+      "reason": ""
+    },
+    "expected": {
+      "model": "small",
+      "effort": "medium"
+    }
+  },
+  {
+    "id": "case-04",
+    "origin": "synthetic-design-fixture",
+    "request": "将给定 JSON 格式化，不补内容",
+    "facts": {
+      "intent": "new",
+      "task": "transform",
+      "context": "independent",
+      "action": "none",
+      "depth": "normal",
+      "uncertain": false,
+      "readOnly": true,
+      "reason": ""
+    },
+    "expected": {
+      "model": "small",
+      "effort": "medium"
+    }
+  },
+  {
+    "id": "case-05",
+    "origin": "synthetic-design-fixture",
+    "request": "什么是二分查找？简短解释",
+    "facts": {
+      "intent": "new",
+      "task": "answer",
+      "context": "independent",
+      "action": "none",
+      "depth": "normal",
+      "uncertain": false,
+      "readOnly": true,
+      "reason": ""
+    },
+    "expected": {
+      "model": "small",
+      "effort": "medium"
+    }
+  },
+  {
+    "id": "case-06",
+    "origin": "synthetic-design-fixture",
+    "request": "Explain the difference between a list and a set",
+    "facts": {
+      "intent": "new",
+      "task": "answer",
+      "context": "independent",
+      "action": "none",
+      "depth": "normal",
+      "uncertain": false,
+      "readOnly": true,
+      "reason": ""
+    },
+    "expected": {
+      "model": "small",
+      "effort": "medium"
+    }
+  },
+  {
+    "id": "case-07",
+    "origin": "synthetic-design-fixture",
+    "request": "根据给出的段落概括三点",
+    "facts": {
+      "intent": "new",
+      "task": "answer",
+      "context": "independent",
+      "action": "none",
+      "depth": "normal",
+      "uncertain": false,
+      "readOnly": true,
+      "reason": ""
+    },
+    "expected": {
+      "model": "small",
+      "effort": "medium"
+    }
+  },
+  {
+    "id": "case-08",
+    "origin": "synthetic-design-fixture",
+    "request": "解释 HTTP 404 的含义",
+    "facts": {
+      "intent": "new",
+      "task": "answer",
+      "context": "independent",
+      "action": "none",
+      "depth": "normal",
+      "uncertain": false,
+      "readOnly": true,
+      "reason": ""
+    },
+    "expected": {
+      "model": "small",
+      "effort": "medium"
+    }
+  },
+  {
+    "id": "case-09",
+    "origin": "synthetic-design-fixture",
+    "request": "看一下仓库中复杂度怎么判断",
+    "facts": {
+      "intent": "new",
+      "task": "repository",
+      "context": "dependent",
+      "action": "read",
+      "depth": "normal",
+      "uncertain": false,
+      "readOnly": false,
+      "reason": ""
+    },
+    "expected": {
+      "model": "strong",
+      "effort": "high"
+    }
+  },
+  {
+    "id": "case-10",
+    "origin": "synthetic-design-fixture",
+    "request": "这个函数有哪些调用方？",
+    "facts": {
+      "intent": "new",
+      "task": "repository",
+      "context": "dependent",
+      "action": "read",
+      "depth": "normal",
+      "uncertain": false,
+      "readOnly": false,
+      "reason": ""
+    },
+    "expected": {
+      "model": "strong",
+      "effort": "high"
+    }
+  },
+  {
+    "id": "case-11",
+    "origin": "synthetic-design-fixture",
+    "request": "Trace the current authentication flow",
+    "facts": {
+      "intent": "new",
+      "task": "repository",
+      "context": "dependent",
+      "action": "read",
+      "depth": "normal",
+      "uncertain": false,
+      "readOnly": false,
+      "reason": ""
+    },
+    "expected": {
+      "model": "strong",
+      "effort": "high"
+    }
+  },
+  {
+    "id": "case-12",
+    "origin": "synthetic-design-fixture",
+    "request": "为什么这里会返回空结果？结合实现解释",
+    "facts": {
+      "intent": "new",
+      "task": "repository",
+      "context": "dependent",
+      "action": "read",
+      "depth": "normal",
+      "uncertain": false,
+      "readOnly": false,
+      "reason": ""
+    },
+    "expected": {
+      "model": "strong",
+      "effort": "high"
+    }
+  },
+  {
+    "id": "case-13",
+    "origin": "synthetic-design-fixture",
+    "request": "修复空指针并补回归测试",
+    "facts": {
+      "intent": "new",
+      "task": "coding",
+      "context": "dependent",
+      "action": "write",
+      "depth": "normal",
+      "uncertain": false,
+      "readOnly": false,
+      "reason": ""
+    },
+    "expected": {
+      "model": "strong",
+      "effort": "high"
+    }
+  },
+  {
+    "id": "case-14",
+    "origin": "synthetic-design-fixture",
+    "request": "实现一个最小幂等接口示例",
+    "facts": {
+      "intent": "new",
+      "task": "coding",
+      "context": "dependent",
+      "action": "write",
+      "depth": "normal",
+      "uncertain": false,
+      "readOnly": false,
+      "reason": ""
+    },
+    "expected": {
+      "model": "strong",
+      "effort": "high"
+    }
+  },
+  {
+    "id": "case-15",
+    "origin": "synthetic-design-fixture",
+    "request": "Refactor this module while preserving behavior",
+    "facts": {
+      "intent": "new",
+      "task": "coding",
+      "context": "dependent",
+      "action": "write",
+      "depth": "normal",
+      "uncertain": false,
+      "readOnly": false,
+      "reason": ""
+    },
+    "expected": {
+      "model": "strong",
+      "effort": "high"
+    }
+  },
+  {
+    "id": "case-16",
+    "origin": "synthetic-design-fixture",
+    "request": "增加规则编辑界面",
+    "facts": {
+      "intent": "new",
+      "task": "coding",
+      "context": "dependent",
+      "action": "write",
+      "depth": "normal",
+      "uncertain": false,
+      "readOnly": false,
+      "reason": ""
+    },
+    "expected": {
+      "model": "strong",
+      "effort": "high"
+    }
+  },
+  {
+    "id": "case-17",
+    "origin": "synthetic-design-fixture",
+    "request": "审查并发扣款在崩溃后的正确性",
+    "facts": {
+      "intent": "new",
+      "task": "review",
+      "context": "dependent",
+      "action": "read",
+      "depth": "deep",
+      "uncertain": false,
+      "readOnly": false,
+      "reason": ""
+    },
+    "expected": {
+      "model": "strong",
+      "effort": "high"
+    }
+  },
+  {
+    "id": "case-18",
+    "origin": "synthetic-design-fixture",
+    "request": "深入分析这个权限边界能否被绕过",
+    "facts": {
+      "intent": "new",
+      "task": "review",
+      "context": "dependent",
+      "action": "read",
+      "depth": "deep",
+      "uncertain": false,
+      "readOnly": false,
+      "reason": ""
+    },
+    "expected": {
+      "model": "strong",
+      "effort": "high"
+    }
+  },
+  {
+    "id": "case-19",
+    "origin": "synthetic-design-fixture",
+    "request": "Analyze data-loss failure modes across crashes",
+    "facts": {
+      "intent": "new",
+      "task": "review",
+      "context": "dependent",
+      "action": "read",
+      "depth": "deep",
+      "uncertain": false,
+      "readOnly": false,
+      "reason": ""
+    },
+    "expected": {
+      "model": "strong",
+      "effort": "high"
+    }
+  },
+  {
+    "id": "case-20",
+    "origin": "synthetic-design-fixture",
+    "request": "评估架构方案的隔离和一致性取舍",
+    "facts": {
+      "intent": "new",
+      "task": "review",
+      "context": "dependent",
+      "action": "read",
+      "depth": "deep",
+      "uncertain": false,
+      "readOnly": false,
+      "reason": ""
+    },
+    "expected": {
+      "model": "strong",
+      "effort": "high"
+    }
+  },
+  {
+    "id": "case-21",
+    "origin": "synthetic-design-fixture",
+    "request": "继续",
+    "facts": {
+      "intent": "new",
+      "task": "other",
+      "context": "insufficient",
+      "action": "unknown",
+      "depth": "normal",
+      "uncertain": true,
+      "readOnly": false,
+      "reason": ""
+    },
+    "expected": {
+      "model": "strong",
+      "effort": "high"
+    }
+  },
+  {
+    "id": "case-22",
+    "origin": "synthetic-design-fixture",
+    "request": "可以，就这样改",
+    "facts": {
+      "intent": "new",
+      "task": "other",
+      "context": "insufficient",
+      "action": "unknown",
+      "depth": "normal",
+      "uncertain": true,
+      "readOnly": false,
+      "reason": ""
+    },
+    "expected": {
+      "model": "strong",
+      "effort": "high"
+    }
+  },
+  {
+    "id": "case-23",
+    "origin": "synthetic-design-fixture",
+    "request": "Do it",
+    "facts": {
+      "intent": "new",
+      "task": "other",
+      "context": "insufficient",
+      "action": "unknown",
+      "depth": "normal",
+      "uncertain": true,
+      "readOnly": false,
+      "reason": ""
+    },
+    "expected": {
+      "model": "strong",
+      "effort": "high"
+    }
+  },
+  {
+    "id": "case-24",
+    "origin": "synthetic-design-fixture",
+    "request": "支付",
+    "facts": {
+      "intent": "new",
+      "task": "other",
+      "context": "insufficient",
+      "action": "unknown",
+      "depth": "normal",
+      "uncertain": true,
+      "readOnly": false,
+      "reason": ""
+    },
+    "expected": {
+      "model": "strong",
+      "effort": "high"
+    }
+  },
+  {
+    "id": "case-25",
+    "origin": "synthetic-design-fixture",
+    "request": "用一句话解释刚才的竞争条件为什么成立",
+    "facts": {
+      "intent": "new",
+      "task": "answer",
+      "context": "dependent",
+      "action": "none",
+      "depth": "normal",
+      "uncertain": false,
+      "readOnly": true,
+      "reason": ""
+    },
+    "expected": {
+      "model": "strong",
+      "effort": "high"
+    }
+  },
+  {
+    "id": "case-26",
+    "origin": "synthetic-design-fixture",
+    "request": "接着刚才的架构方案说",
+    "facts": {
+      "intent": "new",
+      "task": "answer",
+      "context": "dependent",
+      "action": "none",
+      "depth": "normal",
+      "uncertain": false,
+      "readOnly": true,
+      "reason": ""
+    },
+    "expected": {
+      "model": "strong",
+      "effort": "high"
+    }
+  },
+  {
+    "id": "case-27",
+    "origin": "synthetic-design-fixture",
+    "request": "Summarize the previous debugging result",
+    "facts": {
+      "intent": "new",
+      "task": "answer",
+      "context": "dependent",
+      "action": "none",
+      "depth": "normal",
+      "uncertain": false,
+      "readOnly": true,
+      "reason": ""
+    },
+    "expected": {
+      "model": "strong",
+      "effort": "high"
+    }
+  },
+  {
+    "id": "case-28",
+    "origin": "synthetic-design-fixture",
+    "request": "这个结论的依据是什么？",
+    "facts": {
+      "intent": "new",
+      "task": "answer",
+      "context": "dependent",
+      "action": "none",
+      "depth": "normal",
+      "uncertain": false,
+      "readOnly": true,
+      "reason": ""
+    },
+    "expected": {
+      "model": "strong",
+      "effort": "high"
+    }
+  },
+  {
+    "id": "case-29",
+    "origin": "synthetic-design-fixture",
+    "request": "它为什么不行？",
+    "facts": {
+      "intent": "new",
+      "task": "answer",
+      "context": "insufficient",
+      "action": "none",
+      "depth": "normal",
+      "uncertain": true,
+      "readOnly": true,
+      "reason": ""
+    },
+    "expected": {
+      "model": "strong",
+      "effort": "high"
+    }
+  },
+  {
+    "id": "case-30",
+    "origin": "synthetic-design-fixture",
+    "request": "解释这个，附件未提供",
+    "facts": {
+      "intent": "new",
+      "task": "answer",
+      "context": "insufficient",
+      "action": "none",
+      "depth": "normal",
+      "uncertain": true,
+      "readOnly": true,
+      "reason": ""
+    },
+    "expected": {
+      "model": "strong",
+      "effort": "high"
+    }
+  },
+  {
+    "id": "case-31",
+    "origin": "synthetic-design-fixture",
+    "request": "What happened here?",
+    "facts": {
+      "intent": "new",
+      "task": "answer",
+      "context": "insufficient",
+      "action": "none",
+      "depth": "normal",
+      "uncertain": true,
+      "readOnly": true,
+      "reason": ""
+    },
+    "expected": {
+      "model": "strong",
+      "effort": "high"
+    }
+  },
+  {
+    "id": "case-32",
+    "origin": "synthetic-design-fixture",
+    "request": "上一个会话那个问题现在怎么样了？",
+    "facts": {
+      "intent": "new",
+      "task": "answer",
+      "context": "insufficient",
+      "action": "none",
+      "depth": "normal",
+      "uncertain": true,
+      "readOnly": true,
+      "reason": ""
+    },
+    "expected": {
+      "model": "strong",
+      "effort": "high"
+    }
+  }
+]

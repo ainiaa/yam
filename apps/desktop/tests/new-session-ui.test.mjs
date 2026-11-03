@@ -134,15 +134,15 @@ test('concurrent native CLI starts admit one create request before its result is
  assert.equal((await first).session_id,'s');assert.equal(requests.length,1);
 });
 
-test('startup buttons retain availability and provider compatibility equally in both windows',()=>{
+test('startup buttons allow missing CLI setup and retain provider compatibility in both windows',()=>{
  const group=nodes(n=>ts.isJsxElement(n)&&attribute(n,'aria-label')?.text==='Startup program',launchDialog)[0];
  const button=nodes(n=>ts.isJsxElement(n)&&n.openingElement.tagName.getText(file)==='button',group)[0];assert.ok(button);
  const evaluate=(name,bindings)=>new Function(...Object.keys(bindings),ts.transpile('return ('+attribute(button,name).expression.getText(file)+');',{target:ts.ScriptTarget.ES2022}))(...Object.values(bindings));
  for(const [id,available,main,provider,disabled] of [
-  ['shell',false,true,null,false],['shell',false,false,null,false],['codex',true,true,null,false],['codex',false,true,null,true],['codex',true,false,null,false],
+  ['shell',false,true,null,false],['shell',false,false,null,false],['codex',true,true,null,false],['codex',false,true,null,false],['codex',false,false,null,false],['codex',true,false,null,false],
   ['codex',true,true,providers.providerPreset('claude-api').provider,true],['claude',true,true,providers.providerPreset('claude-api').provider,false],
  ]){
-  const calls=[],bindings={adapter:{id,available},isMainWindow:main,formAdapter:id,formLaunch:{provider},supportsProvider:providers.supportsProvider,changeAdapter:v=>calls.push(v)};
+  const calls=[],bindings={starting:false,adapterInstalling:false,adapter:{id,available},isMainWindow:main,formAdapter:id,formLaunch:{provider},supportsProvider:providers.supportsProvider,changeAdapter:v=>calls.push(v)};
   assert.equal(evaluate('disabled',bindings),disabled,`${id}/${available}/${main}/${provider?.id}`);
   assert.equal(evaluate('aria-pressed',bindings),true);evaluate('onClick',bindings)();assert.deepEqual(calls,[id]);
  }

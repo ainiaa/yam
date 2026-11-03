@@ -1834,7 +1834,8 @@ fn create_secondary<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<(), String>
     )
     .title("YAM — second terminal window")
     .theme(Some(tauri::Theme::Dark))
-    .inner_size(1180.0, 760.0)
+    .inner_size(1180.0, 768.0)
+    .min_inner_size(1024.0, 768.0)
     .initialization_script(native_ready_script(epoch))
     .on_page_load(move |handle, payload| {
         let webview: &tauri::Webview<R> = handle.as_ref();
@@ -2191,6 +2192,7 @@ fn settings_target(target: Option<&str>) -> Result<&str, String> {
         | "directory-reporting"
         | "command-reporting"
         | "launch-settings"
+        | "pi-plugins"
         | "support") => Ok(value),
         _ => Err("invalid_settings_target".into()),
     }
@@ -2209,6 +2211,7 @@ fn settings_targets_preserve_pages_and_reject_unknown_values() {
         "system-entry",
         "directory-reporting",
         "command-reporting",
+        "pi-plugins",
         "support",
     ] {
         assert_eq!(settings_target(Some(page)).unwrap(), page);

@@ -57,7 +57,7 @@ function markup(interactive, collapsed, longPath, stopped=false) {
     sidebarSessions,searchInput:{current:null},historyQuery:'',statusFilter:'all',unreadTotal:0,inboxOpen:false,shortcutError:null,history:[],historyCursor:null,historyLoading:false,capacityOpen:false,capacity:null,capacityError:null,capacityBusy:false,scanCapacity(){},jumpToAttention(){},addProject(){},endProjectDrag(){},
     visibleProjects:[{path:'/work',name:'Project',sessions:[{summary:{session_id:'fixture',mode:'command'},status:'stopped',started_at:0}]}],projectKey:path=>path,collapsedProjects:new Set(),normalizedQuery:'',projectColor:()=>'',canRenameProject:()=>true,canMoveProject:()=>false,pinnedSessions:[],
     session: {session_id: 'fixture', cwd:'/work', launch: interactive ? {mode: 'interactive',adapter:'codex'} : null},
-    conversationOpen:false,showConversation(){},openTerminalFind(){},
+    setLayoutMenuHost(){},conversationOpen:false,showConversation(){},openTerminalFind(){},
     starting:false, titleFor: () => 'Codex interactive session', visibleGitContext: longPath ? {kind: 'repository', branch: 'feature/' + 'long-branch-'.repeat(30), dirty: true, root: '/work/' + 'long-directory/'.repeat(30), common_dir: '/repo/.git'} : {kind: 'unavailable'},
     gitContextLabel, isRunning: !stopped, currentAgent: {integration: 'connecting'}, agentLabel,
     agentPhase:"idle",sessionStatus: stopped?'stopped':'running', statusLabels: {running:'Running',stopped:'Stopped'}, notificationsPaused: false,
