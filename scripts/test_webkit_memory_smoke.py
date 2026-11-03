@@ -58,3 +58,18 @@ class WebKitBuildBudget(unittest.TestCase):
             self.assertEqual(compile_call.kwargs['timeout'], 120)
             self.assertEqual(browser_call.kwargs['timeout'], 30)
             self.assertEqual(browser_call.args[0][0], compile_call.args[0][-1])
+
+    def test_periodic_ipc_does_not_keep_startup_pending(self):
+        module = WebKitStartup().smoke()
+        bootstrap = module.SWIFT.split('let bootstrap = """', 1)[1].split('"""', 1)[0]
+        js = """globalThis.window=globalThis; globalThis.document={};
+globalThis.addEventListener=()=>{}; const pending=[];
+globalThis.setTimeout=fn=>pending.push(fn);
+""" + bootstrap + """
+window.__TAURI_INTERNALS__.invoke('memory_usage');
+window.__TAURI_INTERNALS__.invoke('memory_usage');
+if(window.__yamPending!==1)throw Error('Repeated polling counted as startup');
+pending[0]();
+if(window.__yamPending!==0)throw Error('First startup request did not settle');
+"""
+        subprocess.run(['node', '-e', js], check=True, capture_output=True, text=True, timeout=10)
