@@ -842,6 +842,13 @@ fn query_snapshot_changes(
     )?;
     if let Some(bytes) = &original_index {
         shadow.write("index", bytes)?;
+        // Preserve Git's racy-clean boundary when copying the private index.
+        let modified = fs::metadata(&index)
+            .and_then(|metadata| metadata.modified())
+            .map_err(|_| "git_query_failed")?;
+        fs::File::open(shadow.0.join("index"))
+            .and_then(|file| file.set_modified(modified))
+            .map_err(|_| "git_query_failed")?;
     }
     if let Some((_, Some(bytes))) = original_attributes
         .iter()
@@ -2113,6 +2120,10 @@ mod tests {
         let config = fs::read(&global).unwrap();
         let patterns = fs::read(&source).unwrap();
         let index = fs::read(repo.0.join(".git/index")).unwrap();
+        let index_modified = fs::metadata(repo.0.join(".git/index"))
+            .unwrap()
+            .modified()
+            .unwrap();
         let env = vec![
             ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
             ("GIT_CONFIG_GLOBAL".into(), global.as_os_str().to_owned()),
@@ -2143,6 +2154,13 @@ mod tests {
         assert_eq!(fs::read(&source).unwrap(), patterns);
         assert_eq!(fs::read(&global).unwrap(), config);
         assert_eq!(fs::read(repo.0.join(".git/index")).unwrap(), index);
+        assert_eq!(
+            fs::metadata(repo.0.join(".git/index"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            index_modified
+        );
         repo.git(&["config", "core.excludesFile", ""]);
         let (_, _, _) = query_snapshot_changes(
             &repo.0,
