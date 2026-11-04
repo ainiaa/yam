@@ -25,7 +25,7 @@ fn fields(value: &Value, allowed: &[&str]) -> bool {
 fn portable_policy(value: &Value) -> bool {
     let model = |value: &Value| {
         value.as_str().is_some_and(|key| {
-            key.len() <= 512
+            key.encode_utf16().count() <= 512
                 && key.split_once('/').is_some_and(|(provider, id)| {
                     !provider.is_empty()
                         && !id.is_empty()
@@ -33,8 +33,8 @@ fn portable_policy(value: &Value) -> bool {
                             .bytes()
                             .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
                         && id
-                            .bytes()
-                            .all(|b| b.is_ascii_alphanumeric() || b"_.:/-".contains(&b))
+                            .chars()
+                            .all(|c| !c.is_whitespace() && !c.is_control() && c != '\u{feff}')
                 })
         })
     };
@@ -217,6 +217,34 @@ mod tests {
         assert_eq!(serde_json::from_slice::<Value>(&result).unwrap(), value);
         assert!(encode(r#"{"version":2,"settings":{},"connections":[],"piRouting":null}"#).is_ok());
         assert!(encode(r#"{"version":1,"settings":{},"connections":[]}"#).is_ok());
+    }
+    #[test]
+    fn portable_pi_policy_export_accepts_catalog_names_and_utf16_boundary() {
+        for key in [
+            "p/model@2026".to_string(),
+            "p/模型".into(),
+            format!("p/{}", "字".repeat(510)),
+        ] {
+            let mut value = portable_backup();
+            value["piRouting"]["billing"] = "configured".into();
+            for role in ["small", "strong", "classifier", "model"] {
+                value["piRouting"][role] = key.clone().into();
+            }
+            let encoded = encode(&value.to_string()).unwrap();
+            assert_eq!(serde_json::from_slice::<Value>(&encoded).unwrap(), value);
+        }
+        for key in [
+            format!("p/{}", "字".repeat(511)),
+            "p/two words".into(),
+            "p/control\u{85}".into(),
+            "p/space\u{feff}".into(),
+            "p/NUL\0".into(),
+        ] {
+            let mut value = portable_backup();
+            value["piRouting"]["billing"] = "configured".into();
+            value["piRouting"]["small"] = key.into();
+            assert!(encode(&value.to_string()).is_err());
+        }
     }
     #[test]
     fn portable_pi_policy_export_rejects_credentials_invalid_rules_and_unknown_versions() {

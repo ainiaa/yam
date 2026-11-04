@@ -12,7 +12,7 @@ export const piSetupStorageKey='yam.piRoutingSetup.v1';
 export type PiRoutingPolicy={v:1;small:string;strong:string;classifier:string;model:string;effort:string;billing:'configured'|'subscription';rules:TaskRules};
 export function validatePiRoutingPolicy(value:unknown):PiRoutingPolicy {
  const v=value as PiRoutingPolicy,keys=['v','small','strong','classifier','model','effort','billing','rules'];
- const model=(key:unknown)=>typeof key==='string'&&key.length<=512&&/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.:/-]+$/.test(key);
+ const model=(key:unknown)=>typeof key==='string'&&key.length<=512&&/^[A-Za-z0-9_.-]+\/[^\s\p{Cc}]+$/u.test(key);
  if(!v||typeof v!=='object'||Array.isArray(v)||Object.keys(v).length!==keys.length||!keys.every(k=>Object.prototype.hasOwnProperty.call(v,k))||v.v!==1||![v.small,v.strong,v.classifier].every(model)||v.model!=='auto'&&!model(v.model)||!['auto','off','minimal',...piLevels].includes(v.effort)||!['configured','subscription'].includes(v.billing))throw Error('Invalid Pi routing policy');
  if(v.billing==='subscription'&&[v.small,v.strong,v.classifier,...v.model==='auto'?[]:[v.model]].some(key=>!/^(?:yam-codex|openai-codex)\//.test(key)))throw Error('Subscription-only billing requires a Codex subscription model.');
  return {v:1,small:v.small,strong:v.strong,classifier:v.classifier,model:v.model,effort:v.effort,billing:v.billing,rules:validateRules(v.rules)};

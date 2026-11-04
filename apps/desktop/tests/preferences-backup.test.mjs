@@ -5,6 +5,17 @@ import {defaultRules} from '../src-tauri/pi/task-rules.mjs';
 const appearance={language:'en',theme:'nord',background:null,backgroundStrength:12};
 const provider={id:'custom',model:'gateway/model',base_url:'http://127.0.0.1:3425',api_key_env:'GATEWAY_KEY'};
 const row={id:'11111111-1111-4111-8111-111111111111',name:'Magpie',adapter:'codex',mode:'interactive',extra_args:'',prompt:'PRIVATE_PROMPT',command:null,provider};
+test('Pi catalog model names survive policy save and backup with version suffixes and Unicode',()=>{
+ for(const key of ['p/model@2026','p/模型','p/'+'字'.repeat(510)]){
+  const draft={gateway:null,small:key,strong:key,classifier:key,model:key,effort:'high'},models=[{key,name:key,levels:['high'],context_window:128000}];
+  assert.equal(validatePiDraft(draft,models),null);
+  const setup=JSON.stringify(piSetupMapping(draft,'')),backup=parsePreferencesBackup(createPreferencesBackup(k=>k===piSetupStorageKey?setup:null,[],true),true),writes=preferencesImportWrites(backup,[]);
+  assert.equal(parsePiDraft(restorePiSetup('',writes[piSetupStorageKey])).model,key);
+ }
+});
+test('Pi portable model names retain length, whitespace and control validation',()=>{
+ for(const key of ['p/'+'字'.repeat(511),'p/two words','p/line\nfeed','p/NUL\0','p/control\u0085','p/space\ufeff'])assert.throws(()=>piSetupMapping({gateway:null,small:key,strong:key,classifier:key,model:'auto',effort:'auto'},''));
+});
 test('Pi policy backup migrates roles, fixed selection and rules without exporting its machine gateway',()=>{
  const rules=structuredClone(defaultRules);rules.rules.find(r=>r.task==='review').effort='max';
  const mapping=piSetupMapping({gateway:'https://PRIVATE_HOST.example/v1',small:'yam-codex/sol',strong:'yam-codex/strong',classifier:'yam-codex/sol',model:'yam-codex/strong',effort:'high',rules:JSON.stringify(rules)},'--yam-billing subscription');
