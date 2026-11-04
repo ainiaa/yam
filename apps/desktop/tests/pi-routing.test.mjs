@@ -51,11 +51,31 @@ function fixture({answer={intent:'new',difficulty:'simple',uncertain:false,readO
  const nativeCalls=[];
  const adapter=native??{resolveModel:(_ctx,m)=>m,stream:(...args)=>{nativeCalls.push(args);return {result:()=>ctx.modelRegistry.complete(...args)};}};
  const ready=install(pi,m=>Object.keys(m.thinkingLevelMap),class Text {constructor(text){this.text=text;}},adapter);
- const ctx={model:{api:'pi-virtual',provider:'yam',id:'auto'},isIdle:()=>true,ui:{setStatus:(...v)=>statuses.push(v),notify(){},select:async()=>null},sessionManager:{getBranch:()=>entries},modelRegistry:{find:(_p,id)=>models[id],getAvailable:()=>Object.values(models),hasConfiguredAuth:()=>true,complete:async()=>{classifierCalls++;if(answer instanceof Error)throw answer;return {content:[{type:'text',text:JSON.stringify(answer)}]};}}};
+ const ctx={model:{api:'pi-virtual',provider:'yam',id:'auto'},isIdle:()=>true,ui:{setStatus:(...v)=>statuses.push(v),notify(){},select:async()=>null},sessionManager:{getBranch:()=>entries,getSessionFile:()=>null,buildSessionProjection:()=>({})},modelRegistry:{find:(_p,id)=>models[id],getAvailable:()=>Object.values(models),hasConfiguredAuth:()=>true,complete:async()=>{classifierCalls++;if(answer instanceof Error)throw answer;return {content:[{type:'text',text:JSON.stringify(answer)}]};}}};
  ctx.modelRegistry.streamSimple=(...args)=>({result:()=>ctx.modelRegistry.complete(...args)});
  const route=(extra={})=>definition.route({reason:'user',thinkingLevel:selected,messages:[{role:'user',content:'read a file'}],state,...extra},ctx);
  return {pi,route,ctx,handlers,commands,renderers,models,statuses,ready,flags,nativeCalls,get calls(){return classifierCalls;},entries};
 }
+test('routing snapshots expose safe configuration provenance and native execution diagnostics',async()=>{
+ let publish,begins=0;const f=fixture({native:{observeExecution:fn=>publish=fn,beginTurn:()=>{begins++;publish?.(null);}}}),api=await f.ready;await f.handlers.session_start({},f.ctx);assert.equal(begins,1);
+ assert.equal(api.snapshot().diagnostics.configSource,'launch');assert.equal(api.snapshot().diagnostics.billing,'configured');
+ const revision=api.snapshot().revision;publish({stage:'starting',discoveryMs:20,startupMs:null,firstResponseMs:null,executionMs:null});
+ assert.ok(api.snapshot().revision>revision);assert.equal(api.snapshot().diagnostics.execution.stage,'starting');
+ f.entries.push({type:'custom',customType:'yam.routing.config.v1',data:{small:'p/small',strong:'p/strong',classifier:'p/small'}});assert.equal(api.snapshot().diagnostics.configSource,'session');
+ await f.handlers.session_tree({},f.ctx);assert.equal(api.snapshot().diagnostics.execution,null);assert.equal(begins,2);
+});
+test('Pi runtime catalog checks required APIs without inference or persistent session entries',async()=>{
+ for(const missing of [null,'streamSimple','setModel','getSessionFile']){
+  const f=fixture(),messages=[];await f.ready;f.flags['yam-catalog-probe']=true;f.ctx.ui.notify=s=>messages.push(JSON.parse(s));
+  if(missing==='streamSimple')delete f.ctx.modelRegistry[missing];
+  if(missing==='setModel')delete f.pi[missing];
+  if(missing==='getSessionFile')delete f.ctx.sessionManager[missing];
+  await f.handlers.session_start({},f.ctx);
+  const result=messages.at(-1);assert.equal(result.type,'yam_catalog');assert.equal(f.calls,0);assert.equal(f.entries.length,0);
+  if(missing){assert.match(result.error,new RegExp(missing));assert.notEqual(result.runtime,1);}
+  else{assert.equal(result.runtime,1);assert.equal(result.error,null);assert.ok(Array.isArray(result.models));}
+ }
+});
 test('Pi setup probe calls only selected model and rejects invalid or failed classification',async()=>{
  for(const [answer,expected] of [[{intent:'new',task:'answer',context:'independent',action:'none',depth:'normal',uncertain:false,readOnly:true,requires:['text']},true],[{},false],[new Error('provider failure'),false]]){
   const f=fixture({answer,raw:true}),messages=[];await f.ready;f.flags['yam-catalog-probe']=true;f.flags['yam-setup-model']='p/small';f.ctx.ui.notify=s=>messages.push(JSON.parse(s));

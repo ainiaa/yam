@@ -37,4 +37,7 @@ test('edited rule versions are stable and the classifier contract treats descrip
  const copy=JSON.parse(JSON.stringify(defaultRules));assert.equal(rulesVersion(copy),rulesVersion(defaultRules));
  copy.rules[0].model='strong';assert.notEqual(rulesVersion(copy),rulesVersion(defaultRules));
  const prompt=classifierPrompt(copy);assert.match(prompt,/task/);assert.match(prompt,/Never solve/);assert.match(prompt,/untrusted/i);assert.doesNotMatch(prompt,/difficulty.*simple/);
+ assert.match(prompt,/minified JSON only, without whitespace or a reason field/);
+ assert.doesNotMatch(prompt,/"reason":/);
+ for(const field of ['intent','task','context','action','depth','uncertain','readOnly','requires'])assert.ok(prompt.includes(`"${field}":`),field);
 });

@@ -53,7 +53,7 @@ export default async function install(pi,supportedLevels,Text,native) {
  const internalThinking=new Set();
  const thinkingId=ctx=>ctx.sessionManager.getBranch().findLast(e=>e.type==='thinking_level_change')?.id;
  const markThinking=(ctx,before)=>{const id=thinkingId(ctx);if(id&&id!==before){internalThinking.add(id);if(internalThinking.size>64)internalThinking.delete(internalThinking.values().next().value);}};
- let revision=0,phase='starting',target=null,actual=null,pendingInput=false,preferences=null;
+ let revision=0,phase='starting',target=null,actual=null,pendingInput=false,preferences=null,execution=null;
  const changed=()=>{revision++;channel?.publish();};
  const savedPreferences=ctx=>{
   const branch=ctx.sessionManager.getBranch(),index=branch.findLastIndex(e=>e.type==='custom'&&e.customType===preferencesType),saved=branch[index]?.data;
@@ -63,7 +63,7 @@ export default async function install(pi,supportedLevels,Text,native) {
   return thinking&&!later.some(e=>e.type==='model_change')?{...saved,effort:thinking.thinkingLevel}:saved;
  };
  const currentPreferences=()=>blockedPreferences??(context?.model&&context.model.provider!=='yam'?{model:`${context.model.provider}/${context.model.id}`,effort:pi.getThinkingLevel()}:preferences??{model:'auto',effort:pi.getThinkingLevel()==='off'?'auto':pi.getThinkingLevel()});
- const snapshot=()=>({revision,generation:process.env.YAM_PI_GENERATION??'',phase,config:{small:(context?readConfig(context).small:undefined)??pi.getFlag('yam-small')??'',strong:(context?readConfig(context).strong:undefined)??pi.getFlag('yam-strong')??'',classifier:(context?readConfig(context).classifier:undefined)??pi.getFlag('yam-classifier')??pi.getFlag('yam-small')??'',gateway:launchOption('--yam-gateway')??null},preferences:currentPreferences(),rules:taskRules,ruleVersion:rulesVersion(taskRules),preview,decision,target,actual,error:selectionError?.message??runtimeError,gatewayError:gatewayError?.message??null,pendingInput});
+ const snapshot=()=>({revision,generation:process.env.YAM_PI_GENERATION??'',phase,config:{small:(context?readConfig(context).small:undefined)??pi.getFlag('yam-small')??'',strong:(context?readConfig(context).strong:undefined)??pi.getFlag('yam-strong')??'',classifier:(context?readConfig(context).classifier:undefined)??pi.getFlag('yam-classifier')??pi.getFlag('yam-small')??'',gateway:launchOption('--yam-gateway')??null},diagnostics:{configSource:context&&Object.keys(readConfig(context)).length?'session':'launch',billing:pi.getFlag('yam-billing')==='subscription'?'subscription':'configured',execution},preferences:currentPreferences(),rules:taskRules,ruleVersion:rulesVersion(taskRules),preview,decision,target,actual,error:selectionError?.message??runtimeError,gatewayError:gatewayError?.message??null,pendingInput});
  const readConfig=ctx=>ctx.sessionManager.getBranch().filter(e=>e.type==='custom'&&e.customType===configType).at(-1)?.data??{};
  const notify=async(kind,ctx)=>{try{await deliver(kind,ctx,turn);}catch{ctx.ui.notify('YAM event connection unavailable; task and native session remain in Pi.','warning');}};
  const config=ctx=>{
@@ -262,7 +262,13 @@ export default async function install(pi,supportedLevels,Text,native) {
   if(process.env.YAM_AGENT_ADDRESS){ctx.ui.notify('Use YAM New session or Continue to change conversations. The current native session is preserved.','warning');return {cancel:true};}
  });
  pi.on('session_start',async(_event,ctx)=>{
-  context=ctx;await native?.initialize?.(ctx);
+  context=ctx;
+  native?.beginTurn?.(ctx);
+  if(pi.getFlag('yam-catalog-probe')===true){
+   const missing=[[pi,['appendEntry','getThinkingLevel','setThinkingLevel','setModel']],[ctx.modelRegistry,['find','getAvailable','hasConfiguredAuth','streamSimple']],[ctx.sessionManager,['getBranch','getSessionFile','buildSessionProjection']]].flatMap(([api,names])=>names.filter(name=>typeof api?.[name]!=='function'));
+   if(missing.length){ctx.ui.notify(JSON.stringify({type:'yam_catalog',error:`Pi routing requires APIs: ${missing.join(', ')}`}), 'info');return;}
+  }
+  await native?.initialize?.(ctx);
   const originalConfig=config(ctx),migratedConfig={...originalConfig};
   for(const key of ['small','strong','classifier']){
    if(!originalConfig[key])continue;
@@ -273,7 +279,7 @@ export default async function install(pi,supportedLevels,Text,native) {
   if(pi.getFlag('yam-catalog-probe')===true){const key=pi.getFlag('yam-setup-model');let probe;
    if(key){try{const result=await classify(ctx,[{role:'user',content:'Explain HTTP 404 briefly.'}],null,defaultRules,undefined,key);const facts=result.answer;probe={ok:routeFacts(facts,defaultRules).valid&&Array.isArray(facts?.requires)&&facts.requires.every(c=>['text','files','image_input','image_generation'].includes(c))};}catch{probe={ok:false};}}
    const preferred=ctx.model&&ctx.model.api!=='pi-virtual'?`${isChatGPT(ctx,ctx.model)?'yam-codex':ctx.model.provider}/${ctx.model.id}`:null;
-   ctx.ui.notify(JSON.stringify({type:'yam_catalog',models:catalog(),preferred,error:null,warning:gatewayError?.message??null,...(probe?{probe}:{})}),'info');return;}
+   ctx.ui.notify(JSON.stringify({type:'yam_catalog',runtime:1,models:catalog(),preferred,error:null,warning:gatewayError?.message??null,...(probe?{probe}:{})}),'info');return;}
   if(!channel)channel=await serveControls(process.env.YAM_PI_CONTROL_FILE,process.env.YAM_PI_GENERATION,snapshot,control,catalog);
   const saved=savedPreferences(ctx),fixed=pi.getFlag('yam-fixed-model'),level=pi.getFlag('yam-effort');
   let candidate=null;
@@ -296,7 +302,7 @@ export default async function install(pi,supportedLevels,Text,native) {
   if(!saved&&requested!==undefined&&pi.getThinkingLevel()!==requested)await stopSelection(ctx,`Requested reasoning ${requested} is unsupported; inference stopped until the selection is corrected.`,requested);
   changed();await notify('SessionStart',ctx);
  });
- pi.on('session_tree',async(_event,ctx)=>{context=ctx;const saved=savedPreferences(ctx);preferences=null;blockedPreferences=null;target=null;actual=null;selectionError=null;
+ pi.on('session_tree',async(_event,ctx)=>{context=ctx;native?.beginTurn?.(ctx);const saved=savedPreferences(ctx);preferences=null;blockedPreferences=null;target=null;actual=null;execution=null;selectionError=null;
   try{
    const projected=saved?null:ctx.sessionManager.buildSessionProjection(),m=projected?.model;
    const restore=saved??{model:m&&!(m.provider==='yam'&&m.modelId==='auto')?`${m.provider}/${m.modelId}`:'auto',effort:projected.thinkingLevel};
@@ -429,5 +435,6 @@ export default async function install(pi,supportedLevels,Text,native) {
   const selectedThinking=currentPreferences().effort==='auto'?undefined:currentPreferences().effort;
   return {classifier,thinking:classifier.reasoning?effort(classifier,'medium','off'):'off',fixedModel:fixed,selectedThinking,rules:taskRules,gateway:launchOption('--yam-gateway'),profiles:choices.map(([role,m])=>({id:`pi-${role}`,kind:'pi',model:`${m.provider}/${m.id}`,thinking:!selectedThinking&&!m.reasoning?'off':workingEffort(m,role==='small'?'medium':'high',selectedThinking??'off'),auth:connection(m).billing==='subscription'?'subscription':m.provider==='yam-gateway'?'gateway':'api',capabilities:['text',...role==='small'?[]:['files'],...m.input?.includes('image')?['image_input']:[]]}))};
  };
+ native?.observeExecution?.(value=>{execution=value;changed();});
  return {snapshot,control,catalog,agentRoutingContext,billingPolicy};
 }

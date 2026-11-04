@@ -940,7 +940,9 @@ fn agent_query_with_version(
     result
 }
 #[cfg(windows)]
-fn attach_query_job(child: &mut std::process::Child) -> Result<super::WindowsJob, String> {
+pub(super) fn attach_query_job(
+    child: &mut std::process::Child,
+) -> Result<super::WindowsJob, String> {
     use std::os::windows::io::AsRawHandle;
     match super::WindowsJob::attach(child.as_raw_handle()) {
         Ok(job) => Ok(job),
@@ -1375,12 +1377,15 @@ pub(super) fn prepare(
     _environment: Option<&super::provider_launch::Environment>,
 ) -> Result<Prepared, String> {
     if launch.adapter == "pi" && launch.mode == "interactive" {
-        let version =
-            measured_version_checked(executable.as_os_str(), &[], |value| value.trim() == "1.4.0")?;
+        super::pi_router::validate_runtime(executable, assets, _cwd)?;
+        let version = measured_version_checked(executable.as_os_str(), &[], |value| {
+            !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
+        })
+        .ok();
         return Ok(Prepared {
             token: credential()?,
             generation: credential()?,
-            cli_version: Some(version),
+            cli_version: version,
             args: vec![],
             original: vec![],
             opencode: None,
@@ -1543,6 +1548,59 @@ impl Prepared {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn pi_prepare_uses_runtime_capabilities_instead_of_version_allowlists() {
+        use std::os::unix::fs::PermissionsExt;
+        let root =
+            std::env::temp_dir().join(format!("yam-pi-runtime-{}", crate::next_session_id()));
+        std::fs::create_dir(&root).unwrap();
+        let executable = root.join("pi");
+        let launch = crate::AgentLaunch {
+            adapter: "pi".into(),
+            mode: "interactive".into(),
+            claude_context: None,
+            codex: None,
+            provider: None,
+            env_refs: Default::default(),
+            extra_args: String::new(),
+            prompt: None,
+        };
+        for (version, version_code, runtime, allowed) in [
+            ("1.4.0", 0, serde_json::json!({"runtime":1}), true),
+            ("1.5.0", 0, serde_json::json!({"runtime":1}), true),
+            ("1.5.1", 0, serde_json::json!({"runtime":1}), true),
+            ("2.0.0", 0, serde_json::json!({"runtime":1}), true),
+            ("preview-build", 0, serde_json::json!({"runtime":1}), true),
+            ("", 0, serde_json::json!({"runtime":1}), true),
+            ("1.5.0", 1, serde_json::json!({"runtime":1}), true),
+            ("1.4.0", 0, serde_json::json!({}), false),
+            (
+                "1.5.0",
+                0,
+                serde_json::json!({"error":"Pi routing requires API streamSimple"}),
+                false,
+            ),
+        ] {
+            let mut receipt = serde_json::json!({"type":"yam_catalog","models":[]});
+            for (key, value) in runtime.as_object().unwrap() {
+                receipt[key] = value.clone();
+            }
+            std::fs::write(&executable, format!("#!/bin/sh\nif [ \"$1\" = --version ]; then printf '%s\\n' '{version}'; exit {version_code}; fi\nprintf '%s\\n' '{receipt}'\n")).unwrap();
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let result = prepare(&executable, &launch, &root, &root, None);
+            assert_eq!(
+                result.is_ok(),
+                allowed,
+                "{version}: {version_code}, {receipt}"
+            );
+            if allowed {
+                let expected = (version_code == 0 && !version.is_empty()).then_some(version);
+                assert_eq!(result.unwrap().cli_version.as_deref(), expected);
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn routing_review_claude_last_settings_preserves_native_precedence_and_errors() {
         let root =

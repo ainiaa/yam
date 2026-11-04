@@ -56,11 +56,17 @@ export function PiRoutingConfig({args,cwd,invoke,onChange,onValidity,installedGa
   try{localStorage.setItem(piSetupStorageKey,JSON.stringify(piSetupMapping(draft,args)));setSetupStatus('Routing roles saved on this device.');}
   catch(e){setSetupStatus(e instanceof Error&&['Invalid billing policy','Subscription-only billing requires a Codex subscription model.'].includes(e.message)?e.message:'Could not save routing roles on this device.');}
  }
+ function applySavedSetup(){
+  setSetupStatusScope(scope);
+  try{const restored=restorePiSetup(args,localStorage.getItem(piSetupStorageKey),true);if(!restored){setSetupStatus('Saved routing policy is unavailable or conflicts with the current billing policy.');return;}onChange(restored);setSetupStatus('Saved routing policy loaded. Check models and connection before starting.');}
+  catch{setSetupStatus('Saved routing policy is unavailable or conflicts with the current billing policy.');}
+ }
  return <fieldset className="pi-routing-config" ref={root}><legend>{t('Pi automatic routing')}</legend>
   <p className="settings-help">{t('Pi keeps the same native conversation and tools. Model and reasoning can be automatic or fixed independently.')}</p>
   <details className="pi-routing-advanced" open={setupOpen} onToggle={e=>setSetupOpen(e.currentTarget.open)}><summary>{t('Quick model setup')}</summary>
    <p className="settings-help">{t('Scan configured Pi, Codex and local Magpie models. Verification sends a short test request and may use your selected connection quota.')}</p>
    <button type="button" disabled={busy||!cwd.trim()} onClick={()=>void discoverSetup()}>{t('Find available models')}</button>
+   <button type="button" disabled={busy} onClick={applySavedSetup}>{t('Use saved routing policy')}</button>
    {setupScope===scope&&setupModels.some(m=>m.levels.includes('high'))&&<><label><span>{t('Model to verify')}</span><Select aria-label={t('Model to verify')} value={setupModel} disabled={busy} onChange={e=>setSetupModel(e.target.value)}><option value="">{t('Choose a model')}</option><ModelOptions models={setupModels.filter(m=>m.levels.includes('high'))} value={setupModel}/></Select></label><button type="button" disabled={busy||!setupModel} onClick={()=>void verifySetup()}>{t('Verify and use this model')}</button></>}
    {setupStatus&&setupStatusScope===scope&&<p role="status">{t(setupStatus)}</p>}
    {setupScope===scope&&setupGatewayWarning&&(gateway!==null||gateways.includes('magpie'))&&<p className="settings-help" role="status">{t('Magpie gateway model catalog unavailable. Check the gateway; Pi native models remain available.')}</p>}
@@ -132,12 +138,16 @@ export function PiRoutingBar({sessionId,generation,active,available,invoke}:{ses
  const choice=draft??state?.preferences,dirty=!!(draft&&state&&(draft.model!==state.preferences.model||draft.effort!==state.preferences.effort));
  const stale=!!(draft&&state&&draft.revision!==state.revision);
  const live=active&&available&&!readError;
+ const execution=state?.diagnostics?.execution;
+ const executionStages={discovering:'Checking native login…',preparing:'Preparing context…',starting:'Starting native CLI…',executing:'Native task running',completed:'Native task completed',failed:'Execution failed',aborted:'Task interrupted'};
+ const handoffReasons={'verified-prefix':'Verified context prefix','prefix-unverified':'Context checkpoint unavailable or changed','new-task':'New task requested','identity-changed':'Native identity changed','new-session':'New native session'};
  const selected=live&&state?.phase==='selected'?state.target:null;
  function choose(fields:Partial<{model:string;effort:string}>){if(state&&choice)setDraft({...choice,revision:draft?.revision??state.revision,...fields});}
  return <section className="pi-routing-bar" aria-label={t('Pi automatic routing')}>
   <div className="pi-routing-status"><strong>{t('Pi routing')}</strong>{(!available||!state||!active||state.phase==='error'||state.phase==='classifying')&&<span role="status">{!available?t('Background unavailable'):!state?t(active?'Waiting for Pi routing state…':'Routing state unavailable'):!active?t('Session ended'):t(state.phase==='classifying'?'Choosing a model…':'Routing needs attention')}</span>}
    {state&&<span className="pi-routing-model" role="status" title={selected?t('Selected for this turn; waiting for a native model response'):t('Recorded by the native Pi assistant message')}>{selected?t('Selected for this turn: {{value0}} · {{value1}}',{value0:selected.model,value1:selected.effort}):state.actual?t(live&&state.phase==='working'?'Actual model: {{value0}} · {{value1}}':'Latest reply used: {{value0}} · {{value1}}',{value0:state.actual.model,value1:state.actual.effort==='unknown'?t('Reasoning not confirmed'):state.actual.effort}):t('No native model response recorded yet')}</span>}
    {state?.actual?.source&&<span>{t(state.actual.source==='chatgpt-subscription'?'ChatGPT subscription':state.actual.source==='magpie'?'Magpie gateway':state.actual.billing==='subscription'?'Pi native subscription':'Pi native API')}</span>}
+   {execution&&<span role="status">{t(executionStages[execution.stage])}</span>}
    {state&&<span className="pi-routing-policy">{state.preferences.model==='auto'?t('Automatic model'):t('Fixed model: {{value0}}',{value0:state.preferences.model})}</span>}
    <button type="button" aria-expanded={expanded} aria-controls={`pi-routing-controls-${sessionId}`} onClick={()=>setExpanded(value=>!value)}>{t('Adjust routing')}</button>
    {(error||readError||catalogError||state?.error||state?.gatewayError)&&<button type="button" disabled={disabled} onClick={()=>void control('retry')}>{busy?t('Applying…'):t('Refresh connection')}</button>}
@@ -152,6 +162,14 @@ export function PiRoutingBar({sessionId,generation,active,available,invoke}:{ses
    {state.rules&&<PiTaskRules rules={state.rules} disabled={disabled} onApply={async rules=>{if(!await control('rules',rules))throw Error(t('Task rules were not applied'));}} onPreview={async(text,rules)=>{const next=await control('preview',{text,rules}),p=next?.preview;if(!p)throw Error(t('Task rule preview failed'));return `${t('Matched task rule')}: ${t(p.rule)}\n${t(p.selection.model==='small'?'Lightweight model':'Strong model')} · ${p.selection.effort}\n${t('Classification time')}: ${p.latencyMs} ms\n${t('Model-reported cost')}: ${p.cost??t('Unknown cost')}\n${t('Policy preview only. Session locks, capacity and cache can change the final selection.')}`;}}/>}
    {state.decision&&<p className="settings-help">{t('Matched task rule')}: {t(state.decision.rule)} · {state.decision.ruleVersion}<br/>{t('Classification time')}: {state.decision.classificationMs} ms · {t('Model-reported cost so far')}: {state.decision.totalCost??t(state.actual?.billing==='subscription'?'Subscription usage; API cost unavailable':'Unknown cost')}</p>}
    {state.actual?.usage&&<p className="settings-help">{t('Reply tokens')}: {state.actual.usage.input??'—'} {t('input')} / {state.actual.usage.output??'—'} {t('output')}</p>}
+   {state.diagnostics&&<p className="settings-help">{t(state.diagnostics.configSource==='session'?'Saved session configuration':'Launch configuration')} · {t(state.diagnostics.billing==='subscription'?'Subscription only':'Configured channels')}</p>}
+   {execution&&<div className="settings-help" aria-label={t('Execution diagnostics')}>
+    {execution.failedStage&&<p>{t('Failed stage')}: {t(executionStages[execution.failedStage as keyof typeof executionStages]??execution.failedStage)}</p>}
+    {([['Model discovery',execution.discoveryMs],['CLI startup',execution.startupMs],['First reply event',execution.firstResponseMs],['Native execution',execution.executionMs]] as const).map(([label,value])=><p key={label}>{t(label)}: {value===null?'—':`${value} ms`}</p>)}
+    <p>{t('First reply event is measured from native invocation; it is not a first-token estimate.')}</p>
+    {execution.handoff&&<p>{t(execution.handoff.mode==='incremental'?'Incremental context':'Full context')} · {t(handoffReasons[execution.handoff.reason])} · {execution.handoff.characters} / {execution.handoff.budget} {t('characters')}</p>}
+    {execution.failure==='context-budget'&&<p role="status">{t('Context was not sent. Use /compact in Pi or split the task, then explicitly retry. No task was replayed.')}</p>}
+   </div>}
    <div className="pi-routing-details"><p>{state.preferences.effort==='auto'?t('Automatic reasoning'):t('Fixed reasoning: {{value0}}',{value0:state.preferences.effort})}</p><p>{state.config.gateway?t('Gateway: {{value0}}',{value0:state.config.gateway}):t('Existing Pi configuration')}</p>{state.target&&<p>{t('Selected for this turn: {{value0}} · {{value1}}',{value0:state.target.model,value1:state.target.effort})}<br/>{state.target.reason}</p>}{state.actual?<p title={t('Recorded by the native Pi assistant message')}>{t('Latest reply used: {{value0}} · {{value1}}',{value0:state.actual.model,value1:state.actual.effort==='unknown'?t('Reasoning not confirmed'):state.actual.effort})}</p>:<p>{t('No native model response recorded yet')}</p>}<p className="settings-help">{t('Refreshing never resends a task. Review the terminal before explicitly retrying work.')}</p></div>
   </div>
   {dirty&&<p className="settings-help" role="status">{stale?t('Routing changed. Cancel this selection and choose again from the current state.'):t('Selection is not applied. Apply model and reasoning together when ready.')}</p>}

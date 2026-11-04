@@ -78,9 +78,10 @@ export async function stopAgents(){
  if(errors.length)throw errors[0];
 }
 
+export const maxAgentPromptCharacters=128000;
 export function validateAgentPrompt(prompt){
  if(typeof prompt!=='string'||!prompt.trim()||prompt.includes('\0'))throw Error('Invalid agent prompt');
- if(prompt.length>128000)throw Error('Native handoff context exceeds the 128000 character budget; compact or split the task explicitly');
+ if(prompt.length>maxAgentPromptCharacters)throw Error('Native handoff context exceeds the 128000 character budget; compact or split the task explicitly');
 }
 export function invocation(profile,{prompt,resume=null,sessionDirectory,imagePaths=[],imageSchema,images=[],mode='task'}={}){
  validateAgentPrompt(prompt);

@@ -1,6 +1,7 @@
 // Author: Jeff.Liu.
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
+import {defaultRules} from '../src-tauri/pi/task-rules.mjs';
 import {parsePiDraft,buildPiArgs,validatePiDraft,defaultPiArgs,selectPiSetupModel,restorePiSetup,verifyPiSetup,piSetupMapping} from '../src/pi-routing.ts';
 const models=[{key:'p/small',name:'Small',levels:['medium','high'],context_window:10000},{key:'p/strong',name:'Strong',levels:['medium','high','max'],context_window:100000}];
 const draft={gateway:null,small:'p/small',strong:'p/strong',classifier:'',model:'auto',effort:'auto'};
@@ -37,6 +38,24 @@ test('Pi setup accepts only a verified current model and never falls back on pro
  await assert.rejects(()=>verifyPiSetup('','/tmp/project','p/strong',async()=>({models,probe:{ok:false}})));
  await assert.rejects(()=>verifyPiSetup('','/tmp/project','p/missing',invoke));
  await assert.rejects(()=>verifyPiSetup('','/tmp/project','p/strong',async()=>{throw Error('offline');}));
+});
+test('saved Pi setup retains custom task rules and fixed choices while legacy mappings remain readable',()=>{
+ const rules=structuredClone(defaultRules);rules.rules.find(r=>r.task==='review').effort='max';const saved=piSetupMapping({...draft,model:'p/strong',effort:'max',rules:JSON.stringify(rules)},'');
+ const restored=parsePiDraft(restorePiSetup('',JSON.stringify(saved)));assert.equal(restored.model,'p/strong');assert.equal(restored.effort,'max');assert.deepEqual(JSON.parse(restored.rules),rules);
+});
+test('explicitly applying imported defaults preserves unrelated arguments and the stricter billing policy',()=>{
+ const saved=JSON.stringify(piSetupMapping({...draft,small:'yam-codex/sol',strong:'yam-codex/sol',classifier:'yam-codex/sol',rules:JSON.stringify(defaultRules)},'--yam-billing subscription'));
+ const args=restorePiSetup('--yam-small p/manual --yam-strong p/manual --yam-billing configured --tools read --system-prompt "--yam-billing"',saved,true);
+ assert.ok(args);assert.equal(parsePiDraft(args).small,'yam-codex/sol');assert.match(args,/--tools read/);assert.match(args,/--system-prompt "--yam-billing"/);assert.match(args,/--yam-billing subscription/);assert.ok(!args.includes('--yam-billing configured'));
+ assert.equal(restorePiSetup('--yam-billing subscription',JSON.stringify(piSetupMapping(draft,'')),true),null);
+ assert.equal(restorePiSetup('--yam-billing invalid',saved,true),null);
+});
+test('quoted and escaped prompt terminators keep generated routing flags outside the prompt',()=>{
+ for(const terminator of ['--','"--"',"'--'",'\\--']){
+  const args=buildPiArgs(`--system-prompt "--" ${terminator} hello --yam-small literal`,draft),parsed=parsePiDraft(args);
+  assert.equal(parsed.small,'p/small',terminator);assert.equal(parsed.strong,'p/strong',terminator);assert.ok(args.endsWith(`${terminator} hello --yam-small literal`),terminator);assert.ok(args.startsWith('--system-prompt "--"'),terminator);
+  const saved=JSON.stringify(piSetupMapping(draft,'')),restored=restorePiSetup(`${terminator} hello`,saved,true);assert.equal(parsePiDraft(restored).small,'p/small',terminator);assert.ok(restored.endsWith(`${terminator} hello`),terminator);
+ }
 });
 test('Pi setup respects subscription-only billing before sending a probe',async()=>{
  let calls=0;const codex={...models[0],key:'yam-codex/gpt-6.1-sol',source:'chatgpt-subscription',billing:'subscription'};
@@ -200,6 +219,16 @@ async function routingBarFixture(invoke,options={}){
  await flush();return {visible:value=>env.document.visibilityState=value,flush,poll:async()=>{timers.shift()?.();await flush();},select:label=>all(tree).find(n=>n.props['aria-label']===label),button:text=>all(tree).find(n=>n.type==='button'&&n.children.includes(text)),tree:()=>tree,text:()=>all(tree).flatMap(n=>n.children).filter(v=>typeof v==='string').join(' ')};
 }
 const barState=()=>({revision:1,generation:'g',phase:'idle',config:{small:'p/small',strong:'p/strong',classifier:'p/small',gateway:null},preferences:{model:'p/small',effort:'high'},target:null,actual:null,error:null,pendingInput:false});
+test('routing diagnostics show observed stages and missing timings without exposing connection secrets',async()=>{
+ const state={...barState(),diagnostics:{configSource:'session',billing:'subscription',execution:{stage:'failed',failedStage:'starting',discoveryMs:23,startupMs:null,firstResponseMs:null,executionMs:45}}};
+ const f=await routingBarFixture(async(name,args)=>name==='get_pi_routing'?{active:true,state}:{models:[]});
+ assert.match(f.text(),/Execution failed/);assert.match(f.text(),/Model discovery\s*:\s*23 ms/);assert.match(f.text(),/CLI startup\s*:\s*—/);assert.match(f.text(),/First reply event\s*:\s*—/);assert.match(f.text(),/Saved session configuration/);assert.match(f.text(),/Subscription only/);
+});
+test('long context diagnostics explain full handoff and recommend explicit compaction without replay',async()=>{
+ const state={...barState(),diagnostics:{configSource:'launch',billing:'configured',execution:{stage:'failed',failedStage:'preparing',failure:'context-budget',discoveryMs:1,startupMs:null,firstResponseMs:null,executionMs:null,handoff:{mode:'full',reason:'identity-changed',messages:25,characters:130001,budget:128000}}}};let writes=0;
+ const f=await routingBarFixture(async(name)=>{if(name==='get_pi_routing')return {active:true,state};writes++;return {models:[]};});const before=writes;
+ assert.match(f.text(),/Full context/);assert.match(f.text(),/Native identity changed/);assert.ok(JSON.stringify(f.tree()).includes('130001'));assert.ok(JSON.stringify(f.tree()).includes('128000'));assert.match(f.text(),/\/compact/);assert.equal(writes,before);
+});
 test('Pi model/effort transitions apply together without sending an incompatible intermediate selection',async()=>{
  let state=barState();const writes=[];
  const f=await routingBarFixture(async(name,args)=>{if(name==='get_pi_routing')return {active:true,state};if(args.request.action==='catalog')return {models:[]};writes.push(args.request);state={...state,revision:state.revision+1,preferences:args.request.data};return {state};});

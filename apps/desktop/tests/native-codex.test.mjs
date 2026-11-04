@@ -2,17 +2,105 @@ import assert from 'node:assert/strict';
 import {test} from 'node:test';
 const api=await import('../src-tauri/pi/native-codex.mjs').catch(e=>{if(e.code==='ERR_MODULE_NOT_FOUND')return {};throw e;});
 const id='01234567-1234-1234-1234-0123456789ab';
-function fixture({error,restricted=false,notice,persistAt=Infinity}={}){
+function fixture({error,restricted=false,notice,persistAt=Infinity,now,onDiscover,onExecute,configuredExecutable='/native/codex'}={}){
  const entries=[],calls=[],providers=[],commands={};let writes=0;
  const original={provider:'openai',id:'gpt-test',api:'openai-responses',reasoning:true,input:['text','image'],contextWindow:100000,maxTokens:10000,thinkingLevelMap:{off:'none',medium:'medium',high:'high',max:'xhigh'}};
  const profile={id:'codex',kind:'codex',executable:'/native/codex',auth:'subscription',capabilities:['text','files','image_input','image_generation']};
  const pi={getActiveTools:()=>restricted?['read']:['read','bash','edit','write'],registerProvider:(...v)=>providers.push(v),appendEntry:(customType,data)=>{if(++writes>=persistAt)throw Error('receipt disk write failed');entries.push({type:'custom',customType,data});},registerCommand:(n,c)=>commands[n]=c};
  const ctx={cwd:'/repo',ui:{setStatus(){},notify(){},confirm:async()=>true},isIdle:()=>true,sessionManager:{getBranch:()=>entries,getSessionFile:()=>'/owned/parent.jsonl'},modelRegistry:{isUsingOAuth:()=>true,getAll:()=>[original]}};
  const createStream=()=>{let resolve;const promise=new Promise(r=>resolve=r);return {events:[],push(e){this.events.push(e);if(e.type==='done')resolve(e.message);if(e.type==='error')resolve(e.error);},end(){},result:()=>promise};};
- const bridge=api.createNativeCodex?.(pi,{createStream,getTools:c=>c.tools??[],getSystemPrompt:c=>c.systemPrompt??c.messages.filter(m=>m.role==='system').map(m=>m.content).join('\n'),loadModels:async()=>[],executable:'/native/codex',discover:async()=>[profile],execute:async(a,o)=>{calls.push({a,o});o.onLine?.(JSON.stringify({type:'thread.started',thread_id:id}));if(notice)o.onLine?.(JSON.stringify({type:'item.completed',item:{type:notice}}));if(error)throw typeof error==='string'?Error(error):error;return {text:'native commentary\nFinal answer',finalText:'Final answer',sessionId:id,usage:{input_tokens:20,cached_input_tokens:5,output_tokens:4}};}});
+ const bridge=api.createNativeCodex?.(pi,{now,createStream,getTools:c=>c.tools??[],getSystemPrompt:c=>c.systemPrompt??c.messages.filter(m=>m.role==='system').map(m=>m.content).join('\n'),loadModels:async()=>[],executable:configuredExecutable,discover:async()=>{onDiscover?.();return [profile];},execute:async(a,o)=>{calls.push({a,o});if(onExecute)return onExecute(o);o.onLine?.(JSON.stringify({type:'thread.started',thread_id:id}));if(notice)o.onLine?.(JSON.stringify({type:'item.completed',item:{type:notice}}));if(error)throw typeof error==='string'?Error(error):error;return {text:'native commentary\nFinal answer',finalText:'Final answer',sessionId:id,usage:{input_tokens:20,cached_input_tokens:5,output_tokens:4}};}});
  return {bridge,entries,calls,providers,commands,ctx,original,profile};
 }
 const context={messages:[{role:'user',content:'Write the article with a cover'}],tools:[{name:'read'}]};
+test('native execution diagnostics distinguish discovery, startup, first reply and completion without task content',async()=>{
+ let clock=0;const observed=[],f=fixture({now:()=>clock,onDiscover:()=>clock=20,onExecute:o=>{clock=60;o.onLine(JSON.stringify({type:'thread.started',thread_id:id}));clock=90;o.onLine(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'PRIVATE_REPLY'}}));clock=100;return {finalText:'Done',sessionId:id};}});
+ await f.bridge.initialize(f.ctx);f.bridge.observeExecution(value=>observed.push(structuredClone(value)));f.bridge.beginTurn(f.ctx);clock=0;
+ assert.equal((await f.bridge.stream(f.bridge.resolveModel(f.ctx,f.original),context,{}).result()).stopReason,'stop');
+ const last=observed.at(-1);assert.equal(last.stage,'completed');assert.equal(last.discoveryMs,20);assert.equal(last.startupMs,40);assert.equal(last.firstResponseMs,70);assert.equal(last.executionMs,80);
+ assert.ok(observed.some(v=>v?.stage==='discovering'));assert.ok(observed.some(v=>v?.stage==='starting'));assert.ok(observed.some(v=>v?.stage==='executing'));assert.ok(!JSON.stringify(observed).includes('PRIVATE_'));
+ const count=observed.length;f.calls[0].o.onLine(JSON.stringify({type:'item.started',item:{type:'command_execution'}}));assert.equal(observed.length,count);
+ await f.bridge.stream(f.bridge.resolveModel(f.ctx,f.original),{messages:context.messages},{toolChoice:'none'}).result();assert.equal(observed.length,count);
+});
+test('native diagnostics preserve the failed stage and do not invent a first response',async()=>{
+ const observed=[],f=fixture({error:'PRIVATE_TOKEN provider failure'});await f.bridge.initialize(f.ctx);f.bridge.observeExecution(value=>observed.push(structuredClone(value)));f.bridge.beginTurn(f.ctx);
+ assert.equal((await f.bridge.stream(f.bridge.resolveModel(f.ctx,f.original),context,{}).result()).stopReason,'error');
+ const last=observed.at(-1);assert.equal(last.stage,'failed');assert.equal(last.failedStage,'executing');assert.equal(last.firstResponseMs,null);assert.ok(!JSON.stringify(observed).includes('PRIVATE_TOKEN'));
+ f.bridge.beginTurn(f.ctx);assert.equal(observed.at(-1),null);
+});
+test('native preflight failures report preparation with explicit unknown timings before discovery or spawn',async()=>{
+ const observed=[],f=fixture({restricted:true});await f.bridge.initialize(f.ctx);f.bridge.observeExecution(value=>observed.push(structuredClone(value)));f.bridge.beginTurn(f.ctx);
+ assert.equal((await f.bridge.stream(f.bridge.resolveModel(f.ctx,f.original),context,{}).result()).stopReason,'error');const last=observed.at(-1);
+ assert.equal(last.failedStage,'preparing');for(const key of ['discoveryMs','startupMs','firstResponseMs','executionMs'])assert.equal(last[key],null,key);assert.equal(f.calls.length,0);
+});
+test('native task preflight reports aborted and invalid transport requests before starting discovery',async()=>{
+ for(const kind of ['abort','transport']){
+  const observed=[],f=fixture();await f.bridge.initialize(f.ctx);f.bridge.observeExecution(value=>observed.push(structuredClone(value)));f.bridge.beginTurn(f.ctx);const abort=new AbortController();abort.abort();
+  await f.bridge.stream(f.bridge.resolveModel(f.ctx,f.original),context,kind==='abort'?{signal:abort.signal}:{headers:{authorization:'PRIVATE_SECRET'}}).result();const last=observed.at(-1);
+  assert.equal(last.failedStage,'preparing');for(const key of ['discoveryMs','startupMs','firstResponseMs','executionMs'])assert.equal(last[key],null);assert.equal(f.calls.length,0);assert.ok(!JSON.stringify(observed).includes('PRIVATE_SECRET'));
+ }
+});
+test('a queued native stream cannot adopt a newer turn or publish its diagnostics',async()=>{
+ const observed=[],f=fixture();await f.bridge.initialize(f.ctx);f.bridge.observeExecution(value=>observed.push(structuredClone(value)));f.bridge.beginTurn(f.ctx);
+ const pending=f.bridge.stream(f.bridge.resolveModel(f.ctx,f.original),context,{});f.bridge.beginTurn(f.ctx);const result=await pending.result();
+ assert.equal(result.stopReason,'aborted');assert.match(result.errorMessage,/turn changed/i);assert.equal(f.calls.length,0);assert.equal(f.entries.length,0);assert.equal(observed.at(-1),null);
+});
+test('a superseded native execution aborts its owned signal and never writes a late result into another branch',async()=>{
+ for(const outcome of ['resolve','reject']){
+  let finish,fail,started;const ready=new Promise(r=>started=r),pending=new Promise((resolve,reject)=>{finish=resolve;fail=reject;}),f=fixture({onExecute:o=>{o.onLine(JSON.stringify({type:'thread.started',thread_id:id}));started();return pending;}}),observed=[];
+  await f.bridge.initialize(f.ctx);f.bridge.observeExecution(value=>observed.push(structuredClone(value)));f.bridge.beginTurn(f.ctx);const stream=f.bridge.stream(f.bridge.resolveModel(f.ctx,f.original),context,{});await ready;
+  const oldReceipt=structuredClone(f.entries.at(-1));f.entries.length=0;f.entries.push({type:'custom',customType:'foreign-branch',data:{}});f.bridge.beginTurn(f.ctx);assert.equal(f.calls[0].o.signal.aborted,true);
+  if(outcome==='resolve')finish({finalText:'STALE_PRIVATE_REPLY',sessionId:id});else fail(Error('Late execution failure'));
+  const result=await stream.result();assert.equal(result.stopReason,'aborted');assert.ok(!stream.events.some(e=>e.type==='done'));assert.equal(f.entries.length,1);assert.equal(f.entries[0].customType,'foreign-branch');assert.equal(oldReceipt.data.status,'running');assert.equal(observed.at(-1),null);
+ }
+});
+test('a rejected duplicate stream cannot overwrite the active native execution diagnostics',async()=>{
+ let finish,started;const ready=new Promise(r=>started=r),pending=new Promise(r=>finish=r),observed=[],f=fixture({onExecute:o=>{o.onLine(JSON.stringify({type:'thread.started',thread_id:id}));started();return pending;}});
+ await f.bridge.initialize(f.ctx);f.bridge.observeExecution(value=>observed.push(structuredClone(value)));f.bridge.beginTurn(f.ctx);const model=f.bridge.resolveModel(f.ctx,f.original),first=f.bridge.stream(model,context,{});await ready;
+ const running=structuredClone(observed.at(-1));assert.equal((await f.bridge.stream(model,context,{}).result()).stopReason,'error');assert.deepEqual(observed.at(-1),running);
+ finish({finalText:'Done',sessionId:id});assert.equal((await first.result()).stopReason,'stop');const last=observed.at(-1);assert.equal(last.stage,'completed');assert.equal(last.failedStage,undefined);assert.notEqual(last.discoveryMs,null);assert.notEqual(last.startupMs,null);
+});
+test('native context diagnostics explain verified continuation and identity changes without retaining prompts',async()=>{
+ const observed=[],f=fixture();await f.bridge.initialize(f.ctx);f.bridge.observeExecution(value=>observed.push(structuredClone(value)));const model=f.bridge.resolveModel(f.ctx,f.original);
+ const first={...context,messages:[{role:'user',content:'PRIVATE_SCOPE: edit only allowed.md'}]};f.bridge.beginTurn(f.ctx);await f.bridge.stream(model,first,{reasoning:'high'}).result();
+ assert.equal(observed.at(-1).handoff.reason,'new-session');
+ const next={...first,messages:[...first.messages,{role:'user',content:'Continue'}]};f.bridge.beginTurn(f.ctx);await f.bridge.stream(model,next,{reasoning:'high'}).result();
+ assert.equal(observed.at(-1).handoff.mode,'incremental');assert.equal(observed.at(-1).handoff.reason,'verified-prefix');assert.equal(f.calls[1].o.resume,id);
+ f.bridge.beginTurn(f.ctx);await f.bridge.stream(model,next,{reasoning:'medium'}).result();assert.equal(f.calls[2].o.resume,null);assert.ok(f.calls[2].o.prompt.includes('PRIVATE_SCOPE'));assert.equal(observed.at(-1).handoff.reason,'identity-changed');
+ assert.ok(!JSON.stringify(observed).includes('PRIVATE_SCOPE'));
+});
+test('oversized native handoffs report the exact budget and actionable failure before any process starts',async()=>{
+ const observed=[],f=fixture();await f.bridge.initialize(f.ctx);f.bridge.observeExecution(value=>observed.push(structuredClone(value)));f.bridge.beginTurn(f.ctx);
+ const result=await f.bridge.stream(f.bridge.resolveModel(f.ctx,f.original),{...context,messages:[{role:'user',content:'x'.repeat(130000)}]},{}).result();
+ assert.equal(result.stopReason,'error');const last=observed.at(-1);assert.equal(last.failure,'context-budget');assert.equal(last.failedStage,'preparing');assert.equal(last.handoff.budget,128000);assert.ok(last.handoff.characters>last.handoff.budget);assert.equal(last.startupMs,null);assert.equal(f.calls.length,0);assert.equal(f.entries.length,0);
+});
+test('restored receipts resume only the same model, reasoning, directory and executable identity',async()=>{
+ for(const change of ['model','reasoning','cwd','executable']){
+  const f=fixture();await f.bridge.initialize(f.ctx);let model=f.bridge.resolveModel(f.ctx,f.original);f.bridge.beginTurn(f.ctx);await f.bridge.stream(model,context,{reasoning:'high'}).result();
+  if(change==='model')model=f.bridge.resolveModel(f.ctx,{...f.original,id:'other-model'});
+  if(change==='cwd')f.ctx.cwd='/different';
+  if(change==='executable'){const latest=f.entries.at(-1).data,identity=JSON.parse(latest.identity);identity.executable='/old/codex';latest.identity=JSON.stringify(identity);}
+  f.bridge.beginTurn(f.ctx);await f.bridge.stream(model,{...context,messages:[...context.messages,{role:'user',content:'Continue'}]},{reasoning:change==='reasoning'?'medium':'high'}).result();
+  assert.equal(f.calls[1].o.resume,null,change);assert.ok(f.calls[1].o.prompt.includes('Write the article'),change);
+ }
+});
+test('native continuation uses the discovered executable identity when no override is configured',async()=>{
+ const f=fixture({configuredExecutable:null});await f.bridge.initialize(f.ctx);const model=f.bridge.resolveModel(f.ctx,f.original);f.bridge.beginTurn(f.ctx);await f.bridge.stream(model,context,{reasoning:'high'}).result();
+ f.profile.executable='/new-install/codex';f.bridge.beginTurn(f.ctx);await f.bridge.stream(model,{...context,messages:[...context.messages,{role:'user',content:'Continue'}]},{reasoning:'high'}).result();
+ assert.equal(f.calls[1].o.resume,null);assert.ok(f.calls[1].o.prompt.includes('Write the article'));assert.equal(JSON.parse(f.entries.at(-1).data.identity).executable,'/new-install/codex');
+});
+test('a restarted bridge restores a verified checkpoint while mid-flight cancellation never replays execution',async()=>{
+ const first=fixture();await first.bridge.initialize(first.ctx);first.bridge.beginTurn(first.ctx);await first.bridge.stream(first.bridge.resolveModel(first.ctx,first.original),context,{reasoning:'high'}).result();
+ const restored=fixture();restored.entries.push(...structuredClone(first.entries));await restored.bridge.initialize(restored.ctx);restored.bridge.beginTurn(restored.ctx);
+ await restored.bridge.stream(restored.bridge.resolveModel(restored.ctx,restored.original),{...context,messages:[...context.messages,{role:'user',content:'Continue after restart'}]},{reasoning:'high'}).result();
+ assert.equal(restored.calls[0].o.resume,id);assert.ok(!restored.calls[0].o.prompt.includes('Write the article'));assert.ok(restored.calls[0].o.prompt.includes('Continue after restart'));
+ const abort=new AbortController(),cancelled=fixture({onExecute:o=>{o.onLine(JSON.stringify({type:'thread.started',thread_id:id}));abort.abort();return {finalText:'Late response',sessionId:id};}});await cancelled.bridge.initialize(cancelled.ctx);const model=cancelled.bridge.resolveModel(cancelled.ctx,cancelled.original);cancelled.bridge.beginTurn(cancelled.ctx);
+ assert.equal((await cancelled.bridge.stream(model,context,{signal:abort.signal}).result()).stopReason,'aborted');cancelled.bridge.beginTurn(cancelled.ctx);assert.equal((await cancelled.bridge.stream(model,context,{}).result()).stopReason,'error');assert.equal(cancelled.calls.length,1);
+});
+test('native prompt budget accepts the boundary and rejects empty, NUL and oversized context',async()=>{
+ const {validateAgentPrompt,maxAgentPromptCharacters}=await import('../src-tauri/pi/agent-executor.mjs');assert.equal(maxAgentPromptCharacters,128000);assert.doesNotThrow(()=>validateAgentPrompt('x'.repeat(maxAgentPromptCharacters)));
+ for(const prompt of ['',null,'a\0b','x'.repeat(maxAgentPromptCharacters+1)])assert.throws(()=>validateAgentPrompt(prompt));
+});
 test('official Codex execution bridge is available',()=>assert.equal(typeof api.createNativeCodex,'function'));
 test('subscription model resolves to CLI execution while API models keep Pi transport',{skip:!api.createNativeCodex},async()=>{
  const f=fixture();await f.bridge.initialize(f.ctx);const model=f.bridge.resolveModel(f.ctx,f.original);

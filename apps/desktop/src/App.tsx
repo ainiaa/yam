@@ -3041,7 +3041,7 @@ function App() {
   }
   async function exportPreferences(){return invoke<boolean>("export_preferences",{backup:createPreferencesBackup(key=>window.localStorage.getItem(key),launchTemplateCollection.templates,shortcutMac)});}
   async function importPreferences(backup:PreferencesBackup){
-    const writes=preferencesImportWrites(backup,launchTemplateCollection.templates,undefined,launchTemplateCollection.loadError,appPreferences);
+    const writes=preferencesImportWrites(backup,launchTemplateCollection.templates,undefined,launchTemplateCollection.loadError,appPreferences,window.localStorage.getItem('yam.piRoutingSetup.v1'));
     // Commit local preferences before publishing them; no task or CLI configuration is touched.
     applyPreferencesImport(window.localStorage,writes);
     const appearance=loadAppPreferences(()=>window.localStorage.getItem(APP_PREFERENCES_KEY));if(!appearance.error)applyAppPreferences(appearance.value,false);

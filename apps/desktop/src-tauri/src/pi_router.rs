@@ -538,6 +538,26 @@ pub(super) fn catalog(
     cwd: &Path,
     probe_model: Option<&str>,
 ) -> Result<serde_json::Value, String> {
+    let exe = crate::find_executable("pi").ok_or("Pi executable unavailable")?;
+    probe_catalog(&exe, root, gateway, cwd, probe_model)
+}
+pub(super) fn validate_runtime(executable: &Path, root: &Path, cwd: &Path) -> Result<(), String> {
+    let value = probe_catalog(executable, root, None, cwd, None)?;
+    if value["runtime"] != 1 {
+        return Err(
+            "Pi did not confirm the required YAM routing APIs; update or configure Pi and retry"
+                .into(),
+        );
+    }
+    Ok(())
+}
+fn probe_catalog(
+    exe: &Path,
+    root: &Path,
+    gateway: Option<&str>,
+    cwd: &Path,
+    probe_model: Option<&str>,
+) -> Result<serde_json::Value, String> {
     use std::{
         io::{BufRead, BufReader},
         process::{Command, Stdio},
@@ -552,7 +572,6 @@ pub(super) fn catalog(
     }
     validate_probe_model(probe_model)?;
     crate::validate_working_directory(&cwd.to_string_lossy())?;
-    let exe = crate::find_executable("pi").ok_or("Pi executable unavailable")?;
     let entry = stage(root)?;
     let mut command = Command::new(exe);
     command
@@ -591,9 +610,16 @@ pub(super) fn catalog(
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
     let mut child = command
         .spawn()
         .map_err(|_| "Cannot start Pi catalog preflight")?;
+    #[cfg(windows)]
+    let job = super::agent_bridge::attach_query_job(&mut child)?;
     let output = child.stdout.take().ok_or("Pi catalog output unavailable")?;
     let (sender, receiver) = mpsc::sync_channel(1);
     let reader = std::thread::spawn(move || {
@@ -626,6 +652,8 @@ pub(super) fn catalog(
         libc::kill(-(child.id() as i32), libc::SIGKILL);
     }
     let _ = child.kill();
+    #[cfg(windows)]
+    drop(job);
     let _ = child.wait();
     let _ = reader.join();
     let value = result?;
@@ -644,7 +672,7 @@ pub(super) fn catalog(
         return Err("Pi model verification returned an invalid result".into());
     }
     Ok(
-        serde_json::json!({"models":models,"preferred":value["preferred"].as_str(),"warning":value["warning"].as_str(),"probe":value.get("probe")}),
+        serde_json::json!({"models":models,"preferred":value["preferred"].as_str(),"warning":value["warning"].as_str(),"probe":value.get("probe"),"runtime":value["runtime"]}),
     )
 }
 

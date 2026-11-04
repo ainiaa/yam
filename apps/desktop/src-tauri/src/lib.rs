@@ -7822,10 +7822,16 @@ mod tests {
                 pixel_height: 0,
             })
             .unwrap();
-        let child = pair
-            .slave
-            .spawn_command(shell_command(Some(command)))
-            .unwrap();
+        // Fixtures must not run machine-specific login files or depend on SHELL.
+        #[cfg(unix)]
+        let builder = {
+            let mut builder = super::CommandBuilder::new("/bin/sh");
+            builder.args(["-c", command]);
+            builder
+        };
+        #[cfg(not(unix))]
+        let builder = shell_command(Some(command));
+        let child = pair.slave.spawn_command(builder).unwrap();
         #[cfg(unix)]
         let process_identity = child
             .process_id()
@@ -7875,7 +7881,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn terminal_tail_fixture_uses_an_explicit_non_login_shell() {
-        let (session, mut reader, root) = test_session(r#"exec /bin/sh -c 'printf "%s" "$0"'"#);
+        let (session, mut reader, root) = test_session(r#"printf "%s" "$0""#);
         let mut output = String::new();
         reader.read_to_string(&mut output).unwrap();
         session.child.lock().unwrap().wait().unwrap();
