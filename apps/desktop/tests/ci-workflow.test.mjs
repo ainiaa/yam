@@ -26,13 +26,13 @@ test('only CI lowers dev and test debug information while preserving line tables
 });
 test('CI generates native permission schemas before macOS frontend tests',()=>{
  const workflow=ciJob('frontend');
- const runtime=workflow.indexOf('- run: pnpm build:terminal');
- const schema=workflow.indexOf('run: cargo test --doc --manifest-path src-tauri/Cargo.toml --locked');
- const tests=workflow.indexOf('- run: pnpm test:coverage');
+ const runtime=workflow.indexOf('- run: /usr/bin/time -l pnpm build:terminal');
+ const schema=workflow.indexOf('run: /usr/bin/time -l cargo test --doc --manifest-path src-tauri/Cargo.toml --locked');
+ const tests=workflow.indexOf('- run: /usr/bin/time -l pnpm test:coverage');
  assert.ok(runtime>=0&&schema>runtime&&tests>schema,'build runtime and native schema before frontend tests');
- assert.equal(workflow.match(/- run: pnpm build:terminal\r?\n/g)?.length,1,'build the native fixture runtime once');
- assert.equal(workflow.match(/- run: pnpm build:terminal --script-only --notice-mode developer\r?\n/g)?.length,1,'build the configured app script once');
- assert.ok(workflow.indexOf('- run: pnpm build:terminal --script-only')<schema,'script resources must exist before native schema generation');
+ assert.equal(workflow.match(/- run: \/usr\/bin\/time -l pnpm build:terminal\r?\n/g)?.length,1,'build the native fixture runtime once');
+ assert.equal(workflow.match(/- run: \/usr\/bin\/time -l pnpm build:terminal --script-only --notice-mode developer\r?\n/g)?.length,1,'build the configured app script once');
+ assert.ok(workflow.indexOf('- run: /usr/bin/time -l pnpm build:terminal --script-only')<schema,'script resources must exist before native schema generation');
  const step=workflow.slice(workflow.lastIndexOf('\n      -',schema),workflow.indexOf('\n      -',schema+1));
  assert.doesNotMatch(step,/\bif:/,'all CI platforms need their native schema');
 });
@@ -45,7 +45,7 @@ test('Windows checkout keeps inspected Rust source LF and upstream notice bytes 
 test('CI pins a supported Python before checksum-bound runtime preparation',()=>{
  const workflow=readFileSync(new URL('.github/workflows/ci.yml',root),'utf8');
  const python=workflow.indexOf('uses: actions/setup-python@v5');
- assert.ok(python>=0&&python<workflow.indexOf('- run: pnpm build:terminal'));
+ assert.ok(python>=0&&python<workflow.indexOf('- run: /usr/bin/time -l pnpm build:terminal'));
  assert.match(workflow.slice(python,workflow.indexOf('      - ',python)),/python-version: ['"]3\.12['"]/);
  for(const file of ['apps/desktop/src-tauri/Cargo.lock','apps/desktop/pnpm-lock.yaml']){
   const attrs=execFileSync('git',['check-attr','eol','--',file],{cwd:root,encoding:'utf8'});
@@ -72,7 +72,7 @@ test('MSVC test executables receive the same Common Controls v6 manifest as the 
 
 test('CI supports macOS only while retaining coverage and package lifecycle checks',()=>{
  const workflow=readFileSync(new URL('.github/workflows/ci.yml',root),'utf8');
- assert.match(workflow,/runs-on: macos-latest/);
+ assert.match(workflow,/runs-on: macos-26/);
  assert.doesNotMatch(workflow,/ubuntu-|windows-latest|matrix\.|apt-get|xvfb|--bundles nsis|--bundles deb/);
  for(const command of ['pnpm test:coverage','python3 ../../scripts/native-coverage.py','--bundles app','background-platform-smoke.py --desktop','codesign --force --deep'])assert.ok(workflow.includes(command),command);
 });
@@ -139,9 +139,9 @@ test('desktop always validates the selected route and all corresponding job resu
 });
 test('native coverage runs the full suite once with ordinary cfg semantics and preserves normal linting',()=>{
  const native=ciJob('native');
- assert.equal(native.match(/run: python3 ..\/..\/scripts\/native-coverage.py/g)?.length,1);
+ assert.equal(native.match(/run: \/usr\/bin\/time -l python3 ..\/..\/scripts\/native-coverage.py/g)?.length,1);
  assert.match(ciJob('plan'),/python3 -m unittest scripts.test_native_coverage -v/);
- assert.doesNotMatch(native,/run: cargo test|--no-run|--no-clean|--ignore-filename-regex|--exclude|--lib\b|--test-name-pattern/);
+ assert.doesNotMatch(native,/run: (?:\/usr\/bin\/time -l )?cargo test|--no-run|--no-clean|--ignore-filename-regex|--exclude|--lib\b|--test-name-pattern/);
  assert.match(native,/cargo clippy --manifest-path src-tauri\/Cargo.toml --all-targets -- -D warnings/);
  const frontend=ciJob('frontend'),packaged=ciJob('package');
  assert.match(frontend,/cargo test --doc --manifest-path src-tauri\/Cargo.toml --locked -- --test-threads=2/);
@@ -193,4 +193,23 @@ test('frontend saves its new ordinary code outputs while reusing the previous ca
  const frontend=ciJob('frontend');
  assert.match(frontend,/key: .*frontend-v3-lines-docs-/);
  assert.match(frontend,/restore-keys: \|\n\s+.*frontend-v3-lines-docs-\n\s+.*frontend-v3-lines-\n/);
+});
+
+
+test('CI fixes standard runner and test concurrency without changing the package gate',()=>{
+ const workflow=readFileSync(new URL('.github/workflows/ci.yml',root),'utf8');
+ assert.equal(workflow.match(/runs-on: macos-26$/gm)?.length,6);
+ assert.doesNotMatch(workflow,/runs-on: macos-latest|xlarge/);
+ assert.match(workflow,/^  CARGO_BUILD_JOBS: 3$/m);
+ assert.match(ciJob('native'),/CARGO_BUILD_JOBS: 2/);
+ const config=JSON.parse(readFileSync(new URL('apps/desktop/package.json',root),'utf8'));
+ assert.match(config.scripts['test:coverage'],/--test-concurrency=2\b/);
+ for(const name of ['frontend','native','package']){
+  const job=ciJob(name);
+  assert.ok(job.indexOf('--prepare-cache src-tauri/target')<job.indexOf('uses: actions/cache@v4'));
+  assert.match(job,/cpuModel/);assert.match(job,/buildJobs/);
+ }
+ assert.match(ciJob('native'),/--prepare-cache src-tauri\/target src-tauri\/target\/coverage/);
+ for(const command of ['pnpm test:coverage','cargo clippy','cargo test --doc','pnpm tauri build'])assert.ok(workflow.includes('/usr/bin/time -l '+command),command);
+ assert.match(ciJob('package'),/CARGO_LOG: cargo::core::compiler::fingerprint=info/);
 });

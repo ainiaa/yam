@@ -44,6 +44,10 @@ codex -c 'sandbox_mode="read-only"' -c 'approval_policy="never"' review --base B
 
 ## CI 覆盖与缓存（全量路线）
 
+- 所有作业显式使用标准 ARM `macos-26`（文档基线 3 CPU / 7 GiB），避免 `latest` 切换系统大版本；该标签不锁定 GitHub 的具体镜像构建或物理主机。前端覆盖率固定 2 个测试文件并发；Cargo 构建固定 3 个任务，覆盖率编译保留 2 个任务。每个重作业记录实际 CPU、内存和并发配置，不再依赖 CPU 数推导测试并发。
+- 缓存恢复前，用 `native-coverage.py --prepare-cache` 为 CI 新建的空 target 目录写入标准 `CACHEDIR.TAG`；已有目录一律拒绝，不能给未知目录补标签后删除。原生额外初始化独立 coverage 目录；不改缓存路径或键，继续复用现有依赖。覆盖率清理的非零退出和工具吞掉退出码后输出的 warning 都必须阻止后续编译及放行。
+- 耗时步骤通过 macOS `/usr/bin/time -l` 将墙钟、CPU、峰值内存和 I/O 指标写入现有日志；原生另记录清理/编译/报告阶段及分组耗时。仅打包开启 Cargo fingerprint info，以定位重编译原因；不新增性能报告或上传产物。
+
 - `frontend` 与 `native` 在独立 macOS runner 并行；各自准备所需终端资源。前端测试前用普通 `cargo test --doc` 同时生成原生权限 schema、执行 doctest 和生成可复用代码，替代仅生成检查元数据的 `cargo check`。
 - 内存自采样在 `native` 覆盖率测试之后运行，复用同一 runner、同一 `CARGO_LLVM_COV_TARGET_DIR` 中唯一的当前测试程序；缺失或歧义即失败，不回退到普通构建缓存。采样 helper 的额外 profile 写入空设备，避免污染已完成的覆盖率结果。选择逻辑用 Mock/临时普通文件验证，不在本机启动验收 App。
 - `native` 通过 `python3 scripts/native-coverage.py` 使用 `cargo llvm-cov show-env --no-cfg-coverage` 的插桩环境，先清理 workspace 覆盖率产物，再用 `cargo test --no-run --locked --message-format=json` 编译一次。从 Cargo 消息读取全部测试程序，枚举完整清单与 ignored 状态；worktree 组单线程、其余组双线程，最多两个独立进程并行，各自使用自动清理的临时目录。逐组核对实际测试集合、结果和 ignored 状态，失败、超时或清单不匹配即终止本步进程并阻止放行。全部通过后才合并本轮 profile 并要求行覆盖率 85%；保留普通 cfg 语义，不漏测、不重测、不复用旧 profile 数据。

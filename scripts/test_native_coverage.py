@@ -110,6 +110,34 @@ print('test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered ou
             # wait() confirms the sibling is gone before returning, not merely signalled.
             self.assertFalse(delayed.exists())
 
+    def test_cache_initialization_marks_only_new_owned_directories(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "target"
+            coverage.prepare_cache(target)
+            self.assertTrue((target / "CACHEDIR.TAG").read_text().startswith("Signature: 8a477f597d28d172789f06886806bc55"))
+            sentinel = target / "keep"
+            sentinel.write_text("untouched")
+            with self.assertRaises(FileExistsError):
+                coverage.prepare_cache(target)
+            self.assertEqual(sentinel.read_text(), "untouched")
+            with self.assertRaises(FileExistsError):
+                coverage.prepare_cache(target / "CACHEDIR.TAG")
+
+    def test_clean_warning_with_success_status_blocks_compilation(self):
+        for status, stderr in [(0, "warning: process didn't exit successfully: cargo clean (exit status: 101)"), (101, "error: cannot clean")]:
+            def command(argv, **kwargs):
+                if "show-env" in argv:
+                    return subprocess.CompletedProcess(argv, 0, "LLVM_PROFILE_FILE='/tmp/coverage-%p.profraw'\n")
+                if "clean" in argv:
+                    self.assertEqual(kwargs["stderr"], subprocess.PIPE)
+                    self.assertEqual(argv[-2:], ["--color", "never"])
+                    if status:
+                        raise subprocess.CalledProcessError(status, argv, stderr=stderr)
+                    return subprocess.CompletedProcess(argv, 0, "", stderr)
+                self.fail("Compilation or reporting ran after failed cleanup")
+            with self.subTest(status=status), mock.patch.object(coverage.subprocess, "run", side_effect=command), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()), self.assertRaises((RuntimeError, subprocess.CalledProcessError)):
+                coverage.run(Path("/tmp/package/Cargo.toml"))
+
     def test_compile_once_and_report_only_after_audited_groups_pass(self):
         with tempfile.TemporaryDirectory() as directory:
             commands = []
@@ -126,11 +154,11 @@ print('test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered ou
                     output = "" if "--ignored" in argv else "a: test\n"
                 else:
                     output = ""
-                return subprocess.CompletedProcess(argv, 0, output)
+                return subprocess.CompletedProcess(argv, 0, output, "")
             with mock.patch.object(coverage.subprocess, "run", side_effect=command), mock.patch.object(coverage, "run_groups") as execute, contextlib.redirect_stdout(io.StringIO()):
                 coverage.run(Path(directory) / "Cargo.toml")
                 self.assertEqual(sum(argv[:2] == ["cargo", "test"] for argv in commands), 1)
-                self.assertIn(["cargo", "llvm-cov", "clean", "--workspace", "--locked"], commands)
+                self.assertIn(["cargo", "llvm-cov", "clean", "--workspace", "--locked", "--color", "never"], commands)
                 self.assertEqual(commands[-1], ["cargo", "llvm-cov", "report", "--locked", "--fail-under-lines=85"])
                 execute.side_effect = ValueError("missing result")
                 commands.clear()

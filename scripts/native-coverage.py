@@ -8,12 +8,20 @@ import re
 import shlex
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 
 
 WORKTREE = "worktree_manager::tests::"
+
+
+def prepare_cache(target):
+    # CI owns these empty directories before restoring cached build outputs.
+    target = Path(target)
+    target.mkdir()  # Refuse to label an existing directory as safe to clean.
+    (target / "CACHEDIR.TAG").write_text("Signature: 8a477f597d28d172789f06886806bc55\n# YAM CI compilation cache.\n")
 
 
 def parse_environment(output):
@@ -136,12 +144,27 @@ def run(manifest):
     env["CARGO_TARGET_DIR"] = str(target)
 
     def cargo(arguments, capture=False):
-        return subprocess.run(["cargo", *arguments], cwd=manifest.parent, env=env, check=True, text=True, stdout=subprocess.PIPE if capture else None).stdout
+        started = time.monotonic()
+        cleaning = arguments[:2] == ["llvm-cov", "clean"]
+        try:
+            result = subprocess.run(["cargo", *arguments], cwd=manifest.parent, env=env, check=True, text=True, stdout=subprocess.PIPE if capture else None, stderr=subprocess.PIPE if cleaning else None)
+            if cleaning:
+                sys.stderr.write(result.stderr)
+                # cargo-llvm-cov 0.9.1 warns but returns zero when cargo clean fails.
+                if "warning:" in result.stderr:
+                    raise RuntimeError("Coverage cleanup emitted a warning; refusing stale build outputs")
+            return result.stdout
+        except subprocess.CalledProcessError as error:
+            if cleaning and error.stderr:
+                sys.stderr.write(error.stderr)
+            raise
+        finally:
+            print(json.dumps({"phase": " ".join(arguments[:2]), "seconds": round(time.monotonic() - started, 3)}), flush=True)
 
     env.update(parse_environment(cargo(["llvm-cov", "show-env", "--no-cfg-coverage"], capture=True)))
     if "%p" not in env.get("LLVM_PROFILE_FILE", ""):
         raise ValueError("Parallel coverage profiles must contain a process ID")
-    cargo(["llvm-cov", "clean", "--workspace", "--locked"])
+    cargo(["llvm-cov", "clean", "--workspace", "--locked", "--color", "never"])
     binaries = test_binaries(cargo(["test", "--no-run", "--locked", "--message-format=json"], capture=True))
     listing_env = dict(env, LLVM_PROFILE_FILE=os.devnull)
     groups = []
@@ -159,4 +182,10 @@ if __name__ == "__main__":
     def cancelled(_signal, _frame):
         raise KeyboardInterrupt("Native coverage cancelled")
     signal.signal(signal.SIGTERM, cancelled)
-    run(Path(__file__).resolve().parents[1] / "apps/desktop/src-tauri/Cargo.toml")
+    if len(sys.argv) > 1:
+        if sys.argv[1] != "--prepare-cache" or len(sys.argv) < 3:
+            raise SystemExit("Usage: native-coverage.py [--prepare-cache TARGET ...]")
+        for directory in sys.argv[2:]:
+            prepare_cache(directory)
+    else:
+        run(Path(__file__).resolve().parents[1] / "apps/desktop/src-tauri/Cargo.toml")
