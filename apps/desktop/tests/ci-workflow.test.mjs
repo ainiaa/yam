@@ -96,19 +96,19 @@ test('frontend and native checks run independently and desktop fails closed on e
  const beforeCheckout=gate.slice(0,gate.indexOf('      - uses: actions/checkout'));
  assert.match(beforeCheckout,/working-directory: \$\{\{ runner.temp \}\}/,'pre-check must not inherit a repository directory before checkout');
  assert.doesNotMatch(frontend,/^    needs:/m);assert.doesNotMatch(native,/^    needs:/m);
- assert.match(gate,/needs: \[frontend, native\]/);assert.match(gate,/if: \$\{\{ always\(\) \}\}/);
+ assert.match(gate,/needs: \[frontend, native, package\]/);assert.match(gate,/if: \$\{\{ always\(\) \}\}/);
  assert.match(gate,/FRONTEND_RESULT: \$\{\{ needs.frontend.result \}\}/);
  assert.match(gate,/NATIVE_RESULT: \$\{\{ needs.native.result \}\}/);
- assert.ok(gate.includes('test "$FRONTEND_RESULT" = success'));assert.ok(gate.includes('test "$NATIVE_RESULT" = success'));
- assert.ok(gate.includes('name: yam-test-package-macos-${{ github.run_attempt }}'),'reruns retain distinct immutable artifacts');
- for(const job of [frontend,native,gate])assert.doesNotMatch(job,/continue-on-error: true/);
+ assert.ok(gate.includes('test "$FRONTEND_RESULT" = success'));assert.ok(gate.includes('test "$NATIVE_RESULT" = success'));assert.ok(gate.includes('test "$PACKAGE_RESULT" = success'));
+ assert.ok(ciJob('package').includes('name: yam-test-package-macos-${{ github.run_attempt }}'),'reruns retain distinct immutable artifacts');
+ for(const job of [frontend,native,ciJob('package'),gate])assert.doesNotMatch(job,/continue-on-error: true/);
 });
 test('desktop packaging guard rejects failure, cancellation, skipped and missing upstream results',{skip:process.platform==='win32'?'POSIX CI guard requires /bin/sh':false},()=>{
- const script=ciJob('desktop').match(/run: \|\n([\s\S]*?)(?=\n      -)/)?.[1];
+ const script=ciJob('desktop').match(/run: \|\n([\s\S]*?)(?=\n      -|$)/)?.[1];
  assert.ok(script,'the packaging guard must run before checkout and build');
- for(const frontend of ['success','failure','cancelled','skipped',''])for(const native of ['success','failure','cancelled','skipped','']){
-  const result=spawnSync('/bin/sh',['-c',script],{env:{...process.env,FRONTEND_RESULT:frontend,NATIVE_RESULT:native}});
-  assert.equal(result.status===0,frontend==='success'&&native==='success',`${frontend}/${native}`);
+ for(const frontend of ['success','failure','cancelled','skipped',''])for(const native of ['success','failure','cancelled','skipped',''])for(const packaged of ['success','failure','cancelled','skipped','']){
+  const result=spawnSync('/bin/sh',['-c',script],{env:{...process.env,FRONTEND_RESULT:frontend,NATIVE_RESULT:native,PACKAGE_RESULT:packaged}});
+  assert.equal(result.status===0,frontend==='success'&&native==='success'&&packaged==='success',`${frontend}/${native}/${packaged}`);
  }
 });
 test('native coverage runs the full suite once with ordinary cfg semantics and preserves normal linting',()=>{
@@ -118,7 +118,7 @@ test('native coverage runs the full suite once with ordinary cfg semantics and p
  assert.doesNotMatch(native,/run: cargo test|--no-run|--no-clean|--ignore-filename-regex|--exclude|--lib\b|--test-name-pattern/);
  assert.match(native,/cargo clippy --manifest-path src-tauri\/Cargo.toml --all-targets -- -D warnings/);
  assert.ok(ciJob('frontend').includes('cargo check --manifest-path'));
- assert.ok(ciJob('desktop').includes('cargo test --doc --manifest-path src-tauri/Cargo.toml --locked'));
+ assert.ok(ciJob('package').includes('cargo test --doc --manifest-path src-tauri/Cargo.toml --locked'));
 });
 test('both CI workers prepare native resources and cache only reusable compilation outputs',()=>{
  for(const name of ['frontend','native']){
@@ -133,4 +133,14 @@ test('both CI workers prepare native resources and cache only reusable compilati
  const cache=native.slice(native.indexOf('      - name: Restore Rust compilation cache'),native.indexOf('      - name: Select native shell'));
  assert.doesNotMatch(cache,/^\s+.*target\/coverage\s*$/m);
  assert.ok(native.includes('test "$(cargo llvm-cov --version)" = "cargo-llvm-cov 0.9.1"'));
+});
+
+test('superseded packaging remains cancellable and the final desktop gate cannot mask its result',()=>{
+ const packaged=ciJob('package'),gate=ciJob('desktop');
+ assert.match(packaged,/needs: \[frontend, native\]/);
+ assert.ok(packaged.includes("if: ${{ !cancelled() && needs.frontend.result == 'success' && needs.native.result == 'success' }}"));
+ assert.doesNotMatch(packaged,/always\(\)/);
+ assert.match(gate,/PACKAGE_RESULT: \$\{\{ needs.package.result \}\}/);
+ assert.doesNotMatch(gate,/pnpm|cargo|actions\/checkout|upload-artifact/,'the always-running gate must remain short and source-independent');
+ assert.match(gate,/timeout-minutes: 2/);
 });

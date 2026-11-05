@@ -137,22 +137,15 @@ jobs:
           CARGO_BUILD_JOBS: 2
         run: cargo llvm-cov --manifest-path src-tauri/Cargo.toml --locked --no-cfg-coverage --fail-under-lines=85 -- --test-threads=2
 
-  desktop:
+  package:
     needs: [frontend, native]
-    if: ${{ always() }}
+    if: ${{ !cancelled() && needs.frontend.result == 'success' && needs.native.result == 'success' }}
     timeout-minutes: 45
     runs-on: macos-latest
     defaults:
       run:
         working-directory: apps/desktop
     steps:
-      - name: Require both test jobs before packaging
-        working-directory: ${{ runner.temp }}
-        env:
-          FRONTEND_RESULT: ${{ needs.frontend.result }}
-          NATIVE_RESULT: ${{ needs.native.result }}
-        run: |
-          test "$FRONTEND_RESULT" = success && test "$NATIVE_RESULT" = success
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
         with:
@@ -207,3 +200,18 @@ jobs:
           path: apps/desktop/src-tauri/target/debug/bundle/macos/YAM-macos.zip
           if-no-files-found: error
           retention-days: 7
+
+  desktop:
+    needs: [frontend, native, package]
+    if: ${{ always() }}
+    timeout-minutes: 2
+    runs-on: macos-latest
+    steps:
+      - name: Require all verification jobs to succeed
+        working-directory: ${{ runner.temp }}
+        env:
+          FRONTEND_RESULT: ${{ needs.frontend.result }}
+          NATIVE_RESULT: ${{ needs.native.result }}
+          PACKAGE_RESULT: ${{ needs.package.result }}
+        run: |
+          test "$FRONTEND_RESULT" = success && test "$NATIVE_RESULT" = success && test "$PACKAGE_RESULT" = success
