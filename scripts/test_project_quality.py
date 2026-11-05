@@ -15,7 +15,7 @@ class ProjectQualityTests(unittest.TestCase):
                          if line.startswith("coverage:")), "")
         self.assertEqual(shlex.split(coverage), [
             "cargo", "llvm-cov", "--manifest-path", "apps/desktop/src-tauri/Cargo.toml",
-            "--locked", "--fail-under-lines=85", "--", "--test-threads=2",
+            "--locked", "--no-cfg-coverage", "--fail-under-lines=85", "--", "--test-threads=2",
         ])
 
     def test_quality_target_is_explicit(self):
@@ -34,7 +34,7 @@ class ProjectQualityTests(unittest.TestCase):
         self.assertIn("cargo-llvm-cov --version 0.9.1 --locked", content)
         self.assertIn("llvm-tools-preview", content)
         self.assertIn("CARGO_LLVM_COV_TARGET_DIR:", content)
-        self.assertIn("cargo llvm-cov --manifest-path src-tauri/Cargo.toml --locked --fail-under-lines=85 -- --test-threads=2", content)
+        self.assertIn("cargo llvm-cov --manifest-path src-tauri/Cargo.toml --locked --no-cfg-coverage --fail-under-lines=85 -- --test-threads=2", content)
 
 
 if __name__ == "__main__":

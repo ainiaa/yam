@@ -1,12 +1,18 @@
 // Author: Jeff.Liu. A clean checkout must satisfy the same prerequisites as local tests.
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
-import {execFileSync} from 'node:child_process';
+import {execFileSync,spawnSync} from 'node:child_process';
 import {test} from 'node:test';
 
 const root=new URL('../../../',import.meta.url);
+function ciJob(name){
+ const workflow=readFileSync(new URL('.github/workflows/ci.yml',root),'utf8').replace(/\r\n/g,'\n');
+ const marker=`\n  ${name}:\n`,start=workflow.indexOf(marker);
+ assert.ok(start>=0,`missing CI job ${name}`);
+ return workflow.slice(start+marker.length).split(/\n  [a-z][a-z-]*:\n/,1)[0];
+}
 test('CI generates native permission schemas before macOS frontend tests',()=>{
- const workflow=readFileSync(new URL('.github/workflows/ci.yml',root),'utf8');
+ const workflow=ciJob('frontend');
  const runtime=workflow.indexOf('- run: pnpm build:terminal');
  const schema=workflow.indexOf('- run: cargo check --manifest-path src-tauri/Cargo.toml --locked');
  const tests=workflow.indexOf('- run: pnpm test:coverage');
@@ -55,7 +61,7 @@ test('CI supports macOS only while retaining coverage and package lifecycle chec
  const workflow=readFileSync(new URL('.github/workflows/ci.yml',root),'utf8');
  assert.match(workflow,/runs-on: macos-latest/);
  assert.doesNotMatch(workflow,/ubuntu-|windows-latest|matrix\.|apt-get|xvfb|--bundles nsis|--bundles deb/);
- for(const command of ['pnpm test:coverage','cargo test --manifest-path','cargo llvm-cov --manifest-path','--fail-under-lines=85','--bundles app','background-platform-smoke.py --desktop','codesign --force --deep'])assert.ok(workflow.includes(command),command);
+ for(const command of ['pnpm test:coverage','cargo llvm-cov --manifest-path','--fail-under-lines=85','--bundles app','background-platform-smoke.py --desktop','codesign --force --deep'])assert.ok(workflow.includes(command),command);
 });
 test('CI runs PRs once and cancels superseded checks',()=>{
  const workflow=readFileSync(new URL('.github/workflows/ci.yml',root),'utf8').replace(/\r\n/g,'\n');
@@ -83,4 +89,46 @@ test('macOS cleanup inert child and fault state share the test platform boundary
   const offset=source.indexOf(declaration);assert.ok(offset>0);
   assert.match(source.slice(Math.max(0,offset-100),offset),/#\[cfg\(all\(test, target_os = "macos"\)\)\]/,declaration);
  }
+});
+
+test('frontend and native checks run independently and desktop fails closed on either result',()=>{
+ const frontend=ciJob('frontend'),native=ciJob('native'),gate=ciJob('desktop');
+ assert.doesNotMatch(frontend,/^    needs:/m);assert.doesNotMatch(native,/^    needs:/m);
+ assert.match(gate,/needs: \[frontend, native\]/);assert.match(gate,/if: \$\{\{ always\(\) \}\}/);
+ assert.match(gate,/FRONTEND_RESULT: \$\{\{ needs.frontend.result \}\}/);
+ assert.match(gate,/NATIVE_RESULT: \$\{\{ needs.native.result \}\}/);
+ assert.ok(gate.includes('test "$FRONTEND_RESULT" = success'));assert.ok(gate.includes('test "$NATIVE_RESULT" = success'));
+ assert.ok(gate.includes('name: yam-test-package-macos-${{ github.run_attempt }}'),'reruns retain distinct immutable artifacts');
+ for(const job of [frontend,native,gate])assert.doesNotMatch(job,/continue-on-error: true/);
+});
+test('desktop packaging guard rejects failure, cancellation, skipped and missing upstream results',{skip:process.platform==='win32'?'POSIX CI guard requires /bin/sh':false},()=>{
+ const script=ciJob('desktop').match(/run: \|\n([\s\S]*?)(?=\n      -)/)?.[1];
+ assert.ok(script,'the packaging guard must run before checkout and build');
+ for(const frontend of ['success','failure','cancelled','skipped',''])for(const native of ['success','failure','cancelled','skipped','']){
+  const result=spawnSync('/bin/sh',['-c',script],{env:{...process.env,FRONTEND_RESULT:frontend,NATIVE_RESULT:native}});
+  assert.equal(result.status===0,frontend==='success'&&native==='success',`${frontend}/${native}`);
+ }
+});
+test('native coverage runs the full suite once with ordinary cfg semantics and preserves normal linting',()=>{
+ const native=ciJob('native');
+ assert.equal(native.match(/run: cargo llvm-cov --manifest-path/g)?.length,1);
+ assert.match(native,/--locked --no-cfg-coverage --fail-under-lines=85 -- --test-threads=2/);
+ assert.doesNotMatch(native,/run: cargo test|--no-run|--no-clean|--ignore-filename-regex|--exclude|--lib\b|--test-name-pattern/);
+ assert.match(native,/cargo clippy --manifest-path src-tauri\/Cargo.toml --all-targets -- -D warnings/);
+ assert.ok(ciJob('frontend').includes('cargo check --manifest-path'));
+ assert.ok(ciJob('desktop').includes('cargo test --doc --manifest-path src-tauri/Cargo.toml --locked'));
+});
+test('both CI workers prepare native resources and cache only reusable compilation outputs',()=>{
+ for(const name of ['frontend','native']){
+  const job=ciJob(name);
+  for(const command of ['pnpm install --frozen-lockfile','pnpm build:terminal','pnpm build:terminal --script-only --notice-mode developer'])assert.ok(job.includes(command),`${name}: ${command}`);
+  assert.ok(job.indexOf('pnpm build:terminal --script-only')<job.indexOf(name==='frontend'?'cargo check':'cargo fmt'));
+  assert.match(job,/actions\/cache@v4/);assert.match(job,/runner.os/);assert.match(job,/runner.arch/);assert.match(job,/1.98.1/);assert.match(job,/Cargo.lock/);assert.match(job,/github.sha/);
+  assert.match(job,/target\/debug\/deps/);assert.doesNotMatch(job,/path:.*\.cargo\s*$/m);
+ }
+ const native=ciJob('native');
+ assert.match(native,/target\/coverage\/debug\/deps/);
+ const cache=native.slice(native.indexOf('      - name: Restore Rust compilation cache'),native.indexOf('      - name: Select native shell'));
+ assert.doesNotMatch(cache,/^\s+.*target\/coverage\s*$/m);
+ assert.ok(native.includes('test "$(cargo llvm-cov --version)" = "cargo-llvm-cov 0.9.1"'));
 });
