@@ -3,7 +3,7 @@ import {sessionRuntimeInfo} from '../src/session-runtime-info.ts';
 import {englishUiRead} from './fixtures/english-ui-source.mjs';
 const readFileSync=(...args)=>englishUiRead(rawReadFileSync,...args);
 import './fixtures/i18n-test-init.mjs';
-import {componentFunction} from './fixtures/component-function.mjs';
+import {componentFunction,cachedCompilation} from './fixtures/component-function.mjs';
 // Author: Jeff.Liu. Browser geometry of the actual header JSX and stylesheet.
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -20,6 +20,7 @@ import {agentLabel} from '../src/agent-events.ts';
 import * as layoutOperations from '../src/terminal-layout.ts';
 import {gitContextLabel} from '../src/git-context.ts';
 import {connectionDetails} from '../src/provider-config.ts';
+const transpile=cachedCompilation(text=>ts.transpileModule(text,{compilerOptions:{target:ts.ScriptTarget.ES2022,jsx:ts.JsxEmit.React}}).outputText);
 
 const chrome = process.env.CHROME_BIN ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 // Headless Chrome can still display macOS keychain dialogs; installation is not test consent.
@@ -37,16 +38,16 @@ function visit(node) {
 }
 visit(source);
 assert.ok(header, 'actual application header');
-const code = ts.transpileModule('return (' + header.getText(source) + ');', {compilerOptions: {target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React}}).outputText;
+const code = transpile('return (' + header.getText(source) + ');');
 const connectionDeclaration=source.statements.find(node=>ts.isFunctionDeclaration(node)&&node.name?.text==='SessionConnection');
 assert.ok(connectionDeclaration,'actual connection disclosure');
-const connectionCode=ts.transpileModule(connectionDeclaration.getText(source),{compilerOptions:{target:ts.ScriptTarget.ES2022,jsx:ts.JsxEmit.React}}).outputText;
+const connectionCode=transpile(connectionDeclaration.getText(source));
 const SessionConnection=componentFunction('React','connectionDetails','ChevronDown','sessionRuntimeInfo',connectionCode+';return SessionConnection;')(React,connectionDetails,icons.ChevronDown,sessionRuntimeInfo);
 const css = readFileSync(new URL('../src/App.css', import.meta.url), 'utf8');
 
 const layoutSource=ts.createSourceFile('TerminalLayout.tsx',readFileSync(new URL('../src/TerminalLayout.tsx',import.meta.url),'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
 const declaration=layoutSource.statements.find(node=>ts.isFunctionDeclaration(node)&&node.name?.text==='TerminalLayout');
-const layoutCode=ts.transpileModule(declaration.getText(layoutSource).replace(/^export /,''),{compilerOptions:{target:ts.ScriptTarget.ES2022,jsx:ts.JsxEmit.React}}).outputText;
+const layoutCode=transpile(declaration.getText(layoutSource).replace(/^export /,''));
 function layoutElement() {
  const bindings={React,useRef:current=>({current}),useState:value=>[value,()=>{}],useEffect:()=>{},...layoutOperations};
  const component=componentFunction(...Object.keys(bindings),layoutCode+';return TerminalLayout;')(...Object.values(bindings));
@@ -68,12 +69,12 @@ function markup(interactive, collapsed, longPath, stopped=false) {
     terminalViews: {current: new Map()}, recovery: {canRunAgain: false}, canContinue: false,
     closeEndedView() {}, rerunSelectedSession() {}, resumeSelectedSession() {}};
   assert.ok(creation,'actual shared new-session control');
-  const creationCode=ts.transpileModule('return ('+creation.getText(source)+');',{compilerOptions:{target:ts.ScriptTarget.ES2022,jsx:ts.JsxEmit.React}}).outputText;
+  const creationCode=transpile('return ('+creation.getText(source)+');');
   bindings.newSessionButton=componentFunction(...Object.keys(bindings),creationCode)(...Object.values(bindings));
   const element = componentFunction(...Object.keys(bindings), code)(...Object.values(bindings));
-  const asideCode=ts.transpileModule('return ('+sidebar.getText(source)+');',{compilerOptions:{target:ts.ScriptTarget.ES2022,jsx:ts.JsxEmit.React}}).outputText;
+  const asideCode=transpile('return ('+sidebar.getText(source)+');');
   const aside=componentFunction(...Object.keys(bindings),asideCode)(...Object.values(bindings));
-  const viewCode=ts.transpileModule('return ('+viewbar.getText(source)+');',{compilerOptions:{target:ts.ScriptTarget.ES2022,jsx:ts.JsxEmit.React}}).outputText;
+  const viewCode=transpile('return ('+viewbar.getText(source)+');');
   const view=componentFunction(...Object.keys(bindings),viewCode)(...Object.values(bindings));
   return `<div class="app-shell${collapsed ? ' sidebar-collapsed' : ''}">${renderToStaticMarkup(aside)}<main class="main-panel">${renderToStaticMarkup(element)}${renderToStaticMarkup(view)}<section class="terminal-area">${renderToStaticMarkup(layoutElement())}</section></main></div>`;
 }

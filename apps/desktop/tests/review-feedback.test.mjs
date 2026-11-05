@@ -1,5 +1,6 @@
 // Author: Jeff.Liu. Review input is scoped to the original verified CLI; no auto-submit.
 import test from 'node:test';import assert from 'node:assert/strict';
+import {cachedCompilation} from './fixtures/component-function.mjs';
 import {reviewOrigin,reviewReady,formatReviewFeedback,combineReviewComments,deliverReviewFeedback} from '../src/review-feedback.ts';
 const record=()=>({summary:{session_id:'s-one',cwd:'/repo',status:'running',launch:{adapter:'codex',mode:'interactive'}},status:'running',agent:{generation:'generation-one',agent_session_id:'native-one',integration:'connected',phase:'response_finished'}});
 const location={sessionId:'s-one',path:'src/a.ts',line:3,side:'new',basis:'worktree'};
@@ -24,15 +25,19 @@ test('delivery checks fresh native state and invokes only the explicit paste cal
 
 import {readFileSync} from 'node:fs';import ts from 'typescript';
 import {sameReviewOrigin} from '../src/review-feedback.ts';
-function feedbackFixture(){
- const raw=readFileSync(new URL('../src/ReviewFeedback.tsx',import.meta.url),'utf8'),source=ts.createSourceFile('ReviewFeedback.tsx',raw,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
+const compileFeedback=cachedCompilation(raw=>{
+ const source=ts.createSourceFile('ReviewFeedback.tsx',raw,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
  const body=source.statements.filter(n=>!ts.isImportDeclaration(n)).map(n=>n.getText(source).replace(/^export /,'')).join('\n');
+ return ts.transpileModule(body,{compilerOptions:{target:ts.ScriptTarget.ESNext,jsx:ts.JsxEmit.React}}).outputText;
+});
+function feedbackFixture(){
+ const body=compileFeedback(readFileSync(new URL('../src/ReviewFeedback.tsx',import.meta.url),'utf8'));
  const slots=[],effects=[];let at=0,queue=[],tree;const fills=[];
  const React={createElement:(type,props,...children)=>({type,props:{...props,children:children.flat(Infinity)}})};
  const useRef=value=>{const i=at++;return slots[i]??(slots[i]={current:value});};
  const useState=value=>{const i=at++;if(!(i in slots))slots[i]=value;return[slots[i],v=>slots[i]=typeof v==='function'?v(slots[i]):v];};
  const useEffect=(fn,deps)=>{const i=at++;if(!effects[i]||deps.some((v,k)=>v!==effects[i].deps[k]))queue.push(()=>{effects[i]?.cleanup?.();effects[i]={deps,cleanup:fn()};});};
- const component=new Function('React','useRef','useState','useEffect','sameReviewOrigin','formatReviewFeedback','combineReviewComments','t',ts.transpileModule(body,{compilerOptions:{target:ts.ScriptTarget.ESNext,jsx:ts.JsxEmit.React}}).outputText+';return ReviewFeedback;')(React,useRef,useState,useEffect,sameReviewOrigin,formatReviewFeedback,combineReviewComments,v=>v);
+ const component=new Function('React','useRef','useState','useEffect','sameReviewOrigin','formatReviewFeedback','combineReviewComments','t',body+';return ReviewFeedback;')(React,useRef,useState,useEffect,sameReviewOrigin,formatReviewFeedback,combineReviewComments,v=>v);
  const props={active:true,origin:reviewOrigin(record()),ready:true,location,onFill:async(...args)=>fills.push(args)};
  const nodes=n=>[n,...(n?.props?.children??[]).flatMap(c=>c&&typeof c==='object'?nodes(c):[])];
  const render=()=>{at=0;tree=component(props);const batch=queue;queue=[];batch.forEach(fn=>fn());};
@@ -50,14 +55,26 @@ test('changing the native target keeps the draft and blocks delivery until delib
  f.button('Bind current native session').props.onClick();f.render();assert.equal(f.button('Fill original CLI input').props.disabled,false);f.cleanup();
 });
 
-function appPasteFixture(){
- const raw=readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8'),source=ts.createSourceFile('App.tsx',raw,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);let fn;
+test('compiled feedback fixtures keep hook state and callbacks separate',()=>{
+ const first=feedbackFixture(),second=feedbackFixture();
+ first.field().props.onChange({target:{value:'first draft'}});first.render();second.render();
+ assert.equal(first.field().props.value,'first draft');assert.equal(second.field().props.value,'');
+ assert.notEqual(first.props,second.props);assert.notEqual(first.fills,second.fills);
+ first.cleanup();second.cleanup();
+});
+
+const compileAppPaste=cachedCompilation(raw=>{
+ const source=ts.createSourceFile('App.tsx',raw,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);let fn;
  const visit=node=>{if(ts.isFunctionDeclaration(node)&&node.name?.text==='fillReviewInOriginalTerminal')fn=node;ts.forEachChild(node,visit);};visit(source);assert.ok(fn,'actual existing-terminal adapter must be wired');
+ return ts.transpileModule(fn.getText(source),{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText;
+});
+function appPasteFixture(){
+ const body=compileAppPaste(readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8'));
  const pasted=[],notices=[],errors=[];let focus=false,closed=false,current=true,unknown=false;
  const owner={current:{available:true}},mounted={current:true},selected={current:'s-one'};
  const view={ready:true,moving:false,persisted:false,attaching:false,parsing:null,updating:false,projecting:false,resizing:false,clearPending:false,disposed:false,writable:true,instance:{modes:{bracketedPasteMode:true},focus(){focus=true;},paste(text){pasted.push(text);const queue=view.inputQueue??={write:null,version:0,length:0,count:0};queue.write=Promise.resolve().then(()=>{if(unknown)queue.version++;view.writable=!unknown;queue.write=null;});}}};
  const values={isMainWindow:true,terminalMounted:mounted,terminalViews:{current:new Map([['s-one',view]])},sessionId:selected,terminalPasteTarget:()=>({sessionId:'s-one',view}),deliverReviewFeedback,invoke:async(name,args)=>{assert.equal(name,'get_session');assert.equal(args.sessionId,'s-one');return record();},inspectTerminalPaste:text=>({text}),terminalPasteCurrent:()=>current&&owner.current.available&&selected.current==='s-one',ownerConnectionAvailable:owner,pastePending:{current:null},fileDropPending:{current:null},setProjectToolsOpen(){closed=true;},terminalHasInputFocus:()=>focus,setTerminalNotice:value=>notices.push(value),setError:value=>errors.push(value)};
- const render=new Function(...Object.keys(values),ts.transpileModule(fn.getText(source),{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText+';return fillReviewInOriginalTerminal;')(...Object.values(values));
+ const render=new Function(...Object.keys(values),body+';return fillReviewInOriginalTerminal;')(...Object.values(values));
  return{view,pasted,notices,errors,owner,selected,run:()=>render(reviewOrigin(record()),location,'comment'),closed:()=>closed,stale:()=>current=false,uncertain:()=>unknown=true};
 }
 test('actual App fills through the original terminal paste path without Enter and rejects unsafe target states',async()=>{

@@ -11,6 +11,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync as rawReadFileSync} from 'node:fs';
 import ts from 'typescript';
+import {cachedCompilation} from './fixtures/component-function.mjs';
 import {TerminalViews} from '../src/terminal-views.ts';
 import * as layoutOperations from '../src/terminal-layout.ts';
 import {createTerminalLayout,assignTerminalPane,removeTerminalPane,changeTerminalLayout,isTerminalProtocolResponse,clampSplitPercent,swapTerminalPanes} from '../src/terminal-layout.ts';
@@ -29,7 +30,7 @@ assert.ok(setupText,'existing actual terminal setup effect');
 const persistenceText=effects.filter(text=>text.includes('saveTerminalLayout')||text.includes('yam.terminalLayout'));
 const initializers=app.body.statements.filter(ts.isVariableStatement).flatMap(n=>[...n.declarationList.declarations])
  .filter(n=>/terminalLayout|layoutRestore|layoutBoot|layoutPreference|restoreLayout|restoreVersion|restoreGeneration|splitPercent/i.test(n.name.getText(source))||n.initializer?.getText(source).includes('loadTerminalLayout'));
-const transpile=text=>ts.transpileModule(text,{compilerOptions:{target:ts.ScriptTarget.ESNext,jsx:ts.JsxEmit.React}}).outputText;
+const transpile=cachedCompilation(text=>ts.transpileModule(text,{compilerOptions:{target:ts.ScriptTarget.ESNext,jsx:ts.JsxEmit.React}}).outputText);
 const tick=()=>new Promise(setImmediate);
 async function settle(){for(let i=0;i<8;i++)await tick();}
 const ids=['s-19aa2b3-1','s-19aa2b3-2','s-19aa2b3-3','s-19aa2b3-4'];
@@ -64,6 +65,20 @@ function fixture(raw,{last=null,pending=null,readError=false,writeError=false,rp
  return {actual,desktopWindow,refs,document,state,calls,errors,storage,storageReads,storageWrites,listeners,raf,parsers,localStorage,async mount(){this.cleanup=actual.setup();await settle();},emit(name,payload){listeners.get(name)?.({payload});},layout:()=>actual.terminalLayoutRef.current,save:()=>actual.persist(),async flush(){await settle();while(raf.length)raf.shift()();await settle();}};
 }
 const forbidden=['create_session','resume_session','stop_session','write_session','take_terminal_control','resize_session'];
+test('compiled restore fixtures keep layout storage DOM refs and cleanup independent',async()=>{
+ const first=fixture(null),second=fixture(null);
+ await first.mount();await second.mount();
+ first.actual.changeLayoutMode('grid');
+ first.localStorage.setItem('fixture-only','first');
+ first.document.activeElement={fixture:'first'};
+ first.refs.ownerConnectionAvailable.current.version++;
+ assert.equal(second.layout().mode,'single');
+ assert.equal(second.localStorage.getItem('fixture-only'),null);
+ assert.equal(second.document.activeElement,second.document.body);
+ assert.equal(second.refs.ownerConnectionAvailable.current.version,0);
+ assert.notEqual(first.calls,second.calls);assert.notEqual(first.listeners,second.listeners);
+ first.cleanup();assert.equal(second.refs.terminalMounted.current,true);second.cleanup();
+});
 function noTaskMutation(h){assert.deepEqual(h.calls.filter(call=>forbidden.includes(call.name)),[]);}
 function assertStored(h,expected){
  const writes=h.storageWrites.filter(w=>w.key==='yam.window.main.terminalLayout');assert.ok(writes.length,'actual App persistence writes the layout');

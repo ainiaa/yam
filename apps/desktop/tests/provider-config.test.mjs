@@ -10,6 +10,7 @@ import {projectLaunchFields,createLaunchTemplate,encodeLaunchTemplates,decodeLau
 import ts from 'typescript';
 import {readFileSync as rawReadFileSync} from 'node:fs';
 import * as layout from '../src/terminal-layout.ts';
+import {cachedCompilation} from './fixtures/component-function.mjs';
 
 const provider={id:'deepseek',model:'deepseek-flash',base_url:'https://api.deepseek.com',api_key_env:'DEEPSEEK_API_KEY'};
 const launch={adapter:'codex',mode:'interactive',extra_args:'',prompt:null,command:null};
@@ -42,8 +43,8 @@ test('the launch form offers both DeepSeek executors explicitly',()=>{
  assert.match(source,/<option value="deepseek-claude">DeepSeek<\/option>/);
 });
 
-function changeActualCli(adapter,provider,target,previousEdits={}) {
- const source=ts.createSourceFile('App.tsx',readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
+const compileCliChange=cachedCompilation(raw=>{
+ const source=ts.createSourceFile('App.tsx',raw,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
  const declarations=[];let callback;
  function visit(node){
   if(ts.isFunctionDeclaration(node)&&['editLaunch','changeProviderFields','changeAdapter'].includes(node.name?.text))declarations.push(node.getText(source));
@@ -53,10 +54,14 @@ function changeActualCli(adapter,provider,target,previousEdits={}) {
   ts.forEachChild(node,visit);
  }
  visit(source);assert.ok(callback,'actual CLI button callback');
+ return ts.transpile(declarations.join('\n')+'\nreturn ('+callback+');',{target:ts.ScriptTarget.ES2022});
+});
+function changeActualCli(adapter,provider,target,previousEdits={}) {
+ const body=compileCliChange(readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8'));
  const selected={adapter,provider,edits:previousEdits};
  const formLaunch={adapter,provider,mode:'interactive',extra_args:'--verbose',prompt:'keep prompt'};
  const bindings={adapter:{id:target},useProjectSettings:false,launchWorktreeAttempt:undefined,launchDirectoryOverride:"/project",formLaunch,formAdapter:adapter,providerPreset,providerChoice,supportsProvider,setError:value=>selected.error=value,setLaunchDraft:update=>{const next=update({adapter:selected.adapter,provider:selected.provider});selected.adapter=next.adapter;selected.provider=next.provider;},setProjectLaunchEdits:update=>selected.edits=update(selected.edits)};
- const change=new Function(...Object.keys(bindings),ts.transpile(declarations.join('\n')+'\nreturn ('+callback+');',{target:ts.ScriptTarget.ES2022}))(...Object.values(bindings));
+ const change=new Function(...Object.keys(bindings),body)(...Object.values(bindings));
  change();return selected;
 }
 
