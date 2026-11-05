@@ -11,6 +11,19 @@ function ciJob(name){
  assert.ok(start>=0,`missing CI job ${name}`);
  return workflow.slice(start+marker.length).split(/\n  [a-z][a-z-]*:\n/,1)[0];
 }
+test('desktop links only a Rust library and keeps local debug profiles unchanged',()=>{
+ const manifest=readFileSync(new URL('apps/desktop/src-tauri/Cargo.toml',root),'utf8');
+ const library=manifest.split('[lib]')[1]?.split(/\n\[/,1)[0];
+ assert.match(library,/^crate-type = \["rlib"\]$/m);
+ assert.doesNotMatch(manifest,/^\[profile\.(dev|test)(\.|\])/m);
+});
+test('only CI lowers dev and test debug information while preserving line tables',()=>{
+ const workflow=readFileSync(new URL('.github/workflows/ci.yml',root),'utf8');
+ const environment=workflow.split(/^env:\n/m)[1]?.split(/^\S/m,1)[0];
+ assert.ok(environment,'workflow-wide environment must reach every Cargo invocation');
+ for(const profile of ['DEV','TEST'])assert.match(environment,new RegExp(`^  CARGO_PROFILE_${profile}_DEBUG: line-tables-only$`,'m'));
+ assert.doesNotMatch(workflow,/CARGO_PROFILE_(?:DEV|TEST)_DEBUG: (?:0|false|none)|-C\s*debuginfo=0/);
+});
 test('CI generates native permission schemas before macOS frontend tests',()=>{
  const workflow=ciJob('frontend');
  const runtime=workflow.indexOf('- run: pnpm build:terminal');
@@ -138,7 +151,7 @@ test('both CI workers prepare native resources and cache only reusable compilati
   const job=ciJob(name);
   for(const command of ['pnpm install --frozen-lockfile','pnpm build:terminal','pnpm build:terminal --script-only --notice-mode developer'])assert.ok(job.includes(command),`${name}: ${command}`);
   assert.ok(job.indexOf('pnpm build:terminal --script-only')<job.indexOf(name==='frontend'?'cargo check':'cargo fmt'));
-  assert.match(job,/actions\/cache@v4/);assert.match(job,/runner.os/);assert.match(job,/runner.arch/);assert.match(job,/1.98.1/);assert.match(job,/Cargo.lock/);assert.match(job,/-v2-/);
+  assert.match(job,/actions\/cache@v4/);assert.match(job,/runner.os/);assert.match(job,/runner.arch/);assert.match(job,/1.98.1/);assert.match(job,/Cargo.lock/);assert.match(job,/-v3-lines-/);
   assert.match(job,/target\/debug\/deps/);assert.doesNotMatch(job,/path:.*\.cargo\s*$/m);
  }
  const native=ciJob('native');
@@ -169,8 +182,8 @@ test('Rust caches follow build inputs and avoid saving the same dependencies for
  for(const name of ['frontend','native','package']){
   const job=ciJob(name),cache=job.slice(job.indexOf('      - name: Restore Rust compilation cache'),job.indexOf('      - name: Select native shell'));
   const key=cache.match(/^\s+key: (.*)$/m)?.[1];assert.ok(key);
-  assert.match(key,/-v2-/);assert.match(key,/Cargo.lock/);assert.match(key,/Cargo.toml/);assert.match(key,/config.toml/);
+  assert.match(key,/-v3-lines-/);assert.match(key,/Cargo.lock/);assert.match(key,/Cargo.toml/);assert.match(key,/config.toml/);
   assert.doesNotMatch(key,/github.sha|workflows\/ci.yml/);
-  assert.ok(cache.includes(`\${{ runner.os }}-\${{ runner.arch }}-rust-1.98.1-${name}-`),'restore previously validated dependency outputs, then let Cargo check fingerprints');
+  assert.ok(cache.includes(`\${{ runner.os }}-\${{ runner.arch }}-rust-1.98.1-${name}-v3-lines-`),'restore previously validated dependency outputs, then let Cargo check fingerprints');
  }
 });

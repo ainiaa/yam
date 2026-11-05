@@ -6,6 +6,10 @@ on:
 concurrency:
   group: desktop-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
+env:
+  # Keep local debugging unchanged; CI retains file/line backtraces.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
 jobs:
   plan:
     timeout-minutes: 5
@@ -88,9 +92,9 @@ jobs:
             apps/desktop/src-tauri/target/debug/build
             apps/desktop/src-tauri/target/debug/.fingerprint
             apps/desktop/src-tauri/target/debug/incremental
-          key: ${{ runner.os }}-${{ runner.arch }}-rust-1.98.1-frontend-v2-${{ hashFiles('apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml', '.cargo/config.toml', 'apps/desktop/src-tauri/.cargo/config.toml') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-rust-1.98.1-frontend-v3-lines-${{ hashFiles('apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml', '.cargo/config.toml', 'apps/desktop/src-tauri/.cargo/config.toml') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-rust-1.98.1-frontend-
+            ${{ runner.os }}-${{ runner.arch }}-rust-1.98.1-frontend-v3-lines-
       - name: Record runner capacity
         run: node -e "const os=require('node:os');console.log(JSON.stringify({cpus:os.cpus().length,parallelism:os.availableParallelism(),memoryBytes:os.totalmem()}))"
       - name: Select native shell fixture environment
@@ -158,9 +162,9 @@ jobs:
             apps/desktop/src-tauri/target/coverage/debug/build
             apps/desktop/src-tauri/target/coverage/debug/.fingerprint
             apps/desktop/src-tauri/target/coverage/debug/incremental
-          key: ${{ runner.os }}-${{ runner.arch }}-rust-1.98.1-native-v2-${{ hashFiles('apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml', '.cargo/config.toml', 'apps/desktop/src-tauri/.cargo/config.toml') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-rust-1.98.1-native-v3-lines-${{ hashFiles('apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml', '.cargo/config.toml', 'apps/desktop/src-tauri/.cargo/config.toml') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-rust-1.98.1-native-
+            ${{ runner.os }}-${{ runner.arch }}-rust-1.98.1-native-v3-lines-
       - name: Record runner capacity
         run: node -e "const os=require('node:os');console.log(JSON.stringify({cpus:os.cpus().length,parallelism:os.availableParallelism(),memoryBytes:os.totalmem()}))"
       - name: Select native shell fixture environment
@@ -227,10 +231,10 @@ jobs:
             apps/desktop/src-tauri/target/debug/build
             apps/desktop/src-tauri/target/debug/.fingerprint
             apps/desktop/src-tauri/target/debug/incremental
-          key: ${{ runner.os }}-${{ runner.arch }}-rust-1.98.1-package-v2-${{ hashFiles('apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml', '.cargo/config.toml', 'apps/desktop/src-tauri/.cargo/config.toml') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-rust-1.98.1-package-v3-lines-${{ hashFiles('apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml', '.cargo/config.toml', 'apps/desktop/src-tauri/.cargo/config.toml') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-rust-1.98.1-package-
-            ${{ runner.os }}-${{ runner.arch }}-rust-1.98.1-frontend-
+            ${{ runner.os }}-${{ runner.arch }}-rust-1.98.1-package-v3-lines-
+            ${{ runner.os }}-${{ runner.arch }}-rust-1.98.1-frontend-v3-lines-
       - name: Record runner capacity
         run: node -e "const os=require('node:os');console.log(JSON.stringify({cpus:os.cpus().length,parallelism:os.availableParallelism(),memoryBytes:os.totalmem()}))"
       - name: Select native shell fixture environment
