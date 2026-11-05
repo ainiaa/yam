@@ -1,7 +1,7 @@
 import {englishUiRead} from './fixtures/english-ui-source.mjs';
 import './fixtures/i18n-test-init.mjs';
 import {nativeSettings} from './fixtures/native-settings.mjs';
-import {componentFunction} from './fixtures/component-function.mjs';
+import {componentFunction,cachedCompilation} from './fixtures/component-function.mjs';
 import {defaultTerminalLineHeight,parseTerminalLineHeight} from '../src/terminal-line-height.ts';
 import {TERMINAL_SCROLLBACK_LINES} from '../src/terminal-frame.ts';
 import {terminalCursorOptions,defaultTerminalCursor} from '../src/terminal-cursor.ts';
@@ -19,17 +19,28 @@ const clipboard=ts.createSourceFile('Clipboard.ts',englishUiRead(fs.readFileSync
 const clipboardFns=clipboard.statements.filter(n=>ts.isFunctionDeclaration(n)&&['prepareTextForTerminal','bracketTextForPaste','paste'].includes(n.name?.text)).map(n=>n.getText(clipboard).replace('export ',''));
 const installedPaste=componentFunction(ts.transpile(clipboardFns.join('\n'),{target:ts.ScriptTarget.ES2022})+';return paste')();
 let factory;function find(n){if(ts.isBinaryExpression(n)&&n.left.getText(tree)==='createView.current'&&ts.isArrowFunction(n.right))factory=n.right.getText(tree);ts.forEachChild(n,find);}find(tree);assert.ok(factory);
+const functions=['cancelTerminalFileDrop','terminalPaneVisible','terminalHasInputFocus','terminalPasteTarget','terminalPasteCurrent','cancelTerminalPaste','confirmTerminalPaste','captureTerminalPaste','validatePendingTerminalPaste'].map(code).filter(Boolean).join('\n');
+const transpile=cachedCompilation(text=>ts.transpile(text,{target:ts.ScriptTarget.ES2022}));
 export function harness(extra={}){
  const sends=[],entries=[],order=[],elements=[];const document={activeElement:null,hasFocus:()=>true,createElement(){const e={className:'',style:{},dataset:{},listeners:new Map(),append(){},remove(){},contains:t=>t===e.textarea,addEventListener:(name,fn,capture)=>e.listeners.set(name,{fn,capture}),removeEventListener:(name)=>e.listeners.delete(name)};elements.push(e);return e;}};
  class Terminal{constructor(){this.modes={mouseTrackingMode:'none'};this.cols=80;this.rows=24;this.bracketed=false;}loadAddon(){}open(e){this.element=e;this.textarea={value:'',matches:s=>s==='textarea.xterm-helper-textarea'||s==='.xterm-helper-textarea'};e.textarea=this.textarea;}onData(fn){this.data=fn;return{dispose(){}};}onScroll(){return{dispose(){}};}dispose(){}focus(){order.push('focus');document.activeElement=this.textarea;}paste(text){entries.push(text);installedPaste(text,this.textarea,{decPrivateModes:{bracketedPasteMode:this.bracketed},triggerDataEvent:data=>this.data(data)},{rawOptions:{ignoreBracketedPasteMode:false}});}}
  const refs={fileDropPending:{current:null},fileDropDialog:{current:{close(){}}},pastePending:{current:null},pasteDialog:{current:{close(){order.push('close');document.activeElement=null;}}},pasteModeRef:{current:'risky'},ownerConnectionAvailable:{current:{available:true,version:0}},terminalLayoutRef:{current:{mode:'single',panes:['s-a'],focused:0,revision:0}},selectionVersion:{current:0},sessionId:{current:'s-a'},zoomedPaneIdRef:{current:null},terminalViews:{current:{get:()=>view}},terminalSettingsRef:{current:{}},terminalHost:{current:{append(){}}},terminalMounted:{current:true}};
  let preview=null;const errors=[];const bindings={canContinueTerminalInput:()=>false,continueTerminalInput(){},terminalReopen:{current:null},terminalWindowClaim:windowContext.terminalWindowClaim,isMainWindow:true,desktopWindow:{slot:"main",epoch:1,main_epoch:1,restore_blocked:false,requested_session:null,owned_ids:[]},windowPreferenceKey:name=>windowContext.windowPreferenceKey("main",name),installTerminalLinks:()=>({dispose(){}}),shortcutMac:false,...layout,...paste,...refs,document,window:{addEventListener(){},removeEventListener(){}},Terminal,FitAddon:class{},terminalLineHeightRef:{current:defaultTerminalLineHeight},terminalCursorRef:{current:defaultTerminalCursor},TERMINAL_SCROLLBACK_LINES,terminalCursorOptions,terminalSystemThemeRef:{current:"dark"},terminalOptions:()=>({}),syncViewSize(){},handleTerminalScroll(){},setRecoveryRevision(){},setError:e=>errors.push(e),setFileDropPreview(){},setPastePreview:v=>preview=v,invoke:async(name,args)=>{if(name==='release_terminal_view')return;sends.push([name,args]);if(extra.reject)throw Error('Another desktop currently controls this terminal');},...extra.bindings};
- const functions=['cancelTerminalFileDrop','terminalPaneVisible','terminalHasInputFocus','terminalPasteTarget','terminalPasteCurrent','cancelTerminalPaste','confirmTerminalPaste','captureTerminalPaste','validatePendingTerminalPaste'].map(code).filter(Boolean).join('\n');
- const run=componentFunction(...Object.keys(bindings),ts.transpile(functions+'\nconst factory='+factory,{target:ts.ScriptTarget.ES2022})+';return {factory,confirm:typeof confirmTerminalPaste==="function"?confirmTerminalPaste:null,cancel:typeof cancelTerminalPaste==="function"?cancelTerminalPaste:null,validate:typeof validatePendingTerminalPaste==="function"?validatePendingTerminalPaste:null}')(...Object.values(bindings));
+ const run=componentFunction(...Object.keys(bindings),transpile(functions+'\nconst factory='+factory)+';return {factory,confirm:typeof confirmTerminalPaste==="function"?confirmTerminalPaste:null,cancel:typeof cancelTerminalPaste==="function"?cancelTerminalPaste:null,validate:typeof validatePendingTerminalPaste==="function"?validatePendingTerminalPaste:null}')(...Object.values(bindings));
  const view=run.factory('s-a');view.cursor=0;view.live=true;view.firstAttachment=true;Object.assign(view,extra.view);document.activeElement=view.instance.textarea;
  function native(text,target=view.instance.textarea,types=['text/plain']){const ev={target,clipboardData:{types,getData:()=>text},preventDefault(){this.prevented=true;},stopImmediatePropagation(){this.stopped=true;}};view.element.listeners.get('paste')?.fn(ev);if(!ev.stopped)view.instance.paste(text);return ev;}
  return{...refs,document,view,sends,entries,errors,order,native,...run,get preview(){return preview;}};
 }
+test('compiled paste fixtures keep pending dialogs IPC and refs separate',async()=>{
+ const first=harness(),second=harness();
+ first.native('pending\n');
+ assert.ok(first.pastePending.current);assert.equal(second.pastePending.current,null);
+ second.native('safe');await new Promise(setImmediate);
+ assert.equal(first.sends.length,0);assert.equal(second.sends.length,1);
+ first.cancel();assert.equal(second.view.disposed,false);
+ assert.notEqual(first.document,second.document);assert.notEqual(first.errors,second.errors);
+ first.view.dispose();second.view.dispose();
+});
 for(const [name,text] of [['multiline','one\ntwo'],['control','safe\x1b[31m'],['oversize','x'.repeat(131073)]])test('A04a actual capture stops '+name+' before xterm can send',()=>{const h=harness();const event=h.native(text);assert.equal(event.stopped,true,'native capture must stop xterm before its bubble handler');assert.equal(event.prevented,true);assert.equal(h.sends.length,0);});
 
 test('A04a confirm closes restores actual focus and sends original once through installed paste and ordinary onData',async()=>{for(const state of [{frameInstance:null,writable:false},{ready:true,firstAttachment:false,writable:false},{projection:true,cursor:null,firstAttachment:false,frameInstance:'parser',writable:false}]){const h=harness({view:state}),text='空 格\r\nline\n';const event=h.native(text);assert.equal(h.sends.length,0);assert.equal(event.prevented,true);assert.equal(h.view.element.listeners.get('paste').capture,true);h.document.activeElement={dialog:true};h.view.instance.bracketed=true;h.confirm();h.confirm();await new Promise(setImmediate);assert.deepEqual(h.order,['close','focus']);assert.deepEqual(h.entries,[text]);assert.deepEqual(h.sends,[['write_session',{desktopGeneration:0,sessionId:'s-a',data:'\x1b[200~空 格\rline\r\x1b[201~'}]]);assert.equal(h.view.writable,true);assert.equal(h.pastePending.current,null);}});
@@ -113,4 +124,40 @@ test('ended local terminal captures a safe native paste for recovery instead of 
 });
 test('ended terminal multiline paste opens preview and only explicit confirmation recovers it',()=>{
  for(const confirm of [false,true]){const recovered=[];const h=harness({view:{live:false,ready:true},bindings:{canContinueTerminalInput:()=>true,continueTerminalInput:(...args)=>recovered.push(args)}});h.native('echo one\necho two');assert.ok(h.preview);assert.deepEqual(recovered,[]);h.document.activeElement={dialog:true};if(confirm)h.confirm();else h.cancel();assert.equal(recovered.length,confirm?1:0);if(confirm){assert.equal(recovered[0][2],'echo one\necho two');assert.equal(recovered[0][3],true);}assert.deepEqual(h.sends,[]);}
+});
+
+test('a rejected automatic terminal response alone does not claim typed input was discarded',async()=>{
+ const h=harness({bindings:{invoke:async()=>{throw Error('Terminal input cancelled; no bytes were accepted');}}});
+ h.view.instance.data('\x1b[1;1R');await new Promise(setImmediate);
+ assert.deepEqual(h.errors,[]);assert.equal(h.view.inputQueue.count,0);
+});
+test('a rejected terminal response still warns when real input is queued behind it',async()=>{
+ let rejectFirst;const sent=[];
+ const h=harness({bindings:{invoke:(name,args)=>{sent.push(args.data);return new Promise((_,reject)=>rejectFirst=reject);}}});
+ h.view.instance.data('\x1b[1;1R');h.view.instance.data('typed');rejectFirst(Error('Terminal input cancelled; no bytes were accepted'));
+ await new Promise(setImmediate);assert.deepEqual(sent,['\x1b[1;1R']);assert.match(h.errors.at(-1),/Pending terminal input was discarded/);
+});
+
+test('saved terminal focus reports never reopen a shell while explicit typing still does',()=>{
+ const continued=[];const h=harness({view:{live:false},bindings:{continueTerminalInput:(_id,_view,data)=>continued.push(data)}});
+ for(const data of ['\x1b[I','\x1b[O'])h.view.instance.data(data);
+ assert.deepEqual(continued,[]);assert.deepEqual(h.sends,[]);
+ h.view.instance.data('typed');assert.deepEqual(continued,['typed']);
+});
+test('live terminal focus reports stay protocol responses even after focus moved away',async()=>{
+ const h=harness();h.document.activeElement={};h.view.instance.data('\x1b[O');await new Promise(setImmediate);
+ assert.deepEqual(h.sends.map(s=>s[1].data),['\x1b[O']);
+});
+
+test('saved TUI mouse reports never reopen a shell; text, Enter and Tab remain explicit input',()=>{
+ const continued=[];const h=harness({view:{live:false},bindings:{continueTerminalInput:(_id,_view,data)=>continued.push(data)}});
+ for(const data of ['\x1b[<0;12;4M','\x1b[<0;12;4m','\x1b[<35;12;4M','\x1b[M !!','\x1b[32;12;4M'])h.view.instance.data(data);
+ assert.deepEqual(continued,[]);assert.deepEqual(h.sends,[]);
+ for(const data of ['typed','\r','\t'])h.view.instance.data(data);assert.deepEqual(continued,['typed','\r','\t']);
+});
+test('live raw and projected TUI mouse reports remain interactive',async()=>{
+ for(const projection of [false,true]){const h=harness({view:{projection}});h.view.instance.data('\x1b[<0;12;4M');await new Promise(setImmediate);assert.deepEqual(h.sends.map(s=>s[1].data),['\x1b[<0;12;4M']);}
+});
+test('a cancelled mouse report alone does not report lost typed input',async()=>{
+ const h=harness({bindings:{invoke:async()=>{throw Error('Terminal input cancelled; no bytes were accepted');}}});h.view.instance.data('\x1b[<35;12;4M');await new Promise(setImmediate);assert.deepEqual(h.errors,[]);
 });

@@ -44,9 +44,15 @@ export function changeTerminalLayout(layout:TerminalLayoutState,mode:TerminalLay
  const next={mode,panes:leaves.map(leaf=>leaf.sessionId),focused,revision:layout.revision+1};
  return {...next,root:replaceLeaves(terminalLayoutRoot(next,ratio),leaves)};
 }
-export function assignTerminalPane(layout:TerminalLayoutState,index:number,id:string):TerminalLayoutState {
+export function assignTerminalPane(layout:TerminalLayoutState,index:number,id:string,replace=false):TerminalLayoutState {
  if(!Number.isSafeInteger(index)||index<0||index>=layout.panes.length||!id)throw Error("Invalid terminal pane");
- const leaves=terminalLeaves(terminalLayoutRoot(layout)),duplicate=terminalSessionPane(layout,id),target=duplicate>=0?duplicate:index;
+ const leaves=terminalLeaves(terminalLayoutRoot(layout));
+ if(replace){
+  const visible=leaves.findIndex(leaf=>leaf.sessionId===id),target=visible>=0?visible:index;
+  // Legacy hidden tabs remain sessions in history; only visible panes own layout membership now.
+  return updateLeaves(layout,leaves.map((leaf,i)=>({...leaf,sessionId:i===target?id:leaf.sessionId,tabs:i===target?[id]:leaf.sessionId?[leaf.sessionId]:[]})),target);
+ }
+ const duplicate=terminalSessionPane(layout,id),target=duplicate>=0?duplicate:index;
  if(duplicate<0&&terminalMembers(layout).length>=MAX_TERMINAL_PANES)throw Error("Terminal layout supports at most 16 sessions.");
  const leaf=leaves[target],tabs=terminalTabs(leaf);leaves[target]={...leaf,tabs:tabs.includes(id)?[...tabs]:[...tabs,id],sessionId:id};
  return updateLeaves(layout,leaves,target);
@@ -112,10 +118,17 @@ export function splitTerminalPane(layout:TerminalLayoutState,axis:TerminalSplit[
 // xterm emits these finite terminal replies through onData too. They stay per-session,
 // even for hidden live raw views; serialized projection replay never answers queries.
 export function isTerminalProtocolResponse(data:string):boolean {
- return /^\x1b\[\??[0-9]+;[0-9]+R$/.test(data)
+ return /^\x1b\[[IO]$/.test(data)
+  || /^\x1b\[\??[0-9]+;[0-9]+R$/.test(data)
   || /^\x1b\[[?>]?[0-9]+(?:;[0-9]+)*c$/.test(data)
   || /^\x1b\[(?:0|3)n$/.test(data)
   || /^\x1b\](?:10|11|12);rgb:[0-9a-fA-F/]+(?:\x07|\x1b\\)$/.test(data);
+}
+
+export function isTerminalMouseReport(data:string):boolean {
+ return /^\x1b\[<\d+;\d+;\d+[mM]$/.test(data)
+  || /^\x1b\[\d+;\d+;\d+M$/.test(data)
+  || /^\x1b\[M[\s\S]{3}$/u.test(data);
 }
 
 // Resize changes only the addressed split and its ancestors; membership and focus stay intact.

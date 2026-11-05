@@ -39,7 +39,7 @@ test('delete project persists before closing and handles stale targets and faile
  bindings.projectDeleteRef.current=intent;bindings.isMainWindow=false;actual('confirmProjectDeletion',bindings)(intent);assert.equal(errors.length,1);
 });
 function deletionFixture(invoke){const target={id:'s-one',title:'One',archived:false,previewId:null};const calls=[],deleted=[],errors=[];let closed=0;
- const bindings={sessionDeleteRef:{current:target},sessionDeleteBusyRef:{current:false},isMainWindow:true,setSessionDeleteBusy(){},setSessionDeleteError:e=>errors.push(e),invoke:async(name,args)=>{calls.push([name,args]);return invoke(name,args);},clearDeletedSessionNames:ids=>deleted.push(...ids),refreshHistory:async()=>calls.push(['refresh']),closeSessionDeletion:()=>closed++};
+ const bindings={sessionDeleteRef:{current:target},sessionDeleteBusyRef:{current:false},isMainWindow:true,setSessionDeleteBusy(){},setTimeout:callback=>callback(),setSessionDeleteError:e=>errors.push(e),invoke:async(name,args)=>{calls.push([name,args]);return invoke(name,args);},clearDeletedSessionNames:ids=>deleted.push(...ids),refreshHistory:async()=>calls.push(['refresh']),closeSessionDeletion:()=>closed++};
  return {target,bindings,calls,deleted,errors,get closed(){return closed;},run:()=>actual('confirmSessionDeletion',bindings)()};}
 test('session deletion uses the captured ID, confirms its exact preview, and cleans actual IDs only',async()=>{
  const h=deletionFixture(async name=>name==='preview_archive_deletion'?{preview_id:'token',session_ids:['s-one']}:name==='confirm_archive_deletion'?{deleted_ids:['s-one'],complete:true,issues:[]}:null);
@@ -58,10 +58,10 @@ test('delete dialogs are mounted before showModal and project deletion includes 
  assert.equal(dialogs.length,2);for(const dialog of dialogs)assert.ok(!ts.isBinaryExpression(dialog.parent));
  const button=buttons.find(node=>node.getText(tree).includes('deleteProject(project)'));assert.ok(!ts.isBinaryExpression(button.parent));
 });
-test('running sessions and cancelled confirmations never mutate history',()=>{
+test('running sessions open a confirmation and cancellation never mutates history',()=>{
  const shown=[],errors=[];const state={isMainWindow:true,sessionDeleteBusyRef:{current:false},selectedRecord:{current:null},setError:e=>errors.push(e),sessionDeleteRef:{current:null},setSessionDelete:v=>shown.push(v),setSessionDeleteError(){},sessionDeleteDialog:{current:{showModal(){}}},titleFor:()=> 'One'};
- actual('beginSessionDeletion',state)({summary:{session_id:'s-one'},status:'running'});assert.equal(shown.length,0);assert.equal(errors.length,1);
- actual('beginSessionDeletion',state)({summary:{session_id:'s-one'},status:'stopped'});assert.equal(shown.length,1);
+ actual('beginSessionDeletion',state)({summary:{session_id:'s-one'},status:'running'});assert.equal(shown.length,1);assert.equal(shown[0].stopBeforeDelete,true);assert.equal(errors.length,0);
+ actual('beginSessionDeletion',state)({summary:{session_id:'s-one'},status:'stopped'});assert.equal(shown.length,2);assert.equal(shown[1].stopBeforeDelete,false);
  const commands=[];actual('closeSessionDeletion',{...state,setSessionDelete:()=>{},sessionDeleteDialog:{current:{close(){}}},invoke:async name=>commands.push(name)})();assert.equal(state.sessionDeleteRef.current,null);assert.deepEqual(commands,[]);
 });
 test('deleted project intent uses its own full path for derived groups and rejects renamed targets',()=>{
@@ -81,7 +81,7 @@ test('session actions live in a context menu instead of inline buttons',()=>{
  assert.ok(!source.includes('className="session-pin"'));
 });
 test('delete confirmation has dedicated spacing and an accessible description',()=>{
- assert.ok(source.includes('className="app-dialog session-delete-dialog"'));
+ assert.ok(source.includes('className="app-dialog session-delete-dialog confirmation-dialog"'));
  assert.ok(source.includes('aria-describedby="session-delete-description"'));
  assert.ok(source.includes('className="dialog-body"'));
 });
@@ -101,4 +101,44 @@ test('project and workspace action menus stay in the window and open above a bot
   actual('positionProjectMenu',{window:{innerWidth:800,innerHeight:760}})({open:true,getBoundingClientRect:()=>anchor,querySelector:()=>actions});
   assert.equal(actions.style.left,'8px');assert.equal(actions.style.top,expectedTop+'px');
  }
+});
+
+function activeDeletionFixture(options={}){
+ let reads=0,archives=0;
+ const h=deletionFixture(async(name,args)=>{
+  if(name==='get_session'){reads++;return {summary:{session_id:'s-one'},status:options.neverStops?'running':reads<3?'running':'stopped',notification_pending:!!options.pending,agent:{inbox:options.agent?[{id:'receipt-one',revision:7,read:false,delivery:'pending'}]:[]}};}
+  if(name==='stop_session'&&options.stopFailure)throw Error('Stop failed');
+  if(name==='read_agent_receipt')options.agent=false;
+  if(name==='archive_session'){if(options.agent)throw Error('Session has pending notifications');archives++;if(options.finalizing&&archives===1)throw 'Session is still finalizing';}
+  if(name==='acknowledge_notification'&&options.ackFailure)throw Error('Acknowledgement failed');
+  if(name==='preview_archive_deletion')return {preview_id:'token',session_ids:['s-one']};
+  if(name==='confirm_archive_deletion')return {deleted_ids:['s-one'],complete:true,issues:[]};
+ });h.target.stopBeforeDelete=true;return h;
+}
+test('confirmed active deletion stops only the captured session and waits before archiving',async()=>{
+ const h=activeDeletionFixture({finalizing:true,pending:true});await h.run();
+ assert.equal(h.closed,1);assert.deepEqual(h.deleted,['s-one']);
+ assert.deepEqual(h.calls.filter(([n])=>n==='stop_session'),[['stop_session',{sessionId:'s-one'}]]);
+ assert.ok(h.calls.findIndex(([n])=>n==='stop_session')<h.calls.findIndex(([n])=>n==='archive_session'));
+ assert.equal(h.calls.filter(([n])=>n==='archive_session').length,2);
+ assert.deepEqual(h.calls.find(([n])=>n==='acknowledge_notification'),['acknowledge_notification',{sessionId:'s-one',expectedStatus:'stopped'}]);
+});
+test('stop failure or stop timeout preserves the session without archive or deletion',async()=>{
+ for(const options of [{stopFailure:true},{neverStops:true},{pending:true,ackFailure:true}]){
+  const h=activeDeletionFixture(options);await h.run();assert.equal(h.closed,0);assert.deepEqual(h.deleted,[]);assert.equal(h.target.archived,false);assert.ok(h.errors.some(Boolean));assert.equal(h.calls.some(([n])=>n==='archive_session'||n==='confirm_archive_deletion'),false);assert.equal(h.bindings.sessionDeleteBusyRef.current,false);
+ }
+});
+test('natural completion before confirmation skips stopping and double clicks share one deletion',async()=>{
+ const h=activeDeletionFixture();const previous=h.bindings.invoke;h.bindings.invoke=async(name,args)=>name==='get_session'?{summary:{session_id:'s-one'},status:'succeeded'}:previous(name,args);
+ const first=h.run();await h.run();await first;assert.equal(h.closed,1);assert.equal(h.calls.some(([n])=>n==='stop_session'),false);assert.equal(h.calls.filter(([n])=>n==='confirm_archive_deletion').length,1);
+});
+test('active deletion is enabled in the sidebar and warns before stopping',()=>{
+ const button=buttons.find(node=>node.getText(tree).includes('beginSessionDeletion(record)'));assert.ok(button);const render=new Function('React','record','beginSessionDeletion','t','Trash2',ts.transpile('return ('+button.getText(tree)+')',{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2022}));
+ for(const status of ['starting','running','stopped'])assert.equal(render({createElement:(type,props)=>({type,props})},{status},()=>{},x=>x,'Trash2').props.disabled,false);
+ assert.match(source,/Stop and delete/);assert.match(source,/will be stopped before/);
+});
+
+test('confirmed deletion acknowledges only its own unread Agent receipts before archiving',async()=>{
+ const h=activeDeletionFixture({agent:true});await h.run();assert.equal(h.closed,1);
+ assert.deepEqual(h.calls.find(([n])=>n==='read_agent_receipt'),['read_agent_receipt',{sessionId:'s-one',receipt:'receipt-one',revision:7}]);
 });

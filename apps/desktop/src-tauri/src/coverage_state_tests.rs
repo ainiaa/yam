@@ -525,7 +525,8 @@ fn closure_t02_child_wait_error_reaps_real_owned_pid_and_preserves_other_fixture
     let mut session = std::sync::Arc::try_unwrap(session).ok().unwrap();
     let child = session.child.into_inner().unwrap();
     let pid = child.process_id().unwrap();
-    session.exit_observation_fault = Some(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(1)));
+    session.exit_observation_fault =
+        Some(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(1)));
     session.child = std::sync::Mutex::new(Box::new(T02WaitFault {
         child,
         reported_pid: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
@@ -605,7 +606,8 @@ fn closure_t02_wait_error_after_root_exit_still_cleans_owned_background_job() {
     }
     let mut session = std::sync::Arc::try_unwrap(session).ok().unwrap();
     let child = session.child.into_inner().unwrap();
-    session.exit_observation_fault = Some(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(1)));
+    session.exit_observation_fault =
+        Some(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(1)));
     session.child = std::sync::Mutex::new(Box::new(T02WaitFault {
         child,
         reported_pid: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
@@ -686,7 +688,8 @@ fn closure_t02_drain_timeout_keeps_active_until_reader_stops_and_shutdown_retrie
             Ok(0)
         }
     }
-    let (session, _reader, root) = test_session("printf owned; exit 0");
+    let (session, mut reader, root) = test_session("printf owned; exit 0");
+    let drain = std::thread::spawn(move || std::io::copy(&mut reader, &mut std::io::sink()));
     let fixture = Rust85Session {
         session,
         root,
@@ -717,6 +720,7 @@ fn closure_t02_drain_timeout_keeps_active_until_reader_stops_and_shutdown_retrie
     let notifications_before = notifications.lock().unwrap().clone();
     release.send(()).unwrap();
     closure_t02_wait_workers((output, wait));
+    drain.join().unwrap().unwrap();
     assert!(
         retained && !completed,
         "reader pending must retain active/incomplete state"
@@ -749,7 +753,8 @@ fn closure_t02_real_workers_report_read_error_as_failure_after_owned_child_exit(
             Err(std::io::Error::other("owned output read refusal"))
         }
     }
-    let (session, _reader, root) = test_session("printf owned; exit 0");
+    let (session, mut reader, root) = test_session("printf owned; exit 0");
+    let drain = std::thread::spawn(move || std::io::copy(&mut reader, &mut std::io::sink()));
     let fixture = Rust85Session {
         session,
         root,
@@ -765,6 +770,7 @@ fn closure_t02_real_workers_report_read_error_as_failure_after_owned_child_exit(
         |_, _, _| {},
     );
     closure_t02_join(&fixture.session, workers);
+    drain.join().unwrap().unwrap();
     let record = fixture.session.history.get(&fixture.id()).unwrap();
     assert_eq!(record.status, "failed");
     assert!(record.reason.unwrap().contains("owned output read refusal"));
@@ -1033,7 +1039,8 @@ pub(super) fn closure_t02_wait_workers(
 #[test]
 fn closure_t02_real_workers_drain_utf8_before_status_frame_removal_and_completion() {
     use tauri::Manager;
-    let (session, reader, root) = test_session(r#"exec /bin/sh -c "printf 'tail-\317\200\342\202'; exit 0""#);
+    let (session, reader, root) =
+        test_session(r#"exec /bin/sh -c "printf 'tail-\317\200\342\202'; exit 0""#);
     let mut fixture = Rust85Session {
         session,
         root,
@@ -1218,14 +1225,11 @@ fn closure_t01_native_resume_claim_bridge_failure_and_retry_use_private_owned_pr
         "adapter":"claude","mode":"interactive","extra_args":"","prompt":"original prompt must not replay",
         "provider":{"id":"custom","model":"sonnet","base_url":"http://127.0.0.1:1","api_key_env":null}
     })).unwrap();
-    let environment =
-        super::provider_launch::prepare(&fixture.root, &launch, &|name| {
-            match name {
-                "CLAUDE_CONFIG_DIR" | "HOME" | "USERPROFILE" => None,
-                _ => panic!("no real credentials"),
-            }
-        })
-            .unwrap();
+    let environment = super::provider_launch::prepare(&fixture.root, &launch, &|name| match name {
+        "CLAUDE_CONFIG_DIR" | "HOME" | "USERPROFILE" => None,
+        _ => panic!("no real credentials"),
+    })
+    .unwrap();
     let config = environment.config_root(
         "claude",
         &fixture.root,
@@ -1291,8 +1295,9 @@ fn closure_t01_native_resume_claim_bridge_failure_and_retry_use_private_owned_pr
         Some(fixture.id()),
         None,
         |_, builder| {
-            let args: Vec<_> = builder
-                .get_argv()
+            let native_argv = super::interactive_shell::initial_argv(&builder)
+                .unwrap_or_else(|| builder.get_argv().to_vec());
+            let args: Vec<_> = native_argv
                 .iter()
                 .map(|v| v.to_string_lossy().into_owned())
                 .collect();
@@ -1308,7 +1313,10 @@ fn closure_t01_native_resume_claim_bridge_failure_and_retry_use_private_owned_pr
     )
     .err()
     .unwrap();
-    assert!(failed.contains("owned native spawn refusal"));
+    assert!(
+        failed.contains("owned native spawn refusal"),
+        "unexpected error: {failed}"
+    );
     assert_eq!(connections.get(), 1);
     assert!(manager.resume_claims.lock().unwrap().is_empty());
     assert!(manager.sessions.lock().unwrap().is_empty());
@@ -1336,8 +1344,9 @@ fn closure_t01_native_resume_claim_bridge_failure_and_retry_use_private_owned_pr
         None,
         |slave, builder| {
             spawns.set(spawns.get() + 1);
-            let args: Vec<_> = builder
-                .get_argv()
+            let native_argv = super::interactive_shell::initial_argv(&builder)
+                .unwrap_or_else(|| builder.get_argv().to_vec());
+            let args: Vec<_> = native_argv
                 .iter()
                 .map(|v| v.to_string_lossy().into_owned())
                 .collect();
@@ -1969,7 +1978,9 @@ fn closure_t10_final_spawn_rechecks_config_changed_during_hook_registration() {
             |_, _, _, _, builder| {
                 connected.set(connected.get() + 1);
                 if change == "connection" {
-                    let connection = std::path::Path::new(builder.get_env("CLAUDE_CONFIG_DIR").unwrap()).join("yam-connection.json");
+                    let connection =
+                        std::path::Path::new(builder.get_env("CLAUDE_CONFIG_DIR").unwrap())
+                            .join("yam-connection.json");
                     std::fs::write(&connection, b"{}").unwrap();
                 } else {
                     std::fs::rename(project.join("sub"), project.join("saved-sub")).unwrap();
@@ -2084,7 +2095,10 @@ fn terminal_environment_production_spawn_defaults_unusable_owner_term() {
         .filter(|value| !value.is_empty() && value.as_os_str() != "dumb")
         .unwrap_or_else(|| "xterm-256color".into());
     let result = closure_t01_start(
-        &fixture, &app, None, None,
+        &fixture,
+        &app,
+        None,
+        None,
         |_, builder| {
             assert_eq!(builder.get_env("TERM"), Some(expected.as_os_str()));
             Err("owned TERM spawn boundary".into())
@@ -2092,7 +2106,11 @@ fn terminal_environment_production_spawn_defaults_unusable_owner_term() {
         |_, _, _, _, _| panic!("ordinary shell has no agent probe"),
         &started,
     );
-    assert!(result.err().unwrap().contains("owned TERM spawn boundary"));
+    let error = result.err().unwrap();
+    assert!(
+        error.contains("owned TERM spawn boundary"),
+        "unexpected error: {error}"
+    );
     assert!(started.borrow().is_empty());
 }
 
@@ -2529,6 +2547,11 @@ emit({id:r.id,ok:true,data});});
 
 impl Drop for Rust85Session {
     fn drop(&mut self) {
+        let mut reader = self.session.master.lock().ok().and_then(|master| {
+            let master = master.as_ref()?;
+            super::configure_terminal_input(master.as_ref()).ok()?;
+            master.try_clone_reader().ok()
+        });
         if let Some(parser) = &self.parser {
             parser.stop();
         }
@@ -2537,9 +2560,37 @@ impl Drop for Rust85Session {
             if child.try_wait().ok().flatten().is_none() {
                 let _ = child.kill();
             }
-            let _ = child.wait();
         }
+        // macOS can defer PTY child exit until its pending output is consumed.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let exited = loop {
+            if let Some(reader) = &mut reader {
+                for _ in 0..16 {
+                    match reader.read(&mut [0u8; 8192]) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                }
+            }
+            if self
+                .session
+                .child
+                .lock()
+                .ok()
+                .is_some_and(|mut child| child.try_wait().ok().flatten().is_some())
+            {
+                break true;
+            }
+            if std::time::Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        };
         let _ = std::fs::remove_dir_all(&self.root);
+        assert!(
+            exited || std::thread::panicking(),
+            "owned fixture child did not exit after PTY drain"
+        );
     }
 }
 
@@ -2549,6 +2600,60 @@ fn rust85_state_fixture_drop_reaps_only_its_owned_child_and_directory() {
     let session = fixture.session.clone();
     let root = fixture.root.clone();
     drop(fixture);
+    assert!(session.child.lock().unwrap().try_wait().unwrap().is_some());
+    assert!(!root.exists());
+}
+
+#[test]
+fn rust85_state_fixture_drop_drains_pending_pty_output_before_reaping() {
+    use std::io::Read;
+    let fixture = Rust85Session::new("printf '%65536s' x; sleep 30");
+    let session = fixture.session.clone();
+    let root = fixture.root.clone();
+    let mut reader = {
+        let master = session.master.lock().unwrap();
+        let master = master.as_ref().unwrap();
+        super::configure_terminal_input(master.as_ref()).unwrap();
+        master.try_clone_reader().unwrap()
+    };
+    let ready = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match reader.read(&mut [0u8; 1]) {
+            Ok(1) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(
+                    std::time::Instant::now() < ready,
+                    "owned PTY produced no output"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            other => panic!("owned PTY readiness: {other:?}"),
+        }
+    }
+    let (send, receive) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        drop(fixture);
+        send.send(()).unwrap();
+    });
+    let completed = receive
+        .recv_timeout(std::time::Duration::from_secs(3))
+        .is_ok();
+    if !completed {
+        // Release the old destructor on RED so the regression cannot strand CI.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            let _ = reader.read(&mut [0u8; 8192]);
+            if receive.try_recv().is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+    worker.join().unwrap();
+    assert!(
+        completed,
+        "fixture waited for exit without draining its owned PTY output"
+    );
     assert!(session.child.lock().unwrap().try_wait().unwrap().is_some());
     assert!(!root.exists());
 }
@@ -2611,7 +2716,13 @@ fn rust85_state_unknown_and_invalid_commands_do_not_allocate_a_session() {
 #[test]
 fn rust85_state_write_and_resize_reach_only_the_owned_pty() {
     use tauri::Manager;
-    let fixture = Rust85Session::new("read line; test \"$line\" = coverage-write");
+    let (session, mut reader, root) = test_session("read line; test \"$line\" = coverage-write");
+    let drain = std::thread::spawn(move || std::io::copy(&mut reader, &mut std::io::sink()));
+    let fixture = Rust85Session {
+        session,
+        root,
+        parser: None,
+    };
     let app = fixture.app();
     let manager = app.state::<super::SessionManager>();
     super::resize_session(manager.clone(), fixture.id(), 91, 37).unwrap();
@@ -2643,6 +2754,7 @@ fn rust85_state_write_and_resize_reach_only_the_owned_pty() {
         std::thread::sleep(std::time::Duration::from_millis(5));
     };
     assert!(status.success());
+    drain.join().unwrap().unwrap();
     assert_eq!(
         super::clear_terminal_display(manager.clone(), fixture.id(), "a".repeat(64))
             .unwrap()
@@ -2904,20 +3016,52 @@ fn runtime_info_launch_snapshot_is_independent_of_hook_availability() {
         let manager = app.state::<super::SessionManager>();
         let launch: super::AgentLaunch = serde_json::from_value(serde_json::json!({
             "adapter": adapter, "mode": mode, "extra_args": "", "prompt": "owned fixture"
-        })).unwrap();
+        }))
+        .unwrap();
         let result = super::create_session_with_effects(
-            Some(app.handle().clone()), &manager, &fixture.root,
-            Some(fixture.root.to_string_lossy().into_owned()), None, Some(launch),
-            None, None, None, None, None, None, None, None, None,
-            |name| { assert_eq!(name, adapter); Some(std::path::PathBuf::from("/bin/sh")) },
-            |size| super::native_pty_system().openpty(size).map_err(|e| e.to_string()),
+            Some(app.handle().clone()),
+            &manager,
+            &fixture.root,
+            Some(fixture.root.to_string_lossy().into_owned()),
+            None,
+            Some(launch),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            |name| {
+                assert_eq!(name, adapter);
+                Some(std::path::PathBuf::from("/bin/sh"))
+            },
+            |size| {
+                super::native_pty_system()
+                    .openpty(size)
+                    .map_err(|e| e.to_string())
+            },
             |_, _| Err("owned spawn refusal".into()),
-            |_, _, _, _, _| panic!("task and unsupported hook launches cannot connect"),
-            |_, _, _| {}, |_, _, _, _| panic!("refused spawn cannot start workers"),
+            |_, _, _, _, _| {
+                assert_eq!(mode, "interactive");
+                Err("owned unavailable native hooks".into())
+            },
+            |_, _, _| {},
+            |_, _, _, _| panic!("refused spawn cannot start workers"),
         );
         assert!(result.err().unwrap().contains("owned spawn refusal"));
         let rows = fixture.session.history.list().unwrap();
-        let saved = rows.iter().find(|r| r.summary.launch.as_ref().is_some_and(|l| l.adapter == adapter)).unwrap();
+        let saved = rows
+            .iter()
+            .find(|r| {
+                r.summary
+                    .launch
+                    .as_ref()
+                    .is_some_and(|l| l.adapter == adapter)
+            })
+            .unwrap();
         assert_eq!(saved.agent.cli_path.as_deref(), Some("/bin/sh"));
         assert_eq!(saved.status, "failed");
         assert!(manager.sessions.lock().unwrap().is_empty());

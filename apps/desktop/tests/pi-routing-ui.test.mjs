@@ -1,9 +1,150 @@
 // Author: Jeff.Liu.
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {parsePiDraft,buildPiArgs,validatePiDraft} from '../src/pi-routing.ts';
+import {defaultRules} from '../src-tauri/pi/task-rules.mjs';
+import {parsePiDraft,buildPiArgs,validatePiDraft,defaultPiArgs,selectPiSetupModel,restorePiSetup,verifyPiSetup,piSetupMapping} from '../src/pi-routing.ts';
 const models=[{key:'p/small',name:'Small',levels:['medium','high'],context_window:10000},{key:'p/strong',name:'Strong',levels:['medium','high','max'],context_window:100000}];
 const draft={gateway:null,small:'p/small',strong:'p/strong',classifier:'',model:'auto',effort:'auto'};
+test('Pi setup chooses an available high-capability default and never overwrites explicit selections',()=>{
+ assert.equal(selectPiSetupModel(models,'p/strong'),'p/strong');
+ assert.equal(selectPiSetupModel(models,'p/missing'),'');
+ assert.equal(selectPiSetupModel([models[0]],''),'p/small');
+ assert.equal(selectPiSetupModel([{...models[0],levels:['medium']}],''),'');
+ const saved=JSON.stringify({gateway:null,small:'p/small',strong:'p/strong',classifier:'p/small'});
+ assert.equal(restorePiSetup(defaultPiArgs,saved),"--yam-small 'p/small' --yam-strong 'p/strong' --yam-classifier 'p/small' --yam-fixed-model 'auto' --yam-effort 'auto'");
+ const withTools=restorePiSetup('--tools read,bash --append-system-prompt "hello world"',saved);assert.ok(withTools.includes('--tools read,bash'));assert.ok(withTools.includes('--append-system-prompt "hello world"'));assert.equal(parsePiDraft(withTools).strong,'p/strong');
+ const withLiteral=restorePiSetup("--system-prompt '--provider' --tools read",saved);assert.ok(withLiteral.includes("--system-prompt '--provider'"));assert.equal(parsePiDraft(withLiteral).strong,'p/strong');
+ assert.equal(restorePiSetup('--yam-small p/manual',saved),null);
+ assert.equal(restorePiSetup('--model p/manual',saved),null);
+ assert.equal(restorePiSetup('--thinking high',saved),null);
+ assert.equal(restorePiSetup('--provider p',saved),null);
+ assert.equal(restorePiSetup('--provider=p',saved),null);
+ assert.equal(restorePiSetup('--yam-billing subscription',saved),null);
+ const restricted=JSON.stringify({gateway:null,small:'yam-codex/sol',strong:'yam-codex/sol',classifier:'yam-codex/sol',billing:'subscription'});
+ const restoredRestricted=restorePiSetup('--tools read',restricted);assert.match(restoredRestricted,/--yam-billing subscription/);assert.match(restoredRestricted,/--tools read/);
+ assert.equal(restorePiSetup('',JSON.stringify({gateway:null,small:'p/api',strong:'p/api',classifier:'p/api',billing:'subscription'})),null);
+ assert.equal(restorePiSetup('',JSON.stringify({gateway:null,small:'p/api',strong:'p/api',classifier:'p/api',billing:'invalid'})),null);
+ assert.throws(()=>piSetupMapping(draft,'--yam-billing subscription'),/Subscription-only/);
+ assert.equal(piSetupMapping({...draft,small:'yam-codex/sol',strong:'yam-codex/sol',classifier:'yam-codex/sol'},'--yam-billing subscription').billing,'subscription');
+ assert.equal(restorePiSetup('--tools "unterminated',saved),null);
+ assert.equal(restorePiSetup('', '{invalid'),null);
+ assert.equal(restorePiSetup('',JSON.stringify({gateway:'https://user:secret@example.com',small:'p/small',strong:'p/strong',classifier:'p/small'})),null);
+});
+test('Pi setup accepts only a verified current model and never falls back on probe errors',async()=>{
+ const calls=[],invoke=async(name,args)=>{calls.push({name,args});return {models,probe:{ok:true}};};
+ const setup=await verifyPiSetup('', '/tmp/project', 'p/strong', invoke);
+ assert.equal(setup.mapping.strong,'p/strong');assert.equal(parsePiDraft(setup.args).classifier,'p/strong');
+ assert.equal(calls[0].args.probeModel,'p/strong');assert.equal(calls[0].args.gateway,null);
+ await assert.rejects(()=>verifyPiSetup('','/tmp/project','p/strong',async()=>({models,probe:{ok:false}})));
+ await assert.rejects(()=>verifyPiSetup('','/tmp/project','p/missing',invoke));
+ await assert.rejects(()=>verifyPiSetup('','/tmp/project','p/strong',async()=>{throw Error('offline');}));
+});
+test('saved Pi setup retains custom task rules and fixed choices while legacy mappings remain readable',()=>{
+ const rules=structuredClone(defaultRules);rules.rules.find(r=>r.task==='review').effort='max';const saved=piSetupMapping({...draft,model:'p/strong',effort:'max',rules:JSON.stringify(rules)},'');
+ const restored=parsePiDraft(restorePiSetup('',JSON.stringify(saved)));assert.equal(restored.model,'p/strong');assert.equal(restored.effort,'max');assert.deepEqual(JSON.parse(restored.rules),rules);
+});
+test('explicitly applying imported defaults preserves unrelated arguments and the stricter billing policy',()=>{
+ const saved=JSON.stringify(piSetupMapping({...draft,small:'yam-codex/sol',strong:'yam-codex/sol',classifier:'yam-codex/sol',rules:JSON.stringify(defaultRules)},'--yam-billing subscription'));
+ const args=restorePiSetup('--yam-small p/manual --yam-strong p/manual --yam-billing configured --tools read --system-prompt "--yam-billing"',saved,true);
+ assert.ok(args);assert.equal(parsePiDraft(args).small,'yam-codex/sol');assert.match(args,/--tools read/);assert.match(args,/--system-prompt "--yam-billing"/);assert.match(args,/--yam-billing subscription/);assert.ok(!args.includes('--yam-billing configured'));
+ assert.equal(restorePiSetup('--yam-billing subscription',JSON.stringify(piSetupMapping(draft,'')),true),null);
+ assert.equal(restorePiSetup('--yam-billing invalid',saved,true),null);
+});
+test('quoted and escaped prompt terminators keep generated routing flags outside the prompt',()=>{
+ for(const terminator of ['--','"--"',"'--'",'\\--']){
+  const args=buildPiArgs(`--system-prompt "--" ${terminator} hello --yam-small literal`,draft),parsed=parsePiDraft(args);
+  assert.equal(parsed.small,'p/small',terminator);assert.equal(parsed.strong,'p/strong',terminator);assert.ok(args.endsWith(`${terminator} hello --yam-small literal`),terminator);assert.ok(args.startsWith('--system-prompt "--"'),terminator);
+  const saved=JSON.stringify(piSetupMapping(draft,'')),restored=restorePiSetup(`${terminator} hello`,saved,true);assert.equal(parsePiDraft(restored).small,'p/small',terminator);assert.ok(restored.endsWith(`${terminator} hello`),terminator);
+ }
+});
+test('Pi setup respects subscription-only billing before sending a probe',async()=>{
+ let calls=0;const codex={...models[0],key:'yam-codex/gpt-6.1-sol',source:'chatgpt-subscription',billing:'subscription'};
+ const invoke=async()=>{calls++;return {models:[codex],probe:{ok:true}};};
+ await assert.rejects(()=>verifyPiSetup('--yam-billing subscription','/tmp','yam-gateway/api/model',invoke),/Subscription-only/);assert.equal(calls,0);
+ await assert.rejects(()=>verifyPiSetup('--yam-billing=subscription','/tmp','p/small',invoke),/Subscription-only/);assert.equal(calls,0);
+ await assert.rejects(()=>verifyPiSetup('--yam-billing invalid','/tmp',codex.key,invoke),/billing/i);assert.equal(calls,0);
+ const result=await verifyPiSetup('--yam-billing subscription','/tmp',codex.key,invoke);assert.equal(result.mapping.strong,codex.key);assert.equal(result.mapping.billing,'subscription');assert.equal(calls,1);
+ await verifyPiSetup("--system-prompt '--yam-billing'",'/tmp',codex.key,invoke);assert.equal(calls,2);
+});
+test('Pi launch validation rejects models forbidden by the explicit billing policy',()=>{
+ const codex={...models[0],key:'yam-codex/sol',source:'chatgpt-subscription',billing:'subscription'},api={...models[1],key:'yam-gateway/api/model',source:'magpie',billing:'gateway'};
+ const d={...draft,small:codex.key,strong:codex.key,classifier:codex.key};
+ assert.equal(validatePiDraft(d,[codex,api],'--yam-billing subscription'),null);
+ assert.match(validatePiDraft({...d,strong:api.key},[codex,api],'--yam-billing subscription'),/Subscription-only/);
+ assert.match(validatePiDraft({...d,model:api.key,effort:'high'},[codex,api],'--yam-billing subscription'),/Subscription-only/);
+ assert.equal(validatePiDraft({...d,model:codex.key,effort:'high',small:api.key,strong:api.key,classifier:api.key},[codex,api],'--yam-billing subscription'),null);
+ assert.equal(validatePiDraft({...d,strong:api.key},[codex,api],'--yam-billing configured'),null);
+ assert.match(validatePiDraft(d,[codex,api],'--yam-billing invalid'),/Invalid billing policy/);
+});
+test('Pi setup offers provider guidance only when discovery finds no usable models or fails',async()=>{
+ const fs=await import('node:fs'),ts=(await import('typescript')).default;
+ const ast=ts.createSourceFile('PiRouting.tsx',fs.readFileSync(new URL('../src/PiRouting.tsx',import.meta.url),'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
+ const declaration=ast.statements.find(n=>ts.isFunctionDeclaration(n)&&n.name?.text==='PiRoutingConfig');
+ const slots=[],refs=[],opened=[];let index=0,refIndex=0,result={models:[]},failed=false,nativeFailed=false,detected=[],gatewayWarning=false,cwd='/tmp',args='--yam-small p/small --yam-strong p/strong';
+ const invoke=async(name,request)=>{if(name==='list_local_gateways')return detected;if(failed||nativeFailed&&!request.gateway)throw Error('offline');return request.gateway&&gatewayWarning?{...result,warning:'Magpie is offline'}:result;};
+ const env={useState:value=>{const i=index++;if(!(i in slots))slots[i]=typeof value==='function'?value():value;return[slots[i],v=>slots[i]=typeof v==='function'?v(slots[i]):v];},useRef:value=>{const i=refIndex++;return refs[i]??(refs[i]={current:value});},useEffect:()=>{},Select:'select',ModelOptions:()=>null,PiTaskRules:()=>null,defaultRules:{},validateRules:()=>({}),buildPiArgs,parsePiDraft,validatePiDraft,verifyPiSetup,selectPiSetupModel,restorePiSetup,piSetupStorageKey:'setup',piLevels:['high'],t:s=>s,openUrl:async url=>opened.push(url),localStorage:{getItem:()=>null},React:{createElement:(type,props,...children)=>({type,props:props??{},children})}};
+ const code=ts.transpileModule(declaration.getText(ast).replace(/^export /,''),{compilerOptions:{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2020}}).outputText;
+ const component=new Function(...Object.keys(env),code+';return PiRoutingConfig;')(...Object.values(env));
+ const render=gateways=>{index=refIndex=0;return component({args,cwd,invoke,onChange:()=>{},onValidity:()=>{},installedGateways:gateways});};
+ const all=n=>!n||typeof n!=='object'?[]:[n,...(n.children??[]).flat(Infinity).flatMap(all)];
+ const scan=async gateways=>{all(render(gateways)).find(n=>n.type==='button'&&n.children.includes('Find available models')).props.onClick();await new Promise(r=>setImmediate(r));return render(gateways);};
+ const quick=all(render([])).find(n=>n.type==='details'&&n.props.className==='pi-routing-advanced');assert.equal(quick.props.open,false);quick.props.onToggle({currentTarget:{open:true}});
+ assert.doesNotMatch(JSON.stringify(render([])),/Get Magpie/);
+ let tree=await scan([]);assert.equal(all(tree).find(n=>n.type==='details'&&n.props.className==='pi-routing-advanced').props.open,true);assert.match(JSON.stringify(tree),/Get Magpie/);assert.match(JSON.stringify(tree),/\/login/);
+ const link=all(tree).find(n=>n.type==='button'&&n.children.includes('Get Magpie'));await link.props.onClick();assert.deepEqual(opened,['https://usemagpie.ai/']);
+ const piGuide=all(tree).find(n=>n.type==='button'&&n.children.includes('Pi provider setup guide'));await piGuide.props.onClick();assert.equal(opened[1],'https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/providers.md');
+ detected=['magpie','cc-switch'];tree=await scan([]);assert.match(JSON.stringify(tree),/Magpie is installed/);assert.match(JSON.stringify(tree),/CC Switch is installed/);
+ result={models};tree=await scan([]);assert.doesNotMatch(JSON.stringify(tree),/Get Magpie/);
+ gatewayWarning=true;tree=await scan([]);assert.match(JSON.stringify(tree),/Magpie gateway model catalog unavailable/);assert.match(JSON.stringify(tree),/Verify and use this model/);gatewayWarning=false;
+ failed=true;tree=await scan([]);assert.match(JSON.stringify(tree),/Magpie setup guide/);assert.doesNotMatch(JSON.stringify(tree),/Verify and use this model/);
+ failed=false;result={models:[{...models[0],levels:['medium']}]};tree=await scan([]);assert.match(JSON.stringify(tree),/No discovered model supports high reasoning/);assert.match(JSON.stringify(tree),/Magpie setup guide/);assert.doesNotMatch(JSON.stringify(tree),/Verify and use this model/);
+ nativeFailed=true;result={models:[{...models[0],key:'yam-gateway/test/model'}]};tree=await scan([]);assert.match(JSON.stringify(tree),/Verify and use this model/);assert.match(JSON.stringify(tree),/Pi native model catalog unavailable/);nativeFailed=false;
+ cwd='/tmp/other';tree=render([]);assert.doesNotMatch(JSON.stringify(tree),/No discovered model supports high reasoning|Magpie setup guide/);
+});
+test('Pi quick setup verifies before saving and ignores stale completion',async()=>{
+ const fs=await import('node:fs'),ts=(await import('typescript')).default;
+ const ast=ts.createSourceFile('PiRouting.tsx',fs.readFileSync(new URL('../src/PiRouting.tsx',import.meta.url),'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
+ const declaration=ast.statements.find(n=>ts.isFunctionDeclaration(n)&&n.name?.text==='PiRoutingConfig');
+ const slots=[],refs=[],saved=new Map();let index=0,refIndex=0,args='',cwd='/tmp/project',release,fail=false;
+ const invoke=async(_name,request)=>request.probeModel?fail?{models,probe:{ok:false}}:new Promise(r=>release=()=>r({models,probe:{ok:true}})):{models,preferred:'p/strong'};
+ const env={useState:value=>{const i=index++;if(!(i in slots))slots[i]=typeof value==='function'?value():value;return[slots[i],v=>slots[i]=typeof v==='function'?v(slots[i]):v];},useRef:value=>{const i=refIndex++;return refs[i]??(refs[i]={current:value});},useEffect:()=>{},Select:'select',ModelOptions:()=>null,PiTaskRules:()=>null,defaultRules:{},validateRules:()=>({}),buildPiArgs,parsePiDraft,validatePiDraft,verifyPiSetup,selectPiSetupModel,restorePiSetup,piSetupStorageKey:'setup',piLevels:['low','medium','high','xhigh','max'],t:s=>s,localStorage:{getItem:k=>saved.get(k)??null,setItem:(k,v)=>saved.set(k,v)},React:{createElement:(type,props,...children)=>({type,props:props??{},children})}};
+ const code=ts.transpileModule(declaration.getText(ast).replace(/^export /,''),{compilerOptions:{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2020}}).outputText;
+ const component=new Function(...Object.keys(env),code+';return PiRoutingConfig;')(...Object.values(env));
+ const render=()=>{index=refIndex=0;return component({args,cwd,invoke,onChange:v=>args=v,onValidity:()=>{}});};
+ const all=n=>!n||typeof n!=='object'?[]:[n,...(n.children??[]).flat(Infinity).flatMap(all)];
+ const button=text=>all(render()).find(n=>n.type==='button'&&n.children.includes(text));
+ await button('Find available models').props.onClick();await new Promise(r=>setImmediate(r));render();
+ args='--yam-gateway http://127.0.0.1:4567';assert.equal(button('Verify and use this model'),undefined);args='';render();
+ const pending=button('Verify and use this model').props.onClick();await new Promise(r=>setImmediate(r));
+ args='--yam-small p/manual';render();release();await pending;await new Promise(r=>setImmediate(r));assert.equal(args,'--yam-small p/manual');assert.equal(saved.size,0);
+ args='';render();const stale=button('Verify and use this model').props.onClick();await new Promise(r=>setImmediate(r));cwd='/tmp/other';render();release();await stale;await new Promise(r=>setImmediate(r));assert.equal(saved.size,0);assert.equal(args,'');assert.equal(button('Verify and use this model'),undefined);
+ cwd='/tmp/project';render();
+ args='';fail=true;await button('Verify and use this model').props.onClick();await new Promise(r=>setImmediate(r));assert.equal(saved.size,0);assert.equal(args,'');assert.match(JSON.stringify(render()),/Pi provider setup guide/);
+ args='--yam-billing subscription';render();await button('Verify and use this model').props.onClick();await new Promise(r=>setImmediate(r));assert.equal(saved.size,0);assert.match(JSON.stringify(render()),/Subscription-only billing requires a Codex subscription model/);
+ args='';fail=false;const good=button('Verify and use this model').props.onClick();await new Promise(r=>setImmediate(r));release();await good;await new Promise(r=>setImmediate(r));assert.equal(parsePiDraft(args).strong,'p/strong');assert.equal(saved.size,1);
+});
+test('Pi initial connection check does not cancel an in-flight user scan',async()=>{
+ const fs=await import('node:fs'),ts=(await import('typescript')).default;
+ const ast=ts.createSourceFile('PiRouting.tsx',fs.readFileSync(new URL('../src/PiRouting.tsx',import.meta.url),'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
+ const declaration=ast.statements.find(n=>ts.isFunctionDeclaration(n)&&n.name?.text==='PiRoutingConfig');
+ const slots=[],refs=[],effects=[];let index=0,refIndex=0,timer,release,scans=0;
+ const invoke=async(name,request)=>{if(name==='list_local_gateways')return [];if(++scans===1)return await new Promise(r=>release=()=>r({models,preferred:'p/strong'}));return {models,preferred:'p/strong'};};
+ const env={useState:value=>{const i=index++;if(!(i in slots))slots[i]=typeof value==='function'?value():value;return[slots[i],v=>slots[i]=typeof v==='function'?v(slots[i]):v];},useRef:value=>{const i=refIndex++;return refs[i]??(refs[i]={current:value});},useEffect:fn=>effects.push(fn),setTimeout:fn=>(timer=fn,1),clearTimeout:()=>{},Select:'select',ModelOptions:()=>null,PiTaskRules:()=>null,defaultRules:{},validateRules:()=>({}),buildPiArgs,parsePiDraft,validatePiDraft,verifyPiSetup,selectPiSetupModel,restorePiSetup,piSetupStorageKey:'setup',piLevels:['high'],t:s=>s,localStorage:{getItem:()=>null},React:{createElement:(type,props,...children)=>({type,props:props??{},children})}};
+ const code=ts.transpileModule(declaration.getText(ast).replace(/^export /,''),{compilerOptions:{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2020}}).outputText;
+ const component=new Function(...Object.keys(env),code+';return PiRoutingConfig;')(...Object.values(env));
+ const render=()=>{index=refIndex=0;effects.length=0;return component({args:'',cwd:'/tmp/project',invoke,onChange:()=>{},onValidity:()=>{}});};
+ const all=n=>!n||typeof n!=='object'?[]:[n,...(n.children??[]).flat(Infinity).flatMap(all)];
+ render();effects[1]();render();effects[2]();
+ all(render()).find(n=>n.type==='button'&&n.children.includes('Find available models')).props.onClick();await new Promise(r=>setImmediate(r));
+ timer();await new Promise(r=>setImmediate(r));release();await new Promise(r=>setImmediate(r));
+ assert.match(JSON.stringify(render()),/Verify and use this model/);assert.ok(scans>=3,'the normal connection check still runs after discovery');
+});
+test('Pi rule defaults roundtrip literal JSON and reject malformed rules before launch',async()=>{
+ const {defaultRules}=await import('../src-tauri/pi/task-rules.mjs');const rules=JSON.stringify(defaultRules),saved=buildPiArgs('',{...draft,rules});
+ assert.equal(parsePiDraft(saved).rules,rules);assert.equal(validatePiDraft({...draft,rules},models),null);
+ assert.match(validatePiDraft({...draft,rules:'{}'},models),/rules/i);
+ assert.throws(()=>parsePiDraft('--yam-rules'),/Missing/);
+});
 test('Pi form roundtrips roles and independent model/effort without changing literal advanced arguments',()=>{
  const args='--tools read,bash --append-system-prompt "literal $HOME `date`" --yam-small p/old --yam-strong p/strong';
  const saved=buildPiArgs(args,{...draft,model:'p/strong',effort:'auto'});
@@ -23,6 +164,12 @@ test('Pi preflight refuses missing models and unsupported locked effort but allo
  assert.ok(validatePiDraft({...draft,small:'unknown/model'},models));
  assert.ok(validatePiDraft({...draft,gateway:'http://other-host'},models));
  assert.throws(()=>parsePiDraft('--yam-small "unterminated'),/argument|quote/i);
+});
+test('Pi preflight distinguishes unselected routing roles from unavailable models',()=>{
+ assert.equal(validatePiDraft({...draft,small:''},models),'Choose a lightweight model');
+ assert.equal(validatePiDraft({...draft,strong:''},models),'Choose a strong model');
+ assert.equal(validatePiDraft({...draft,model:'p/strong',small:'',effort:'auto'},models),'Choose a lightweight model');
+ assert.equal(validatePiDraft({...draft,small:'p/missing'},models),'Pi model unavailable: p/missing');
 });
 test('Pi form does not reinterpret an explicit physical off selection as automatic reasoning',()=>{
  const physical=parsePiDraft('--yam-small p/small --yam-strong p/strong --model p/strong --thinking off');assert.equal(physical.effort,'off');
@@ -62,16 +209,26 @@ async function routingBarFixture(invoke,options={}){
  const fs=await import('node:fs'),ts=(await import('typescript')).default,ast=ts.createSourceFile('PiRouting.tsx',fs.readFileSync(new URL('../src/PiRouting.tsx',import.meta.url),'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
  const declaration=ast.statements.find(n=>ts.isFunctionDeclaration(n)&&n.name?.text==='PiRoutingBar');
  const slots=[],refs=[],dependencies=[],pending=[],timers=[];let index=0,refIndex=0,effectIndex=0;
- const env={useState:initial=>{const i=index++;if(!(i in slots))slots[i]=initial;return[slots[i],next=>slots[i]=typeof next==='function'?next(slots[i]):next];},useRef:initial=>{const i=refIndex++;return refs[i]??(refs[i]={current:initial});},useEffect:(fn,deps)=>{const i=effectIndex++,old=dependencies[i];if(!old||deps.some((v,j)=>v!==old[j])){dependencies[i]=deps;pending.push(fn);}},Select:()=>null,ModelOptions:()=>null,piLevels:['high','max'],t:s=>s,React:{createElement:(type,props,...children)=>({type,props:props??{},children})},document:{visibilityState:options.visibility??'visible'},setTimeout:fn=>{timers.push(fn);return timers.length;},clearTimeout(){}};
+ const env={useState:initial=>{const i=index++;if(!(i in slots))slots[i]=initial;return[slots[i],next=>slots[i]=typeof next==='function'?next(slots[i]):next];},useRef:initial=>{const i=refIndex++;return refs[i]??(refs[i]={current:initial});},useEffect:(fn,deps)=>{const i=effectIndex++,old=dependencies[i];if(!old||deps.some((v,j)=>v!==old[j])){dependencies[i]=deps;pending.push(fn);}},Select:()=>null,ModelOptions:()=>null,piLevels:['high','max'],t:(s,values={})=>s.replace(/{{(\w+)}}/g,(_,key)=>values[key]??''),React:{createElement:(type,props,...children)=>({type,props:props??{},children})},document:{visibilityState:options.visibility??'visible'},setTimeout:fn=>{timers.push(fn);return timers.length;},clearTimeout(){}};
  const code=ts.transpileModule(declaration.getText(ast).replace(/^export /,''),{compilerOptions:{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2020}}).outputText;
  const component=new Function(...Object.keys(env),code+';return PiRoutingBar;')(...Object.values(env));let tree;
- const render=()=>{index=refIndex=effectIndex=0;tree=component({sessionId:'s-pi',generation:'g',active:options.active??true,available:true,invoke});return tree;};
+ const render=()=>{index=refIndex=effectIndex=0;tree=component({sessionId:'s-pi',generation:'g',active:options.active??true,available:options.available??true,invoke});return tree;};
  const all=node=>!node||typeof node!=='object'?[]:[node,...(node.children??[]).flat(Infinity).flatMap(all)];
  const tick=()=>new Promise(r=>setImmediate(r));
  const flush=async()=>{for(let i=0;i<3;i++){render();for(const effect of pending.splice(0))effect();await tick();}render();};
  await flush();return {visible:value=>env.document.visibilityState=value,flush,poll:async()=>{timers.shift()?.();await flush();},select:label=>all(tree).find(n=>n.props['aria-label']===label),button:text=>all(tree).find(n=>n.type==='button'&&n.children.includes(text)),tree:()=>tree,text:()=>all(tree).flatMap(n=>n.children).filter(v=>typeof v==='string').join(' ')};
 }
 const barState=()=>({revision:1,generation:'g',phase:'idle',config:{small:'p/small',strong:'p/strong',classifier:'p/small',gateway:null},preferences:{model:'p/small',effort:'high'},target:null,actual:null,error:null,pendingInput:false});
+test('routing diagnostics show observed stages and missing timings without exposing connection secrets',async()=>{
+ const state={...barState(),diagnostics:{configSource:'session',billing:'subscription',execution:{stage:'failed',failedStage:'starting',discoveryMs:23,startupMs:null,firstResponseMs:null,executionMs:45}}};
+ const f=await routingBarFixture(async(name,args)=>name==='get_pi_routing'?{active:true,state}:{models:[]});
+ assert.match(f.text(),/Execution failed/);assert.match(f.text(),/Model discovery\s*:\s*23 ms/);assert.match(f.text(),/CLI startup\s*:\s*—/);assert.match(f.text(),/First reply event\s*:\s*—/);assert.match(f.text(),/Saved session configuration/);assert.match(f.text(),/Subscription only/);
+});
+test('long context diagnostics explain full handoff and recommend explicit compaction without replay',async()=>{
+ const state={...barState(),diagnostics:{configSource:'launch',billing:'configured',execution:{stage:'failed',failedStage:'preparing',failure:'context-budget',discoveryMs:1,startupMs:null,firstResponseMs:null,executionMs:null,handoff:{mode:'full',reason:'identity-changed',messages:25,characters:130001,budget:128000}}}};let writes=0;
+ const f=await routingBarFixture(async(name)=>{if(name==='get_pi_routing')return {active:true,state};writes++;return {models:[]};});const before=writes;
+ assert.match(f.text(),/Full context/);assert.match(f.text(),/Native identity changed/);assert.ok(JSON.stringify(f.tree()).includes('130001'));assert.ok(JSON.stringify(f.tree()).includes('128000'));assert.match(f.text(),/\/compact/);assert.equal(writes,before);
+});
 test('Pi model/effort transitions apply together without sending an incompatible intermediate selection',async()=>{
  let state=barState();const writes=[];
  const f=await routingBarFixture(async(name,args)=>{if(name==='get_pi_routing')return {active:true,state};if(args.request.action==='catalog')return {models:[]};writes.push(args.request);state={...state,revision:state.revision+1,preferences:args.request.data};return {state};});
@@ -128,10 +285,58 @@ function visibleRoutingText(node){
  const children=(node.children??[]).flat(Infinity);
  return (node.type==='details'&&!node.props.open?children.filter(child=>child?.type==='summary'):children).map(visibleRoutingText).join(' ');
 }
-test('Pi default bar hides execution history and reasoning details while routing errors stay visible',async()=>{
+test('Pi default bar shows native model and effort while configuration details stay collapsed',async()=>{
  let writes=0;const state={...barState(),preferences:{model:'auto',effort:'high'},phase:'working',target:{model:'p/strong',effort:'high',reason:'complex'},actual:{model:'p/small',effort:'medium',at:1}};
  const f=await routingBarFixture(async(name,args)=>{if(name==='get_pi_routing')return {active:true,state};if(args.request.action==='catalog')return {models:[]};writes++;return {state};});
- assert.match(visibleRoutingText(f.tree()),/Automatic model/);assert.doesNotMatch(visibleRoutingText(f.tree()),/Fixed reasoning|Last actual|Selected for this turn/);
- f.button('Adjust routing').props.onClick();await f.flush();assert.match(visibleRoutingText(f.tree()),/Last actual/);assert.match(visibleRoutingText(f.tree()),/Selected for this turn/);assert.equal(writes,0);
+ assert.match(visibleRoutingText(f.tree()),/Automatic model/);assert.match(visibleRoutingText(f.tree()),/Actual model: p\/small · medium/);assert.doesNotMatch(visibleRoutingText(f.tree()),/Fixed reasoning|Latest reply used|Selected for this turn/);
+ f.button('Adjust routing').props.onClick();await f.flush();assert.match(visibleRoutingText(f.tree()),/Latest reply used/);assert.match(visibleRoutingText(f.tree()),/Selected for this turn/);assert.equal(writes,0);
  f.button('Adjust routing').props.onClick();await f.flush();state.phase='error';state.error='routing failed';await f.poll();assert.match(visibleRoutingText(f.tree()),/routing failed/);assert.ok(f.button('Refresh connection'));assert.equal(writes,0);
+});
+
+
+test('Pi summary separates planned selection, native response, prior response and missing evidence',async()=>{
+ let state={...barState(),preferences:{model:'auto',effort:'auto'},phase:'classifying',actual:{model:'p/old',effort:'medium',at:1}};
+ const f=await routingBarFixture(async(name,args)=>name==='get_pi_routing'?{active:true,state}:{models:[]});
+ const visible=()=>visibleRoutingText(f.tree());
+ assert.equal(f.tree().children[0].children.flat(Infinity).find(n=>n?.props?.className==='pi-routing-model').props.role,'status');
+ assert.match(visible(),/Choosing a model/);assert.match(visible(),/Latest reply used: p\/old · medium/);assert.doesNotMatch(visible(),/Actual model:/);
+ state={...state,phase:'selected',target:{model:'p/new',effort:'max',reason:'critical'}};await f.poll();
+ assert.match(visible(),/Selected for this turn: p\/new · max/);assert.doesNotMatch(visible(),/Actual model:|p\/old/);
+ state={...state,phase:'working',actual:{model:'p/native',effort:'unknown',at:2}};await f.poll();
+ assert.match(visible(),/Actual model: p\/native · Reasoning not confirmed/);assert.doesNotMatch(visible(),/p\/new|p\/old/);
+ state={...state,phase:'idle'};await f.poll();assert.match(visible(),/Latest reply used: p\/native/);
+ state={...state,phase:'error',error:'request failed'};await f.poll();assert.match(visible(),/Latest reply used: p\/native/);assert.match(visible(),/request failed/);
+ state={...state,phase:'idle',actual:null,target:null,error:null};await f.poll();assert.match(visible(),/No native model response recorded yet/);assert.doesNotMatch(visible(),/Actual model:|Selected for this turn:/);
+});
+test('Pi ended and disconnected summaries never claim a current response or planned selection',async()=>{
+ for(const ended of [false,true]){
+  let fail=false;const state={...barState(),phase:'working',actual:{model:'p/native',effort:'high',at:1},target:{model:'p/next',effort:'max',reason:'critical'}};
+  const f=await routingBarFixture(async(name)=>{if(name!=='get_pi_routing')return {models:[]};if(fail)throw Error('connection lost');return {state};},{active:!ended});
+  if(!ended){fail=true;await f.poll();}
+  const visible=visibleRoutingText(f.tree());assert.match(visible,/Latest reply used: p\/native · high/);assert.doesNotMatch(visible,/Actual model:|Selected for this turn:/);
+ }
+});
+
+test('Pi native subscription status keeps controls usable during a Magpie warning and shows token usage',async()=>{
+ const state={...barState(),gatewayError:'Magpie is offline',actual:{model:'openai/chat',effort:'high',at:1,source:'chatgpt-subscription',billing:'subscription',usage:{input:10,output:20,cacheRead:0,cacheWrite:0}},decision:{rule:'fixed',ruleVersion:'v1',classificationMs:0,totalCost:null}};
+ const f=await routingBarFixture(async(name,args)=>name==='get_pi_routing'?{active:true,state}:args.request.action==='catalog'?{models:[]}:{state});
+ const text=JSON.stringify(f.tree());assert.match(text,/ChatGPT subscription/);assert.match(text,/Magpie is offline/);assert.match(text,/Reply tokens/);assert.match(text,/10/);assert.match(text,/20/);assert.equal(f.button('Refresh connection').props.disabled,false);
+});
+
+test('Pi new defaults discover both channels without pinning a gateway subscription model',async()=>{
+ const {defaultPiArgs}=await import('../src/pi-routing.ts'),draft=parsePiDraft(defaultPiArgs);
+ assert.equal(draft.gateway,null);assert.equal(draft.small,'');assert.equal(draft.strong,'');assert.ok(validatePiDraft(draft,models));
+});
+
+test('Pi legacy gateway catalog options retain the gateway source label without new metadata',async()=>{
+ const fs=await import('node:fs'),ts=(await import('typescript')).default,ast=ts.createSourceFile('PiRouting.tsx',fs.readFileSync(new URL('../src/PiRouting.tsx',import.meta.url),'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX),fn=ast.statements.find(n=>ts.isFunctionDeclaration(n)&&n.name?.text==='ModelOptions');
+ const code=ts.transpileModule(fn.getText(ast),{compilerOptions:{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2020}}).outputText,component=new Function('React','t',code+';return ModelOptions;')({createElement:(type,props,...children)=>({type,props,children})},s=>s);
+ const text=JSON.stringify(component({models:[{key:'yam-gateway/codex/old',name:'Old',levels:['high'],context_window:1000}],value:''}));assert.match(text,/Magpie gateway/);assert.doesNotMatch(text,/Pi native/);
+ const native=JSON.stringify(component({models:[{key:'api/a',name:'API',billing:'api',levels:['high'],context_window:1000},{key:'oauth/b',name:'OAuth',billing:'subscription',levels:['high'],context_window:1000}],value:''}));assert.match(native,/Pi native API/);assert.match(native,/Pi native subscription/);
+});
+
+test('Pi starts without an implicit Magpie dependency and preserves explicit subscription policy',()=>{
+ assert.equal(defaultPiArgs,'');
+ const args=buildPiArgs('--yam-billing subscription',{gateway:null,small:'yam-codex/a',strong:'yam-codex/b',classifier:'yam-codex/a',model:'auto',effort:'auto'});
+ assert.ok(args.includes('--yam-billing subscription'));assert.ok(!args.includes('--yam-gateway'));
 });

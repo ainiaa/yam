@@ -16,15 +16,22 @@ import tempfile
 import time
 
 
+def native_test_binary(root, coverage_target=None):
+    target = pathlib.Path(coverage_target) if coverage_target else root / "apps/desktop/src-tauri/target"
+    deps = target / "debug/deps"
+    binaries = [p for p in deps.glob("yam_desktop_lib-*") if p.is_file() and p.stat().st_mode & 0o111]
+    if not binaries:
+        raise SystemExit("Native self-sampling test executable is missing in the configured target")
+    if coverage_target and len(binaries) != 1:
+        raise SystemExit("Expected one current coverage test executable for self-sampling")
+    return max(binaries, key=lambda p: p.stat().st_mtime)
+
+
 def main():
     if platform.system() != "Darwin":
         raise SystemExit("Self-coalition sampling smoke requires macOS")
     root = pathlib.Path(__file__).resolve().parent.parent
-    deps = root / "apps/desktop/src-tauri/target/debug/deps"
-    binaries = [p for p in deps.glob("yam_desktop_lib-*") if p.is_file() and p.stat().st_mode & 0o111]
-    if not binaries:
-        raise SystemExit("Run cargo test before native self-sampling smoke")
-    binary = max(binaries, key=lambda p: p.stat().st_mtime)
+    binary = native_test_binary(root, os.environ.get("CARGO_LLVM_COV_TARGET_DIR"))
     parser = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     try:
         with tempfile.TemporaryDirectory(prefix="yam-self-memory-") as folder:
@@ -38,15 +45,20 @@ def main():
                 "CFBundlePackageType": "APPL", "LSUIElement": True,
             }))
             result = pathlib.Path(folder) / "result.json"
+            start = pathlib.Path(folder) / "start"
             log = pathlib.Path(folder) / "log.txt"
             owner = {"pid": os.getpid(), "runtime_pid": parser.pid, "workloads": []}
             subprocess.run([
                 "/usr/bin/open", "-n", "-g",
                 "--env", "YAM_MEMORY_TEST_OWNER=" + json.dumps(owner),
                 "--env", "YAM_MEMORY_TEST_RESULT=" + str(result),
+                "--env", "YAM_MEMORY_TEST_START=" + str(start),
+                "--env", "LLVM_PROFILE_FILE=" + os.devnull,
                 "--stdout", str(log), "--stderr", str(log), str(app), "--args",
                 "memory::tests::native_application_self_sampling", "--ignored", "--nocapture",
             ], check=True)
+            # open belongs to the measured owner tree; release sampling only after it exits.
+            start.touch()
             for _ in range(100):
                 if result.exists():
                     break

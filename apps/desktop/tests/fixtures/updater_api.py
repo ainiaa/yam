@@ -4,6 +4,7 @@ import http.server
 import json
 from pathlib import Path
 import ssl
+from socketserver import ThreadingTCPServer
 import subprocess
 import time
 
@@ -33,7 +34,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             body = json.dumps({
                 "version": "7.8.10" if args.mode == "wrong-version" else "7.8.9",
                 "notes": "owned fixture",
-                "url": f"https://127.0.0.1:{self.server.server_port}/artifact",
+                "url": f"https://127.0.0.1:{self.server.server_address[1]}/artifact",
                 "signature": (fixtures / "updater-artifact.txt.sig").read_text().strip(),
             }).encode()
             content_type = "application/json"
@@ -57,9 +58,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass
 
 
-server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-context.load_cert_chain(certificate, key)
-server.socket = context.wrap_socket(server.socket, server_side=True)
-print(json.dumps({"endpoint": f"https://127.0.0.1:{server.server_port}/manifest"}), flush=True)
-server.serve_forever()
+# HTTPServer.server_bind calls getfqdn even for loopback; this fixture must not use DNS.
+with ThreadingTCPServer(("127.0.0.1", 0), Handler) as server:
+    server.daemon_threads = True
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(certificate, key)
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    print(json.dumps({"endpoint": f"https://127.0.0.1:{server.server_address[1]}/manifest"}), flush=True)
+    server.serve_forever()

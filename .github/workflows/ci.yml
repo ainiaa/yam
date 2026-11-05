@@ -6,10 +6,63 @@ on:
 concurrency:
   group: desktop-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
+env:
+  # Keep local debugging unchanged; CI retains file/line backtraces.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  CARGO_BUILD_JOBS: 3
 jobs:
-  desktop:
+  plan:
+    timeout-minutes: 5
+    runs-on: macos-26
+    outputs:
+      route: ${{ steps.impact.outputs.route }}
+      exercise_quick: ${{ steps.impact.outputs.exercise_quick }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python3 -m unittest scripts.test_ci_impact -v
+      - run: python3 -m unittest scripts.test_native_coverage -v
+      - name: Select checks from the complete PR diff
+        id: impact
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 scripts/ci_impact.py plan
+
+  quick:
+    needs: [plan]
+    if: ${{ needs.plan.outputs.route == 'quick' || needs.plan.outputs.exercise_quick == 'true' }}
+    timeout-minutes: 10
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: apps/desktop/pnpm-lock.yaml
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pnpm install --frozen-lockfile
+        working-directory: apps/desktop
+      - name: Run mapped fixture and terminal checks without GUI
+        run: python3 -m unittest scripts.test_loopback_fixtures scripts.test_terminal_latency_probe -v
+
+  frontend:
+    needs: [plan]
+    if: ${{ needs.plan.outputs.route == 'full' }}
     timeout-minutes: 45
-    runs-on: macos-latest
+    runs-on: macos-26
     defaults:
       run:
         working-directory: apps/desktop
@@ -29,43 +82,187 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: rustfmt, clippy
+      # Seed tags before restore: legacy partial caches omit them. Keep cache
+      # paths/keys unchanged so this repair does not invalidate dependency caches.
+      - name: Initialize empty owned Rust cache directories
+        run: python3 ../../scripts/native-coverage.py --prepare-cache src-tauri/target
+      - name: Restore Rust compilation cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/src
+            ~/.cargo/git/db
+            apps/desktop/src-tauri/target/debug/deps
+            apps/desktop/src-tauri/target/debug/build
+            apps/desktop/src-tauri/target/debug/.fingerprint
+            apps/desktop/src-tauri/target/debug/incremental
+          key: ${{ runner.os }}-${{ runner.arch }}-rust-1.98.1-frontend-v3-lines-docs-${{ hashFiles('apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml', '.cargo/config.toml', 'apps/desktop/src-tauri/.cargo/config.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-rust-1.98.1-frontend-v3-lines-docs-
+            ${{ runner.os }}-${{ runner.arch }}-rust-1.98.1-frontend-v3-lines-
+      - name: Record runner capacity
+        run: node -e "const os=require('node:os');console.log(JSON.stringify({cpus:os.cpus().length,parallelism:os.availableParallelism(),memoryBytes:os.totalmem(),cpuModel:os.cpus()[0]?.model,buildJobs:process.env.CARGO_BUILD_JOBS,testConcurrency:6}))"
       - name: Select native shell fixture environment
         shell: bash
         run: echo "SHELL=/bin/zsh" >> "$GITHUB_ENV"
       - run: pnpm install --frozen-lockfile
-      - run: pnpm build:terminal
-      - run: pnpm build:terminal --script-only --notice-mode developer
-      - run: cargo check --manifest-path src-tauri/Cargo.toml --locked
-      - run: pnpm test:coverage
+      - run: /usr/bin/time -l pnpm build:terminal
+      - run: /usr/bin/time -l pnpm build:terminal --script-only --notice-mode developer
+      - name: Check delivery policy before expensive builds
+        working-directory: .
+        run: python3 -m unittest scripts.test_project_quality scripts.test_project_mutation scripts.test_memory_self_smoke -v
+      - name: Generate native schemas and verify ordinary Rust documentation tests
+        run: /usr/bin/time -l cargo test --doc --manifest-path src-tauri/Cargo.toml --locked -- --test-threads=2
+      - run: /usr/bin/time -l pnpm test:coverage
       - name: Verify loopback fixtures avoid DNS
         run: python3 -m unittest discover -s ../../scripts -p test_loopback_fixtures.py
-      - run: pnpm build
+      - run: /usr/bin/time -l pnpm build
       - name: Verify frontend renders in native WebKit
-        run: python3 ../../scripts/webkit-memory-smoke.py
+        run: /usr/bin/time -l python3 ../../scripts/webkit-memory-smoke.py
       - name: Verify asynchronous WebKit startup regression
         run: python3 -m unittest discover -s ../../scripts -p test_webkit_memory_smoke.py
-      - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
-      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-      - run: cargo test --manifest-path src-tauri/Cargo.toml --locked -- --test-threads=2
-      - name: Install native coverage tools
-        run: |
-          rustup component add llvm-tools-preview
-          cargo install cargo-llvm-cov --version 0.9.1 --locked
-      - name: Enforce native crate line coverage
-        env:
-          CARGO_LLVM_COV_TARGET_DIR: ${{ runner.temp }}/yam-native-coverage
-          CARGO_BUILD_JOBS: 2
-        run: cargo llvm-cov --manifest-path src-tauri/Cargo.toml --locked --fail-under-lines=85 -- --test-threads=2
-      - name: Verify memory sampling from its own application coalition
-        run: python3 ../../scripts/memory-self-smoke.py
       - name: Verify lifecycle validation protocol
         run: python3 -m unittest discover -s ../../scripts -p test_background_smoke.py
       - name: Verify macOS release workflow without signing or uploading
         run: python3 -m unittest discover -s ../../scripts -p test_macos_release.py
+
+  native:
+    needs: [plan]
+    if: ${{ needs.plan.outputs.route == 'full' }}
+    timeout-minutes: 45
+    env:
+      CARGO_LLVM_COV_TARGET_DIR: ${{ github.workspace }}/apps/desktop/src-tauri/target/coverage
+    runs-on: macos-26
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: apps/desktop/pnpm-lock.yaml
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+      # Seed tags before restore: legacy partial caches omit them. Keep cache
+      # paths/keys unchanged so this repair does not invalidate dependency caches.
+      - name: Initialize empty owned Rust cache directories
+        run: python3 ../../scripts/native-coverage.py --prepare-cache src-tauri/target src-tauri/target/coverage
+      - name: Restore Rust compilation cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/src
+            ~/.cargo/git/db
+            apps/desktop/src-tauri/target/debug/deps
+            apps/desktop/src-tauri/target/debug/build
+            apps/desktop/src-tauri/target/debug/.fingerprint
+            apps/desktop/src-tauri/target/debug/incremental
+            apps/desktop/src-tauri/target/coverage/debug/deps
+            apps/desktop/src-tauri/target/coverage/debug/build
+            apps/desktop/src-tauri/target/coverage/debug/.fingerprint
+            apps/desktop/src-tauri/target/coverage/debug/incremental
+          key: ${{ runner.os }}-${{ runner.arch }}-rust-1.98.1-native-v3-lines-${{ hashFiles('apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml', '.cargo/config.toml', 'apps/desktop/src-tauri/.cargo/config.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-rust-1.98.1-native-v3-lines-
+      - name: Record runner capacity
+        run: node -e "const os=require('node:os');console.log(JSON.stringify({cpus:os.cpus().length,parallelism:os.availableParallelism(),memoryBytes:os.totalmem(),cpuModel:os.cpus()[0]?.model,buildJobs:process.env.CARGO_BUILD_JOBS,worktreeTestThreads:1,remainingTestThreads:5,testProcesses:2}))"
+      - name: Select native shell fixture environment
+        shell: bash
+        run: echo "SHELL=/bin/zsh" >> "$GITHUB_ENV"
+      - run: pnpm install --frozen-lockfile
+      - run: /usr/bin/time -l pnpm build:terminal
+      - run: /usr/bin/time -l pnpm build:terminal --script-only --notice-mode developer
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+      - run: /usr/bin/time -l cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+      - name: Restore pinned coverage tool
+        id: coverage-tool
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-llvm-cov
+          key: ${{ runner.os }}-${{ runner.arch }}-rust-1.98.1-cargo-llvm-cov-0.9.1
+      - name: Install LLVM tools
+        run: rustup component add llvm-tools-preview
+      - name: Install pinned coverage tool on cache miss
+        if: steps.coverage-tool.outputs.cache-hit != 'true'
+        run: cargo install cargo-llvm-cov --version 0.9.1 --locked
+      - name: Verify coverage tool version
+        run: test "$(cargo llvm-cov --version)" = "cargo-llvm-cov 0.9.1"
+      - name: Compile native tests once, run isolated groups in parallel and enforce coverage
+        env:
+          CARGO_BUILD_JOBS: 2
+        run: /usr/bin/time -l python3 ../../scripts/native-coverage.py
+      - name: Verify memory sampling from its own application coalition
+        run: python3 ../../scripts/memory-self-smoke.py
+
+  package:
+    needs: [plan, frontend, native]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.route == 'full' && needs.frontend.result == 'success' && needs.native.result == 'success' }}
+    timeout-minutes: 45
+    runs-on: macos-26
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: apps/desktop/pnpm-lock.yaml
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+      # Seed tags before restore: legacy partial caches omit them. Keep cache
+      # paths/keys unchanged so this repair does not invalidate dependency caches.
+      - name: Initialize empty owned Rust cache directories
+        run: python3 ../../scripts/native-coverage.py --prepare-cache src-tauri/target
+      - name: Restore Rust compilation cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/src
+            ~/.cargo/git/db
+            apps/desktop/src-tauri/target/debug/deps
+            apps/desktop/src-tauri/target/debug/build
+            apps/desktop/src-tauri/target/debug/.fingerprint
+            apps/desktop/src-tauri/target/debug/incremental
+          key: ${{ runner.os }}-${{ runner.arch }}-rust-1.98.1-package-v3-lines-${{ hashFiles('apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml', '.cargo/config.toml', 'apps/desktop/src-tauri/.cargo/config.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-rust-1.98.1-package-v3-lines-
+            ${{ runner.os }}-${{ runner.arch }}-rust-1.98.1-frontend-v3-lines-
+      - name: Record runner capacity
+        run: node -e "const os=require('node:os');console.log(JSON.stringify({cpus:os.cpus().length,parallelism:os.availableParallelism(),memoryBytes:os.totalmem(),cpuModel:os.cpus()[0]?.model,buildJobs:process.env.CARGO_BUILD_JOBS}))"
+      - name: Select native shell fixture environment
+        shell: bash
+        run: echo "SHELL=/bin/zsh" >> "$GITHUB_ENV"
+      - run: pnpm install --frozen-lockfile
       - name: Write isolated lifecycle validation identity
         run: python3 -c "import pathlib,json; p=pathlib.Path('src-tauri/target/ci-validation.json'); p.parent.mkdir(parents=True,exist_ok=True); p.write_text(json.dumps({'identifier':'com.yam.platform-validation'}),encoding='utf-8')"
       - name: Package desktop application
-        run: pnpm tauri build --debug --bundles app --config src-tauri/target/ci-validation.json
+        env:
+          CARGO_LOG: cargo::core::compiler::fingerprint=info
+        run: /usr/bin/time -l pnpm tauri build --debug --bundles app --config src-tauri/target/ci-validation.json
       - name: Validate actual background process lifecycle
         run: python3 ../../scripts/background-platform-smoke.py --desktop --executable "src-tauri/target/debug/bundle/macos/YAM.app/Contents/MacOS/yam-desktop" --identifier com.yam.platform-validation
       - name: Sign and archive macOS test package
@@ -75,7 +272,25 @@ jobs:
       - name: Save desktop test package
         uses: actions/upload-artifact@v4
         with:
-          name: yam-test-package-macos
+          name: yam-test-package-macos-${{ github.run_attempt }}
           path: apps/desktop/src-tauri/target/debug/bundle/macos/YAM-macos.zip
           if-no-files-found: error
           retention-days: 7
+
+  desktop:
+    needs: [plan, quick, frontend, native, package]
+    if: ${{ always() }}
+    timeout-minutes: 2
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require every check selected by the impact plan
+        env:
+          ROUTE: ${{ needs.plan.outputs.route }}
+          EXERCISE_QUICK: ${{ needs.plan.outputs.exercise_quick }}
+          PLAN_RESULT: ${{ needs.plan.result }}
+          QUICK_RESULT: ${{ needs.quick.result }}
+          FRONTEND_RESULT: ${{ needs.frontend.result }}
+          NATIVE_RESULT: ${{ needs.native.result }}
+          PACKAGE_RESULT: ${{ needs.package.result }}
+        run: python3 scripts/ci_impact.py gate

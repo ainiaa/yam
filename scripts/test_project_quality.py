@@ -13,10 +13,12 @@ class ProjectQualityTests(unittest.TestCase):
         content = path.read_text() if path.exists() else ""
         coverage = next((line.partition(":")[2].strip() for line in content.splitlines()
                          if line.startswith("coverage:")), "")
-        self.assertEqual(shlex.split(coverage), [
-            "cargo", "llvm-cov", "--manifest-path", "apps/desktop/src-tauri/Cargo.toml",
-            "--locked", "--fail-under-lines=85", "--", "--test-threads=2",
-        ])
+        self.assertEqual(shlex.split(coverage), ["python3", "scripts/native-coverage.py"])
+        runner = (ROOT / "scripts/native-coverage.py").read_text()
+        for option in ['"--no-cfg-coverage"', '"--workspace"', '"--locked"', '"--fail-under-lines=85"']:
+            self.assertIn(option, runner)
+        for option in ["--exclude", "--ignore-filename-regex", "--no-clean"]:
+            self.assertNotIn(option, runner)
 
     def test_quality_target_is_explicit(self):
         path = ROOT / "docs/00_standards/quality-targets.yml"
@@ -34,7 +36,7 @@ class ProjectQualityTests(unittest.TestCase):
         self.assertIn("cargo-llvm-cov --version 0.9.1 --locked", content)
         self.assertIn("llvm-tools-preview", content)
         self.assertIn("CARGO_LLVM_COV_TARGET_DIR:", content)
-        self.assertIn("cargo llvm-cov --manifest-path src-tauri/Cargo.toml --locked --fail-under-lines=85 -- --test-threads=2", content)
+        self.assertIn("python3 ../../scripts/native-coverage.py", content)
 
 
 if __name__ == "__main__":

@@ -582,14 +582,25 @@ pub(crate) fn validate_command(command: &str, args: &serde_json::Value) -> Resul
         "list_archived_sessions" | "list_session_summaries" | "list_unread_receipts" => {
             (&["request"], &["request"])
         }
-        "cli_show" | "cli_focus" | "cli_stop" | "archive_session" | "restore_archive"
-        | "get_session" | "test_notification" => (&["session_id"], &["session_id"]),
+        "cli_show"
+        | "cli_focus"
+        | "cli_stop"
+        | "archive_session"
+        | "restore_archive"
+        | "get_session"
+        | "test_notification"
+        | "recover_terminal_agent" => (&["session_id"], &["session_id"]),
+        "start_terminal_agent" => (
+            &["session_id", "adapter", "mode", "extra", "cwd"],
+            &["session_id", "adapter", "mode", "extra", "cwd"],
+        ),
         "get_pi_routing" => (&["session_id"], &["session_id"]),
         "pi_routing_control" => (
             &["session_id", "generation", "request"],
             &["session_id", "generation", "request"],
         ),
-        "pi_routing_catalog" => (&["cwd", "gateway"], &["cwd", "gateway"]),
+        "pi_routing_catalog" => (&["cwd", "gateway", "probe_model"], &["cwd", "gateway"]),
+        "pi_packages" => (&["request"], &["request"]),
         "cli_start" => (&["request_key", "start"], &["request_key", "start"]),
         "cli_events" => (&["cursor"], &["cursor"]),
         "set_history_policy" => (&["auto_archive_30_days"], &["auto_archive_30_days"]),
@@ -1112,6 +1123,48 @@ fn dispatch(app: &tauri::AppHandle, request: Request) -> Result<serde_json::Valu
                     &argument::<String>(args, "expected_owner_instance")?,
                 );
             }
+            if request.command == "start_terminal_agent" {
+                #[cfg(unix)]
+                return super::interactive_shell::start(
+                    app,
+                    &manager,
+                    &argument::<String>(args, "session_id")?,
+                    &argument::<String>(args, "adapter")?,
+                    &argument::<String>(args, "mode")?,
+                    argument(args, "extra")?,
+                    argument::<String>(args, "cwd")?.into(),
+                );
+                #[cfg(not(unix))]
+                return Err("Managed Shell integration is unavailable on this platform".into());
+            }
+            if request.command == "recover_terminal_agent" {
+                #[cfg(unix)]
+                {
+                    let id = argument::<String>(args, "session_id")?;
+                    let active = manager
+                        .sessions
+                        .lock()
+                        .map_err(|_| "Session manager unavailable")?
+                        .get(&id)
+                        .cloned()
+                        .ok_or("Terminal is no longer running")?;
+                    if active._interactive_assets.is_none() {
+                        return Err("This terminal does not support managed recovery".into());
+                    }
+                    super::interactive_shell::recover(&active.history, &id)?;
+                    use tauri::Emitter;
+                    let _ = app.emit(
+                        "agent-state",
+                        super::SessionMessage {
+                            session_id: id,
+                            data: "updated".into(),
+                        },
+                    );
+                    return Ok(serde_json::json!({"status":"shell"}));
+                }
+                #[cfg(not(unix))]
+                return Err("Managed Shell recovery is unavailable on this platform".into());
+            }
             if request.command == "cli_start" {
                 let private = app.path().app_data_dir().map_err(|_| "cli_unavailable")?;
                 let session =
@@ -1119,6 +1172,12 @@ fn dispatch(app: &tauri::AppHandle, request: Request) -> Result<serde_json::Valu
                 return Ok(serde_json::json!({"session_id":session.session_id,"status":"started"}));
             }
             let result = match request.command.as_str() {
+                "pi_packages" => serde_json::to_value(super::pi_packages::handle(
+                    &app.path()
+                        .home_dir()
+                        .map_err(|_| "Home directory unavailable")?,
+                    argument(args, "request")?,
+                )?),
                 "get_pi_routing" => serde_json::to_value(super::get_pi_routing(
                     app.clone(),
                     manager,
@@ -1139,6 +1198,7 @@ fn dispatch(app: &tauri::AppHandle, request: Request) -> Result<serde_json::Valu
                         manager,
                         argument(args, "cwd")?,
                         argument(args, "gateway")?,
+                        argument(args, "probe_model")?,
                     ),
                 )?),
                 "get_history_policy" => {
@@ -2509,6 +2569,8 @@ impl Client {
             write_frame(&mut stream, &bytes, MAX_REQUEST).map_err(|error| (true, error))?;
             let (limit, deadline) = if command == "diagnostics_report" {
                 (1024 * 1024, Duration::from_secs(3))
+            } else if command == "pi_packages" || command == "pi_routing_catalog" {
+                (2 * 1024 * 1024, Duration::from_secs(150))
             } else {
                 (MAX_RESPONSE, Duration::from_secs(35))
             };
@@ -3351,6 +3413,20 @@ mod tests {
         assert!(!leases.available("s", "two", 3100));
         assert!(leases.available("s", "two", 3101));
         assert_eq!(leases.owners, original);
+    }
+    #[test]
+    fn interactive_shell_recovery_rpc_refuses_force_and_process_targets() {
+        assert!(validate_command(
+            "recover_terminal_agent",
+            &serde_json::json!({"session_id":"s-valid"})
+        )
+        .is_ok());
+        for extra in ["force", "pid", "path", "generation", "run"] {
+            let mut args = serde_json::json!({"session_id":"s-valid"});
+            args[extra] = serde_json::json!(true);
+            assert!(validate_command("recover_terminal_agent", &args).is_err());
+        }
+        assert!(validate_command("recover_terminal_agent", &serde_json::json!({})).is_err());
     }
     #[test]
     fn dispatcher_accepts_only_known_commands_and_their_exact_argument_shape() {

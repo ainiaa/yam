@@ -518,7 +518,12 @@ fn unread(record: &SessionRecord) -> usize {
         .count()
 }
 fn attention(record: &SessionRecord) -> bool {
-    unread(record) > 0 || record.status == "needs_attention"
+    unread(record) > 0 || record.status == "needs_attention" || waiting_permission(record)
+}
+fn waiting_permission(record: &SessionRecord) -> bool {
+    matches!(record.status.as_str(), "starting" | "running")
+        && record.agent.integration == "connected"
+        && record.agent.phase == "needs_permission"
 }
 fn title(record: &SessionRecord) -> Cow<'_, str> {
     if let Some(ssh) = record.summary.ssh.as_ref() {
@@ -782,11 +787,12 @@ impl HistoryStore {
     pub(crate) fn next_attention(&self, current: Option<&str>) -> Result<Option<String>, String> {
         let records = self.lock_records()?;
         let priority = |record: &&SessionRecord| {
-            if record
-                .agent
-                .inbox
-                .iter()
-                .any(|r| !r.read && r.kind == "needs_permission")
+            if waiting_permission(record)
+                || record
+                    .agent
+                    .inbox
+                    .iter()
+                    .any(|r| !r.read && r.kind == "needs_permission")
             {
                 0
             } else if matches!(record.status.as_str(), "failed" | "needs_attention")
@@ -5110,6 +5116,77 @@ mod tests {
             .all(|item| item.receipt.delivery != "failed"));
         let overview = serde_json::to_value(store.overview().unwrap()).unwrap();
         assert_eq!(overview["failed_receipts"], 1);
+        fs::remove_dir_all(store.root).unwrap();
+    }
+    #[test]
+    fn history_read_permission_remains_attention_only_while_current_and_connected() {
+        let store = store(1);
+        {
+            let mut records = store.records.lock().unwrap();
+            let record = &mut records[0];
+            record.status = "running".into();
+            record.agent.integration = "connected".into();
+            record.agent.phase = "needs_permission".into();
+            record.agent.inbox.push(agent_events::AgentReceipt {
+                id: "permission".into(),
+                revision: 1,
+                turn_id: "turn".into(),
+                kind: "needs_permission".into(),
+                delivery: "accepted".into(),
+                read: false,
+                error: None,
+            });
+        }
+        store
+            .read_agent_receipt("s-00000", "permission", 1)
+            .unwrap();
+        assert_eq!(store.overview().unwrap().unread_receipts, 0);
+        assert_eq!(
+            store.next_attention(None).unwrap().as_deref(),
+            Some("s-00000")
+        );
+        {
+            let mut records = store.records.lock().unwrap();
+            records[0].agent.integration = "unavailable".into();
+        }
+        assert_eq!(store.next_attention(None).unwrap(), None);
+        {
+            let mut records = store.records.lock().unwrap();
+            records[0].agent.integration = "connected".into();
+            records[0].status = "stopped".into();
+        }
+        assert_eq!(store.next_attention(None).unwrap(), None);
+        {
+            let mut records = store.records.lock().unwrap();
+            records[0].status = "running".into();
+            records[0].agent.phase = "working".into();
+        }
+        assert_eq!(store.next_attention(None).unwrap(), None);
+        fs::remove_dir_all(store.root).unwrap();
+    }
+    #[test]
+    fn history_read_current_permission_precedes_unread_response() {
+        let store = store(2);
+        {
+            let mut records = store.records.lock().unwrap();
+            records[0].status = "running".into();
+            records[0].agent.integration = "connected".into();
+            records[0].agent.phase = "needs_permission".into();
+            records[1].agent.inbox.push(agent_events::AgentReceipt {
+                id: "response".into(),
+                revision: 1,
+                turn_id: "turn".into(),
+                kind: "response_finished".into(),
+                delivery: "accepted".into(),
+                read: false,
+                error: None,
+            });
+        }
+        assert_eq!(
+            store.next_attention(None).unwrap().as_deref(),
+            Some("s-00000")
+        );
+        assert_eq!(store.overview().unwrap().attention_sessions, 2);
         fs::remove_dir_all(store.root).unwrap();
     }
     #[test]

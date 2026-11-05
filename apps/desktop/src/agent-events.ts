@@ -1,7 +1,8 @@
 export type AgentReceipt = {id:string;revision:number;turn_id:string;kind:string;delivery:string;read:boolean;error:string|null};
-export type AgentState = {cli_path?:string|null;cli_version?:string|null;cli_platform?:string|null;generation?:string;turn_id?:string|null;revision?:number;phase:string;integration:string;agent_session_id:string|null;inbox:AgentReceipt[]};
+export type AgentState = {cli_path?:string|null;cli_version?:string|null;cli_platform?:string|null;generation?:string;process_run?:string|null;turn_id?:string|null;revision?:number;phase:string;integration:string;agent_session_id:string|null;inbox:AgentReceipt[]};
 export function unreadCount(agent?:AgentState):number{return agent?.inbox.filter(entry=>!entry.read).length??0;}
 export function agentLabel(agent?:AgentState,status="running"):string{
+ if(agent?.phase==='shell')return ['starting','running'].includes(status)?'Shell · waiting for input':'Agent exited';
  if(!agent||agent.integration.startsWith('unavailable'))return 'Integration unavailable';
  if(agent.integration==='connecting')return ['starting','running'].includes(status)?'Awaiting trusted hook':'Integration not connected';
  if(agent.integration!=='connected')return 'Integration unavailable';

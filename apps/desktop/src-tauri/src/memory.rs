@@ -120,6 +120,11 @@ pub(super) fn process_identity(pid: u32) -> Option<u64> {
     }
 }
 
+#[cfg(target_os = "macos")]
+pub(super) fn process_tree() -> Result<Vec<(u32, u32, u32, bool)>, String> {
+    platform::process_tree()
+}
+
 pub(super) fn sample(owner: &OwnerProcesses) -> Result<Sample, String> {
     sample_for_desktop(owner, std::process::id())
 }
@@ -240,8 +245,7 @@ mod platform {
             .checked_add(info.pbi_start_tvusec)
     }
 
-    pub(super) fn snapshot() -> Result<HashMap<u32, Process>, String> {
-        let started = Instant::now();
+    fn process_ids() -> Result<Vec<i32>, String> {
         let mut pids = vec![0i32; MAX_PROCESSES];
         // libc declares the native libproc ABI; no elevated task port is required.
         let count = unsafe {
@@ -253,8 +257,62 @@ mod platform {
         if count <= 0 || count as usize >= MAX_PROCESSES {
             return Err("Process snapshot is unavailable or exceeds budget".into());
         }
+        pids.truncate(count as usize);
+        pids.retain(|pid| *pid > 0);
+        Ok(pids)
+    }
+    pub(super) fn process_tree() -> Result<Vec<(u32, u32, u32, bool)>, String> {
+        process_tree_with(
+            process_ids()?,
+            |pid| {
+                let mut info: libc::proc_bsdshortinfo = unsafe { std::mem::zeroed() };
+                let size = std::mem::size_of_val(&info) as i32;
+                (unsafe {
+                    libc::proc_pidinfo(
+                        pid,
+                        libc::PROC_PIDT_SHORTBSDINFO,
+                        0,
+                        (&mut info as *mut libc::proc_bsdshortinfo).cast(),
+                        size,
+                    )
+                } == size)
+                    .then_some((
+                        info.pbsi_ppid,
+                        info.pbsi_pgid,
+                        info.pbsi_status == libc::SZOMB,
+                    ))
+            },
+            |pid| unsafe {
+                libc::kill(pid, 0) == 0
+                    || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+            },
+        )
+    }
+    fn process_tree_with(
+        pids: Vec<i32>,
+        mut inspect: impl FnMut(i32) -> Option<(u32, u32, bool)>,
+        mut exists: impl FnMut(i32) -> bool,
+    ) -> Result<Vec<(u32, u32, u32, bool)>, String> {
+        let started = Instant::now();
+        let mut rows = Vec::new();
+        for pid in pids {
+            if started.elapsed() > Duration::from_secs(2) {
+                return Err("Process snapshot timed out".into());
+            }
+            if let Some((parent, group, zombie)) = inspect(pid) {
+                rows.push((pid as u32, parent, group, zombie));
+            } else if exists(pid) {
+                return Err(
+                    "A live process cannot be inspected; process snapshot is unconfirmed".into(),
+                );
+            }
+        }
+        Ok(rows)
+    }
+    pub(super) fn snapshot() -> Result<HashMap<u32, Process>, String> {
+        let started = Instant::now();
         let mut rows = HashMap::new();
-        for pid in pids.into_iter().take(count as usize).filter(|pid| *pid > 0) {
+        for pid in process_ids()? {
             if started.elapsed() > Duration::from_secs(2) {
                 return Err("Process snapshot timed out".into());
             }
@@ -328,6 +386,21 @@ mod platform {
             pid,
             child.id(),
         )
+    }
+    #[cfg(test)]
+    mod tree_tests {
+        use super::*;
+        #[test]
+        fn live_uninspectable_process_cannot_be_a_successful_partial_snapshot() {
+            assert!(process_tree_with(vec![11], |_| None, |_| true).is_err());
+            assert!(process_tree_with(vec![11], |_| None, |_| false)
+                .unwrap()
+                .is_empty());
+            assert_eq!(
+                process_tree_with(vec![11], |_| Some((1, 11, false)), |_| true).unwrap(),
+                vec![(11, 1, 11, false)]
+            );
+        }
     }
 }
 
@@ -654,6 +727,12 @@ mod tests {
         let mut after = rows.clone();
         after.insert(4, row(1, Some(40), 4));
         assert!(aggregate(&rows, &after, &[1], &owner).is_err());
+        let mut launching = rows.clone();
+        launching.insert(4, row(owner.pid, Some(40), 4));
+        assert_eq!(
+            aggregate(&launching, &rows, &[1], &owner).unwrap_err(),
+            "Memory process membership changed during sampling"
+        );
         after = rows.clone();
         after.remove(&3);
         assert!(aggregate(&rows, &after, &[1], &owner).is_err());
@@ -737,12 +816,47 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
+    fn wait_for_sampling_start(path: &std::path::Path, timeout: Duration) -> Result<(), String> {
+        let started = Instant::now();
+        while !path.try_exists().map_err(|error| error.to_string())? {
+            if started.elapsed() >= timeout {
+                return Err("Self-sampling launcher did not finish".into());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn self_sampling_start_barrier_is_bounded_and_requires_launcher_completion() {
+        let folder =
+            std::env::temp_dir().join(format!("yam-sampling-{}", crate::next_session_id()));
+        std::fs::create_dir(&folder).unwrap();
+        let start = folder.join("start");
+        assert!(wait_for_sampling_start(&start, Duration::ZERO).is_err());
+        let signal = start.clone();
+        let launcher = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            std::fs::write(signal, b"").unwrap();
+        });
+        wait_for_sampling_start(&start, Duration::from_secs(2)).unwrap();
+        launcher.join().unwrap();
+        wait_for_sampling_start(&start, Duration::ZERO).unwrap();
+        let invalid = start.join("not-a-directory");
+        assert!(wait_for_sampling_start(&invalid, Duration::ZERO).is_err());
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
     #[test]
     #[ignore = "must launch this test binary as an isolated LaunchServices app"]
     fn native_application_self_sampling() {
         let owner: OwnerProcesses =
             serde_json::from_str(&std::env::var("YAM_MEMORY_TEST_OWNER").unwrap()).unwrap();
-        let result = sample(&owner);
+        let start = std::env::var("YAM_MEMORY_TEST_START").unwrap();
+        let result = wait_for_sampling_start(std::path::Path::new(&start), Duration::from_secs(10))
+            .and_then(|()| sample(&owner));
         std::fs::write(
             std::env::var("YAM_MEMORY_TEST_RESULT").unwrap(),
             serde_json::to_vec(&result).unwrap(),

@@ -17,3 +17,19 @@ export function historyRequest(query:string,status:string,titles:Record<string,s
  return request;
 }
 export function capacityLevel(bytes:number){return bytes>=32*1024*1024?"protected":bytes>=24*1024*1024?"warning":"normal";}
+
+// Presentation only: retain receipt identities and unread state across loaded pages.
+export function groupInbox(items:readonly InboxItem[]){
+ const sessions=new Map<string,Map<string,InboxItem>>();
+ for(const item of items){
+  if(item.receipt.read)continue;
+  const id=item.session.summary.session_id,receipts=sessions.get(id)??new Map<string,InboxItem>();
+  const previous=receipts.get(item.receipt.id);
+  if(!previous||item.receipt.revision>previous.receipt.revision)receipts.set(item.receipt.id,item);
+  sessions.set(id,receipts);
+ }
+ return [...sessions.values()].map(items=>{
+  const ordered=[...items.values()].sort((a,b)=>b.receipt.revision-a.receipt.revision),session=ordered[0].session;
+  return {session,receipts:ordered.map(item=>item.receipt),unreadCount:Math.max(session.agent.unread_count,ordered.length)};
+ });
+}

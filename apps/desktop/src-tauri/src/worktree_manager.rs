@@ -248,6 +248,24 @@ mod tests {
         private: std::path::PathBuf,
         target: std::path::PathBuf,
     }
+    #[test]
+    fn t13_git_fixture_identity_is_command_scoped_and_overridable() {
+        let _serial = serial_worktree_test();
+        let fixture = GitFixture::new();
+        let config = std::fs::read_to_string(fixture.repository.join(".git/config")).unwrap();
+        assert!(
+            !config.contains("[user]"),
+            "identity must not require config subprocesses"
+        );
+        assert_eq!(
+            fixture.git(&["log", "-1", "--format=%an <%ae>"]),
+            "T13 Fixture <fixture@example.invalid>"
+        );
+        assert_eq!(
+            fixture.git(&["-c", "user.name=Override", "config", "user.name"]),
+            "Override"
+        );
+    }
     impl GitFixture {
         fn new() -> Self {
             let owned = Fixture::new();
@@ -269,8 +287,6 @@ mod tests {
                 "core.hooksPath",
                 fixture.owned.0.join("empty-hooks").to_str().unwrap(),
             ]);
-            fixture.git(&["config", "user.name", "T13 Fixture"]);
-            fixture.git(&["config", "user.email", "fixture@example.invalid"]);
             std::fs::write(fixture.repository.join("file.txt"), "committed fixture\n").unwrap();
             std::fs::write(fixture.repository.join("Unicode 中.txt"), "unicode\n").unwrap();
             fixture.git(&["add", "file.txt", "Unicode 中.txt"]);
@@ -293,6 +309,12 @@ mod tests {
                 }
             }
             let result = command
+                .args([
+                    "-c",
+                    "user.name=T13 Fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                ])
                 .args(args)
                 .current_dir(&self.repository)
                 .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -1683,6 +1705,7 @@ mod tests {
         );
         std::sync::Arc::new(crate::Session {
             _directory_reporting_assets: None,
+            _interactive_assets: None,
             _resume_claim: None,
             summary: crate::SessionSummary {
                 ssh: None,

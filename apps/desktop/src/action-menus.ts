@@ -3,7 +3,13 @@ export function installActionMenus(document:Document):()=>void{
  const opened=()=>Array.from(document.querySelectorAll<HTMLDetailsElement>('details.toolbar-more[open]'));
  const outside=(event:Event)=>{for(const menu of opened())if(!menu.contains(event.target as Node))menu.open=false;};
  const toggle=(event:Event)=>{const target=event.target as HTMLDetailsElement;if(target.matches?.('details.toolbar-more')&&target.open)for(const menu of opened())if(menu!==target)menu.open=false;};
- const click=(event:Event)=>{const button=(event.target as Element)?.closest?.('button');if(!button||button.disabled||button.getAttribute?.("role")==="combobox")return;const menu=button.closest<HTMLDetailsElement>('details.toolbar-more');if(menu)menu.open=false;};
+ const click=(event:Event)=>{const button=(event.target as Element)?.closest?.('button');if(!button||button.disabled||button.getAttribute?.("role")==="combobox")return;const menu=button.closest<HTMLDetailsElement>('details.toolbar-more');if(!menu)return;
+  const dialog=document.querySelector?.<HTMLDialogElement>('dialog[open]'),origin=menu.querySelector<HTMLElement>('summary');
+  if(dialog?.contains(document.activeElement))dialog.addEventListener('close',()=>{
+   if(origin?.isConnected&&!document.querySelector('dialog[open]')&&(document.activeElement===document.body||document.activeElement===button||dialog.contains(document.activeElement)))origin.focus();
+  },{once:true});
+  menu.open=false;
+ };
  const change=(event:Event)=>{const target=event.target as HTMLSelectElement;if(target.tagName==='SELECT'){const menu=target.closest<HTMLDetailsElement>('details.toolbar-more');if(menu)menu.open=false;}};
  const key=(event:KeyboardEvent)=>{
   if(event.defaultPrevented||event.isComposing||event.keyCode===229)return;

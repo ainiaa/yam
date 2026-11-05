@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub(super) const DEFAULT_ARGS: &str = "--yam-gateway http://127.0.0.1:3425 --yam-small yam-gateway/codex/gpt-6-luna --yam-strong yam-gateway/codex/gpt-6.1-sol";
+pub(super) const DEFAULT_ARGS: &str = "";
 
 pub(super) fn command(
     exe: &Path,
@@ -62,6 +62,8 @@ pub(super) fn command(
                 | "--yam-gateway"
                 | "--yam-fixed-model"
                 | "--yam-effort"
+                | "--yam-rules"
+                | "--yam-billing"
                 | "--tools"
                 | "--skill"
                 | "--append-system-prompt"
@@ -95,6 +97,12 @@ pub(super) fn command(
     }
     let mut b = CommandBuilder::new(exe);
     b.env("PATH", crate::agent_path());
+    b.env("YAM_PI_EXECUTABLE", exe);
+    for name in ["codex", "claude", "gemini"] {
+        if let Some(path) = crate::find_executable(name) {
+            b.env(format!("YAM_{}_EXECUTABLE", name.to_uppercase()), path);
+        }
+    }
     b.env(
         "YAM_PI_EXPLICIT_THINKING",
         if native_thinking { "1" } else { "0" },
@@ -123,7 +131,22 @@ pub(super) fn stage(root: &Path) -> Result<PathBuf, String> {
         ("entry.ts", include_str!("../pi/entry.ts")),
         ("router.mjs", include_str!("../pi/router.mjs")),
         ("policy.mjs", include_str!("../pi/policy.mjs")),
+        ("task-rules.mjs", include_str!("../pi/task-rules.mjs")),
         ("control.mjs", include_str!("../pi/control.mjs")),
+        ("agent-plan.mjs", include_str!("../pi/agent-plan.mjs")),
+        (
+            "agent-executor.mjs",
+            include_str!("../pi/agent-executor.mjs"),
+        ),
+        (
+            "agent-orchestrator.mjs",
+            include_str!("../pi/agent-orchestrator.mjs"),
+        ),
+        ("native-codex.mjs", include_str!("../pi/native-codex.mjs")),
+        (
+            "handoff-context.mjs",
+            include_str!("../pi/handoff-context.mjs"),
+        ),
     ];
     let hash = format!(
         "{:x}",
@@ -231,6 +254,18 @@ mod tests {
         serde_json::from_value(serde_json::json!({"adapter":"pi","mode":"interactive","extra_args":"--yam-small native/small --yam-strong native/strong","prompt":null})).unwrap()
     }
     #[test]
+    fn pi_router_new_defaults_do_not_pin_magpie_subscription_models() {
+        let mut l = launch();
+        l.extra_args.clear();
+        let b = super::command(Path::new("pi"), &l, false).unwrap();
+        assert!(!b.get_argv().iter().any(|a| a == "--yam-gateway"));
+        assert!(!b
+            .get_argv()
+            .iter()
+            .any(|a| a == "--yam-small" || a == "--yam-strong"));
+    }
+
+    #[test]
     fn pi_router_launch_accepts_native_role_flags_without_changing_official_defaults() {
         let builder = agent_command(Path::new("pi"), &launch())
             .expect("Pi auto router is an installed adapter");
@@ -247,6 +282,21 @@ mod tests {
         official.extra_args = "--model chosen -c model_reasoning_effort=high".into();
         let before = agent_command(Path::new("codex"), &official).unwrap();
         assert!(!before.get_argv().iter().any(|v| v == "yam/auto"));
+    }
+    #[test]
+    fn pi_router_rules_flag_is_literal_and_rules_module_is_staged() {
+        let mut l = launch();
+        l.extra_args =
+            "--yam-small native/small --yam-strong native/strong --yam-rules '{\"v\":1}'".into();
+        let builder = agent_command(Path::new("pi"), &l).unwrap();
+        assert!(builder
+            .get_argv()
+            .windows(2)
+            .any(|a| a == ["--yam-rules", "{\"v\":1}"]));
+        let root = std::env::temp_dir().join(format!("yam-pi-rules-{}", next_session_id()));
+        let entry = super::stage(&root).unwrap();
+        assert!(entry.parent().unwrap().join("task-rules.mjs").is_file());
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn routing_review_pi_inline_model_effort_and_native_defaults_are_not_overridden() {
@@ -413,8 +463,9 @@ pub(super) fn control_request(
         .keys()
         .any(|k| !["action", "revision", "data"].contains(&k.as_str()))
         || request["revision"].as_u64().is_none()
-        || !["set", "reset", "retry", "catalog"].contains(&request["action"].as_str().unwrap_or(""))
-        || request.to_string().len() > 8192
+        || !["set", "reset", "retry", "catalog", "rules", "preview"]
+            .contains(&request["action"].as_str().unwrap_or(""))
+        || request.to_string().len() > 32768
     {
         return Err("Invalid Pi control".into());
     }
@@ -461,10 +512,51 @@ pub(super) fn control_request(
     Ok(serde_json::json!({"state":response["state"],"models":response["models"]}))
 }
 static CATALOG_PROBE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+fn set_probe_codex(command: &mut std::process::Command, executable: Option<&Path>) {
+    if let Some(executable) = executable {
+        command.env("YAM_CODEX_EXECUTABLE", executable);
+    }
+}
+fn validate_probe_model(model: Option<&str>) -> Result<(), String> {
+    if let Some(value) = model {
+        let Some((provider, id)) = value.split_once('/') else {
+            return Err("Invalid Pi setup model".into());
+        };
+        if provider.is_empty()
+            || id.is_empty()
+            || value.len() > 512
+            || value.chars().any(|c| c.is_whitespace() || c.is_control())
+        {
+            return Err("Invalid Pi setup model".into());
+        }
+    }
+    Ok(())
+}
 pub(super) fn catalog(
     root: &Path,
     gateway: Option<&str>,
     cwd: &Path,
+    probe_model: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    let exe = crate::find_executable("pi").ok_or("Pi executable unavailable")?;
+    probe_catalog(&exe, root, gateway, cwd, probe_model)
+}
+pub(super) fn validate_runtime(executable: &Path, root: &Path, cwd: &Path) -> Result<(), String> {
+    let value = probe_catalog(executable, root, None, cwd, None)?;
+    if value["runtime"] != 1 {
+        return Err(
+            "Pi did not confirm the required YAM routing APIs; update or configure Pi and retry"
+                .into(),
+        );
+    }
+    Ok(())
+}
+fn probe_catalog(
+    exe: &Path,
+    root: &Path,
+    gateway: Option<&str>,
+    cwd: &Path,
+    probe_model: Option<&str>,
 ) -> Result<serde_json::Value, String> {
     use std::{
         io::{BufRead, BufReader},
@@ -478,8 +570,8 @@ pub(super) fn catalog(
     if gateway.is_some_and(|s| s.len() > 2048 || s.chars().any(char::is_control)) {
         return Err("Invalid Pi gateway".into());
     }
+    validate_probe_model(probe_model)?;
     crate::validate_working_directory(&cwd.to_string_lossy())?;
-    let exe = crate::find_executable("pi").ok_or("Pi executable unavailable")?;
     let entry = stage(root)?;
     let mut command = Command::new(exe);
     command
@@ -506,17 +598,28 @@ pub(super) fn catalog(
             command.env_remove(key);
         }
     }
+    set_probe_codex(&mut command, crate::find_executable("codex").as_deref());
     if let Some(gateway) = gateway {
         command.args(["--yam-gateway", gateway]);
+    }
+    if let Some(model) = probe_model {
+        command.args(["--yam-setup-model", model]);
     }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
     let mut child = command
         .spawn()
         .map_err(|_| "Cannot start Pi catalog preflight")?;
+    #[cfg(windows)]
+    let job = super::agent_bridge::attach_query_job(&mut child)?;
     let output = child.stdout.take().ok_or("Pi catalog output unavailable")?;
     let (sender, receiver) = mpsc::sync_channel(1);
     let reader = std::thread::spawn(move || {
@@ -538,13 +641,19 @@ pub(super) fn catalog(
         }
     });
     let result = receiver
-        .recv_timeout(Duration::from_secs(18))
+        .recv_timeout(Duration::from_secs(if probe_model.is_some() {
+            60
+        } else {
+            18
+        }))
         .map_err(|_| "Pi catalog unavailable or timed out".to_string());
     #[cfg(unix)]
     unsafe {
         libc::kill(-(child.id() as i32), libc::SIGKILL);
     }
     let _ = child.kill();
+    #[cfg(windows)]
+    drop(job);
     let _ = child.wait();
     let _ = reader.join();
     let value = result?;
@@ -559,12 +668,37 @@ pub(super) fn catalog(
     {
         return Err("Invalid Pi catalog".into());
     }
-    Ok(serde_json::json!({"models":models}))
+    if probe_model.is_some() && !value["probe"]["ok"].is_boolean() {
+        return Err("Pi model verification returned an invalid result".into());
+    }
+    Ok(
+        serde_json::json!({"models":models,"preferred":value["preferred"].as_str(),"warning":value["warning"].as_str(),"probe":value.get("probe"),"runtime":value["runtime"]}),
+    )
 }
 
 #[cfg(test)]
 mod control_tests {
     use super::*;
+    #[test]
+    fn setup_probe_rejects_unbounded_or_non_model_inputs() {
+        assert!(validate_probe_model(Some("yam-codex/gpt-6.1-sol")).is_ok());
+        assert!(validate_probe_model(None).is_ok());
+        for invalid in ["", "x", "--model", "p/", "/m", "p/a b", "p/\n"] {
+            assert!(validate_probe_model(Some(invalid)).is_err(), "{invalid:?}");
+        }
+    }
+    #[test]
+    fn setup_probe_passes_discovered_codex_to_pi_without_requiring_shell_environment() {
+        let mut command = std::process::Command::new("pi");
+        set_probe_codex(&mut command, Some(Path::new("/opt/codex")));
+        assert_eq!(
+            command
+                .get_envs()
+                .find(|(key, _)| *key == "YAM_CODEX_EXECUTABLE")
+                .and_then(|(_, value)| value),
+            Some(std::ffi::OsStr::new("/opt/codex"))
+        );
+    }
     #[test]
     fn pi_control_descriptor_rejects_generation_links_and_oversize_without_exposing_secret() {
         let root = std::env::temp_dir().join(format!(
@@ -610,7 +744,8 @@ mod control_tests {
         };
         let mut record:crate::SessionRecord=serde_json::from_value(serde_json::json!({"summary":{"session_id":"s-pi-wire","cwd":"/tmp","command":null,"status":"running","launch":{"adapter":"pi","mode":"interactive","extra_args":"","prompt":null}},"status":"running","exit_code":null,"reason":null,"started_at":0,"ended_at":null,"agent":agent})).unwrap();
         assert_eq!(read_state(&root, &record).unwrap()["active"], true);
-        let request = serde_json::json!({"action":"catalog","revision":1});
+        let request =
+            serde_json::json!({"action":"preview","revision":1,"data":{"text":"\0".repeat(4000)}});
         assert!(control_request(&root, &record, "old", request.clone()).is_err());
         assert!(control_request(
             &root,
@@ -632,7 +767,7 @@ mod control_tests {
             let wire: serde_json::Value = serde_json::from_str(&raw).unwrap();
             assert_eq!(wire["token"], token);
             assert_eq!(wire["generation"], "g");
-            assert_eq!(wire["action"], "catalog");
+            assert_eq!(wire["action"], "preview");
             stream.write_all(serde_json::json!({"ok":true,"token":token,"state":{"generation":"g","revision":2},"models":[]}).to_string().as_bytes()).unwrap();
         });
         let reply = control_request(&root, &record, "g", request).unwrap();

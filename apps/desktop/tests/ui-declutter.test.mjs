@@ -11,7 +11,7 @@ const app=source('App.tsx'), layout=source('TerminalLayout.tsx');
 function elements(file,predicate) {const result=[];function visit(node){if(ts.isJsxElement(node)&&predicate(node))result.push(node);ts.forEachChild(node,visit);}visit(file);return result;}
 function tag(node) {return node.openingElement.tagName.getText();}
 function disclosure(node) {for(let parent=node.parent;parent;parent=parent.parent)if(ts.isJsxElement(parent)&&tag(parent)==='details')return parent;}
-for(const [file,labels] of [[layout,['Reopen last hidden tab','Split right','Split down','Move tab left']],[app,['Browse archived sessions','Manage history capacity','Edit project','Pin project','Export diagnostics','Terminal-reported directory','Shell-reported phase']]]) {
+for(const [file,labels] of [[layout,['Reopen last hidden session','Split right','Split down']],[app,['Browse archived sessions','Manage history capacity','Edit project','Pin project','Export diagnostics','Terminal-reported directory','Shell-reported phase']]]) {
  for(const label of labels)test(label+' is inside a closed, keyboard-accessible disclosure',()=>{
   const matches=elements(file,node=>['button','Select','span'].includes(tag(node))&&(label==='Settings'?/>Settings<\/button>/.test(node.getText(file)):node.getText(file).includes(label)));
   assert.ok(matches.length,label+' exists');

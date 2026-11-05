@@ -85,6 +85,26 @@ pub(crate) fn prepare_modes(
     cwd: bool,
     command: bool,
 ) -> Result<Assets, ()> {
+    prepare_scripts(root, builder, cwd, command, None)
+}
+#[cfg(unix)]
+pub(crate) fn prepare_agent(
+    root: &Path,
+    builder: &mut CommandBuilder,
+    startup: &str,
+    cwd: bool,
+    command: bool,
+) -> Result<Assets, ()> {
+    prepare_scripts(root, builder, cwd, command, Some(startup))
+}
+#[cfg(unix)]
+fn prepare_scripts(
+    root: &Path,
+    builder: &mut CommandBuilder,
+    cwd: bool,
+    command: bool,
+    startup: Option<&str>,
+) -> Result<Assets, ()> {
     use std::io::Write;
     use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
     if builder
@@ -111,7 +131,20 @@ pub(crate) fn prepare_modes(
         directory,
         created: false,
     };
-    let trampoline = if command {
+    let trampoline = if startup.is_some() {
+        let normal = if command { " _yam_zsh_precmd" } else { "" };
+        let cwd_hook = if cwd { " _yam_zsh_report" } else { "" };
+        TRAMPOLINE
+            .replace(" _yam_zsh_report )", &format!("{normal}{cwd_hook} )"))
+            .replace(
+                "  _yam_zsh_report\n",
+                &format!(
+                    "  {}\n  {}\n  _yam_agent_initial\n",
+                    if command { "_yam_zsh_precmd" } else { ":" },
+                    if cwd { "_yam_zsh_report" } else { ":" }
+                ),
+            )
+    } else if command {
         TRAMPOLINE
             .replace(
                 "  _yam_zsh_report\n",
@@ -131,6 +164,7 @@ pub(crate) fn prepare_modes(
             ""
         }
     );
+    let integration = format!("{integration}{}", startup.unwrap_or(""));
     let mut write = || -> Result<(), ()> {
         if trampoline.len() > 16384 || integration.len() > 16384 {
             return Err(());

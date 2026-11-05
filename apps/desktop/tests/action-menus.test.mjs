@@ -31,3 +31,15 @@ test('arrow-up opens at the last action and composition, modifiers and form cont
  const f=navigationFixture();assert.equal(f.key('ArrowUp'),true);assert.equal(f.doc.activeElement,f.items[3]);assert.equal(f.key('Escape',{isComposing:true}),false);assert.equal(f.menu.open,true);assert.equal(f.key('Home',{ctrlKey:true}),false);
  const input={menu:f.menu,closest:selector=>selector==='details.toolbar-more'?f.menu:selector.includes('input')?input:null};f.doc.activeElement=input;assert.equal(f.key('ArrowDown'),false);assert.equal(f.doc.activeElement,input);
 });
+
+test('closing a confirmation opened by a menu restores its trigger without stealing later focus',()=>{
+ for(const mode of ['return','dialog-focus','detached','other-focus','other-dialog']){
+  const listeners=new Map(),closed=[],body={},elsewhere={},cancel={};let focused=0,activeDialog;
+  const trigger={isConnected:mode!=='detached',focus(){focused++;}},menu={open:true,querySelector:()=>trigger};
+  const button={disabled:false,closest:selector=>selector==='details.toolbar-more'?menu:null};
+  const dialog={contains:node=>node===button||node===cancel,addEventListener:(name,fn,options)=>{assert.equal(name,'close');assert.equal(options.once,true);closed.push(fn);}};
+  activeDialog=dialog;const doc={body,activeElement:button,querySelector:()=>activeDialog,querySelectorAll:()=>[],addEventListener:(name,fn)=>listeners.set(name,fn),removeEventListener(){}};
+  installActionMenus(doc);listeners.get('click')({target:{closest:()=>button}});assert.equal(menu.open,false);assert.equal(closed.length,1);
+  doc.activeElement=mode==='other-focus'?elsewhere:mode==='dialog-focus'?cancel:body;activeDialog=mode==='other-dialog'?{}:null;closed[0]();assert.equal(focused,['return','dialog-focus'].includes(mode)?1:0);
+ }
+});

@@ -34,8 +34,8 @@ test('embedded system settings does not duplicate its surrounding title',()=>{
 });
 test('confirmed departure from profile settings resets its shared draft without starting a process',()=>{
  const text=read('App.tsx'),source=ts.createSourceFile('App.tsx',text,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);let fn;function walk(n){if(ts.isFunctionDeclaration(n)&&n.name?.text==='openSettingsSection')fn=n;ts.forEachChild(n,walk);}walk(source);
- for(const selectedId of [null,'saved']){const calls=[],bindings={isMainWindow:true,starting:false,systemEntryBusy:false,terminalProfilesOpen:true,terminalProfileCollection:{selectedId},selectTerminalProfile:id=>calls.push(['reset',id]),newTerminalProfile:()=>calls.push(['reset',null]),launchSettingsDialog:{current:{close(){}}},setLaunchDefaultsNotice(){},requestAnimationFrame(){},refreshSystemEntry(){},openMainSettings:assert.fail};
-  for(const name of ['DataSettings','Appearance','TerminalSettings','TerminalProfiles','KeyboardShortcuts','PasteSettings','Updater','SystemEntry','DirectoryReporting','CommandReporting'])bindings['set'+name+'Open']=value=>{if(value)calls.push(name);};
+ for(const selectedId of [null,'saved']){const calls=[],bindings={isMainWindow:true,starting:false,systemEntryBusy:false,piPluginsBusy:false,terminalProfilesOpen:true,terminalProfileCollection:{selectedId},selectTerminalProfile:id=>calls.push(['reset',id]),newTerminalProfile:()=>calls.push(['reset',null]),launchSettingsDialog:{current:{close(){}}},setLaunchDefaultsNotice(){},requestAnimationFrame(){},refreshSystemEntry(){},openMainSettings:assert.fail};
+  for(const name of ['PiPlugins','DataSettings','Appearance','TerminalSettings','TerminalProfiles','KeyboardShortcuts','PasteSettings','Updater','SystemEntry','DirectoryReporting','CommandReporting'])bindings['set'+name+'Open']=value=>{if(value)calls.push(name);};
   const run=new Function(...Object.keys(bindings),ts.transpileModule(fn.getText(source),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText+';return openSettingsSection;')(...Object.values(bindings));run('appearance');assert.deepEqual(calls,[['reset',selectedId],'Appearance']);
  }
 });

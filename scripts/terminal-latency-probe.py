@@ -9,6 +9,7 @@ import plistlib
 import secrets
 import shlex
 import shutil
+import socketserver
 import subprocess
 import sys
 import tempfile
@@ -24,6 +25,10 @@ def load(name, filename):
 
 performance = load("latency_performance", "terminal-performance.py")
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+
+def loopback_server(handler):
+    return socketserver.TCPServer(("127.0.0.1", 0), handler)
 
 
 def validate_probe(value):
@@ -182,10 +187,10 @@ def main():
                             return frame["projection"] if expected in frame["projection"]["data"] else False
                         frame = smoke.wait_until(acknowledged_projection, 10)
                         self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers(); self.wfile.write(json.dumps(frame).encode())
-                server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+                server = loopback_server(Handler)
                 threading.Thread(target=server.serve_forever, daemon=True).start()
                 result_path = folder / f"result-{round_index}.json"
-                subprocess.run(["open", "-n", str(probe_app), "--args", f"http://127.0.0.1:{server.server_port}/{token}/index.html", str(result_path)], check=True, timeout=10)
+                subprocess.run(["open", "-n", str(probe_app), "--args", f"http://127.0.0.1:{server.server_address[1]}/{token}/index.html", str(result_path)], check=True, timeout=10)
                 smoke.wait_until(result_path.exists, 130)
                 value = json.loads(result_path.read_text())
                 performance.write_evidence(args.output / f"round-{round_index + 1}-raw.json", value)

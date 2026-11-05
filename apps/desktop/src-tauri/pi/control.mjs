@@ -14,7 +14,7 @@ export async function serveControls(path,generation,snapshot,control,catalog) {
  const server=createServer({allowHalfOpen:true},socket=>{
   if(++connections>4){connections--;socket.destroy();return;}
   let raw='';socket.setEncoding('utf8');socket.setTimeout(1500,()=>socket.destroy());socket.on('error',()=>{});socket.once('close',()=>connections--);
-  socket.on('data',chunk=>{raw+=chunk.toString();if(Buffer.byteLength(raw)>16384)socket.destroy();});
+  socket.on('data',chunk=>{raw+=chunk.toString();if(Buffer.byteLength(raw)>32768)socket.destroy();});
   socket.on('end',async()=>{
    try{
     const request=JSON.parse(raw);
