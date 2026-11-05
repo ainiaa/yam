@@ -26,7 +26,7 @@ codex -c 'sandbox_mode="read-only"' -c 'approval_policy="never"' review --base B
 
 | 改动范围 | 提前运行的检查 |
 | --- | --- |
-| CI / 质量门槛 | `node --test apps/desktop/tests/ci-workflow.test.mjs`；`python3 -m unittest scripts.test_project_quality scripts.test_project_mutation -v` |
+| CI / 质量门槛 | `node --test apps/desktop/tests/ci-workflow.test.mjs`；`python3 -m unittest scripts.test_project_quality scripts.test_project_mutation scripts.test_memory_self_smoke -v` |
 | 终端构建资源 | `python3 -m unittest discover -s scripts -p test_terminal_runtime.py` |
 | Pi 策略、导入导出、模型标识 | `node --test apps/desktop/tests/preferences-backup.test.mjs apps/desktop/tests/pi-routing-ui.test.mjs`；`cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked portable_pi_policy_export` |
 | 原生异步执行与上下文 | `node --test apps/desktop/tests/native-codex.test.mjs apps/desktop/tests/pi-native-context.test.mjs` |
@@ -37,6 +37,7 @@ codex -c 'sandbox_mode="read-only"' -c 'approval_policy="never"' review --base B
 ## CI 覆盖与缓存
 
 - `frontend` 与 `native` 在独立 macOS runner 并行；各自准备所需终端资源。前端测试前仍生成原生权限 schema。
+- 内存自采样在 `native` 覆盖率测试之后运行，复用同一 runner、同一 `CARGO_LLVM_COV_TARGET_DIR` 中唯一的当前测试程序；缺失或歧义即失败，不回退到普通构建缓存。采样 helper 的额外 profile 写入空设备，避免污染已完成的覆盖率结果。选择逻辑用 Mock/临时普通文件验证，不在本机启动验收 App。
 - `native` 用完整 crate 的 `cargo llvm-cov --no-cfg-coverage --fail-under-lines=85` 执行单元/集成测试一次。关闭额外 `cfg(coverage)`，保留普通配置语义；不筛选测试、不降低门槛、不复用旧 profile 数据。
 - `package` 仅在前端和原生两路都成功且 `!cancelled()` 时运行普通应用构建、doctest、实际后台生命周期、签名归档及产物上传；新提交取消旧运行时，打包仍可被取消。
 - `desktop` 保留原有 required-check 名称，以 `always()` 汇总前端、原生、打包三路结果；任一路失败、取消或跳过均失败。该作业仅作轻量状态检查，不执行构建/上传；长打包作业不得使用 `always()`。[GitHub 取消语义](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-cancellation)

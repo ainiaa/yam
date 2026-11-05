@@ -52,7 +52,7 @@ jobs:
       - run: pnpm build:terminal --script-only --notice-mode developer
       - name: Check delivery policy before expensive builds
         working-directory: .
-        run: python3 -m unittest scripts.test_project_quality scripts.test_project_mutation -v
+        run: python3 -m unittest scripts.test_project_quality scripts.test_project_mutation scripts.test_memory_self_smoke -v
       - run: cargo check --manifest-path src-tauri/Cargo.toml --locked
       - run: pnpm test:coverage
       - name: Verify loopback fixtures avoid DNS
@@ -62,8 +62,6 @@ jobs:
         run: python3 ../../scripts/webkit-memory-smoke.py
       - name: Verify asynchronous WebKit startup regression
         run: python3 -m unittest discover -s ../../scripts -p test_webkit_memory_smoke.py
-      - name: Verify memory sampling from its own application coalition
-        run: python3 ../../scripts/memory-self-smoke.py
       - name: Verify lifecycle validation protocol
         run: python3 -m unittest discover -s ../../scripts -p test_background_smoke.py
       - name: Verify macOS release workflow without signing or uploading
@@ -71,6 +69,8 @@ jobs:
 
   native:
     timeout-minutes: 45
+    env:
+      CARGO_LLVM_COV_TARGET_DIR: ${{ github.workspace }}/apps/desktop/src-tauri/target/coverage
     runs-on: macos-latest
     defaults:
       run:
@@ -133,9 +133,10 @@ jobs:
         run: test "$(cargo llvm-cov --version)" = "cargo-llvm-cov 0.9.1"
       - name: Enforce native crate line coverage and run unit/integration tests once
         env:
-          CARGO_LLVM_COV_TARGET_DIR: ${{ github.workspace }}/apps/desktop/src-tauri/target/coverage
           CARGO_BUILD_JOBS: 2
         run: cargo llvm-cov --manifest-path src-tauri/Cargo.toml --locked --no-cfg-coverage --fail-under-lines=85 -- --test-threads=2
+      - name: Verify memory sampling from its own application coalition
+        run: python3 ../../scripts/memory-self-smoke.py
 
   package:
     needs: [frontend, native]

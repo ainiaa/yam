@@ -1,2 +1,2 @@
-test: python3 -m unittest scripts.test_project_quality scripts.test_project_mutation -v
+test: python3 -m unittest scripts.test_project_quality scripts.test_project_mutation scripts.test_memory_self_smoke -v
 coverage: cargo llvm-cov --manifest-path apps/desktop/src-tauri/Cargo.toml --locked --no-cfg-coverage --fail-under-lines=85 -- --test-threads=2

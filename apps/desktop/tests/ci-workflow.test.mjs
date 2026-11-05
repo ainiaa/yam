@@ -144,3 +144,10 @@ test('superseded packaging remains cancellable and the final desktop gate cannot
  assert.doesNotMatch(gate,/pnpm|cargo|actions\/checkout|upload-artifact/,'the always-running gate must remain short and source-independent');
  assert.match(gate,/timeout-minutes: 2/);
 });
+test('native self-sampling stays beside the freshly executed coverage test binary',()=>{
+ const native=ciJob('native'),frontend=ciJob('frontend');
+ assert.doesNotMatch(frontend,/memory-self-smoke.py/);
+ assert.ok(native.indexOf('memory-self-smoke.py')>native.indexOf('cargo llvm-cov --manifest-path'));
+ assert.match(native,/^    env:\n      CARGO_LLVM_COV_TARGET_DIR:.*target\/coverage/m);
+ assert.match(frontend,/scripts.test_memory_self_smoke/,'fixture selection must be tested without starting an application');
+});
