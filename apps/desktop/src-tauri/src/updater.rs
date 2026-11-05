@@ -1118,10 +1118,7 @@ mod tests {
                 "no-update",
                 "held",
             ] {
-                let phase = Instant::now();
-                eprintln!("HTTPS {mode} start");
                 let fixture = ClosureT14Fixture::new(mode);
-                eprintln!("HTTPS {mode} fixture {:?}", phase.elapsed());
                 let mut context = tauri::test::mock_context(tauri::test::noop_assets());
                 context.config_mut().plugins.0.insert("updater".into(),serde_json::json!({
                     "pubkey":include_str!("../../tests/fixtures/updater-public.key").trim(),
@@ -1131,7 +1128,6 @@ mod tests {
                     .plugin(tauri_plugin_updater::Builder::new().build())
                     .build(context)
                     .unwrap();
-                eprintln!("HTTPS {mode} app-built {:?}", phase.elapsed());
                 // This private session accepts its ephemeral certificate; production client stays unchanged.
                 let sdk = app
                     .updater_builder()
@@ -1145,18 +1141,12 @@ mod tests {
                     })
                     .build()
                     .unwrap();
-                eprintln!("HTTPS {mode} sdk-built {:?}", phase.elapsed());
                 let found = sdk.check().await.unwrap();
-                eprintln!("HTTPS {mode} checked {:?}", phase.elapsed());
                 if mode == "no-update" {
                     assert!(found.is_none());
                     let receipts =
                         std::fs::read_to_string(fixture.root.join("requests.jsonl")).unwrap();
                     assert_eq!(receipts.lines().count(), 1);
-                    drop(app);
-                    eprintln!("HTTPS {mode} app-drop {:?}", phase.elapsed());
-                    drop(fixture);
-                    eprintln!("HTTPS {mode} fixture-drop {:?}", phase.elapsed());
                     continue;
                 }
                 let mut update = found.unwrap();
@@ -1197,7 +1187,6 @@ mod tests {
                         || finished.store(true, std::sync::atomic::Ordering::Release),
                     )
                     .await;
-                eprintln!("HTTPS {mode} downloaded {:?}", phase.elapsed());
                 assert_eq!(
                     finished.load(std::sync::atomic::Ordering::Acquire),
                     mode != "held"
@@ -1273,9 +1262,7 @@ mod tests {
                         )
                         .is_err());
                 }
-                eprintln!("HTTPS {mode} controller {:?}", phase.elapsed());
                 controller.shutdown_and_join();
-                eprintln!("HTTPS {mode} shutdown {:?}", phase.elapsed());
                 let paths: Vec<_> = std::fs::read_to_string(fixture.root.join("requests.jsonl"))
                     .unwrap()
                     .lines()
@@ -1287,10 +1274,6 @@ mod tests {
                     })
                     .collect();
                 assert_eq!(paths, ["/manifest", "/artifact", "/artifact"]);
-                drop(app);
-                eprintln!("HTTPS {mode} app-drop {:?}", phase.elapsed());
-                drop(fixture);
-                eprintln!("HTTPS {mode} fixture-drop {:?}", phase.elapsed());
             }
         });
     }

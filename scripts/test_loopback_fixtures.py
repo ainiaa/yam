@@ -6,6 +6,7 @@ import http.client
 import subprocess
 import sys
 import json
+import runpy
 from pathlib import Path
 import socket
 import socketserver
@@ -42,3 +43,17 @@ class LoopbackFixtureTests(unittest.TestCase):
             finally:
                 process.terminate()
                 process.communicate(timeout=5)
+
+    def test_updater_https_startup_never_resolves_loopback_hostnames(self):
+        fixture = Path(__file__).resolve().parents[1] / "apps/desktop/tests/fixtures/updater_api.py"
+        for mode in ["valid", "changed-bytes", "wrong-version", "no-update", "held"]:
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                output = io.StringIO()
+                with mock.patch.object(sys, "argv", [str(fixture), "--root", directory, "--mode", mode]), mock.patch.object(socket, "getfqdn", side_effect=AssertionError("DNS forbidden")), mock.patch.object(socket, "gethostbyaddr", side_effect=AssertionError("reverse DNS forbidden")), mock.patch.object(socketserver.BaseServer, "serve_forever") as serve, contextlib.redirect_stdout(output):
+                    namespace = runpy.run_path(str(fixture), run_name="__main__")
+                    try:
+                        self.assertRegex(json.loads(output.getvalue())["endpoint"], r"^https://127\.0\.0\.1:[1-9]\d*/manifest$")
+                        self.assertTrue(namespace["server"].daemon_threads)
+                        serve.assert_called_once_with()
+                    finally:
+                        namespace["server"].server_close()
