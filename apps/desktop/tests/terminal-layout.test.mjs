@@ -26,7 +26,11 @@ function visit(node){
  ts.forEachChild(node,visit);
 }
 visit(source);
-const transpile=s=>ts.transpileModule(s,{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText;
+const transpileCache=new Map();
+const transpile=s=>{
+ if(!transpileCache.has(s))transpileCache.set(s,ts.transpileModule(s,{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText);
+ return transpileCache.get(s);
+};
 function actual(name,args){args={sessionCopyIntent:{current:0},setSessionCopy(){},setCopyName(){},ordinaryLaunchSnapshot:{current:undefined},...args};args={isMainWindow:true,desktopWindow:{slot:"main",epoch:1,main_epoch:1,restore_blocked:false},windowPreferenceKey:name=>windowContext.windowPreferenceKey("main",name),...args};
  assert.ok(functions.has(name),`Actual App ${name} callback is required`);
  const dependencies=['terminalReopenCurrent','rememberHiddenTerminal','recoverRevealedTerminals','claimWindowView','reconcileTerminalLayoutSelection','refreshTerminalScroll','cancelLayoutRestore','finishLayoutRestore','syncViewSize','fitTerminalViews','setTerminalPaneZoom','terminalPaneVisible','terminalPaneHasSize','terminalHasInputFocus','syncNotificationContext','showTerminalLayout','focusTerminalPane','pollTerminalFrames','renderFrame','requestTerminalLayoutFit','cancelTerminalLayoutFit','canSwapTerminalPanes','applyTerminalTabMove','requestTerminalTabFocus'];
@@ -1070,4 +1074,14 @@ test('split node minimums are capped by the available viewport for narrow and sh
 test('split pane CSS allows both dimensions to shrink inside the capped viewport',()=>{
  const css=readFileSync(new URL('../src/App.css',import.meta.url),'utf8');
  assert.match(css,/\.terminal-layout-node > \.terminal-pane\s*\{[^}]*min-width:\s*0;[^}]*min-height:\s*0;/);
+});
+
+test('fixture transpilation reuses identical source without sharing callback state',()=>{
+ const text='function fixtureValue(){return value;}';
+ const before=transpileCache.size;
+ const first=transpile(text);assert.equal(transpile(text),first);assert.equal(transpileCache.size,before+1);
+ assert.equal(new Function('value',first+';return fixtureValue()')(1),1);
+ assert.equal(new Function('value',first+';return fixtureValue()')(2),2);
+ transpile(text+'\n// changed source');assert.equal(transpileCache.size,before+2);
+ const empty=transpile('');assert.equal(transpile(''),empty);assert.equal(empty,ts.transpileModule('',{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText);assert.equal(transpileCache.size,before+3);
 });

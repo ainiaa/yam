@@ -27,7 +27,7 @@ test('only CI lowers dev and test debug information while preserving line tables
 test('CI generates native permission schemas before macOS frontend tests',()=>{
  const workflow=ciJob('frontend');
  const runtime=workflow.indexOf('- run: pnpm build:terminal');
- const schema=workflow.indexOf('- run: cargo check --manifest-path src-tauri/Cargo.toml --locked');
+ const schema=workflow.indexOf('run: cargo test --doc --manifest-path src-tauri/Cargo.toml --locked');
  const tests=workflow.indexOf('- run: pnpm test:coverage');
  assert.ok(runtime>=0&&schema>runtime&&tests>schema,'build runtime and native schema before frontend tests');
  assert.equal(workflow.match(/- run: pnpm build:terminal\r?\n/g)?.length,1,'build the native fixture runtime once');
@@ -143,14 +143,16 @@ test('native coverage runs the full suite once with ordinary cfg semantics and p
  assert.match(native,/--locked --no-cfg-coverage --fail-under-lines=85 -- --test-threads=2/);
  assert.doesNotMatch(native,/run: cargo test|--no-run|--no-clean|--ignore-filename-regex|--exclude|--lib\b|--test-name-pattern/);
  assert.match(native,/cargo clippy --manifest-path src-tauri\/Cargo.toml --all-targets -- -D warnings/);
- assert.ok(ciJob('frontend').includes('cargo check --manifest-path'));
- assert.ok(ciJob('package').includes('cargo test --doc --manifest-path src-tauri/Cargo.toml --locked'));
+ const frontend=ciJob('frontend'),packaged=ciJob('package');
+ assert.match(frontend,/cargo test --doc --manifest-path src-tauri\/Cargo.toml --locked -- --test-threads=2/);
+ assert.doesNotMatch(frontend,/cargo check --manifest-path/,'doctests also generate schemas and reusable ordinary code');
+ assert.doesNotMatch(packaged,/cargo test --doc/,'ordinary doctests must run once before the package gate');
 });
 test('both CI workers prepare native resources and cache only reusable compilation outputs',()=>{
  for(const name of ['frontend','native']){
   const job=ciJob(name);
   for(const command of ['pnpm install --frozen-lockfile','pnpm build:terminal','pnpm build:terminal --script-only --notice-mode developer'])assert.ok(job.includes(command),`${name}: ${command}`);
-  assert.ok(job.indexOf('pnpm build:terminal --script-only')<job.indexOf(name==='frontend'?'cargo check':'cargo fmt'));
+  assert.ok(job.indexOf('pnpm build:terminal --script-only')<job.indexOf(name==='frontend'?'cargo test --doc':'cargo fmt'));
   assert.match(job,/actions\/cache@v4/);assert.match(job,/runner.os/);assert.match(job,/runner.arch/);assert.match(job,/1.98.1/);assert.match(job,/Cargo.lock/);assert.match(job,/-v3-lines-/);
   assert.match(job,/target\/debug\/deps/);assert.doesNotMatch(job,/path:.*\.cargo\s*$/m);
  }
@@ -186,4 +188,9 @@ test('Rust caches follow build inputs and avoid saving the same dependencies for
   assert.doesNotMatch(key,/github.sha|workflows\/ci.yml/);
   assert.ok(cache.includes(`\${{ runner.os }}-\${{ runner.arch }}-rust-1.98.1-${name}-v3-lines-`),'restore previously validated dependency outputs, then let Cargo check fingerprints');
  }
+});
+test('frontend saves its new ordinary code outputs while reusing the previous cache',()=>{
+ const frontend=ciJob('frontend');
+ assert.match(frontend,/key: .*frontend-v3-lines-docs-/);
+ assert.match(frontend,/restore-keys: \|\n\s+.*frontend-v3-lines-docs-\n\s+.*frontend-v3-lines-\n/);
 });

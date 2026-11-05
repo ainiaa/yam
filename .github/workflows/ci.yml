@@ -92,8 +92,9 @@ jobs:
             apps/desktop/src-tauri/target/debug/build
             apps/desktop/src-tauri/target/debug/.fingerprint
             apps/desktop/src-tauri/target/debug/incremental
-          key: ${{ runner.os }}-${{ runner.arch }}-rust-1.98.1-frontend-v3-lines-${{ hashFiles('apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml', '.cargo/config.toml', 'apps/desktop/src-tauri/.cargo/config.toml') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-rust-1.98.1-frontend-v3-lines-docs-${{ hashFiles('apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml', '.cargo/config.toml', 'apps/desktop/src-tauri/.cargo/config.toml') }}
           restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-rust-1.98.1-frontend-v3-lines-docs-
             ${{ runner.os }}-${{ runner.arch }}-rust-1.98.1-frontend-v3-lines-
       - name: Record runner capacity
         run: node -e "const os=require('node:os');console.log(JSON.stringify({cpus:os.cpus().length,parallelism:os.availableParallelism(),memoryBytes:os.totalmem()}))"
@@ -106,7 +107,8 @@ jobs:
       - name: Check delivery policy before expensive builds
         working-directory: .
         run: python3 -m unittest scripts.test_project_quality scripts.test_project_mutation scripts.test_memory_self_smoke -v
-      - run: cargo check --manifest-path src-tauri/Cargo.toml --locked
+      - name: Generate native schemas and verify ordinary Rust documentation tests
+        run: cargo test --doc --manifest-path src-tauri/Cargo.toml --locked -- --test-threads=2
       - run: pnpm test:coverage
       - name: Verify loopback fixtures avoid DNS
         run: python3 -m unittest discover -s ../../scripts -p test_loopback_fixtures.py
@@ -245,8 +247,6 @@ jobs:
         run: python3 -c "import pathlib,json; p=pathlib.Path('src-tauri/target/ci-validation.json'); p.parent.mkdir(parents=True,exist_ok=True); p.write_text(json.dumps({'identifier':'com.yam.platform-validation'}),encoding='utf-8')"
       - name: Package desktop application
         run: pnpm tauri build --debug --bundles app --config src-tauri/target/ci-validation.json
-      - name: Verify Rust documentation tests in the ordinary build
-        run: cargo test --doc --manifest-path src-tauri/Cargo.toml --locked -- --test-threads=2
       - name: Validate actual background process lifecycle
         run: python3 ../../scripts/background-platform-smoke.py --desktop --executable "src-tauri/target/debug/bundle/macos/YAM.app/Contents/MacOS/yam-desktop" --identifier com.yam.platform-validation
       - name: Sign and archive macOS test package

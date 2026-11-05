@@ -44,13 +44,13 @@ codex -c 'sandbox_mode="read-only"' -c 'approval_policy="never"' review --base B
 
 ## CI 覆盖与缓存（全量路线）
 
-- `frontend` 与 `native` 在独立 macOS runner 并行；各自准备所需终端资源。前端测试前仍生成原生权限 schema。
+- `frontend` 与 `native` 在独立 macOS runner 并行；各自准备所需终端资源。前端测试前用普通 `cargo test --doc` 同时生成原生权限 schema、执行 doctest 和生成可复用代码，替代仅生成检查元数据的 `cargo check`。
 - 内存自采样在 `native` 覆盖率测试之后运行，复用同一 runner、同一 `CARGO_LLVM_COV_TARGET_DIR` 中唯一的当前测试程序；缺失或歧义即失败，不回退到普通构建缓存。采样 helper 的额外 profile 写入空设备，避免污染已完成的覆盖率结果。选择逻辑用 Mock/临时普通文件验证，不在本机启动验收 App。
 - `native` 用完整 crate 的 `cargo llvm-cov --no-cfg-coverage --fail-under-lines=85` 执行单元/集成测试一次。关闭额外 `cfg(coverage)`，保留普通配置语义；不筛选测试、不降低门槛、不复用旧 profile 数据。
-- `package` 仅在前端和原生两路都成功且 `!cancelled()` 时运行普通应用构建、doctest、实际后台生命周期、签名归档及产物上传；新提交取消旧运行时，打包仍可被取消。
+- `package` 仅在前端和原生两路都成功且 `!cancelled()` 时运行普通应用构建、实际后台生命周期、签名归档及产物上传；doctest 已由前端门禁执行一次，不在打包后切换测试依赖再编译。新提交取消旧运行时，打包仍可被取消。
 - `desktop` 以 `always()` 运行轻量 checkout 和 Python 路线门禁，不执行构建/上传；长打包作业不得使用 `always()`。[GitHub 取消语义](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-cancellation)
 - 测试产物名包含 `github.run_attempt`，同一提交重跑时保留各次独立产物，避免不可变同名产物冲突；归档内部文件名和签名验收不变。
-- Rust 缓存按 OS、架构、工具链、Cargo 锁文件/清单/config 及作业用途隔离。缓存代号 `v2` 明确区分当前策略；变更编译配置/缓存语义时升级代号。不把工作流排版或每个提交 SHA 加入缓存身份，避免不相关 CI 修改使依赖缓存失效、每个提交重复保存大缓存。允许回退到同平台/工具链/用途的已有缓存，Cargo 仍核对当前源码和编译参数的指纹。只缓存依赖、编译输出及固定版本覆盖率工具；不缓存原始覆盖率 profile 或整个 coverage 根目录。覆盖率继续使用工具默认清理行为，缓存命中也必须实际执行测试。
+- Rust 缓存按 OS、架构、工具链、Cargo 锁文件/清单/config 及作业用途隔离。缓存代号为 `v3-lines`；前端新增普通 doctest 编译输出使用 `v3-lines-docs`，仍回退旧前端缓存以复用依赖。原生和打包键不变，避免无关的冷编译。不把工作流排版或每个提交 SHA 加入缓存身份，避免不相关 CI 修改使依赖缓存失效、每个提交重复保存大缓存。允许回退到同平台/工具链/用途的已有缓存，Cargo 仍核对当前源码和编译参数的指纹。只缓存依赖、编译输出及固定版本覆盖率工具；不缓存原始覆盖率 profile 或整个 coverage 根目录。覆盖率继续使用工具默认清理行为，缓存命中也必须实际执行测试。
 - 工具/平台能力缺口在复核前注明。Windows 用例在 macOS 上不能视作运行通过；产品运行时的完整机器化 TDD 追溯未覆盖项不因 CI 优化而被改写为通过。
 
 ## 耗时对照
