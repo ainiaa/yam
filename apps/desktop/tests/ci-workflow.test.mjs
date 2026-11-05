@@ -91,25 +91,38 @@ test('macOS cleanup inert child and fault state share the test platform boundary
  }
 });
 
-test('frontend and native checks run independently and desktop fails closed on either result',()=>{
- const frontend=ciJob('frontend'),native=ciJob('native'),gate=ciJob('desktop');
- const beforeCheckout=gate.slice(0,gate.indexOf('      - uses: actions/checkout'));
- assert.match(beforeCheckout,/working-directory: \$\{\{ runner.temp \}\}/,'pre-check must not inherit a repository directory before checkout');
- assert.doesNotMatch(frontend,/^    needs:/m);assert.doesNotMatch(native,/^    needs:/m);
- assert.match(gate,/needs: \[frontend, native, package\]/);assert.match(gate,/if: \$\{\{ always\(\) \}\}/);
- assert.match(gate,/FRONTEND_RESULT: \$\{\{ needs.frontend.result \}\}/);
- assert.match(gate,/NATIVE_RESULT: \$\{\{ needs.native.result \}\}/);
- assert.ok(gate.includes('test "$FRONTEND_RESULT" = success'));assert.ok(gate.includes('test "$NATIVE_RESULT" = success'));assert.ok(gate.includes('test "$PACKAGE_RESULT" = success'));
- assert.ok(ciJob('package').includes('name: yam-test-package-macos-${{ github.run_attempt }}'),'reruns retain distinct immutable artifacts');
- for(const job of [frontend,native,ciJob('package'),gate])assert.doesNotMatch(job,/continue-on-error: true/);
-});
-test('desktop packaging guard rejects failure, cancellation, skipped and missing upstream results',{skip:process.platform==='win32'?'POSIX CI guard requires /bin/sh':false},()=>{
- const script=ciJob('desktop').match(/run: \|\n([\s\S]*?)(?=\n      -|$)/)?.[1];
- assert.ok(script,'the packaging guard must run before checkout and build');
- for(const frontend of ['success','failure','cancelled','skipped',''])for(const native of ['success','failure','cancelled','skipped',''])for(const packaged of ['success','failure','cancelled','skipped','']){
-  const result=spawnSync('/bin/sh',['-c',script],{env:{...process.env,FRONTEND_RESULT:frontend,NATIVE_RESULT:native,PACKAGE_RESULT:packaged}});
-  assert.equal(result.status===0,frontend==='success'&&native==='success'&&packaged==='success',`${frontend}/${native}/${packaged}`);
+test('impact selection covers the complete PR and full jobs depend on the plan',()=>{
+ const plan=ciJob('plan');
+ assert.match(plan,/fetch-depth: 0/);
+ assert.ok(plan.includes('BASE_SHA: ${{ github.event.pull_request.base.sha }}'));
+ assert.ok(plan.includes('HEAD_SHA: ${{ github.event.pull_request.head.sha }}'));
+ assert.ok(plan.includes('EVENT_NAME: ${{ github.event_name }}'));
+ assert.match(plan,/python3 -m unittest scripts.test_ci_impact -v/);
+ assert.match(plan,/python3 scripts\/ci_impact.py plan/);
+ for(const name of ['frontend','native']){
+  const job=ciJob(name);assert.match(job,/needs: \[plan\]/);
+  assert.ok(job.includes("if: ${{ needs.plan.outputs.route == 'full' }}"));
  }
+});
+test('quick checks use only mapped fixtures and never bootstrap native builds or GUI',()=>{
+ const quick=ciJob('quick');
+ assert.match(quick,/needs: \[plan\]/);
+ assert.ok(quick.includes("needs.plan.outputs.route == 'quick' || needs.plan.outputs.exercise_quick == 'true'"));
+ assert.match(quick,/pnpm install --frozen-lockfile/);
+ assert.doesNotMatch(quick,/pnpm build|build:terminal/);
+ assert.match(quick,/python3 -m unittest scripts.test_loopback_fixtures scripts.test_terminal_latency_probe -v/);
+ assert.doesNotMatch(quick,/cargo|rust-toolchain|swiftc|webkit-memory-smoke.py|background-platform-smoke|memory-self-smoke.py|upload-artifact/);
+});
+test('desktop always validates the selected route and all corresponding job results',()=>{
+ const gate=ciJob('desktop');
+ assert.match(gate,/needs: \[plan, quick, frontend, native, package\]/);
+ assert.match(gate,/if: \$\{\{ always\(\) \}\}/);
+ assert.match(gate,/python3 scripts\/ci_impact.py gate/);
+ for(const name of ['plan','quick','frontend','native','package'])assert.ok(gate.includes(`${name.toUpperCase()}_RESULT: \${{ needs.${name}.result }}`));
+ assert.ok(gate.includes('ROUTE: ${{ needs.plan.outputs.route }}'));
+ assert.ok(gate.includes('EXERCISE_QUICK: ${{ needs.plan.outputs.exercise_quick }}'));
+ for(const name of ['plan','quick','frontend','native','package','desktop'])assert.doesNotMatch(ciJob(name),/continue-on-error: true/);
+ assert.ok(ciJob('package').includes('name: yam-test-package-macos-${{ github.run_attempt }}'));
 });
 test('native coverage runs the full suite once with ordinary cfg semantics and preserves normal linting',()=>{
  const native=ciJob('native');
@@ -125,7 +138,7 @@ test('both CI workers prepare native resources and cache only reusable compilati
   const job=ciJob(name);
   for(const command of ['pnpm install --frozen-lockfile','pnpm build:terminal','pnpm build:terminal --script-only --notice-mode developer'])assert.ok(job.includes(command),`${name}: ${command}`);
   assert.ok(job.indexOf('pnpm build:terminal --script-only')<job.indexOf(name==='frontend'?'cargo check':'cargo fmt'));
-  assert.match(job,/actions\/cache@v4/);assert.match(job,/runner.os/);assert.match(job,/runner.arch/);assert.match(job,/1.98.1/);assert.match(job,/Cargo.lock/);assert.match(job,/github.sha/);
+  assert.match(job,/actions\/cache@v4/);assert.match(job,/runner.os/);assert.match(job,/runner.arch/);assert.match(job,/1.98.1/);assert.match(job,/Cargo.lock/);assert.match(job,/-v2-/);
   assert.match(job,/target\/debug\/deps/);assert.doesNotMatch(job,/path:.*\.cargo\s*$/m);
  }
  const native=ciJob('native');
@@ -137,11 +150,11 @@ test('both CI workers prepare native resources and cache only reusable compilati
 
 test('superseded packaging remains cancellable and the final desktop gate cannot mask its result',()=>{
  const packaged=ciJob('package'),gate=ciJob('desktop');
- assert.match(packaged,/needs: \[frontend, native\]/);
- assert.ok(packaged.includes("if: ${{ !cancelled() && needs.frontend.result == 'success' && needs.native.result == 'success' }}"));
+ assert.match(packaged,/needs: \[plan, frontend, native\]/);
+ assert.ok(packaged.includes("!cancelled() && needs.plan.result == 'success' && needs.plan.outputs.route == 'full' && needs.frontend.result == 'success' && needs.native.result == 'success'"));
  assert.doesNotMatch(packaged,/always\(\)/);
  assert.match(gate,/PACKAGE_RESULT: \$\{\{ needs.package.result \}\}/);
- assert.doesNotMatch(gate,/pnpm|cargo|actions\/checkout|upload-artifact/,'the always-running gate must remain short and source-independent');
+ assert.doesNotMatch(gate,/pnpm|cargo|upload-artifact/,'the always-running gate must remain short');
  assert.match(gate,/timeout-minutes: 2/);
 });
 test('native self-sampling stays beside the freshly executed coverage test binary',()=>{
@@ -150,4 +163,14 @@ test('native self-sampling stays beside the freshly executed coverage test binar
  assert.ok(native.indexOf('memory-self-smoke.py')>native.indexOf('cargo llvm-cov --manifest-path'));
  assert.match(native,/^    env:\n      CARGO_LLVM_COV_TARGET_DIR:.*target\/coverage/m);
  assert.match(frontend,/scripts.test_memory_self_smoke/,'fixture selection must be tested without starting an application');
+});
+
+test('Rust caches follow build inputs and avoid saving the same dependencies for every commit',()=>{
+ for(const name of ['frontend','native','package']){
+  const job=ciJob(name),cache=job.slice(job.indexOf('      - name: Restore Rust compilation cache'),job.indexOf('      - name: Select native shell'));
+  const key=cache.match(/^\s+key: (.*)$/m)?.[1];assert.ok(key);
+  assert.match(key,/-v2-/);assert.match(key,/Cargo.lock/);assert.match(key,/Cargo.toml/);assert.match(key,/config.toml/);
+  assert.doesNotMatch(key,/github.sha|workflows\/ci.yml/);
+  assert.ok(cache.includes(`\${{ runner.os }}-\${{ runner.arch }}-rust-1.98.1-${name}-`),'restore previously validated dependency outputs, then let Cargo check fingerprints');
+ }
 });
