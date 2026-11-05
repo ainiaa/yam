@@ -103,7 +103,7 @@ jobs:
             ${{ runner.os }}-${{ runner.arch }}-rust-1.98.1-frontend-v3-lines-docs-
             ${{ runner.os }}-${{ runner.arch }}-rust-1.98.1-frontend-v3-lines-
       - name: Record runner capacity
-        run: node -e "const os=require('node:os');console.log(JSON.stringify({cpus:os.cpus().length,parallelism:os.availableParallelism(),memoryBytes:os.totalmem(),cpuModel:os.cpus()[0]?.model,buildJobs:process.env.CARGO_BUILD_JOBS,testConcurrency:2}))"
+        run: node -e "const os=require('node:os');console.log(JSON.stringify({cpus:os.cpus().length,parallelism:os.availableParallelism(),memoryBytes:os.totalmem(),cpuModel:os.cpus()[0]?.model,buildJobs:process.env.CARGO_BUILD_JOBS,testConcurrency:6}))"
       - name: Select native shell fixture environment
         shell: bash
         run: echo "SHELL=/bin/zsh" >> "$GITHUB_ENV"
@@ -178,7 +178,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-rust-1.98.1-native-v3-lines-
       - name: Record runner capacity
-        run: node -e "const os=require('node:os');console.log(JSON.stringify({cpus:os.cpus().length,parallelism:os.availableParallelism(),memoryBytes:os.totalmem(),cpuModel:os.cpus()[0]?.model,buildJobs:process.env.CARGO_BUILD_JOBS,testConcurrency:2}))"
+        run: node -e "const os=require('node:os');console.log(JSON.stringify({cpus:os.cpus().length,parallelism:os.availableParallelism(),memoryBytes:os.totalmem(),cpuModel:os.cpus()[0]?.model,buildJobs:process.env.CARGO_BUILD_JOBS,worktreeTestThreads:1,remainingTestThreads:5,testProcesses:2}))"
       - name: Select native shell fixture environment
         shell: bash
         run: echo "SHELL=/bin/zsh" >> "$GITHUB_ENV"
@@ -252,7 +252,7 @@ jobs:
             ${{ runner.os }}-${{ runner.arch }}-rust-1.98.1-package-v3-lines-
             ${{ runner.os }}-${{ runner.arch }}-rust-1.98.1-frontend-v3-lines-
       - name: Record runner capacity
-        run: node -e "const os=require('node:os');console.log(JSON.stringify({cpus:os.cpus().length,parallelism:os.availableParallelism(),memoryBytes:os.totalmem(),cpuModel:os.cpus()[0]?.model,buildJobs:process.env.CARGO_BUILD_JOBS,testConcurrency:2}))"
+        run: node -e "const os=require('node:os');console.log(JSON.stringify({cpus:os.cpus().length,parallelism:os.availableParallelism(),memoryBytes:os.totalmem(),cpuModel:os.cpus()[0]?.model,buildJobs:process.env.CARGO_BUILD_JOBS}))"
       - name: Select native shell fixture environment
         shell: bash
         run: echo "SHELL=/bin/zsh" >> "$GITHUB_ENV"

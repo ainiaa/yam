@@ -46,7 +46,7 @@ class NativeCoverageTests(unittest.TestCase):
         self.assertEqual(set(groups[0][2]) | set(groups[1][2]), tests)
         self.assertTrue(groups[1][2]["gui::ignored"])
         self.assertIn("--test-threads=1", groups[0][1])
-        self.assertIn("--test-threads=2", groups[1][1])
+        self.assertIn("--test-threads=5", groups[1][1])
         self.assertEqual(len(coverage.partition("/tmp/bin", set(), set())), 1)
         with self.assertRaises(ValueError):
             coverage.partition("/tmp/lib", tests, {"missing"})

@@ -68,7 +68,7 @@ def partition(binary, tests, ignored):
     groups = []
     for label, names, arguments in [
         ("worktree", worktree, [WORKTREE, "--test-threads=1"]),
-        ("remaining", tests - worktree, ["--skip", WORKTREE, "--test-threads=2"]),
+        ("remaining", tests - worktree, ["--skip", WORKTREE, "--test-threads=5"]),
     ]:
         if names or label == "remaining":
             groups.append((str(binary) + "/" + label, [str(binary), *arguments, "--format=pretty", "--color=never"], {name: name in ignored for name in names}))

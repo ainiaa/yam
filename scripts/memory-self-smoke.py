@@ -45,16 +45,20 @@ def main():
                 "CFBundlePackageType": "APPL", "LSUIElement": True,
             }))
             result = pathlib.Path(folder) / "result.json"
+            start = pathlib.Path(folder) / "start"
             log = pathlib.Path(folder) / "log.txt"
             owner = {"pid": os.getpid(), "runtime_pid": parser.pid, "workloads": []}
             subprocess.run([
                 "/usr/bin/open", "-n", "-g",
                 "--env", "YAM_MEMORY_TEST_OWNER=" + json.dumps(owner),
                 "--env", "YAM_MEMORY_TEST_RESULT=" + str(result),
+                "--env", "YAM_MEMORY_TEST_START=" + str(start),
                 "--env", "LLVM_PROFILE_FILE=" + os.devnull,
                 "--stdout", str(log), "--stderr", str(log), str(app), "--args",
                 "memory::tests::native_application_self_sampling", "--ignored", "--nocapture",
             ], check=True)
+            # open belongs to the measured owner tree; release sampling only after it exits.
+            start.touch()
             for _ in range(100):
                 if result.exists():
                     break

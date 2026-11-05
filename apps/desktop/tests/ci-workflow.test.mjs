@@ -203,7 +203,10 @@ test('CI fixes standard runner and test concurrency without changing the package
  assert.match(workflow,/^  CARGO_BUILD_JOBS: 3$/m);
  assert.match(ciJob('native'),/CARGO_BUILD_JOBS: 2/);
  const config=JSON.parse(readFileSync(new URL('apps/desktop/package.json',root),'utf8'));
- assert.match(config.scripts['test:coverage'],/--test-concurrency=2\b/);
+ assert.match(config.scripts['test:coverage'],/--test-concurrency=6\b/);
+ assert.match(ciJob('frontend'),/testConcurrency:6/);
+ assert.match(ciJob('native'),/worktreeTestThreads:1,remainingTestThreads:5,testProcesses:2/);
+ assert.doesNotMatch(ciJob('package'),/testConcurrency:/);
  for(const name of ['frontend','native','package']){
   const job=ciJob(name);
   assert.ok(job.indexOf('--prepare-cache src-tauri/target')<job.indexOf('uses: actions/cache@v4'));

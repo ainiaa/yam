@@ -727,6 +727,12 @@ mod tests {
         let mut after = rows.clone();
         after.insert(4, row(1, Some(40), 4));
         assert!(aggregate(&rows, &after, &[1], &owner).is_err());
+        let mut launching = rows.clone();
+        launching.insert(4, row(owner.pid, Some(40), 4));
+        assert_eq!(
+            aggregate(&launching, &rows, &[1], &owner).unwrap_err(),
+            "Memory process membership changed during sampling"
+        );
         after = rows.clone();
         after.remove(&3);
         assert!(aggregate(&rows, &after, &[1], &owner).is_err());
@@ -810,12 +816,47 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
+    fn wait_for_sampling_start(path: &std::path::Path, timeout: Duration) -> Result<(), String> {
+        let started = Instant::now();
+        while !path.try_exists().map_err(|error| error.to_string())? {
+            if started.elapsed() >= timeout {
+                return Err("Self-sampling launcher did not finish".into());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn self_sampling_start_barrier_is_bounded_and_requires_launcher_completion() {
+        let folder =
+            std::env::temp_dir().join(format!("yam-sampling-{}", crate::next_session_id()));
+        std::fs::create_dir(&folder).unwrap();
+        let start = folder.join("start");
+        assert!(wait_for_sampling_start(&start, Duration::ZERO).is_err());
+        let signal = start.clone();
+        let launcher = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            std::fs::write(signal, b"").unwrap();
+        });
+        wait_for_sampling_start(&start, Duration::from_secs(2)).unwrap();
+        launcher.join().unwrap();
+        wait_for_sampling_start(&start, Duration::ZERO).unwrap();
+        let invalid = start.join("not-a-directory");
+        assert!(wait_for_sampling_start(&invalid, Duration::ZERO).is_err());
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
     #[test]
     #[ignore = "must launch this test binary as an isolated LaunchServices app"]
     fn native_application_self_sampling() {
         let owner: OwnerProcesses =
             serde_json::from_str(&std::env::var("YAM_MEMORY_TEST_OWNER").unwrap()).unwrap();
-        let result = sample(&owner);
+        let start = std::env::var("YAM_MEMORY_TEST_START").unwrap();
+        let result = wait_for_sampling_start(std::path::Path::new(&start), Duration::from_secs(10))
+            .and_then(|()| sample(&owner));
         std::fs::write(
             std::env::var("YAM_MEMORY_TEST_RESULT").unwrap(),
             serde_json::to_vec(&result).unwrap(),

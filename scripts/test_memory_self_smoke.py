@@ -1,10 +1,13 @@
 """Author: Jeff.Liu. Resolve native smoke fixtures without launching applications."""
 import importlib.util
+import contextlib
+import io
+import json
 import os
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 @unittest.skipIf(os.name == "nt", "macOS executable permission fixtures")
@@ -67,6 +70,49 @@ class MemorySelfSmokeTests(unittest.TestCase):
                 self.module.main()
             resolve.assert_called_once_with(self.root, str(self.coverage))
             launch.assert_not_called()
+
+    def test_sampling_is_released_only_after_launcher_exits_and_failure_is_preserved(self):
+        binary = self.binary(self.coverage)
+        for outcome in [{"Ok": {"application_bytes": 1}}, {"Err": "membership changed"}, None]:
+            parser = Mock(pid=123)
+            paths = {}
+
+            def launch(argv, **kwargs):
+                self.assertTrue(kwargs["check"])
+                env = dict(arg.split("=", 1) for index, arg in enumerate(argv)
+                           if index and argv[index - 1] == "--env")
+                self.assertIn("YAM_MEMORY_TEST_START", env,
+                              "sampling must wait for the launcher to leave the owner tree")
+                paths["start"] = Path(env["YAM_MEMORY_TEST_START"])
+                paths["result"] = Path(env["YAM_MEMORY_TEST_RESULT"])
+                self.assertFalse(paths["start"].exists(), "launcher is still alive")
+                self.assertEqual(env["LLVM_PROFILE_FILE"], os.devnull)
+                self.assertEqual(json.loads(env["YAM_MEMORY_TEST_OWNER"]),
+                                 {"pid": os.getpid(), "runtime_pid": parser.pid, "workloads": []})
+
+            def sample(_):
+                self.assertTrue(paths["start"].is_file(), "launcher has exited before sampling")
+                if outcome is not None:
+                    paths["result"].write_text(json.dumps(outcome))
+
+            with self.subTest(outcome=outcome), \
+                    patch.object(self.module.platform, "system", return_value="Darwin"), \
+                    patch.object(self.module, "native_test_binary", return_value=binary), \
+                    patch.object(self.module.subprocess, "Popen", return_value=parser), \
+                    patch.object(self.module.subprocess, "run", side_effect=launch), \
+                    patch.object(self.module.time, "sleep", side_effect=sample), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                if outcome is None:
+                    with self.assertRaisesRegex(AssertionError, "did not finish"):
+                        self.module.main()
+                elif "Err" in outcome:
+                    with self.assertRaisesRegex(AssertionError, "membership changed"):
+                        self.module.main()
+                else:
+                    self.module.main()
+                parser.terminate.assert_called_once_with()
+                parser.wait.assert_called_once_with(timeout=5)
+                self.assertFalse(paths["start"].parent.exists(), "fixture files are cleaned")
 
 
 if __name__ == "__main__":
