@@ -3,7 +3,8 @@ import argparse
 import base64
 from email.parser import BytesParser
 import json
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
+from socketserver import ThreadingTCPServer
 from pathlib import Path
 import threading
 import time
@@ -213,10 +214,10 @@ def serve(token, receipt_path):
                 pass
             self.close_connection = True
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    server.daemon_threads = True
-    print(json.dumps({"base_url": f"http://127.0.0.1:{server.server_port}"}), flush=True)
-    server.serve_forever()
+    with ThreadingTCPServer(("127.0.0.1", 0), Handler) as server:
+        server.daemon_threads = True
+        print(json.dumps({"base_url": f"http://127.0.0.1:{server.server_address[1]}"}), flush=True)
+        server.serve_forever()
 
 
 if __name__ == "__main__":
