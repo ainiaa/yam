@@ -147,6 +147,7 @@ jobs:
         working-directory: apps/desktop
     steps:
       - name: Require both test jobs before packaging
+        working-directory: ${{ runner.temp }}
         env:
           FRONTEND_RESULT: ${{ needs.frontend.result }}
           NATIVE_RESULT: ${{ needs.native.result }}

@@ -93,6 +93,8 @@ test('macOS cleanup inert child and fault state share the test platform boundary
 
 test('frontend and native checks run independently and desktop fails closed on either result',()=>{
  const frontend=ciJob('frontend'),native=ciJob('native'),gate=ciJob('desktop');
+ const beforeCheckout=gate.slice(0,gate.indexOf('      - uses: actions/checkout'));
+ assert.match(beforeCheckout,/working-directory: \$\{\{ runner.temp \}\}/,'pre-check must not inherit a repository directory before checkout');
  assert.doesNotMatch(frontend,/^    needs:/m);assert.doesNotMatch(native,/^    needs:/m);
  assert.match(gate,/needs: \[frontend, native\]/);assert.match(gate,/if: \$\{\{ always\(\) \}\}/);
  assert.match(gate,/FRONTEND_RESULT: \$\{\{ needs.frontend.result \}\}/);
