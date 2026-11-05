@@ -74,7 +74,7 @@ test('CI supports macOS only while retaining coverage and package lifecycle chec
  const workflow=readFileSync(new URL('.github/workflows/ci.yml',root),'utf8');
  assert.match(workflow,/runs-on: macos-latest/);
  assert.doesNotMatch(workflow,/ubuntu-|windows-latest|matrix\.|apt-get|xvfb|--bundles nsis|--bundles deb/);
- for(const command of ['pnpm test:coverage','cargo llvm-cov --manifest-path','--fail-under-lines=85','--bundles app','background-platform-smoke.py --desktop','codesign --force --deep'])assert.ok(workflow.includes(command),command);
+ for(const command of ['pnpm test:coverage','python3 ../../scripts/native-coverage.py','--bundles app','background-platform-smoke.py --desktop','codesign --force --deep'])assert.ok(workflow.includes(command),command);
 });
 test('CI runs PRs once and cancels superseded checks',()=>{
  const workflow=readFileSync(new URL('.github/workflows/ci.yml',root),'utf8').replace(/\r\n/g,'\n');
@@ -139,8 +139,8 @@ test('desktop always validates the selected route and all corresponding job resu
 });
 test('native coverage runs the full suite once with ordinary cfg semantics and preserves normal linting',()=>{
  const native=ciJob('native');
- assert.equal(native.match(/run: cargo llvm-cov --manifest-path/g)?.length,1);
- assert.match(native,/--locked --no-cfg-coverage --fail-under-lines=85 -- --test-threads=2/);
+ assert.equal(native.match(/run: python3 ..\/..\/scripts\/native-coverage.py/g)?.length,1);
+ assert.match(ciJob('plan'),/python3 -m unittest scripts.test_native_coverage -v/);
  assert.doesNotMatch(native,/run: cargo test|--no-run|--no-clean|--ignore-filename-regex|--exclude|--lib\b|--test-name-pattern/);
  assert.match(native,/cargo clippy --manifest-path src-tauri\/Cargo.toml --all-targets -- -D warnings/);
  const frontend=ciJob('frontend'),packaged=ciJob('package');
@@ -175,7 +175,7 @@ test('superseded packaging remains cancellable and the final desktop gate cannot
 test('native self-sampling stays beside the freshly executed coverage test binary',()=>{
  const native=ciJob('native'),frontend=ciJob('frontend');
  assert.doesNotMatch(frontend,/memory-self-smoke.py/);
- assert.ok(native.indexOf('memory-self-smoke.py')>native.indexOf('cargo llvm-cov --manifest-path'));
+ assert.ok(native.indexOf('memory-self-smoke.py')>native.indexOf('python3 ../../scripts/native-coverage.py'));
  assert.match(native,/^    env:\n      CARGO_LLVM_COV_TARGET_DIR:.*target\/coverage/m);
  assert.match(frontend,/scripts.test_memory_self_smoke/,'fixture selection must be tested without starting an application');
 });

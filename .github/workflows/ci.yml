@@ -25,6 +25,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: python3 -m unittest scripts.test_ci_impact -v
+      - run: python3 -m unittest scripts.test_native_coverage -v
       - name: Select checks from the complete PR diff
         id: impact
         env:
@@ -190,10 +191,10 @@ jobs:
         run: cargo install cargo-llvm-cov --version 0.9.1 --locked
       - name: Verify coverage tool version
         run: test "$(cargo llvm-cov --version)" = "cargo-llvm-cov 0.9.1"
-      - name: Enforce native crate line coverage and run unit/integration tests once
+      - name: Compile native tests once, run isolated groups in parallel and enforce coverage
         env:
           CARGO_BUILD_JOBS: 2
-        run: cargo llvm-cov --manifest-path src-tauri/Cargo.toml --locked --no-cfg-coverage --fail-under-lines=85 -- --test-threads=2
+        run: python3 ../../scripts/native-coverage.py
       - name: Verify memory sampling from its own application coalition
         run: python3 ../../scripts/memory-self-smoke.py
 

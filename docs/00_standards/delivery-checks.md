@@ -46,7 +46,7 @@ codex -c 'sandbox_mode="read-only"' -c 'approval_policy="never"' review --base B
 
 - `frontend` 与 `native` 在独立 macOS runner 并行；各自准备所需终端资源。前端测试前用普通 `cargo test --doc` 同时生成原生权限 schema、执行 doctest 和生成可复用代码，替代仅生成检查元数据的 `cargo check`。
 - 内存自采样在 `native` 覆盖率测试之后运行，复用同一 runner、同一 `CARGO_LLVM_COV_TARGET_DIR` 中唯一的当前测试程序；缺失或歧义即失败，不回退到普通构建缓存。采样 helper 的额外 profile 写入空设备，避免污染已完成的覆盖率结果。选择逻辑用 Mock/临时普通文件验证，不在本机启动验收 App。
-- `native` 用完整 crate 的 `cargo llvm-cov --no-cfg-coverage --fail-under-lines=85` 执行单元/集成测试一次。关闭额外 `cfg(coverage)`，保留普通配置语义；不筛选测试、不降低门槛、不复用旧 profile 数据。
+- `native` 通过 `python3 scripts/native-coverage.py` 使用 `cargo llvm-cov show-env --no-cfg-coverage` 的插桩环境，先清理 workspace 覆盖率产物，再用 `cargo test --no-run --locked --message-format=json` 编译一次。从 Cargo 消息读取全部测试程序，枚举完整清单与 ignored 状态；worktree 组单线程、其余组双线程，最多两个独立进程并行，各自使用自动清理的临时目录。逐组核对实际测试集合、结果和 ignored 状态，失败、超时或清单不匹配即终止本步进程并阻止放行。全部通过后才合并本轮 profile 并要求行覆盖率 85%；保留普通 cfg 语义，不漏测、不重测、不复用旧 profile 数据。
 - `package` 仅在前端和原生两路都成功且 `!cancelled()` 时运行普通应用构建、实际后台生命周期、签名归档及产物上传；doctest 已由前端门禁执行一次，不在打包后切换测试依赖再编译。新提交取消旧运行时，打包仍可被取消。
 - `desktop` 以 `always()` 运行轻量 checkout 和 Python 路线门禁，不执行构建/上传；长打包作业不得使用 `always()`。[GitHub 取消语义](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-cancellation)
 - 测试产物名包含 `github.run_attempt`，同一提交重跑时保留各次独立产物，避免不可变同名产物冲突；归档内部文件名和签名验收不变。
