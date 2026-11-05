@@ -46,3 +46,5 @@ T1/T2/T3 的本机验证均已通过；T3 完整前端为 2335 通过、3 项 op
 追加边界检查复现了模型可通过启动校验、却无法保存和导出的不一致。前后端先补失败用例，再修正模型 ID 字符及长度检查；覆盖 `@` 后缀、Unicode、512/513 边界以及空白、控制字符和凭据 URL 拒绝。正式结果由最新提交的独立复核及 CI 验证。
 
 - 远端覆盖率重跑暴露 Git 私有索引的 racy-clean 边界：复制索引后时间戳变新，会偶发漏掉同秒等长修改。现有忽略规则回归在本机覆盖率构建第 18 次复现；私有索引保留原时间戳，未改动真实索引或放宽快照保护。
+
+- 权限边界核实：Windows 的 `File::set_modified` 经 `SetFileTime` 需要写属性权限。私有索引改用可写句柄，保留真实索引只读；新增 Windows 平台回归（真实索引只读时查询仍成功且字节/时间戳不变）。当前 macOS 不能执行该 Windows 用例，不将文档核实冒充 Windows 运行验证。依据：[Rust 1.98.1 实现](https://github.com/rust-lang/rust/blob/1.98.1/library/std/src/sys/fs/windows.rs)、[SetFileTime 权限要求](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-setfiletime)。

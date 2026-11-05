@@ -846,7 +846,9 @@ fn query_snapshot_changes(
         let modified = fs::metadata(&index)
             .and_then(|metadata| metadata.modified())
             .map_err(|_| "git_query_failed")?;
-        fs::File::open(shadow.0.join("index"))
+        OpenOptions::new()
+            .write(true)
+            .open(shadow.0.join("index"))
             .and_then(|file| file.set_modified(modified))
             .map_err(|_| "git_query_failed")?;
     }
@@ -2083,6 +2085,25 @@ mod tests {
         fs::write(repo.0.join(".git/info/exclude"), "ignored-only.txt\n").unwrap();
         fs::write(linked.join("ignored-only.txt"), "fixture").unwrap();
         assert_eq!(query(&linked).unwrap().dirty, Some(false));
+    }
+    #[cfg(windows)]
+    #[test]
+    fn t12_private_index_timestamp_does_not_require_source_index_write_access() {
+        let _serial = serial_query_test();
+        let repo = Repo::new();
+        repo.commit();
+        let index = repo.0.join(".git/index");
+        let bytes = fs::read(&index).unwrap();
+        let modified = fs::metadata(&index).unwrap().modified().unwrap();
+        let permissions = fs::metadata(&index).unwrap().permissions();
+        let mut read_only = permissions.clone();
+        read_only.set_readonly(true);
+        fs::set_permissions(&index, read_only).unwrap();
+        let result = query(&repo.0);
+        fs::set_permissions(&index, permissions).unwrap();
+        assert_eq!(result.unwrap().dirty, Some(false));
+        assert_eq!(fs::read(&index).unwrap(), bytes);
+        assert_eq!(fs::metadata(&index).unwrap().modified().unwrap(), modified);
     }
     #[test]
     fn ignore_fix_effective_global_patterns_preserve_diff_inventory_and_original_files() {
