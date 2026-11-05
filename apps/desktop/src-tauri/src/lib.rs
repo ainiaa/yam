@@ -3708,6 +3708,7 @@ async fn get_git_changes(
     query_token: String,
     selected_path: Option<String>,
     side: Option<String>,
+    baseline: Option<String>,
 ) -> Result<git_context::GitChanges, String> {
     let client = manager
         .background_client
@@ -3722,6 +3723,9 @@ async fn get_git_changes(
         }
         if let Some(side) = side {
             args["side"] = side.into();
+        }
+        if let Some(baseline) = baseline {
+            args["baseline"] = baseline.into();
         }
         serde_json::from_value(client.call("get_git_changes", args)?)
             .map_err(|_| "git_query_failed".into())

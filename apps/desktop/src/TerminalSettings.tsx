@@ -65,15 +65,17 @@ export function TerminalSettings({fonts=["SFMono-Regular","Menlo","Monaco","Cons
 }
 
 export function CommandPalette({query,onQuery,entries,onChoose,onClose}:{query:string;onQuery:(value:string)=>void;entries:PaletteEntry[];onChoose:(entry:PaletteEntry)=>void;onClose:()=>void}){
- const dialog=useRef<HTMLDialogElement>(null),input=useRef<HTMLInputElement>(null),composing=useRef(false),[selected,setSelected]=useState(0);
+ const dialog=useRef<HTMLDialogElement>(null),input=useRef<HTMLInputElement>(null),composing=useRef(false),[selected,setSelected]=useState<{query:string;entry?:PaletteEntry}>(()=>({query,entry:entries[0]}));
  useEffect(()=>{dialog.current?.showModal();input.current?.focus();},[]);
- useEffect(()=>setSelected(0),[query]);
- const index=Math.min(selected,entries.length-1);
- return <dialog ref={dialog} className="app-dialog command-palette-dialog" aria-labelledby="command-palette-title" onCancel={event=>{event.preventDefault();onClose();}}>
-  <header className="dialog-header"><h2 id="command-palette-title">{t("Command palette")}</h2><button type="button" onClick={onClose}>{t("Close")}</button></header>
+ useEffect(()=>setSelected({query,entry:entries[0]}),[query]);
+ const index=selected.query===query?entries.findIndex(entry=>entry.action===selected.entry?.action&&entry.sessionId===selected.entry?.sessionId):entries.length?0:-1;
+ useEffect(()=>{dialog.current?.querySelector("button.selected")?.scrollIntoView({block:"nearest"});},[index,query]);
+ function cancel(){dialog.current?.close();onClose();}
+ return <dialog ref={dialog} className="app-dialog command-palette-dialog" aria-labelledby="command-palette-title" onCancel={event=>{event.preventDefault();cancel();}}>
+  <header className="dialog-header"><h2 id="command-palette-title">{t("Command palette")}</h2><button type="button" onClick={cancel}>{t("Close")}</button></header>
   <form className="dialog-fields" onSubmit={event=>{event.preventDefault();if(!composing.current&&entries[index])onChoose(entries[index]);}}>
-   <label>{t("Find an action or loaded session")}<input ref={input} aria-label={t("Command query")} maxLength={256} value={query} onCompositionStart={()=>{composing.current=true;}} onCompositionEnd={()=>{composing.current=false;}} onChange={event=>onQuery(event.target.value)} onKeyDown={event=>{if(event.nativeEvent.isComposing)return;if(event.key==="ArrowDown"||event.key==="ArrowUp"){event.preventDefault();setSelected(value=>Math.max(0,Math.min(entries.length-1,value+(event.key==="ArrowDown"?1:-1))));}}}/></label>
-   <ul className="command-palette-results" aria-label={t("Commands")}>{entries.map((entry,i)=><li key={`${entry.action}:${entry.sessionId??""}`}><button type="button" className={i===index?"selected":""} onClick={()=>onChoose(entry)}>{entry.label}</button></li>)}</ul>
+   <label>{t("Find an action or loaded session")}<input ref={input} aria-label={t("Command query")} maxLength={256} value={query} onCompositionStart={()=>{composing.current=true;}} onCompositionEnd={()=>{composing.current=false;}} onChange={event=>onQuery(event.target.value)} onKeyDown={event=>{if(composing.current||event.nativeEvent.isComposing)return;if(event.key==="ArrowDown"||event.key==="ArrowUp"){event.preventDefault();const entry=entries[Math.max(0,Math.min(entries.length-1,index+(event.key==="ArrowDown"?1:-1)))];if(entry)setSelected({query,entry});}}}/></label>
+   <ul className="command-palette-results" aria-label={t("Commands")}>{entries.map((entry,i)=><li key={`${entry.action}:${entry.sessionId??""}`}><button type="button" className={i===index?"selected":""} aria-current={i===index?"true":undefined} onClick={()=>onChoose(entry)}><span>{entry.label}</span>{entry.detail&&<small className="command-palette-detail">{entry.detail}</small>}</button></li>)}</ul>
    {!entries.length&&<p role="status">{t("No matching action or loaded session.")}</p>}
    <p className="log-note">{t("Filtering performs no action. Choose a result to run it. Session results use the loaded history page.")}</p>
   </form>

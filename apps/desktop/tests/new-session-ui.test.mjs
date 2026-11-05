@@ -32,7 +32,7 @@ test('new session keeps directory, CLI and terminal target outside closed advanc
  const primary=controls.filter(n=>!advanced(n)&&attribute(n,'value')?.expression?.getText(file)!=='copyName');
  assert.equal(primary.length,3,'directory, CLI and terminal target are primary inputs');
  assert.ok(primary.some(n=>attribute(n,'aria-label')?.text==='Startup program'));
- assert.doesNotMatch(launchDialog.getText(file),/Run mode|Model source|<GitChanges|<WorktreeControls|<LaunchTemplates|Save current fields as application defaults/);
+ assert.doesNotMatch(launchDialog.getText(file),/Run mode|Model source|<GitChanges|<LaunchTemplates|Save current fields as application defaults/);
  for(const detail of nodes(n=>ts.isJsxElement(n)&&n.openingElement.tagName.getText(file)==='details',launchDialog))assert.equal(attribute(detail,'open'),undefined);
 });
 

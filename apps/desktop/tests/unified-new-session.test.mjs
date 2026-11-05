@@ -16,7 +16,7 @@ import {zshCommandReportingEligible} from '../src/zsh-command-reporting.ts';
 
 const source=ts.createSourceFile('App.tsx',readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
 function nodes(predicate,root=source){const found=[];function visit(n){if(predicate(n))found.push(n);ts.forEachChild(n,visit);}visit(root);return found;}
-function actual(name,bindings){bindings={terminalSettingsRef:{current:{fontFamily:"Menlo",fontSize:13,theme:"app"}},sessionCopy:null,copyName:"",sessionCopyIntent:{current:0},setSessionCopy(){},setCopyName(){},ordinaryLaunchSnapshot:{current:undefined},saveSessionLaunchSettings(){},sessionTerminal:"yam",setLaunchWorktreeAttempt(){},...bindings};const fn=nodes(n=>ts.isFunctionDeclaration(n)&&n.name?.text===name)[0];assert.ok(fn,name);return new Function(...Object.keys(bindings),ts.transpile(fn.getText(source),{target:ts.ScriptTarget.ES2022})+`;return ${name};`)(...Object.values(bindings));}
+function actual(name,bindings){bindings={launchWorkspace:null,setLaunchWorkspace(){},terminalSettingsRef:{current:{fontFamily:"Menlo",fontSize:13,theme:"app"}},sessionCopy:null,copyName:"",sessionCopyIntent:{current:0},setSessionCopy(){},setCopyName(){},ordinaryLaunchSnapshot:{current:undefined},saveSessionLaunchSettings(){},sessionTerminal:"yam",setLaunchWorktreeAttempt(){},...bindings};const fn=nodes(n=>ts.isFunctionDeclaration(n)&&n.name?.text===name)[0];assert.ok(fn,name);return new Function(...Object.keys(bindings),ts.transpile(fn.getText(source),{target:ts.ScriptTarget.ES2022})+`;return ${name};`)(...Object.values(bindings));}
 
 test('the primary new-session button opens the same session dialog',()=>{
  const buttons=nodes(n=>ts.isJsxElement(n)&&n.openingElement.tagName.getText(source)==='button');
@@ -109,8 +109,8 @@ test('cancelled directory selection cannot override the profile directory',async
 
 test('successful worktree launch releases its draft reservation so later drafts cannot reuse it',async()=>{
  for(const result of [undefined,{launch:{adapter:'codex'}}]){
-  const cleared=[],calls=[];await actual('startNewSession',{isMainWindow:true,formAdapter:'codex',formLaunch:{command:null,provider:null},useProjectSettings:false,launchWorktreeAttempt:'reserved',startSession:async(...args)=>{calls.push(args);return result;},setLaunchWorktreeAttempt:value=>cleared.push(value),localStorage:{setItem(){}},setError:assert.fail})();
-  assert.deepEqual(calls,[[undefined,'reserved']]);assert.deepEqual(cleared,result?[undefined]:[]);
+  const cleared=[],workspaces=[],calls=[];await actual('startNewSession',{isMainWindow:true,formAdapter:'codex',formLaunch:{command:null,provider:null},useProjectSettings:false,launchWorkspace:{root:'/repo'},launchWorktreeAttempt:'reserved',startSession:async(...args)=>{calls.push(args);return result;},setLaunchWorktreeAttempt:value=>cleared.push(value),setLaunchWorkspace:value=>workspaces.push(value),localStorage:{setItem(){}},setError:assert.fail})();
+  assert.deepEqual(calls,[[undefined,'reserved']]);assert.deepEqual(cleared,result?[undefined]:[]);assert.deepEqual(workspaces,result?[null]:[]);
  }
 });
 

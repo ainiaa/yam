@@ -4,7 +4,7 @@ import {Select} from "./Select";
 // Author: Jeff.Liu. Read-only Git operations; file contents require a separate action.
 import {useCallback, useEffect, useMemo, useRef, useState} from "react";
 import {invoke} from "@tauri-apps/api/core";
-import {GitChangesController, type GitChangesRequest, type GitChangesState, type GitPatch} from "./git-context";
+import {GitChangesController,validGitBaseline, type GitChangesRequest, type GitChangesState, type GitPatch} from "./git-context";
 import {parseUnifiedDiff, findDiffLine,type DiffTarget} from "./git-diff-navigation";
 import {FilePreview} from "./FilePreview";
 import type {PreviewTarget} from "./file-preview";
@@ -37,7 +37,7 @@ export function GitPatchView({patch,description,onEditLine,onReviewLine}: {patch
     else focusRow(index);
   }
   return <div className="git-patch-view" ref={root}>
-    <p>{description ?? (patch.side === "staged" ? t("Staged changes · old: HEAD · new: index.") : t("Working tree changes · old: index · new: working tree."))} {t("Line numbers refer to these diff sides.")}</p>
+    <p>{description ?? (patch.side === "committed" ? t("Committed changes · old: baseline commit · new: HEAD commit.") : patch.side === "staged" ? t("Staged changes · old: HEAD · new: index.") : t("Working tree changes · old: index · new: working tree."))} {t("Line numbers refer to these diff sides.")}</p>
     {selected&&(selected.newLine!==null||selected.oldLine!==null)&&(onEditLine||onReviewLine)&&<div className="git-diff-navigation">
       <span>{t("Selected snapshot line")}: {selected.newLine??selected.oldLine}</span>
       {onEditLine&&patch.side==="worktree"&&selected.newLine!==null&&<button type="button" onClick={()=>onEditLine(selected.newLine!)}>{t("Edit current line")}</button>}
@@ -67,46 +67,51 @@ export function GitPatchView({patch,description,onEditLine,onReviewLine}: {patch
 
 export function GitChanges({path, owner, sessionId = null,active=true,onOpenFile,onReview}: {path: string; owner: number; active?:boolean; sessionId?:string|null;onOpenFile?:(target:DiffTarget)=>void;onReview?:(target:DiffTarget)=>void}) {
   const [open, setOpen] = useState(false);
-  const previewScope=JSON.stringify([path,owner,sessionId,open]);
+  const [comparison,setComparison]=useState<{path:string;owner:number;baseline:string}|null>(null);
+  const [baselineDraft,setBaselineDraft]=useState("");
+  const baseline=comparison?.path===path&&comparison.owner===owner?comparison.baseline:undefined;
+  const previewScope=JSON.stringify([path,owner,sessionId,open,baseline]);
   const [preview,setPreview]=useState<{scope:string;id:number;target?:PreviewTarget}|null>(null);
   const previewSequence=useRef(0);
   useEffect(()=>{setPreview(null);},[previewScope]);
-  const [snapshot, setState] = useState<(GitChangesState & {path: string; owner: number}) | null>(null);
+  const [snapshot, setState] = useState<(GitChangesState & {path: string; owner: number;baseline?:string}) | null>(null);
   // Hide stale data during render, before passive effects can cancel the old query.
-  const state = open && snapshot?.path === path && snapshot.owner === owner ? snapshot : null;
+  const state = open && snapshot?.path === path && snapshot.owner === owner&&snapshot.baseline===baseline ? snapshot : null;
   const controller = useRef(new GitChangesController());
-  const context = useRef({path, owner, open,sessionId});
-  context.current = {path, owner, open,sessionId};
-  const load = useCallback((selection?: {path: string; side: "staged" | "worktree"}, root?: string,background=false) => {
+  const context = useRef({path, owner, open,sessionId,baseline});
+  context.current = {path, owner, open,sessionId,baseline};
+  const load = useCallback((selection?: {path: string; side: "staged" | "worktree"|"committed"}, root?: string,background=false) => {
     const directory = path, currentOwner = owner;
+    if(baseline===""||context.current.baseline!==baseline||context.current.path!==directory||context.current.owner!==currentOwner||!context.current.open)return Promise.resolve();
     return controller.current.load(
       (args: GitChangesRequest) => invoke("get_git_changes", args),
       token => invoke("cancel_git_changes", {query_token: token}),
       next => {
         const current = context.current;
-        if (current.open && current.path === directory && current.owner === currentOwner&&!(background&&next.kind==="loading")) setState({...next, path: directory, owner: currentOwner});
+        if (current.open && current.path === directory && current.owner === currentOwner&&current.baseline===baseline&&!(background&&next.kind==="loading")) setState({...next, path: directory, owner: currentOwner,baseline});
       },
       selection,
       root,
     );
-  }, [path, owner]);
+  }, [path, owner,baseline]);
+  function selectComparison(next:string|undefined){if(next===baseline){void load();return;}context.current.baseline=next;controller.current.cancel();setState(null);setPreview(null);setComparison(next===undefined?null:{path,owner,baseline:next});}
   useEffect(() => {
-    context.current = {path, owner, open,sessionId};
-    controller.current.select(path, String(owner));
+    context.current = {path, owner, open,sessionId,baseline};
+    controller.current.select(path, String(owner),baseline);
     setState(null);
     return () => {
       context.current.open = false;
       controller.current.cancel();
     };
-  }, [open, path, owner, load]);
+  }, [open, path, owner,baseline, load]);
   useEffect(()=>{
-    controller.current.select(path,String(owner));
+    controller.current.select(path,String(owner),baseline);
     if(open&&active){
       const latest=refreshState.current,value=latest?.kind==="ready"?latest.value:null,patch=value?.patch;
       void load(patch?{path:patch.path,side:patch.side}:undefined,value?.root??undefined,!!value);
     }
     return()=>controller.current.cancel();
-  },[open,active,path,owner,load]);
+  },[open,active,path,owner,baseline,load]);
   const close = () => {
     context.current.open = false;
     controller.current.cancel();
@@ -125,7 +130,7 @@ export function GitChanges({path, owner, sessionId = null,active=true,onOpenFile
     });
   },[open,active,load]);
   function act(file:string,line:number|null,side:"old"|"new",basis:"staged"|"worktree",action:((target:DiffTarget)=>void)|undefined){
-    const current=context.current;if(!action||!value?.root||!sessionId||!current.open||current.path!==path||current.owner!==owner||current.sessionId!==sessionId)return;
+    const current=context.current;if(!action||!value?.root||!sessionId||!current.open||current.path!==path||current.owner!==owner||current.sessionId!==sessionId||current.baseline!==baseline)return;
     action({sessionId,absolutePath:`${value.root.replace(/\/$/,"")}/${file}`,line,side,basis});
   }
   return <section className="git-changes">
@@ -133,6 +138,11 @@ export function GitChanges({path, owner, sessionId = null,active=true,onOpenFile
       <div className="git-changes-heading">
         <h3>{t("Git changes")}</h3><button type="button" onClick={close}>{t("Close Git changes")}</button>
       </div>
+      <div role="group" aria-label={t("Comparison scope")}>
+        <button type="button" aria-pressed={baseline===undefined} onClick={()=>selectComparison(undefined)}>{t("Uncommitted changes")}</button>
+        <button type="button" aria-pressed={baseline!==undefined} onClick={()=>selectComparison("")}>{t("Committed changes")}</button>
+      </div>
+      {baseline!==undefined&&<div className="project-files-controls"><label>{t("Comparison baseline")}<input aria-label={t("Comparison baseline")} value={baselineDraft} maxLength={256} placeholder="refs/heads/main" onChange={event=>setBaselineDraft(event.target.value)}/></label><button type="button" disabled={!validGitBaseline(baselineDraft.trim())} onClick={()=>selectComparison(baselineDraft.trim())}>{t("Compare with HEAD")}</button><p>{t("Compare the selected local commit directly with HEAD. No fetch or merge-base inference.")}</p></div>}
       <p>{t("Read only. Untracked files show names only until explicitly previewed. Preview reads the current working tree, including for staged rows.")}</p>
       {state?.kind === "loading" && <p role="status">{t("Reading Git changes…")}</p>}
       {state?.kind === "unavailable" && <div role="alert">
@@ -140,25 +150,27 @@ export function GitChanges({path, owner, sessionId = null,active=true,onOpenFile
         <button type="button" onClick={() => load()}>{t("Retry")}</button>
       </div>}
       {value && <>
+        {value.comparison&&<p>{t("Baseline commit")}: <code>{value.comparison.base}</code> → HEAD: <code>{value.comparison.head}</code> ({value.comparison.reference})</p>}
         <p>{value.root === null ? t("Not a Git repository") : value.rows.length === 0 ? t("No changes") : value.root}</p>
         <ul>{value.rows.map(row => <li key={row.path}>
           <span>{row.path}</span>
           {row.untracked ? <span>{t("Untracked · names only")}</span> : <>
+            {row.committed&&<button type="button" aria-label={t("Committed changes for {{value0}}",{value0:row.path})} onClick={()=>load({path:row.path,side:"committed"},value.root??undefined)}>{t("Committed changes")} ({row.committed})</button>}
             {row.staged !== " " && <button type="button" aria-label={t("Staged changes for {{value0}}", {value0:row.path})}
               onClick={() => load({path: row.path, side: "staged"}, value.root ?? undefined)}>{t("Staged (")}{row.staged})</button>}
             {row.worktree !== " " && <button type="button" aria-label={t("Worktree changes for {{value0}}", {value0:row.path})}
               onClick={() => load({path: row.path, side: "worktree"}, value.root ?? undefined)}>{t("Worktree (")}{row.worktree})</button>}
           </>}
           {sessionId&&onOpenFile&&<button type="button" disabled={row.unsupported} onClick={()=>act(row.path,null,"new","worktree",onOpenFile)}>{t("Edit current file")}</button>}
-          {sessionId&&onReview&&<button type="button" onClick={()=>act(row.path,null,"new","worktree",onReview)}>{t("Review this file")}</button>}
+          {baseline===undefined&&sessionId&&onReview&&<button type="button" onClick={()=>act(row.path,null,"new","worktree",onReview)}>{t("Review this file")}</button>}
           <button type="button" aria-label={t("Preview current file {{value0}}", {value0:row.path})} disabled={row.unsupported} onClick={()=>{
-            const current=context.current;if(!current.open||current.path!==path||current.owner!==owner||current.sessionId!==sessionId)return;
+            const current=context.current;if(!current.open||current.path!==path||current.owner!==owner||current.sessionId!==sessionId||current.baseline!==baseline)return;
             setPreview({scope:previewScope,id:++previewSequence.current,target:sessionId&&value.root?{sessionId,path:`${value.root.replace(/\/$/,"")}/${row.path}`}:undefined});
           }}>{t("Preview current file")}</button>
         </li>)}</ul>
         {value.patch && <div className="git-patch">
           <h4>{value.patch.side} · {value.patch.path}</h4>
-          {value.patch.kind === "text" ? <GitPatchView key={JSON.stringify([path,owner,value.patch.path,value.patch.side])} patch={value.patch} onEditLine={value.patch.side==="worktree"&&onOpenFile?line=>act(value.patch!.path,line,"new","worktree",onOpenFile):undefined} onReviewLine={onReview?(side,line)=>act(value.patch!.path,line,side,value.patch!.side,onReview):undefined}/> : <p>{value.patch.kind === "binary"
+          {value.patch.kind === "text" ? <GitPatchView key={JSON.stringify([path,owner,value.patch.path,value.patch.side,value.comparison])} patch={value.patch} onEditLine={value.patch.side==="worktree"&&onOpenFile?line=>act(value.patch!.path,line,"new","worktree",onOpenFile):undefined} onReviewLine={onReview&&value.patch.side!=="committed"?(side,line)=>act(value.patch!.path,line,side,value.patch!.side as "staged"|"worktree",onReview):undefined}/> : <p>{value.patch.kind === "binary"
             ? t("Binary changes cannot be shown as text.") : t("This change type has no text comparison.")}</p>}
         </div>}
       </>}

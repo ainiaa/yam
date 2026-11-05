@@ -11,6 +11,25 @@ const record={attempt:"a".repeat(64),session_id:"s-123-1",repository:"/fixture/r
 const preview={...record,state:"creating",checkout_complete:false,reference:"refs/heads/main",revision:1};
 const request={root:record.repository,target:record.target,reference:"refs/heads/main",branch:null};
 const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return {promise,resolve,reject};};
+test('worktree suggestions use a sibling directory and editable codex branch on POSIX and Windows',()=>{
+ assert.equal(typeof worktree.suggestWorktree,'function');
+ for(const [root,target] of [['/work/中文 repo/','/work/中文 repo-task-1234abcd'],['C:\\work\\repo\\','C:\\work\\repo-task-1234abcd'],['C:/work/repo/','C:/work/repo-task-1234abcd']])assert.deepEqual(worktree.suggestWorktree(root,'1234abcd'),{target,branch:'codex/task-1234abcd'});
+ for(const root of ['', '/', 'C:\\', 'relative'])assert.equal(worktree.suggestWorktree(root,'1234abcd').target,'');
+});
+
+test('creation-only component suggests fields and reuses preview/create without management or launch actions',async()=>{
+ const tree=await renderManaged({root:record.repository,owner:1,selected:null,creationOnly:true,onCreated(){}},[record]);
+ const inputs=elements(tree).filter(item=>item.type==='input');assert.match(inputs[0].props.value,/^\/fixture\/repo-task-[a-f0-9]{8}$/);assert.match(inputs[2].props.value,/^codex\/task-[a-f0-9]{8}$/);
+ const buttons=elements(tree).filter(item=>item.type==='button').map(item=>item.children.flat(Infinity).join(''));
+ assert.ok(buttons.includes('Preview creation'));assert.ok(!buttons.includes('Preview cleanup'));assert.ok(!buttons.includes('Select for first session'));
+ const details=elements(tree).find(item=>item.type==='details');assert.equal(details.props.open,true);
+});
+
+test('double creation keeps the first in-flight guard until the single owner result settles',async()=>{
+ const selection=new worktree.WorktreeSelection();selection.select(record.repository,'1');await selection.previewCreate(request,async()=>preview);
+ const pending=deferred(),calls=[],values={context:{current:{root:record.repository,owner:1,version:0,alive:true}},flow:{current:selection},root:record.repository,owner:1,invoke:async()=>{calls.push('create');return pending.promise;},setBusy:value=>calls.push(['busy',value]),setError(){},setPreview(){},setRecords(){},onCreated:()=>calls.push('created')};
+ const create=await actualFunction('create',values,'../src/WorktreeControls.tsx');const first=create();await create();assert.deepEqual(calls,[['busy',true],'create']);pending.resolve(record);await first;assert.equal(calls.filter(value=>value==='create').length,1);assert.equal(calls.filter(value=>value==='created').length,1);
+});
 test("T13 finite records enforce checkout completion and prospective ID branch",()=>{
  assert.equal(worktree.isManagedWorktree(record),true);
  for(const value of [null,{...record,state:"unknown"},{...record,extra:"command"},{...record,checkout_complete:"true"}])assert.equal(worktree.isManagedWorktree(value),false);
@@ -66,7 +85,7 @@ test("T13 actual App explicit managed start preserves normal owner create path",
 
 test("T13 actual App renders explicit managed controls without an automatic launch",async()=>{
  const fs=await import("node:fs/promises"),ts=await import("typescript");const source=await englishUiReadAsync(fs.readFile,new URL("../src/App.tsx",import.meta.url),"utf8");const tree=ts.default.createSourceFile("App.tsx",source,ts.default.ScriptTarget.Latest,true,ts.default.ScriptKind.TSX);let element;
- const visit=node=>{if(ts.default.isJsxSelfClosingElement(node)&&node.tagName.getText(tree)==="WorktreeControls")element=node;ts.default.forEachChild(node,visit);};visit(tree);
+ const visit=node=>{if(ts.default.isJsxSelfClosingElement(node)&&node.tagName.getText(tree)==="WorktreeControls"&&!node.attributes.properties.some(attr=>attr.name?.text==="creationOnly"))element=node;ts.default.forEachChild(node,visit);};visit(tree);
  assert.ok(element,"actual App must render worktree controls");const attributes=Object.fromEntries(element.attributes.properties.filter(ts.default.isJsxAttribute).map(item=>[item.name.text,item.initializer?.getText(tree)]));
  assert.equal(attributes.onCreated,"{worktreeCreated}");assert.equal(attributes.onStart,"{startManagedWorktree}");assert.equal(attributes.selected,"{selectedWorktree}");assert.equal(attributes.root,"{projectToolsPath}");
 });

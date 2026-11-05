@@ -61,7 +61,8 @@ import {SystemEntryController,type NotificationPauseState} from "./system-entry"
 import {saveTerminalLayout} from "./terminal-layout-persistence";
 import {TerminalLayout} from "./TerminalLayout";
 import {createTerminalLayout,changeTerminalLayout,assignTerminalPane,replaceTerminalSession,removeTerminalPane,isTerminalProtocolResponse,isTerminalMouseReport,resizeTerminalNode,clampSplitPercent,swapTerminalPanes,terminalPaneId,terminalPaneIndex,terminalLeaves,terminalLayoutRoot,splitTerminalPane,terminalTabs,terminalMembers,terminalSessionPane,removeTerminalTab,splitAndMoveTerminalTab,type TerminalPaneEdge,moveTerminalTab,terminalDirectionPane,type TerminalPaneDirection,type TerminalPaneRect,type TerminalLayoutMode} from "./terminal-layout";
-import {GitContextPolling,gitContextLabel,type GitContext} from "./git-context";
+import {GitContextPolling,gitContextLabel,isGitContext,type GitContext} from "./git-context";
+import {canStartWorktree,type ManagedWorktree} from "./worktree-controls";
 import {historyRequest,capacityLevel,type HistoryItem,type HistoryCursor,type HistoryPage,type HistoryOverview,type InboxItem,type PendingKey,type HistoryCapacity} from "./history";
 import { useEffect, useLayoutEffect, useRef, useState, type DragEvent } from "react";
 import {memoryLabel, startMemoryPolling, type MemorySample} from "./memory";
@@ -676,6 +677,7 @@ function App() {
   const [launchDirectoryOverride,setLaunchDirectoryOverride]=useState<string|undefined>(undefined);
   const [launchTerminalProfile,setLaunchTerminalProfile]=useState<string|null|undefined>(undefined);
   const [launchWorktreeAttempt,setLaunchWorktreeAttempt]=useState<string|undefined>(undefined);
+  const [launchWorkspace,setLaunchWorkspace]=useState<{root:string;owner:number;intent:number}|null>(null);
   const [launchDraft,setLaunchDraft]=useState<LaunchDefaults>({adapter:"codex",mode:"interactive",extra_args:"",prompt:null,command:null,provider:null});
   const [adapters, setAdapters] = useState<AgentAdapter[]>([]);
   const adapterDiscoveryEpoch=useRef(0),cliInstallPending=useRef(false);
@@ -1014,19 +1016,19 @@ function App() {
       }while(afterKey);
     }catch(reason){setNotificationError(String(reason));}finally{pendingLoading.current=false;}
   }
-  async function openSession(id:string,onAttached?:(view:TerminalView,detail:number,intent:number)=>void,valid=()=>true,recordedOnly=false,pane?:string){
+  async function openSession(id:string,onAttached?:(view:TerminalView,detail:number,intent:number)=>void,valid?:()=>boolean,recordedOnly=false,pane?:string){
     cancelLayoutRestore();
     const version=++detailVersion.current,intent=layoutRestore.current.version;
-    const current=()=>valid()&&version===detailVersion.current&&intent===layoutRestore.current.version;
+    const current=()=>(!valid||valid())&&version===detailVersion.current&&intent===layoutRestore.current.version;
     try {
       const record=await invoke<SessionRecord>("get_session",{sessionId:id});
       if(!current())return false;
       const inspect=recordedOnly||terminalStatuses.has(record.status);
-      const receipt=inspect?await openHistory(record,false,pane,undefined,onAttached?valid:undefined,undefined,undefined,undefined,true,undefined,true):await openTerminal(record,pane,undefined,onAttached?valid:undefined);
+      const receipt=inspect?await openHistory(record,false,pane,undefined,valid,undefined,undefined,undefined,true,undefined,true):await openTerminal(record,pane,undefined,valid);
       if(!receipt)return false;
       const {view,attachment,detail,intent:attachmentIntent}=receipt;
       const attachedId=view.record?.summary.session_id;
-      if(!attachedId||!valid()||detail!==detailVersion.current||attachmentIntent!==layoutRestore.current.version||sessionId.current!==attachedId||terminalViews.current.get(attachedId)!==view||view.attachVersion!==attachment||view.disposed)return false;
+      if(!attachedId||(valid&&!valid())||detail!==detailVersion.current||attachmentIntent!==layoutRestore.current.version||sessionId.current!==attachedId||terminalViews.current.get(attachedId)!==view||view.attachVersion!==attachment||view.disposed)return false;
       view.recordedOnly=inspect;
       onAttached?.(view,detail,attachmentIntent);
       return true;
@@ -1557,7 +1559,32 @@ function App() {
     setProjectToolsOpen(false);
     newSession(record.target,undefined,record.attempt);
   }
+  async function selectLaunchWorkspace(isolated:boolean){
+    if(!isMainWindow||starting||creatingSession.current)return;
+    if(isolated&&!ownerConnectionAvailable.current.available){setError("Background connection unavailable. Reconnect using the existing recovery controls.");return;}
+    const intent=++sessionCopyIntent.current,owner=ownerConnectionAvailable.current.version;
+    setLaunchWorktreeAttempt(undefined);setError(null);
+    cancelProjectPreview();
+    if(!isolated){
+      setLaunchDirectoryOverride(cwd);setLaunchWorkspace(null);return;
+    }
+    setLaunchDirectoryOverride(cwd);
+    setLaunchWorkspace({root:"",owner,intent});
+    const current=()=>sessionCopyIntent.current===intent&&launchDialog.current?.open&&ownerConnectionAvailable.current.version===owner;
+    try{
+      const context=await invoke<GitContext>("get_git_context",{path:cwd});
+      if(!current())return;
+      if(!isGitContext(context)||!context.root)throw Error("Choose a local Git repository before creating an isolated worktree.");
+      setLaunchWorkspace({root:context.root,owner,intent});
+    }catch{if(current())setError("Choose a local Git repository before creating an isolated worktree.");}
+  }
+  function launchWorktreeCreated(record:ManagedWorktree,root:string,owner:number){
+    if(!launchWorkspace||sessionCopyIntent.current!==launchWorkspace.intent||!launchDialog.current?.open||launchWorkspace.owner!==ownerConnectionAvailable.current.version||owner!==gitOwner||root!==launchWorkspace.root||record.repository!==root||!canStartWorktree(record))return;
+    cancelProjectPreview();setProjectTemplate("");setSelectedWorktree(record);
+    setCwd(record.target);setLaunchDirectoryOverride(record.target);setLaunchWorktreeAttempt(record.attempt);setError(null);
+  }
   async function startNewSession(quickCopy?:ReturnType<typeof duplicateSessionDraft>){
+    if(!quickCopy&&launchWorkspace&&!launchWorktreeAttempt){setError("Create the isolated worktree before starting the session.");return;}
     const launchAdapter=quickCopy?.draft.adapter??formAdapter,launch=quickCopy?.draft??formLaunch;
     if(launchAdapter==="pi"&&!quickCopy&&!piFormValid){setError("Check the connection and available Pi models.");return;}
     const projectSettings=!quickCopy&&useProjectSettings,worktree=quickCopy?undefined:launchWorktreeAttempt;
@@ -1577,7 +1604,7 @@ function App() {
       saveSessionLaunchSettings(localStorage,next.session_id,{terminal:outputTerminal as SessionLaunchSettings["terminal"],appearance:{...appearance},...(ordinaryTerminal&&ordinarySnapshot?{ordinary:ordinarySnapshot}:{}),...(next.launch?.env_refs?{envRefs:next.launch.env_refs}:{})});
       if(name){const title=saveSessionName(localStorage,next.session_id,name);setSessionTitles(previous=>({...previous,[next!.session_id]:title!}));}
     }catch{setError("Session started, but its name or launch settings could not be saved. Use the existing session; do not start it again.");}
-    if(next&&worktree)setLaunchWorktreeAttempt(undefined);
+    if(next&&worktree){setLaunchWorktreeAttempt(undefined);setLaunchWorkspace(null);}
     if(next&&outputTerminal!=="yam")try{await invoke("open_external_terminal",{sessionId:next.session_id,terminal:outputTerminal});}catch{setError("The session was created in YAM, but the external terminal could not be opened. Check macOS Automation permission; use this existing session instead of starting it again.");}
     if(next&&isMainWindow)try{localStorage.setItem("yam.lastSessionCli",JSON.stringify(next.launch?.adapter??"shell"));}catch{setError("Session started, but the last CLI choice could not be saved.");}
   }
@@ -2643,11 +2670,16 @@ function App() {
     if(!sessionId.current)setTerminalNotice("View closed. Select its history to reopen the saved scene.");
   }
   function openCommandPalette(){paletteVersion.current++;setPaletteQuery("");setPaletteOpen(true);}
-  function closeCommandPalette(){paletteVersion.current++;setPaletteOpen(false);}
+  function closeCommandPalette(invalidate=true){if(invalidate)paletteVersion.current++;setPaletteOpen(false);}
   const recovery=selectedRecovery();
   const canContinue=recovery.canContinue;
   const recoveryNotice=ownerConnectionAvailable.current.available?(recovery.notice ?? terminalNotice):null;
-  const commandEntries=paletteEntries(paletteQuery,orderedHistory.map(record=>({id:record.summary.session_id,title:titleFor(record.summary),status:record.status})),canContinue,{new:shortcutHint(shortcuts.terminal,shortcutMac),previous:shortcutHint(shortcuts.previous,shortcutMac),search:shortcutHint(shortcuts.search,shortcutMac),"clear-display":shortcutHint(shortcuts["clear-display"],shortcutMac)},canReopenTerminalTab());
+  const commandEntries=paletteEntries(paletteQuery,orderedHistory.map(record=>({
+    id:record.summary.session_id,title:titleFor(record.summary),cwd:record.summary.cwd,
+    project:projects.find(project=>projectKey(project.path)===projectKey(record.summary.cwd))?.name??projectName(record.summary.cwd),
+    agent:adapters.find(adapter=>adapter.id===record.summary.adapter)?.label??record.summary.adapter??t("Terminal"),
+    status:t(statusLabels[record.status]??record.status)+(record.summary.mode==="interactive"?" · "+t(agentLabel({...record.agent,agent_session_id:null,inbox:[]},record.status)):""),
+  })),canContinue,{new:shortcutHint(shortcuts.terminal,shortcutMac),previous:shortcutHint(shortcuts.previous,shortcutMac),search:shortcutHint(shortcuts.search,shortcutMac),"clear-display":shortcutHint(shortcuts["clear-display"],shortcutMac)},canReopenTerminalTab());
   function clearEntryAdmission(){return !starting&&!terminalReopenFlight.current&&!layoutRestore.current.pending&&!desktopWindow.restore_blocked&&!creatingSession.current&&!terminalMoveTaskRef.current&&!terminalMoveIncomingRef.current&&!terminalMoveOperationRef.current;}
   function queuePaletteClear(version:number){
     if(!paletteOpen||version!==paletteVersion.current)return;
@@ -2664,9 +2696,10 @@ function App() {
   },[paletteOpen]);
   async function choosePaletteEntry(entry:PaletteEntry){
     const version=paletteVersion.current;
-    try{await executePaletteEntry(entry,{"clear-display":()=>queuePaletteClear(version),reopen:()=>reopenTerminalTab(),"second-window":()=>openSecondWindow(),new:()=>newSession(),terminal:()=>newSession(),previous:()=>previousSession.current?openSession(previousSession.current):undefined,search:()=>{setSidebarOpen(true);requestAnimationFrame(()=>{searchInput.current?.focus();searchInput.current?.select();});},logs:()=>setLogSearchOpen(true),inbox:()=>setInboxOpen(true),resume:()=>{if(canContinue)resumeSelectedSession();},diagnostics:()=>exportDiagnostics(),appearance:()=>(isMainWindow?setAppearanceOpen(true):void openMainSettings("appearance")),settings:()=>(isMainWindow?setTerminalSettingsOpen(true):void openMainSettings("settings")),profiles:()=>(isMainWindow?setTerminalProfilesOpen(true):void openMainSettings("profiles")),"paste-settings":()=>(isMainWindow?setPasteSettingsOpen(true):void openMainSettings("paste-settings")),"keyboard-shortcuts":()=>(isMainWindow?setKeyboardShortcutsOpen(true):void openMainSettings("keyboard-shortcuts")),larger:()=>zoomTerminal("larger"),smaller:()=>zoomTerminal("smaller"),reset:()=>zoomTerminal("reset"),switch:id=>id?openSession(id):undefined},()=>paletteOpen&&version===paletteVersion.current);}
+    const current=()=>paletteOpen&&version===paletteVersion.current;
+    try{await executePaletteEntry(entry,{"clear-display":()=>queuePaletteClear(version),reopen:()=>reopenTerminalTab(),"second-window":()=>openSecondWindow(),new:()=>newSession(),terminal:()=>newSession(),previous:()=>previousSession.current?openSession(previousSession.current,undefined,current):undefined,search:()=>{setSidebarOpen(true);requestAnimationFrame(()=>{searchInput.current?.focus();searchInput.current?.select();});},logs:()=>setLogSearchOpen(true),inbox:()=>setInboxOpen(true),resume:()=>{if(canContinue)resumeSelectedSession();},diagnostics:()=>exportDiagnostics(),appearance:()=>(isMainWindow?setAppearanceOpen(true):void openMainSettings("appearance")),settings:()=>(isMainWindow?setTerminalSettingsOpen(true):void openMainSettings("settings")),profiles:()=>(isMainWindow?setTerminalProfilesOpen(true):void openMainSettings("profiles")),"paste-settings":()=>(isMainWindow?setPasteSettingsOpen(true):void openMainSettings("paste-settings")),"keyboard-shortcuts":()=>(isMainWindow?setKeyboardShortcutsOpen(true):void openMainSettings("keyboard-shortcuts")),larger:()=>zoomTerminal("larger"),smaller:()=>zoomTerminal("smaller"),reset:()=>zoomTerminal("reset"),switch:id=>id?openSession(id,undefined,current):undefined},current);}
     catch(reason){if(version===paletteVersion.current)setError(String(reason));}
-    finally{if(version===paletteVersion.current)closeCommandPalette();}
+    finally{if(version===paletteVersion.current)closeCommandPalette(false);}
   }
 
   function applyTerminalRetention(value:TerminalRetention,persist=true){
@@ -2692,7 +2725,7 @@ function App() {
     sessionCopyIntent.current++;setSessionCopy(null);setCopyName("");ordinaryLaunchSnapshot.current=undefined;
     cancelLayoutRestore();
     setError(null);
-    setLaunchDirectoryOverride(path);setLaunchTerminalProfile(profileId);setLaunchWorktreeAttempt(worktreeAttempt);
+    setLaunchDirectoryOverride(path);setLaunchTerminalProfile(profileId);setLaunchWorktreeAttempt(worktreeAttempt);setLaunchWorkspace(null);
     cancelProjectPreview();setProjectLaunchEdits({});
     const defaults=globalLaunchDefaults.mode==="task"?{adapter:globalLaunchDefaults.adapter,mode:"interactive",extra_args:"",prompt:null,command:null,provider:null}:globalLaunchDefaults;
     const available=adapters.filter(item=>item.available||item.id==="shell");
@@ -3000,14 +3033,17 @@ function App() {
   }
 
   async function chooseDirectory(target: "launch" | "project") {
+    const intent=target==="launch"?++sessionCopyIntent.current:0;
+    const current=()=>target!=="launch"||sessionCopyIntent.current===intent;
     try {
       const path = await selectProjectDirectory(async () => {
         const chosen = await openDirectoryDialog({directory: true, multiple: false, title: "Choose project directory"});
         if (Array.isArray(chosen)) throw new Error("Expected one directory");
         return chosen;
       }, path => invoke("validate_project_directory", {path}));
+      if(!current())return;
       if (path !== null) { if (target === "launch") {setCwd(path);setLaunchDirectoryOverride(path);} else { setProjectPath(path); setProjectError(null); } }
-    } catch (reason) { if (target === "launch") setError(String(reason)); else setProjectError(String(reason)); }
+    } catch (reason) { if(!current())return;if (target === "launch") setError(String(reason)); else setProjectError(String(reason)); }
   }
 
   async function saveProject() {
@@ -3598,6 +3634,7 @@ function App() {
           if (starting||adapterInstalling) event.preventDefault();
         }}
         onClose={() => {
+          sessionCopyIntent.current++;if(!launchWorktreeAttempt)setLaunchWorkspace(null);
           cancelProjectPreview();
           if (sessionId.current&&document.activeElement===document.body) terminal.current?.focus();
         }}
@@ -3605,6 +3642,7 @@ function App() {
         <form
           onSubmit={(event) => {
             event.preventDefault();
+            if(launchWorkspace&&!launchWorktreeAttempt)return;
             if(selectedCliMissing)void installSelectedCli();else void startNewSession();
           }}
         >
@@ -3613,15 +3651,22 @@ function App() {
           </header>
           <div className="dialog-fields">
             {sessionCopy&&<><label><span>{t("Session name")}</span><input value={copyName} maxLength={200} onChange={event=>setCopyName(event.target.value)}/></label><p className="settings-help">{t("Creates an independent session with the same settings. Conversation history is not copied.")}</p>{sessionCopy.warning&&<p className="settings-help" role="status">{t(sessionCopy.warning)}</p>}</>}
+            {isMainWindow&&<div role="group" aria-label={t("Workspace")} className="worktree-actions">
+              <button type="button" aria-pressed={!launchWorkspace&&!launchWorktreeAttempt} disabled={starting||adapterInstalling} onClick={()=>void selectLaunchWorkspace(false)}>{t("Current directory")}</button>
+              <button type="button" aria-pressed={!!launchWorkspace||!!launchWorktreeAttempt} disabled={starting||adapterInstalling||!cwd.trim()||!!launchWorkspace||!!launchWorktreeAttempt} onClick={()=>void selectLaunchWorkspace(true)}>{t("Isolated worktree")}</button>
+            </div>}
             <label>
-              <span className="directory-field-heading">{t("Project directory")}<button className="directory-browse" type="button" onClick={() => void chooseDirectory("launch")}>{t("Browse…")}</button></span>
+              <span className="directory-field-heading">{t("Project directory")}<button className="directory-browse" type="button" disabled={!!launchWorkspace||!!launchWorktreeAttempt} onClick={() => void chooseDirectory("launch")}>{t("Browse…")}</button></span>
               <input
                 autoFocus
+                readOnly={!!launchWorkspace||!!launchWorktreeAttempt}
                 value={cwd}
-                onChange={(event) => {setCwd(event.target.value);setLaunchDirectoryOverride(event.target.value);}}
+                onChange={(event) => {sessionCopyIntent.current++;setCwd(event.target.value);setLaunchDirectoryOverride(event.target.value);}}
                 placeholder={t("/path/to/project")}
               />
             </label>
+            {launchWorkspace&&!launchWorktreeAttempt&&(!ownerConnectionAvailable.current.available||launchWorkspace.owner!==ownerConnectionAvailable.current.version?<p role="status">{t("The background connection changed. Choose Current directory before selecting isolation again.")}</p>:launchWorkspace.root?<WorktreeControls key={`${launchWorkspace.intent}:${gitOwner}`} creationOnly root={launchWorkspace.root} owner={gitOwner} selected={null} onCreated={launchWorktreeCreated}/>:!error&&<p role="status">{t("Checking repository for the isolated worktree…")}</p>)}
+            {launchWorktreeAttempt&&<p role="status">{t("Worktree ready. Review the program and choose Start session. If startup fails, choose Current directory to reuse this worktree.")}</p>}
             <div className="startup-program-field">
               <span>{t("Startup program")}</span>
               <div className="startup-programs" role="group" aria-label={t("Startup program")}>
@@ -3714,7 +3759,7 @@ function App() {
             <button
               className="primary-button"
               type="submit"
-              disabled={starting || adapterInstalling || adapterChecking || adapters.length === 0 || (selectedCliMissing?!selectedCliInstaller:((formAdapter==="pi"&&!piFormValid) || projectConfigBusy || (useProjectSettings&&!projectPreview?.trusted)))}
+              disabled={starting || adapterInstalling || adapterChecking || !!(launchWorkspace&&!launchWorktreeAttempt) || adapters.length === 0 || (selectedCliMissing?!selectedCliInstaller:((formAdapter==="pi"&&!piFormValid) || projectConfigBusy || (useProjectSettings&&!projectPreview?.trusted)))}
             >
               <Play aria-hidden="true" />
               {starting||adapterInstalling ? t("Starting...") : selectedCliMissing&&selectedCliInstaller?t("Install {{name}}",{name:selectedCliInstaller.name}):t("Start session")}
