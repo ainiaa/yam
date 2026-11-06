@@ -4,8 +4,9 @@ import {isChatGPT} from './native-codex.mjs';
 import {basename} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {serveControls} from './control.mjs';
-import {efforts,guardCapacity,preferCachedModel,weakReadOnlyReply,resolveEffort,splitModel,textOf,publicExcerpt,launchOption} from './policy.mjs';
-import {defaultRules,validateRules,rulesVersion,routeFacts,classifierPrompt} from './task-rules.mjs';
+import {efforts,guardCapacity,measureContextBudget,preferCachedModel,weakReadOnlyReply,resolveEffort,splitModel,textOf,publicExcerpt,launchOption} from './policy.mjs';
+import {defaultRules,defaultTierRules,validateRules,rulesVersion,routeFacts,classifierPrompt} from './task-rules.mjs';
+import {nativeError,withFailure,failureOf,projectFailure} from './failure.mjs';
 const configType='yam.routing.config.v1',preferencesType='yam.routing.preferences.v1';
  const rulesType='yam.routing.rules.v1',rulesSchemaType='yam.routing.rules.default-high.v1';
 export async function deliver(kind,ctx,turn) {
@@ -21,7 +22,7 @@ export async function deliver(kind,ctx,turn) {
   socket.on('connect',()=>socket.end(JSON.stringify({version:1,token,run:process.env.YAM_AGENT_RUN,event:{kind,agent_session_id:id,turn_id:turn??null}})));
  });
 }
-export default async function install(pi,supportedLevels,Text,native) {
+export default async function install(pi,supportedLevels,Text,native,budgetDependencies) {
  const replyType='yam.reply-model.v1';
  const clean=value=>typeof value==='string'?value.replace(/[\p{Cc}\p{Cf}]/gu,'').trim().slice(0,256):'';
  const replyEffort=value=>['off','minimal',...efforts].includes(value)?value:'unknown';
@@ -36,17 +37,27 @@ export default async function install(pi,supportedLevels,Text,native) {
   if(m?.role!=='assistant'||!Array.isArray(m.content)||!m.content.some(b=>b.type==='text'&&typeof b.text==='string'&&b.text.trim()))return;
   return {entries:[{type:'custom',customType:replyType,data:{messageId:event.messageEntryId,model:clean(m.provider)&&clean(m.model)?`${clean(m.provider)}/${clean(m.model)}`:null,effort:replyEffort(m.thinkingLevel)}}]};
  });
- for(const name of ['yam-small','yam-strong','yam-classifier','yam-gateway','yam-fixed-model','yam-effort','yam-rules','yam-billing','yam-setup-model'])pi.registerFlag(name,{description:`YAM routing ${name.slice(4)}`,type:'string'});
+ for(const name of ['yam-small','yam-medium','yam-strong','yam-classifier','yam-gateway','yam-fixed-model','yam-effort','yam-rules','yam-billing','yam-setup-model'])pi.registerFlag(name,{description:`YAM routing ${name.slice(4)}`,type:'string'});
  let taskRules=validateRules(defaultRules),preview=null,decision=null,rulesError=false;
- const restoreRules=ctx=>{const branch=ctx.sessionManager.getBranch(),index=branch.findLastIndex(e=>e.type==='custom'&&e.customType===rulesType),saved=branch[index];taskRules=validateRules(saved?saved.data:(pi.getFlag('yam-rules')?JSON.parse(pi.getFlag('yam-rules')):defaultRules));
+ const restoreRules=ctx=>{const branch=ctx.sessionManager.getBranch(),index=branch.findLastIndex(e=>e.type==='custom'&&e.customType===rulesType),saved=branch[index];taskRules=validateRules(saved?saved.data:(pi.getFlag('yam-rules')?JSON.parse(pi.getFlag('yam-rules')):(config(ctx).medium?defaultTierRules:defaultRules)));
   if(saved&&!branch.slice(index+1).some(e=>e.type==='custom'&&e.customType===rulesSchemaType)){const legacy=structuredClone(defaultRules);legacy.rules.find(r=>r.task==='review').effort='max';if(JSON.stringify(taskRules)===JSON.stringify(legacy)){taskRules=validateRules(defaultRules);pi.appendEntry(rulesType,taskRules);}}
   if(!saved)pi.appendEntry(rulesType,taskRules);if(!saved||!branch.slice(index+1).some(e=>e.type==='custom'&&e.customType===rulesSchemaType))pi.appendEntry(rulesSchemaType,{});preview=null;};
  pi.registerFlag('yam-catalog-probe',{description:'YAM read-only model catalog',type:'boolean'});
  let turn=null,lastError=false,gatewayError=null,selectionError=null,restoringSelection=false,context=null,channel=null,changing=false;
- let runtimeError=null,blockedPreferences=null,pendingUserInput=null;
+ let runtimeError=null,blockedPreferences=null,pendingUserInput=null,failure=null;
  let replyRequest=null,toolsUsed=false,replyUpgraded=false;
  let costMessages=new WeakSet(),streamedModel=null;
  const saveDecision=()=>{if(decision)pi.appendEntry('yam.routing.decision.v1',structuredClone(decision));};
+ const checkBudget=(model,messages)=>{
+  if(taskRules.v!==2)return;
+  const budget=measureContextBudget(model,messages,budgetDependencies);
+  if(!budget.fits){
+   decision??={rule:preferences?.model&&preferences.model!=='auto'?'fixed':'context-guard',ruleVersion:rulesVersion(taskRules),classificationMs:0,classifierCost:0,executionCost:0,correctionCost:0,totalCost:0};
+   (decision.rejected??=[]).push({model:`${model.provider}/${model.id}`,reason:budget.reason,budget});saveDecision();
+   throw nativeError('context-budget','Local context budget unavailable or exceeded; explicitly compact or split the task. The main model is preserved.');
+  }
+  return budget;
+ };
  const totalCost=()=>{if(decision)decision.totalCost=['classifierCost','executionCost','correctionCost'].every(k=>decision[k]!==null)?decision.classifierCost+decision.executionCost+decision.correctionCost:null;};
  const recordCost=(m,kind)=>{if(!decision||costMessages.has(m))return;costMessages.add(m);const cost=observedCost(m,context?.modelRegistry.find(m.provider,m.model));decision[kind]=decision[kind]===null||cost===null?null:decision[kind]+cost;totalCost();};
  let pricedGatewayModels=new Set();
@@ -63,12 +74,12 @@ export default async function install(pi,supportedLevels,Text,native) {
   return thinking&&!later.some(e=>e.type==='model_change')?{...saved,effort:thinking.thinkingLevel}:saved;
  };
  const currentPreferences=()=>blockedPreferences??(context?.model&&context.model.provider!=='yam'?{model:`${context.model.provider}/${context.model.id}`,effort:pi.getThinkingLevel()}:preferences??{model:'auto',effort:pi.getThinkingLevel()==='off'?'auto':pi.getThinkingLevel()});
- const snapshot=()=>({revision,generation:process.env.YAM_PI_GENERATION??'',phase,config:{small:(context?readConfig(context).small:undefined)??pi.getFlag('yam-small')??'',strong:(context?readConfig(context).strong:undefined)??pi.getFlag('yam-strong')??'',classifier:(context?readConfig(context).classifier:undefined)??pi.getFlag('yam-classifier')??pi.getFlag('yam-small')??'',gateway:launchOption('--yam-gateway')??null},diagnostics:{configSource:context&&Object.keys(readConfig(context)).length?'session':'launch',billing:pi.getFlag('yam-billing')==='subscription'?'subscription':'configured',execution},preferences:currentPreferences(),rules:taskRules,ruleVersion:rulesVersion(taskRules),preview,decision,target,actual,error:selectionError?.message??runtimeError,gatewayError:gatewayError?.message??null,pendingInput});
+ const snapshot=()=>({revision,generation:process.env.YAM_PI_GENERATION??'',phase,config:{small:(context?readConfig(context).small:undefined)??pi.getFlag('yam-small')??'',medium:(context?readConfig(context).medium:undefined)??pi.getFlag('yam-medium')??null,strong:(context?readConfig(context).strong:undefined)??pi.getFlag('yam-strong')??'',classifier:(context?readConfig(context).classifier:undefined)??pi.getFlag('yam-classifier')??pi.getFlag('yam-small')??'',gateway:launchOption('--yam-gateway')??null},diagnostics:{configSource:context&&Object.keys(readConfig(context)).length?'session':'launch',billing:pi.getFlag('yam-billing')==='subscription'?'subscription':'configured',execution},failure,nativeRecovery:native?.getRecovery?.(context)??null,preferences:currentPreferences(),rules:taskRules,ruleVersion:rulesVersion(taskRules),preview,decision,target,actual,error:selectionError?.message??runtimeError,gatewayError:gatewayError?.message??null,pendingInput});
  const readConfig=ctx=>ctx.sessionManager.getBranch().filter(e=>e.type==='custom'&&e.customType===configType).at(-1)?.data??{};
  const notify=async(kind,ctx)=>{try{await deliver(kind,ctx,turn);}catch{ctx.ui.notify('YAM event connection unavailable; task and native session remain in Pi.','warning');}};
  const config=ctx=>{
   const saved=Object.keys(readConfig(ctx)).length?readConfig(ctx):null;
-  const result=saved??{small:pi.getFlag('yam-small'),strong:pi.getFlag('yam-strong'),classifier:pi.getFlag('yam-classifier')??pi.getFlag('yam-small')};
+  const result=saved??{small:pi.getFlag('yam-small'),...(pi.getFlag('yam-medium')?{medium:pi.getFlag('yam-medium')}:{}),strong:pi.getFlag('yam-strong'),classifier:pi.getFlag('yam-classifier')??pi.getFlag('yam-small')};
   return result;
  };
  const billingPolicy=()=>{const policy=pi.getFlag('yam-billing')??'configured';if(!['configured','subscription'].includes(policy))throw Error('Invalid billing policy');return policy;};
@@ -80,20 +91,21 @@ export default async function install(pi,supportedLevels,Text,native) {
   if(forbiddenGateway(m)||provider==='yam-gateway'&&/^(codex|openai-codex|chatgpt)\//i.test(id))throw Error('ChatGPT subscription gateway routes are disabled; select official Codex CLI');
   if(m&&isChatGPT(ctx,m)){
    if(!native)throw Error('Official Codex execution adapter unavailable; no subscription HTTP fallback');
+   const issue=native.discoveryFailure?.();if(issue)throw withFailure(Error('Official Codex subscription discovery unavailable; check native login and connection'),issue);
    m=native.resolveModel(ctx,m);
   }
   if(billingPolicy()==='subscription'&&!isChatGPT(ctx,m))throw Error('Subscription-only billing policy forbids API or gateway inference');
   if(!m||m.api==='pi-virtual'||!ctx.modelRegistry.hasConfiguredAuth(m))throw Error(`Routing model unavailable: ${key}. Configure Pi credentials or gateway; no fallback to another model.`);
   return m;
  };
- const effort=(m,desired,selected)=>resolveEffort({...m,thinkingLevelMap:Object.fromEntries(supportedLevels(m).map(v=>[v,v]))},desired,selected);
+ const effort=(m,desired,selected)=>{try{return resolveEffort({...m,thinkingLevelMap:Object.fromEntries(supportedLevels(m).map(v=>[v,v]))},desired,selected);}catch(error){throw withFailure(error,{code:'capability-unavailable',stage:'preparation',dispatch:'not-started'});}};
  const workingEffort=(m,desired,selected)=>{
   if(preferences?.effort!=='off')return effort(m,desired,selected);
-  if(!supportedLevels(m).includes('off'))throw Error(`Reasoning off is unsupported by ${m.id}; no silent downgrade`);
+  if(!supportedLevels(m).includes('off'))throw nativeError('capability-unavailable',`Reasoning off is unsupported by ${m.id}; no silent downgrade`);
   return 'off';
  };
  const available=(ctx,key)=>{try{return find(ctx,key);}catch(e){if(gatewayError&&key?.startsWith('yam-gateway/'))return null;throw e;}};
- const validate=ctx=>{const c=config(ctx);for(const key of ['small','strong','classifier'])available(ctx,c[key]);return c;};
+ const validate=ctx=>{const c=config(ctx);for(const key of ['small',...c.medium?['medium']:[],'strong','classifier'])available(ctx,c[key]);return c;};
  const connection=model=>{
   if(model?.provider==='yam-codex')return {source:'chatgpt-subscription',billing:'subscription'};
   if(model?.provider==='yam-gateway')return {source:'magpie',billing:'gateway'};
@@ -130,21 +142,23 @@ export default async function install(pi,supportedLevels,Text,native) {
    if(pi.getThinkingLevel()!==level){pi.setThinkingLevel(before);throw Error('Native reasoning selection changed unexpectedly; the previous level was restored.');}
   }finally{markThinking(ctx,beforeEntry);restoringSelection=false;}
   preferences={model:next.model,effort:next.effort};blockedPreferences=null;if(persist||requestedKey!==next.model)pi.appendEntry(preferencesType,preferences);
-  selectionError=null;runtimeError=null;phase='idle';target=null;decision=null;preview=null;changed();
+  selectionError=null;runtimeError=null;failure=null;phase='idle';target=null;decision=null;preview=null;changed();
  }
  async function control(request){
   const ctx=context;if(!ctx)throw Error('Pi session is starting');
-  if(changing||!ctx.isIdle())throw Error('Wait for the current task to finish before changing routing');
   if(request.revision!==revision)throw Error('Routing state changed; refresh and try again');
+  if(request.action==='native-recovery'){if(request.data!==undefined)throw Error('Invalid native recovery request');return;}
+  if(changing||!ctx.isIdle())throw Error('Wait for the current task to finish before changing routing');
   changing=true;
   try{
-   if(request.action==='set')await applyPreferences(ctx,request.data);
+   if(request.action==='native-reset'){if(!native?.reset)throw Error('Native recovery unavailable');native.reset(ctx,request.data);runtimeError=null;failure=null;changed();}
+   else if(request.action==='set')await applyPreferences(ctx,request.data);
    else if(request.action==='reset')await applyPreferences(ctx,{model:'auto',effort:'auto'});
    else if(request.action==='rules'){
     const next=validateRules(request.data),recovering=rulesError,restore=blockedPreferences??preferences??savedPreferences(ctx)??currentPreferences();
     if(recovering)checkSelection(ctx,restore);
     pi.appendEntry(rulesType,next);pi.appendEntry(rulesSchemaType,{});taskRules=next;preview=null;decision=null;
-    if(recovering){rulesError=false;try{await applyPreferences(ctx,restore,!savedPreferences(ctx));}catch(e){blockedPreferences=restore;await stopSelection(ctx,String(e.message),restore.effort);throw e;}}
+    if(recovering){rulesError=false;try{await applyPreferences(ctx,restore,!savedPreferences(ctx));}catch(e){blockedPreferences=restore;await stopSelection(ctx,e,restore.effort);throw e;}}
     changed();
    }
    else if(request.action==='preview'){
@@ -153,8 +167,8 @@ export default async function install(pi,supportedLevels,Text,native) {
     const decision=routeFacts(result.answer,rules);preview={...decision,latencyMs:result.latencyMs,cost:result.cost};changed();
    }
    else if(request.action==='retry'){
-    await refreshGateway();await ctx.modelRegistry.refresh?.();const restore=blockedPreferences??preferences??savedPreferences(ctx)??currentPreferences();
-    try{await applyPreferences(ctx,restore,false);}catch(e){await stopSelection(ctx,String(e.message),restore.effort);throw e;}
+    await refreshGateway();await ctx.modelRegistry.refresh?.();await native?.initialize?.(ctx);const restore=blockedPreferences??preferences??savedPreferences(ctx)??currentPreferences();
+    try{await applyPreferences(ctx,restore,false);}catch(e){await stopSelection(ctx,e,restore.effort);throw e;}
    }else throw Error('Unknown Pi control action');
   }finally{changing=false;}
  }
@@ -166,12 +180,12 @@ export default async function install(pi,supportedLevels,Text,native) {
    const signal=requestSignal?AbortSignal.any([requestSignal,AbortSignal.timeout(isChatGPT(ctx,classifier)?45000:15000)]):AbortSignal.timeout(isChatGPT(ctx,classifier)?45000:15000);
    const result=await (isChatGPT(ctx,classifier)?native.stream.bind(native):ctx.modelRegistry.streamSimple.bind(ctx.modelRegistry))(classifier,{systemPrompt:classifierPrompt(rules),messages:[{role:'user',content:JSON.stringify({request:text,previousTask:previous?.task,recent:publicExcerpt(messages),truncated:messages.length>6||messages.some(m=>textOf(m).length>1200)}),timestamp:Date.now()}]},{signal,maxTokens:512,reasoning:effort(classifier,'medium','off'),toolChoice:'none'}).result();
    cost=observedCost(result,classifier);
-   if(signal.aborted||result.stopReason&&result.stopReason!=='stop')throw Error('Classification incomplete');
+   if(signal.aborted||result.stopReason&&result.stopReason!=='stop')throw withFailure(Error('Classification incomplete'),isChatGPT(ctx,classifier)&&result.failure?projectFailure(result.failure):{code:requestSignal?.aborted?'cancelled':signal.aborted?'process-timeout':'unknown',stage:'discovery',dispatch:'not-started'});
    answer=JSON.parse(textOf(result).replace(/^```(?:json)?\s*|\s*```$/g,''));
    if(connection(classifier).billing==='subscription'&&!routeFacts(answer,rules).valid)throw Error('Invalid subscription classification');
   }catch(e){
    if(requestSignal?.aborted||gatewayError&&config(ctx).classifier?.startsWith('yam-gateway/'))throw e;
-   if(connection(classifier).billing==='subscription')throw Error('ChatGPT subscription classification unavailable. Check official Codex login, quota and model support; no switch to another channel.');
+   if(connection(classifier).billing==='subscription')throw withFailure(Error('ChatGPT subscription classification unavailable. Check official Codex login, quota and model support; no switch to another channel.'),failureOf(e,{stage:'discovery',dispatch:'not-started'}));
   }
   return {answer,latencyMs:Date.now()-started,cost};
  }
@@ -204,6 +218,7 @@ export default async function install(pi,supportedLevels,Text,native) {
   try{await setupGateway(launchOption('--yam-gateway'));gatewayError=null;}catch{pricedGatewayModels=new Set();gatewayError=Error('Magpie gateway model catalog unavailable. Check the gateway; Pi native models remain available.');}
  }
  async function stopSelection(ctx,message,requested) {
+  failure=failureOf(message,{stage:'preparation',dispatch:'not-started'});message=String(message?.message??message);
   selectionError={message,effort:requested};phase='error';changed();const beforeEntry=thinkingId(ctx);restoringSelection=true;
   try {
    const automatic=ctx.modelRegistry.find('yam','auto');
@@ -218,7 +233,7 @@ export default async function install(pi,supportedLevels,Text,native) {
   if(restoringSelection||event.source==='restore'||!event.previousModel)return;
   if(isChatGPT(ctx,event.model)||billingPolicy()==='subscription'||forbiddenGateway(event.model)){
    try{await applyPreferences(ctx,{model:`${event.model.provider}/${event.model.id}`,effort:pi.getThinkingLevel()});}
-   catch(e){blockedPreferences={model:`${event.model.provider}/${event.model.id}`,effort:pi.getThinkingLevel()};await stopSelection(ctx,String(e.message),blockedPreferences.effort);}
+   catch(e){blockedPreferences={model:`${event.model.provider}/${event.model.id}`,effort:pi.getThinkingLevel()};await stopSelection(ctx,e,blockedPreferences.effort);}
    return;
   }
   if(event.model.provider==='yam-gateway'&&gatewayError){blockedPreferences={model:`${event.model.provider}/${event.model.id}`,effort:pi.getThinkingLevel()};await stopSelection(ctx,gatewayError.message,blockedPreferences.effort);return;}
@@ -270,7 +285,7 @@ export default async function install(pi,supportedLevels,Text,native) {
   }
   await native?.initialize?.(ctx);
   const originalConfig=config(ctx),migratedConfig={...originalConfig};
-  for(const key of ['small','strong','classifier']){
+  for(const key of ['small','medium','strong','classifier']){
    if(!originalConfig[key])continue;
    const model=ctx.modelRegistry.find(...splitModel(originalConfig[key]));
    if(model&&isChatGPT(ctx,model)&&native){const resolved=native.resolveModel(ctx,model);migratedConfig[key]=`${resolved.provider}/${resolved.id}`;}
@@ -290,26 +305,26 @@ export default async function install(pi,supportedLevels,Text,native) {
   }
   if(!candidate&&isChatGPT(ctx,ctx.model))candidate={model:`${ctx.model.provider}/${ctx.model.id}`,effort:pi.getThinkingLevel()};
   try{restoreRules(ctx);rulesError=false;}catch(e){rulesError=true;blockedPreferences=candidate??currentPreferences();await stopSelection(ctx,'Invalid task rules; correct the launch rules or restore valid session rules.',candidate?.effort);return;}
-  if(candidate){try{await applyPreferences(ctx,candidate,!saved);}catch(e){blockedPreferences=candidate;await stopSelection(ctx,String(e.message),candidate.effort);}}
+  if(candidate){try{await applyPreferences(ctx,candidate,!saved);}catch(e){blockedPreferences=candidate;await stopSelection(ctx,e,candidate.effort);}}
   else preferences=null;
   const last=ctx.sessionManager.getBranch().filter(e=>e.type==='message'&&e.message?.role==='assistant'&&e.message.provider&&e.message.model&&!['error','aborted','length'].includes(e.message.stopReason)).at(-1)?.message;
   if(last)actual={model:`${last.provider}/${last.model}`,effort:last.thinkingLevel??'unknown',at:last.timestamp??0};
   if(!selectionError)phase='idle';changed();
   try{checkSelection(ctx);const p=currentPreferences();ctx.ui.setStatus('yam-route',`${p.model==='auto'?'自动模型':p.model} · ${p.effort==='auto'?'自动推理':p.effort} · /yam-route`);}
-  catch(e){ctx.ui.notify(String(e.message),'error');ctx.ui.setStatus('yam-route','路由配置不可用 · 请检查模型和连接');await stopSelection(ctx,String(e.message));}
+  catch(e){ctx.ui.notify(String(e.message),'error');ctx.ui.setStatus('yam-route','路由配置不可用 · 请检查模型和连接');await stopSelection(ctx,e);}
   const inline=launchOption('--model')?.split(':').at(-1);
   const requested=launchOption('--thinking')??(['off','minimal',...efforts].includes(inline)?inline:undefined);
   if(!saved&&requested!==undefined&&pi.getThinkingLevel()!==requested)await stopSelection(ctx,`Requested reasoning ${requested} is unsupported; inference stopped until the selection is corrected.`,requested);
   changed();await notify('SessionStart',ctx);
  });
- pi.on('session_tree',async(_event,ctx)=>{context=ctx;native?.beginTurn?.(ctx);const saved=savedPreferences(ctx);preferences=null;blockedPreferences=null;target=null;actual=null;execution=null;selectionError=null;
+ pi.on('session_tree',async(_event,ctx)=>{context=ctx;native?.beginTurn?.(ctx);const saved=savedPreferences(ctx);preferences=null;blockedPreferences=null;target=null;actual=null;execution=null;selectionError=null;failure=null;
   try{
    const projected=saved?null:ctx.sessionManager.buildSessionProjection(),m=projected?.model;
    const restore=saved??{model:m&&!(m.provider==='yam'&&m.modelId==='auto')?`${m.provider}/${m.modelId}`:'auto',effort:projected.thinkingLevel};
    blockedPreferences=restore;
    try{restoreRules(ctx);rulesError=false;}catch(e){rulesError=true;throw e;}
    await applyPreferences(ctx,restore,!saved);
-   checkSelection(ctx);phase='idle';}catch(e){await stopSelection(ctx,String(e.message),saved?.effort);}
+   checkSelection(ctx);phase='idle';}catch(e){await stopSelection(ctx,e,saved?.effort);}
   const last=ctx.sessionManager.getBranch().filter(e=>e.type==='message'&&e.message?.role==='assistant'&&e.message.provider&&e.message.model&&!['error','aborted','length'].includes(e.message.stopReason)).at(-1)?.message;
   if(last)actual={model:`${last.provider}/${last.model}`,effort:last.thinkingLevel??'unknown',at:last.timestamp??0};changed();
  });
@@ -329,26 +344,28 @@ export default async function install(pi,supportedLevels,Text,native) {
   }
   else if(cmd[0]==='models') {
    if(cmd.length<3||cmd.length>4)throw Error('Use /yam-route models provider/small provider/strong [provider/classifier]');
-   const c={small:cmd[1],strong:cmd[2],classifier:cmd[3]??cmd[1]};for(const k of Object.keys(c))find(ctx,c[k]);pi.appendEntry(configType,c);selectionError=null;runtimeError=null;phase='idle';changed();
+   const c={...config(ctx),small:cmd[1],strong:cmd[2],classifier:cmd[3]??cmd[1]};for(const k of Object.keys(c))find(ctx,c[k]);pi.appendEntry(configType,c);selectionError=null;runtimeError=null;phase='idle';changed();
   } else if(cmd[0]==='manual'){ctx.ui.notify('Use native /model to select and lock a physical model. /yam-route auto returns to routing.','info');return;}
   else throw Error('Unknown routing command');
   ctx.ui.notify('Routing preference saved in this native session.','info');
  }});
  pi.registerVirtualModel({provider:'yam',id:'auto',name:'YAM 自动路由',thinkingLevels:['off','minimal',...efforts],async route(request,ctx){
   try{
-  if(request.signal?.aborted)throw Error('Routing aborted');
+  if(request.signal?.aborted)throw nativeError('cancelled','Routing aborted');
   context=ctx;
   if(rulesError)throw Error('Invalid task rules; restore valid session rules first');
   if(selectionError)throw Error(selectionError.message);
   const images=request.messages.some(m=>Array.isArray(m.content)&&m.content.some(b=>b.type==='image'));
-  const compatible=model=>{if(images&&!model.input?.includes('image'))throw Error('Selected model cannot accept image context; choose a compatible strong model');return model;};
+  const compatible=model=>{if(images&&!model.input?.includes('image'))throw nativeError('capability-unavailable','Selected model cannot accept image context; choose a compatible strong model');return model;};
   const sticky=request.failed??request.previous;
-  if(request.reason!=='user'&&request.reason!=='direct'&&sticky){if(sticky.model.provider==='yam-gateway'&&gatewayError)throw gatewayError;return {model:compatible(find(ctx,`${sticky.model.provider}/${sticky.model.id}`)),thinkingLevel:sticky.thinkingLevel};}
+  if(request.reason!=='user'&&request.reason!=='direct'&&sticky){if(sticky.model.provider==='yam-gateway'&&gatewayError)throw gatewayError;const model=compatible(find(ctx,`${sticky.model.provider}/${sticky.model.id}`));if(taskRules.v===2)workingEffort(model,sticky.thinkingLevel,sticky.thinkingLevel);checkBudget(model,request.messages);return {model,thinkingLevel:sticky.thinkingLevel};}
   const fixed=preferences?.model&&preferences.model!=='auto'?find(ctx,preferences.model):null;
-  if(request.reason==='direct'){const m=fixed??find(ctx,config(ctx).strong);return {model:m.provider==='yam-codex'?{...compatible(m),yamNativeMode:'readonly'}:compatible(m),thinkingLevel:workingEffort(m,'high',request.thinkingLevel)};}
-  const c=fixed?(preferences.effort==='auto'?config(ctx):{}):validate(ctx),strong=fixed??available(ctx,c.strong),small=fixed??available(ctx,c.small);
+  if(request.reason==='direct'){const m=fixed??find(ctx,config(ctx).strong);checkBudget(m,request.messages);return {model:m.provider==='yam-codex'?{...compatible(m),yamNativeMode:'readonly'}:compatible(m),thinkingLevel:workingEffort(m,'high',request.thinkingLevel)};}
+  const c=fixed?(preferences.effort==='auto'?config(ctx):{}):validate(ctx),strong=fixed??available(ctx,c.strong),small=fixed??available(ctx,c.small),regular=fixed??(taskRules.v===2&&c.medium?available(ctx,c.medium):strong);
   if(fixed&&preferences.effort!=='auto'){
-   const level=workingEffort(fixed,'high',request.thinkingLevel),reason='用户固定模型与推理档位';compatible(fixed);ctx.ui.setStatus('yam-route',`${fixed.provider}/${fixed.id} · ${level} · 固定模型与推理`);target={model:`${fixed.provider}/${fixed.id}`,effort:level,reason};decision={rule:'fixed',ruleVersion:rulesVersion(taskRules),classificationMs:0,classifierCost:0,executionCost:0,correctionCost:0,totalCost:0};saveDecision();phase='selected';changed();
+   const level=workingEffort(fixed,'high',request.thinkingLevel),reason='用户固定模型与推理档位',budget=checkBudget(fixed,request.messages);compatible(fixed);
+   native?.setRoute?.({intent:undefined,requires:[],roles:executionProfiles(ctx)});
+   ctx.ui.setStatus('yam-route',`${fixed.provider}/${fixed.id} · ${level} · 固定模型与推理`);target={model:`${fixed.provider}/${fixed.id}`,effort:level,reason};decision={rule:'fixed',ruleVersion:rulesVersion(taskRules),classificationMs:0,classifierCost:0,executionCost:0,correctionCost:0,totalCost:0,...budget?{budget}:{}};saveDecision();phase='selected';changed();
    return {model:fixed,thinkingLevel:level,state:{v:1,model:fixed===small?'small':'strong',effort:level,task:textOf(request.messages.filter(m=>m.role==='user').at(-1)).slice(0,4000),reason}};
   }
   phase='classifying';target=null;changed();
@@ -356,32 +373,76 @@ export default async function install(pi,supportedLevels,Text,native) {
   const classified=await classify(ctx,request.messages,request.state,taskRules,request.signal),answer=classified.answer;
   const policy=routeFacts(answer,taskRules,request.state);
   const needs=answer?.requires??[];if(!Array.isArray(needs)||needs.some(c=>!['text','files','image_input','image_generation'].includes(c)))throw Error('Invalid classified native capability requirements');
-  native?.setRoute?.({intent:answer?.intent,requires:needs});
-  let next={...policy.selection};
+  const intent=taskRules.v===2?policy.intent:answer?.intent;
+  const continuing=taskRules.v===2&&request.state?.v===2&&intent!=='new';
+  const userContent=request.messages.findLast(m=>m.role==='user')?.content;
+  const imageInput=needs.includes('image_input')&&Array.isArray(userContent)&&userContent.some(c=>c.type==='image');
+  const attachedRead=answer?.action==='none'&&answer.readOnly===true&&imageInput&&needs.every(c=>['text','image_input'].includes(c));
+  const localTools=answer?.action==='read'&&!needs.includes('image_generation')&&(needs.includes('files')||imageInput)||answer?.action==='write'&&answer.readOnly===false;
+  const readonlyPhase=!fixed&&continuing&&(request.state.model==='small'||request.state.mode==='readonly'||request.state.reason==='只读回答质量不足，升档一次');
+  const phaseHandoff=readonlyPhase&&policy.valid&&answer?.intent==='continue'&&answer.uncertain===false&&answer.context!=='insufficient'&&(localTools||attachedRead);
+  const phaseSource=phaseHandoff&&request.state.model!=='small'?regular:small;
+  // The text-only phase owns no business session; never resume an older medium task for this new tool phase.
+  let next=phaseHandoff?{model:'medium',effort:taskRules.fallback.effort}:{...policy.selection};
+  if(continuing&&(next.model==='small'||readonlyPhase)&&!phaseHandoff&&(images||needs.some(c=>c!=='text')||answer?.action!=='none'))throw nativeError('capability-unavailable','Continued lightweight task requires new capabilities; main session preserved, choose a capable execution path.');
   const uncached=next.model;
-  if(!fixed&&small&&strong&&[small,strong].every(m=>connection(m).billing!=='subscription'&&(m.provider!=='yam-gateway'||pricedGatewayModels.has(m.id))))next.model=preferCachedModel(next.model,request.messages,small,strong);
+  if(taskRules.v===1&&!fixed&&small&&strong&&[small,strong].every(m=>connection(m).billing!=='subscription'&&(m.provider!=='yam-gateway'||pricedGatewayModels.has(m.id))))next.model=preferCachedModel(next.model,request.messages,small,strong);
   const cached=uncached!==next.model;
-  if(next.model==='small'){
+  if(taskRules.v===1&&next.model==='small'){
    const capability=small??ctx.modelRegistry.find(...splitModel(c.small));
    if(!capability&&!images)find(ctx,c.small);
-   next.model=guardCapacity(next.model,request.messages,capability,strong??capability);
+   const guarded=guardCapacity(next.model,request.messages,capability,regular??capability);
+   if(continuing&&guarded!=='small')throw nativeError('context-budget','Continued task exceeds its model capacity; main session preserved.');
+   next.model=guarded;
   }
-  let model=fixed??find(ctx,next.model==='small'?c.small:c.strong);
-  try{next.effort=workingEffort(model,next.effort,request.thinkingLevel);}catch(e){if(fixed||next.model!=='small'||connection(model).billing==='subscription'&&connection(strong).billing!=='subscription')throw e;model=find(ctx,c.strong);next.model='strong';next.effort=workingEffort(model,next.effort,request.thinkingLevel);}
+  let model=fixed??find(ctx,next.model==='small'?c.small:next.model==='medium'?c.medium:c.strong),capabilityAdjusted=false,budget;
+  const rejected=[];
+  decision={rule:policy.rule,ruleVersion:policy.version,classificationMs:classified.latencyMs,classifierCost:classified.cost,executionCost:0,correctionCost:0,totalCost:classified.cost,planned:policy.selection,cacheRetained:cached,...taskRules.v===2?{rejected}:{}};
+  const required=[...new Set(['text',...needs,...images?['image_input']:[]])];
+  const supports=(candidate,tier)=>required.every(capability=>{
+   if(capability==='image_input'&&!candidate.input?.includes('image'))return false;
+   if(tier==='small'&&['files','image_generation'].includes(capability))return false;
+   const runtime=isChatGPT(ctx,candidate)?native?.capabilities?.():null;
+   return !runtime||runtime.includes(capability);
+  });
+  if(!fixed&&taskRules.v===2&&(!continuing||phaseHandoff)){
+   const anchor=phaseHandoff?phaseSource:model,tiers=['small','medium','strong'];
+   let selected;
+   for(const tier of tiers.slice(tiers.indexOf(next.model))){
+    const key=c[tier];if(!key)continue;
+    const candidate=available(ctx,key);if(!candidate)continue;
+    const identity={model:`${candidate.provider}/${candidate.id}`,tier};
+    if(connection(anchor).billing==='subscription'&&connection(candidate).billing!=='subscription'){rejected.push({...identity,reason:'billing'});continue;}
+    if(!supports(candidate,tier)){rejected.push({...identity,reason:'capability'});continue;}
+    let level;try{level=workingEffort(candidate,next.effort,request.thinkingLevel);}catch{rejected.push({...identity,reason:'effort'});continue;}
+    const measured=measureContextBudget(candidate,request.messages,budgetDependencies);
+    if(!measured.fits){rejected.push({...identity,reason:measured.reason,budget:measured});continue;}
+    selected={model:candidate,tier,effort:level,budget:measured};break;
+   }
+   if(!selected){saveDecision();const context=rejected.some(r=>r.budget);throw nativeError(context?'context-budget':'capability-unavailable',context?'No configured model fits the local context budget within the authorized billing path; explicitly compact or split the task.':'No configured model supports the required capabilities and reasoning within the authorized subscription/billing path; no API or gateway fallback.');}
+   capabilityAdjusted=next.model!==selected.tier;model=selected.model;next.model=selected.tier;next.effort=selected.effort;budget=selected.budget;
+  }
+  if(phaseHandoff&&connection(phaseSource).billing==='subscription'&&connection(model).billing!=='subscription')throw Error('Continued subscription task cannot transfer to an API or gateway model.');
+  if(taskRules.v===2){if(!budget){next.effort=workingEffort(model,next.effort,request.thinkingLevel);budget=checkBudget(model,request.messages);}}
+  else try{next.effort=workingEffort(model,next.effort,request.thinkingLevel);}catch(e){if(continuing||fixed||next.model!=='small'||connection(model).billing==='subscription'&&connection(regular).billing!=='subscription')throw e;model=regular;next.model='strong';next.effort=workingEffort(model,next.effort,request.thinkingLevel);}
   compatible(model);
-  const reason=cached?'保留近期缓存，预计成本更低':policy.rule==='fallback'?'分类或上下文不足，保守选择强模型':`任务规则：${policy.rule}`;
-  decision={rule:policy.rule,ruleVersion:policy.version,classificationMs:classified.latencyMs,classifierCost:classified.cost,executionCost:0,correctionCost:0,totalCost:classified.cost,planned:policy.selection,selected:{model:next.model,effort:next.effort},cacheRetained:cached};saveDecision();
+  if(!supports(model,next.model))throw nativeError('capability-unavailable','Selected main model lacks required capabilities; main session preserved.');
+  const mode=!fixed&&(next.model==='small'||readonlyPhase&&!phaseHandoff)?'readonly':'task';
+  native?.setRoute?.({intent:phaseHandoff?'new':intent,mode,requires:needs,roles:executionProfiles(ctx)});
+  const reason=capabilityAdjusted?'能力、推理与上下文预算匹配，选择同计费授权的兼容模型':phaseHandoff?'只读任务转入中档工具执行阶段':cached?'保留近期缓存，预计成本更低':policy.rule==='fallback'?(taskRules.v===2?'分类或上下文不足，选择中档主模型':'分类或上下文不足，保守选择强模型'):`任务规则：${policy.rule}`;
+  Object.assign(decision,{selected:{model:next.model,effort:next.effort},...budget?{budget}:{}});saveDecision();
   ctx.ui.setStatus('yam-route',`${model.provider}/${model.id} · ${next.effort} · ${preferences?.effort==='off'||request.thinkingLevel!=='off'?'固定推理':'自动推理'} · ${reason}`);
   phase='selected';target={model:`${model.provider}/${model.id}`,effort:next.effort,reason};changed();
-  const state={v:1,...next,rule:policy.rule,ruleVersion:policy.version,task:answer?.intent==='continue'&&request.state?.task?request.state.task:text.slice(0,4000),reason};
-  replyRequest=!fixed&&small&&strong&&!(connection(small).billing==='subscription'&&connection(strong).billing!=='subscription')&&policy.valid&&answer?.readOnly===true&&answer.uncertain===false&&answer.action==='none'&&answer.context==='independent'&&['transform','answer'].includes(answer.task)&&next.model==='small'&&small.provider+'/'+small.id!==strong.provider+'/'+strong.id?{request,small,strong,state}:null;
+  const state={v:taskRules.v,...next,...taskRules.v===2?{mode}:{},rule:policy.rule,ruleVersion:policy.version,task:intent==='continue'&&request.state?.task?request.state.task:text.slice(0,4000),reason};
+  replyRequest=!fixed&&small&&regular&&!(connection(small).billing==='subscription'&&connection(regular).billing!=='subscription')&&policy.valid&&answer?.readOnly===true&&answer.uncertain===false&&answer.action==='none'&&answer.context==='independent'&&['transform','answer'].includes(answer.task)&&next.model==='small'&&small.provider+'/'+small.id!==regular.provider+'/'+regular.id?{request,small,strong:regular,state}:null;
   return {model,thinkingLevel:next.effort,state};
-  }catch(e){runtimeError=String(e.message).slice(0,1000);phase='error';changed();throw e;}
+  }catch(e){failure=failureOf(e,{stage:'preparation',dispatch:'not-started'});runtimeError=String(e.message).slice(0,1000);phase='error';changed();throw e;}
  }});
- pi.on('before_agent_start',async(_event,ctx)=>{context=ctx;native?.beginTurn?.(ctx);replyRequest=null;toolsUsed=false;replyUpgraded=false;costMessages=new WeakSet();streamedModel=null;turn=randomUUID();lastError=false;runtimeError=null;pendingInput=false;decision=ctx.model&&ctx.model.provider!=='yam'?{rule:'fixed',ruleVersion:rulesVersion(taskRules),classificationMs:0,classifierCost:0,executionCost:0,correctionCost:0,totalCost:0}:null;preview=null;await notify('UserPromptSubmit',ctx);});
+ pi.on('before_agent_start',async(_event,ctx)=>{context=ctx;native?.beginTurn?.(ctx);replyRequest=null;toolsUsed=false;replyUpgraded=false;costMessages=new WeakSet();streamedModel=null;turn=randomUUID();lastError=false;runtimeError=null;failure=null;pendingInput=false;decision=ctx.model&&ctx.model.provider!=='yam'?{rule:'fixed',ruleVersion:rulesVersion(taskRules),classificationMs:0,classifierCost:0,executionCost:0,correctionCost:0,totalCost:0}:null;preview=null;await notify('UserPromptSubmit',ctx);});
  const recordReply=(m,kind='executionCost')=>{
   recordCost(m,kind);
   lastError=['error','length','aborted'].includes(m.stopReason);
+  failure=lastError?projectFailure(m.provider==='yam-codex'?m.failure:null,{stage:'execution',dispatch:'unknown'}):null;
   if(!lastError)runtimeError=null;
   const key=m.provider&&m.model?`${m.provider}/${m.model}`:null;
   if(key&&(!lastError||m.content?.length||streamedModel===key))actual=actualReply(m);
@@ -401,19 +462,19 @@ export default async function install(pi,supportedLevels,Text,native) {
    const {request,strong,state}=pending;
    let correctionReceived=false;
    try{
-    const level=workingEffort(strong,'high',request.thinkingLevel),reason='只读回答质量不足，升档一次';
+    const messages=request.messages.map(message=>message.role==='system'?{...message,toolsAdded:[],toolsRemoved:[]}:message);
+    const level=workingEffort(strong,'high',request.thinkingLevel),reason='只读回答质量不足，升档一次',budget=checkBudget(strong,messages);
     target={model:`${strong.provider}/${strong.id}`,effort:level,reason};phase='selected';changed();ctx.ui.setStatus('yam-route',`${target.model} · ${level} · ${reason}`);
     // Native message_end replacement is persisted before turn_end; this call never declares or executes tools.
     const signal=request.signal?AbortSignal.any([request.signal,AbortSignal.timeout(60000)]):AbortSignal.timeout(60000);
-    const messages=request.messages.map(message=>message.role==='system'?{...message,toolsAdded:[],toolsRemoved:[]}:message);
     const result=await (isChatGPT(ctx,strong)?native.stream.bind(native):ctx.modelRegistry.streamSimple.bind(ctx.modelRegistry))(strong,{messages},{signal,reasoning:level,toolChoice:'none'}).result();
     recordCost(result,'correctionCost');
     correctionReceived=true;
     if(signal.aborted)throw Error('Answer correction aborted');
     if(result.role!=='assistant'||result.provider!==strong.provider||result.model!==strong.id||result.stopReason!=='stop'||!textOf(result).trim()||result.content.some(b=>b.type==='toolCall'))throw Error('Answer correction incomplete');
     const replacement={...result,thinkingLevel:level};
-    pi.appendEntry('pi.virtual-model-state',{provider:'yam',modelId:'auto',state:{...state,model:'strong',effort:level,reason}});
-    if(decision){decision.corrected=true;decision.selected={model:'strong',effort:level};}costMessages.add(replacement);recordReply(replacement,'correctionCost');return {message:replacement};
+    pi.appendEntry('pi.virtual-model-state',{provider:'yam',modelId:'auto',state:{...state,model:state.v===2?'medium':'strong',effort:level,reason}});
+    if(decision){decision.corrected=true;decision.selected={model:state.v===2?'medium':'strong',effort:level};if(budget)decision.budget=budget;}costMessages.add(replacement);recordReply(replacement,'correctionCost');return {message:replacement};
    }catch{
     if(decision&&!correctionReceived){decision.correctionCost=null;totalCost();}
     if(request.signal?.aborted){const replacement={...m,stopReason:'aborted',errorMessage:'Answer correction interrupted'};costMessages.add(replacement);recordReply(replacement);return {message:replacement};}
@@ -426,14 +487,24 @@ export default async function install(pi,supportedLevels,Text,native) {
  pi.on('tool_execution_end',async(_event,ctx)=>{if(turn)await notify('ToolProgress',ctx);});
  pi.on('agent_settled',async(event,ctx)=>{saveDecision();if(turn)await notify(event.aborted?'Interrupt':lastError?'TurnFailed':'TurnComplete',ctx);turn=null;if(event.aborted){phase='error';runtimeError='Task interrupted. Review the terminal before explicitly retrying work.';}else if(!lastError)phase='idle';changed();});
  await refreshGateway();
+ const executionProfiles=ctx=>{
+  const fixed=preferences?.model&&preferences.model!=='auto'?find(ctx,preferences.model):ctx.model?.provider!=='yam'?ctx.model:null,c=config(ctx);
+  const selectedThinking=currentPreferences().effort==='auto'?undefined:currentPreferences().effort;
+  const choices=fixed?[['fixed',`${fixed.provider}/${fixed.id}`]]:[['small',c.small],...c.medium?[['medium',c.medium]]:[],['strong',c.strong]];
+  return choices.flatMap(([role,key])=>{
+   try{
+    const m=find(ctx,key),thinking=!selectedThinking&&!m.reasoning?'off':workingEffort(m,role==='small'?'medium':'high',selectedThinking??'off');
+    return [{id:`pi-${role}`,kind:'pi',model:`${m.provider}/${m.id}`,thinking,auth:connection(m).billing==='subscription'?'subscription':m.provider==='yam-gateway'?'gateway':'api',capabilities:['text',...role==='small'?[]:['files'],...m.input?.includes('image')?['image_input']:[]]}];
+   }catch(error){if(fixed)throw error;return [];}
+  });
+ };
  const agentRoutingContext=ctx=>{
   if(selectionError||rulesError)throw Error(selectionError?.message??'Invalid task rules');
   const fixed=preferences?.model&&preferences.model!=='auto'?find(ctx,preferences.model):ctx.model?.provider!=='yam'?ctx.model:null,c=config(ctx);
   const classifier=find(ctx,c.classifier??(fixed?`${fixed.provider}/${fixed.id}`:c.small));
   if(!fixed)find(ctx,c.strong);
-  const choices=fixed?[['fixed',fixed]]:[['small',find(ctx,c.small)],['strong',find(ctx,c.strong)]];
   const selectedThinking=currentPreferences().effort==='auto'?undefined:currentPreferences().effort;
-  return {classifier,thinking:classifier.reasoning?effort(classifier,'medium','off'):'off',fixedModel:fixed,selectedThinking,rules:taskRules,gateway:launchOption('--yam-gateway'),profiles:choices.map(([role,m])=>({id:`pi-${role}`,kind:'pi',model:`${m.provider}/${m.id}`,thinking:!selectedThinking&&!m.reasoning?'off':workingEffort(m,role==='small'?'medium':'high',selectedThinking??'off'),auth:connection(m).billing==='subscription'?'subscription':m.provider==='yam-gateway'?'gateway':'api',capabilities:['text',...role==='small'?[]:['files'],...m.input?.includes('image')?['image_input']:[]]}))};
+  return {classifier,thinking:classifier.reasoning?effort(classifier,'medium','off'):'off',fixedModel:fixed,selectedThinking,rules:taskRules,gateway:launchOption('--yam-gateway'),profiles:executionProfiles(ctx)};
  };
  native?.observeExecution?.(value=>{execution=value;changed();});
  return {snapshot,control,catalog,agentRoutingContext,billingPolicy};

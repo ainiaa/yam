@@ -1,6 +1,6 @@
 [package]
 name = "yam-desktop"
-version = "0.1.11"
+version = "0.1.12"
 description = "YAM desktop terminal workspace for local agent sessions"
 authors = ["Jeff.Liu"]
 edition = "2021"

@@ -2,7 +2,7 @@
 import {readFileSync} from 'node:fs';
 import {pathToFileURL} from 'node:url';
 const levels=['off','minimal','low','medium','high','xhigh','max'];
-const selection=value=>value&&['small','strong'].includes(value.model)&&levels.includes(value.effort);
+const selection=value=>value&&['small','medium','strong'].includes(value.model)&&levels.includes(value.effort);
 export function evaluateRouting(cases,observations){
  if(!Array.isArray(cases)||!cases.length||!Array.isArray(observations)||cases.length!==observations.length)throw Error('Require one observation per nonempty case');
  const expected=new Map();
@@ -12,7 +12,7 @@ export function evaluateRouting(cases,observations){
  for(const row of observations){
   if(!row||!expected.has(row.id)||seen.has(row.id)||!selection(row)||!Number.isFinite(row.latencyMs)||row.latencyMs<0)throw Error('Invalid, missing or duplicate observation');
   if(row.totalCost!=null&&(!Number.isFinite(row.totalCost)||row.totalCost<0)||row.taskPassed!=null&&typeof row.taskPassed!=='boolean')throw Error('Invalid cost or quality observation');
-  seen.add(row.id);const target=expected.get(row.id),modelRank=Number(row.model==='strong')-Number(target.model==='strong'),effortRank=levels.indexOf(row.effort)-levels.indexOf(target.effort);
+  seen.add(row.id);const target=expected.get(row.id),modelRank=['small','medium','strong'].indexOf(row.model)-['small','medium','strong'].indexOf(target.model),effortRank=levels.indexOf(row.effort)-levels.indexOf(target.effort);
   if(!modelRank&&!effortRank)exactMatches++;
   if(modelRank<0||effortRank<0)underRouted++;
   if(modelRank>0||effortRank>0)overRouted++;

@@ -58,3 +58,9 @@ test('failed preference write rolls back every original value and never touches 
 test('connection import refuses unreadable existing templates before producing writes',()=>{const backup=parsePreferencesBackup(JSON.stringify({version:1,settings:{},connections:[{name:'Magpie',adapter:'codex',provider}]}),true);assert.throws(()=>preferencesImportWrites(backup,[],()=> '22222222-2222-4222-8222-222222222222','unreadable templates'),/saved connections/i);});
 
 test('import of appearance never clears a local background image excluded from backup',()=>{const b=parsePreferencesBackup(JSON.stringify({version:1,settings:{'yam.appAppearance.v1':appearance},connections:[]}),true);const current={...appearance,background:'data:image/png;base64,AAAA'};const writes=preferencesImportWrites(b,[],undefined,null,current);assert.equal(JSON.parse(writes['yam.appAppearance.v1']).background,current.background);});
+test('three-tier portable backup restores the middle role with its rules and billing',async()=>{
+ const {defaultTierRules}=await import('../src-tauri/pi/task-rules.mjs');
+ const setup=JSON.stringify(piSetupMapping({gateway:null,small:'yam-codex/low',medium:'yam-codex/main',strong:'yam-codex/high',classifier:'yam-codex/low',model:'auto',effort:'auto',rules:JSON.stringify(defaultTierRules)},'--yam-billing subscription'));
+ const backup=parsePreferencesBackup(createPreferencesBackup(k=>k===piSetupStorageKey?setup:null,[],true),true);assert.equal(backup.piRouting.v,2);assert.equal(backup.piRouting.medium,'yam-codex/main');
+ const imported=preferencesImportWrites(backup,[])[piSetupStorageKey];const args=restorePiSetup('',imported);assert.equal(parsePiDraft(args).medium,'yam-codex/main');assert.match(args,/--yam-billing subscription/);assert.equal(JSON.parse(parsePiDraft(args).rules).v,2);
+});

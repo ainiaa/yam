@@ -2,14 +2,14 @@ import assert from 'node:assert/strict';
 import {test} from 'node:test';
 const api=await import('../src-tauri/pi/native-codex.mjs').catch(e=>{if(e.code==='ERR_MODULE_NOT_FOUND')return {};throw e;});
 const id='01234567-1234-1234-1234-0123456789ab';
-function fixture({error,restricted=false,notice,persistAt=Infinity,now,onDiscover,onExecute,configuredExecutable='/native/codex'}={}){
+function fixture({error,restricted=false,notice,persistAt=Infinity,now,onDiscover,onExecute,discovery,configuredExecutable='/native/codex',extraModels=[]}={}){
  const entries=[],calls=[],providers=[],commands={};let writes=0;
  const original={provider:'openai',id:'gpt-test',api:'openai-responses',reasoning:true,input:['text','image'],contextWindow:100000,maxTokens:10000,thinkingLevelMap:{off:'none',medium:'medium',high:'high',max:'xhigh'}};
  const profile={id:'codex',kind:'codex',executable:'/native/codex',auth:'subscription',capabilities:['text','files','image_input','image_generation']};
  const pi={getActiveTools:()=>restricted?['read']:['read','bash','edit','write'],registerProvider:(...v)=>providers.push(v),appendEntry:(customType,data)=>{if(++writes>=persistAt)throw Error('receipt disk write failed');entries.push({type:'custom',customType,data});},registerCommand:(n,c)=>commands[n]=c};
- const ctx={cwd:'/repo',ui:{setStatus(){},notify(){},confirm:async()=>true},isIdle:()=>true,sessionManager:{getBranch:()=>entries,getSessionFile:()=>'/owned/parent.jsonl'},modelRegistry:{isUsingOAuth:()=>true,getAll:()=>[original]}};
+ const ctx={cwd:'/repo',ui:{setStatus(){},notify(){},confirm:async()=>true},isIdle:()=>true,sessionManager:{getBranch:()=>entries,getSessionFile:()=>'/owned/parent.jsonl'},modelRegistry:{isUsingOAuth:()=>true,getAll:()=>[original,...extraModels]}};
  const createStream=()=>{let resolve;const promise=new Promise(r=>resolve=r);return {events:[],push(e){this.events.push(e);if(e.type==='done')resolve(e.message);if(e.type==='error')resolve(e.error);},end(){},result:()=>promise};};
- const bridge=api.createNativeCodex?.(pi,{now,createStream,getTools:c=>c.tools??[],getSystemPrompt:c=>c.systemPrompt??c.messages.filter(m=>m.role==='system').map(m=>m.content).join('\n'),loadModels:async()=>[],executable:configuredExecutable,discover:async()=>{onDiscover?.();return [profile];},execute:async(a,o)=>{calls.push({a,o});if(onExecute)return onExecute(o);o.onLine?.(JSON.stringify({type:'thread.started',thread_id:id}));if(notice)o.onLine?.(JSON.stringify({type:'item.completed',item:{type:notice}}));if(error)throw typeof error==='string'?Error(error):error;return {text:'native commentary\nFinal answer',finalText:'Final answer',sessionId:id,usage:{input_tokens:20,cached_input_tokens:5,output_tokens:4}};}});
+ const bridge=api.createNativeCodex?.(pi,{now,createStream,getTools:c=>c.tools??[],getSystemPrompt:c=>c.systemPrompt??c.messages.filter(m=>m.role==='system').map(m=>m.content).join('\n'),loadModels:async()=>[],executable:configuredExecutable,discover:discovery??(async()=>{onDiscover?.();return [profile];}),execute:async(a,o)=>{calls.push({a,o});if(onExecute)return onExecute(o);o.onLine?.(JSON.stringify({type:'thread.started',thread_id:id}));if(notice)o.onLine?.(JSON.stringify({type:'item.completed',item:{type:notice}}));if(error)throw typeof error==='string'?Error(error):error;return {text:'native commentary\nFinal answer',finalText:'Final answer',sessionId:id,usage:{input_tokens:20,cached_input_tokens:5,output_tokens:4}};}});
  return {bridge,entries,calls,providers,commands,ctx,original,profile};
 }
 const context={messages:[{role:'user',content:'Write the article with a cover'}],tools:[{name:'read'}]};
@@ -246,4 +246,177 @@ test('modified native payloads require a full unmodified handoff before incremen
 });
 test('payload hooks cannot remove mandatory native scope in task or read-only inference',async()=>{
  for(const readonly of [false,true]){const f=fixture();await f.bridge.initialize(f.ctx);f.bridge.beginTurn(f.ctx);const result=await f.bridge.stream(f.bridge.resolveModel(f.ctx,f.original),{...context,systemPrompt:'PARENT_SCOPE'},{...readonly?{toolChoice:'none'}:{},onPayload:p=>({...p,prompt:'Replacement without parent scope'})}).result();assert.equal(result.stopReason,'error');assert.match(result.errorMessage,/scope/i);assert.equal(f.calls.length,0);assert.equal(f.entries.length,0);}
+});
+
+const collaborationRoles=[
+ {id:'pi-small',model:'yam-codex/gpt-helper',auth:'subscription',thinking:'low'},
+ {id:'pi-medium',model:'yam-codex/gpt-test',auth:'subscription',thinking:'medium'},
+ {id:'pi-strong',model:'yam-codex/gpt-helper',auth:'subscription',thinking:'high'}
+];
+test('native main task receives only known subscription model roles and owns collaboration closure',async()=>{
+ const f=fixture({extraModels:[{provider:'openai-codex',id:'gpt-helper',input:['text'],reasoning:true}]});await f.bridge.initialize(f.ctx);f.bridge.beginTurn(f.ctx);
+ f.bridge.setRoute({intent:'new',roles:[...collaborationRoles,{id:'pi-strong',model:'other/paid',auth:'api',thinking:'high'},{id:'pi-strong',model:'yam-codex/unknown',auth:'subscription',thinking:'high'}]});
+ const result=await f.bridge.stream(f.bridge.resolveModel(f.ctx,f.original),{...context,systemPrompt:'USER_FORBIDS_PUBLISHING'},{}).result();
+ assert.equal(result.stopReason,'stop');const options=f.calls[0].o;
+ assert.equal(options.allowCollaboration,true);assert.match(options.prompt,/Automatic native collaboration/);assert.match(options.prompt,/fork_turns=none/);assert.match(options.prompt,/wait.*sub.*(?:task|agent)/i);assert.match(options.prompt,/verify.*(?:result|artifact)/i);
+ assert.ok(options.prompt.includes('gpt-helper'));assert.ok(options.prompt.includes('USER_FORBIDS_PUBLISHING'));assert.ok(!options.prompt.includes('other/paid'));assert.ok(!options.prompt.includes('yam-codex/unknown'));
+ assert.equal(f.calls[0].a.model,'gpt-test');
+});
+test('read-only, fixed, single-model and delegated execution cannot enable native collaboration',async()=>{
+ for(const kind of ['readonly','fixed','single','child','unavailable']){
+  const f=fixture({extraModels:[{provider:'openai-codex',id:'gpt-helper',input:['text'],reasoning:true}]});await f.bridge.initialize(f.ctx);f.bridge.beginTurn(f.ctx);
+  const roles=kind==='fixed'?[{...collaborationRoles[1],id:'pi-fixed'}]:kind==='single'?[collaborationRoles[1],{...collaborationRoles[1],id:'pi-small'}]:kind==='unavailable'?[collaborationRoles[1],{...collaborationRoles[0],model:'openai/gpt-paid',auth:'api'}]:collaborationRoles;
+  f.bridge.setRoute({roles});const previous=process.env.YAM_AGENT_ROUTING_CHILD;
+  try{if(kind==='child')process.env.YAM_AGENT_ROUTING_CHILD='1';await f.bridge.stream(f.bridge.resolveModel(f.ctx,f.original),context,kind==='readonly'?{toolChoice:'none'}:{}).result();}
+  finally{if(previous===undefined)delete process.env.YAM_AGENT_ROUTING_CHILD;else process.env.YAM_AGENT_ROUTING_CHILD=previous;}
+  assert.equal(f.calls[0].o.allowCollaboration,false,kind);assert.ok(!f.calls[0].o.prompt.includes('Automatic native collaboration'),kind);
+ }
+});
+
+test('native helper reasoning follows the same metadata mapping as its parent and rejects unsupported levels',async()=>{
+ for(const desired of ['max','off','high']){
+  const f=fixture({extraModels:[{provider:'openai-codex',id:'gpt-helper',input:['text'],reasoning:true,thinkingLevelMap:{max:'xhigh',off:'none',high:null}}]});await f.bridge.initialize(f.ctx);f.bridge.beginTurn(f.ctx);
+  f.bridge.setRoute({roles:[collaborationRoles[1],{...collaborationRoles[0],thinking:desired}]});
+  await f.bridge.stream(f.bridge.resolveModel(f.ctx,f.original),context,{reasoning:desired}).result();
+  const call=f.calls[0];assert.equal(call.a.thinking,desired==='max'?'xhigh':desired==='off'?'none':'high');
+  if(desired==='high'){assert.equal(call.o.allowCollaboration,false);assert.ok(!call.o.prompt.includes('Automatic native collaboration'));}
+  else{assert.equal(call.o.allowCollaboration,true);assert.ok(call.o.prompt.includes(JSON.stringify({role:'small',model:'gpt-helper',reasoning:desired==='max'?'xhigh':'none'})));}
+ }
+});
+
+test('native capability snapshot is read-only and execution rechecks revoked runtime abilities',async()=>{
+ const f=fixture();await f.bridge.initialize(f.ctx);assert.deepEqual(f.bridge.capabilities(),f.profile.capabilities);
+ const copy=f.bridge.capabilities();copy.length=0;assert.ok(f.bridge.capabilities().includes('image_generation'));
+ f.profile.capabilities=['text','files','image_input'];f.bridge.beginTurn(f.ctx);f.bridge.setRoute({intent:'new',requires:['image_generation']});
+ const result=await f.bridge.stream(f.bridge.resolveModel(f.ctx,f.original),context,{}).result();assert.equal(result.stopReason,'error');assert.match(result.errorMessage,/capability/);assert.equal(f.calls.length,0);assert.equal(f.entries.length,0);
+ await f.bridge.initialize(f.ctx);assert.deepEqual(f.bridge.capabilities(),f.profile.capabilities);
+});
+
+// C2: recovery is a status/control seam, never an execution retry.
+test('native recovery exposes only branch-local facts and survives restore without replay',async()=>{
+ const f=fixture({error:Object.assign(Error('PRIVATE_STDERR'),{mayBeRunning:true})});await f.bridge.initialize(f.ctx);f.bridge.beginTurn(f.ctx);
+ await f.bridge.stream(f.bridge.resolveModel(f.ctx,f.original),context,{}).result();
+ assert.equal(typeof f.bridge.getRecovery,'function');
+ const recovery=f.bridge.getRecovery(f.ctx);assert.equal(recovery.sessionId,id);assert.equal(recovery.status,'running');assert.equal(recovery.reason,'cleanup-unconfirmed');assert.equal(recovery.needsInspection,true);assert.equal(recovery.inProgress,false);
+ assert.deepEqual(Object.keys(recovery).sort(),['cleanup','failure','inProgress','needsInspection','reason','receiptId','sessionId','status']);assert.doesNotMatch(JSON.stringify(recovery),/PRIVATE|identity|cwd|prompt|stderr/);
+ const restored=fixture();restored.entries.push(...structuredClone(f.entries));await restored.bridge.initialize(restored.ctx);restored.bridge.beginTurn(restored.ctx);assert.deepEqual(restored.bridge.getRecovery(restored.ctx),recovery);
+ const branch=restored.entries.splice(0);assert.equal(restored.bridge.getRecovery(restored.ctx),null);restored.entries.push(...branch);assert.deepEqual(restored.bridge.getRecovery(restored.ctx),recovery);assert.equal(restored.calls.length,0);
+});
+test('native recovery treats legacy receipts conservatively, including missing identifiers',async()=>{
+ const f=fixture();await f.bridge.initialize(f.ctx);assert.equal(typeof f.bridge.getRecovery,'function');
+ for(const status of ['failed','running']){f.entries.length=0;f.entries.push({type:'custom',customType:'yam.native-codex.v1',data:{status,identity:'PRIVATE',cwd:'/PRIVATE'}});assert.deepEqual(f.bridge.getRecovery(f.ctx),{receiptId:null,sessionId:null,status,reason:'unknown',cleanup:'unknown',inProgress:false,needsInspection:true});assert.throws(()=>f.bridge.reset(f.ctx,{receiptId:null,confirmed:true}),/receipt|identif/i);}
+ f.entries[0].id='legacy-entry';assert.equal(f.bridge.getRecovery(f.ctx).receiptId,'legacy-entry');
+});
+test('native recovery reset requires current receipt, idle and confirmation and only writes a marker',async()=>{
+ const f=fixture({error:'quota exhausted'});await f.bridge.initialize(f.ctx);f.bridge.beginTurn(f.ctx);const model=f.bridge.resolveModel(f.ctx,f.original);await f.bridge.stream(model,context,{}).result();
+ assert.equal(typeof f.bridge.reset,'function');const receiptId=f.bridge.getRecovery(f.ctx).receiptId,before=f.entries.length;
+ for(const data of [{receiptId},{receiptId,confirmed:false},{receiptId:'stale',confirmed:true},{receiptId,confirmed:true,extra:1}])assert.throws(()=>f.bridge.reset(f.ctx,data),/confirm|receipt|Invalid/i);
+ f.ctx.isIdle=()=>false;assert.throws(()=>f.bridge.reset(f.ctx,{receiptId,confirmed:true}),/Wait|stop/i);f.ctx.isIdle=()=>true;
+ f.bridge.reset(f.ctx,{receiptId,confirmed:true});assert.equal(f.entries.length,before+1);assert.equal(f.entries.at(-1).customType,'yam.native-codex-reset.v1');assert.equal(f.entries.at(-1).data.receiptId,receiptId);assert.equal(f.bridge.getRecovery(f.ctx),null);assert.equal(f.calls.length,1);
+ f.bridge.beginTurn(f.ctx);await f.bridge.stream(model,context,{}).result();assert.equal(f.calls.length,2);assert.equal(f.calls[1].o.resume,null);
+});
+test('native reset persistence failure leaves the unfinished receipt blocked',async()=>{
+ const f=fixture({error:'failed',persistAt:4});await f.bridge.initialize(f.ctx);f.bridge.beginTurn(f.ctx);await f.bridge.stream(f.bridge.resolveModel(f.ctx,f.original),context,{}).result();assert.equal(typeof f.bridge.getRecovery,'function');const before=f.bridge.getRecovery(f.ctx);
+ assert.throws(()=>f.bridge.reset(f.ctx,{receiptId:before.receiptId,confirmed:true}),/disk/);assert.deepEqual(f.bridge.getRecovery(f.ctx),before);assert.equal(f.calls.length,1);
+});
+test('native recovery can be viewed during execution but cannot clear an active receipt',async()=>{
+ let release,started;const ready=new Promise(r=>started=r),f=fixture({onExecute:()=>{started();return new Promise(r=>release=r);}});await f.bridge.initialize(f.ctx);f.bridge.beginTurn(f.ctx);const pending=f.bridge.stream(f.bridge.resolveModel(f.ctx,f.original),context,{}).result();await ready;
+ assert.equal(typeof f.bridge.getRecovery,'function');const current=f.bridge.getRecovery(f.ctx);assert.equal(current.inProgress,true);assert.equal(current.needsInspection,false);assert.throws(()=>f.bridge.reset(f.ctx,{receiptId:current.receiptId,confirmed:true}),/Wait|stop/i);
+ release({finalText:'Done',sessionId:id});await pending;assert.equal(f.bridge.getRecovery(f.ctx),null);assert.equal(f.calls.length,1);
+});
+test('CLI reset confirmation binds the branch and refreshes recovery without executing',async()=>{
+ const f=fixture({error:'failed'});await f.bridge.initialize(f.ctx);f.bridge.beginTurn(f.ctx);await f.bridge.stream(f.bridge.resolveModel(f.ctx,f.original),context,{}).result();let release;f.ctx.ui.confirm=()=>new Promise(r=>release=r);const before=f.entries.length;
+ const pending=f.commands['yam-native'].handler('reset',f.ctx);f.bridge.beginTurn(f.ctx);release(true);await assert.rejects(pending,/changed|refresh/i);assert.equal(f.entries.length,before);assert.equal(f.calls.length,1);
+ f.ctx.ui.confirm=async()=>false;await f.commands['yam-native'].handler('reset',f.ctx);assert.equal(f.entries.length,before);
+ let updates=0;f.bridge.observeExecution(()=>updates++);f.ctx.ui.confirm=async()=>true;await f.commands['yam-native'].handler('reset',f.ctx);assert.equal(updates,1);assert.equal(f.calls.length,1);assert.equal(f.bridge.getRecovery(f.ctx),null);
+});
+
+test('CLI recovery preserves empty, completed and identifier-free manual resets',async()=>{
+ for(const kind of ['empty','completed','legacy']){const f=fixture();await f.bridge.initialize(f.ctx);f.bridge.beginTurn(f.ctx);if(kind==='completed')await f.bridge.stream(f.bridge.resolveModel(f.ctx,f.original),context,{}).result();if(kind==='legacy')f.entries.push({type:'custom',customType:'yam.native-codex.v1',data:{status:'failed'}});const calls=f.calls.length;await f.commands['yam-native'].handler('reset',f.ctx);assert.equal(f.entries.at(-1).customType,'yam.native-codex-reset.v1',kind);assert.equal(f.bridge.getRecovery(f.ctx),null);assert.equal(f.calls.length,calls);}
+});
+test('CLI confirmation rejects a replaced receipt even when its logical identifier stays the same',async()=>{
+ const f=fixture({error:'failed'});await f.bridge.initialize(f.ctx);f.bridge.beginTurn(f.ctx);await f.bridge.stream(f.bridge.resolveModel(f.ctx,f.original),context,{}).result();let release;f.ctx.ui.confirm=()=>new Promise(r=>release=r);const pending=f.commands['yam-native'].handler('reset',f.ctx);f.entries.push(structuredClone(f.entries.at(-1)));release(true);await assert.rejects(pending,/changed|receipt/i);assert.notEqual(f.entries.at(-1).customType,'yam.native-codex-reset.v1');
+});
+test('native cancellation persists a conservative recovery reason and never restarts work',async()=>{
+ const abort=new AbortController(),f=fixture({onExecute:()=>{abort.abort();throw Error('aborted');}});await f.bridge.initialize(f.ctx);f.bridge.beginTurn(f.ctx);await f.bridge.stream(f.bridge.resolveModel(f.ctx,f.original),context,{signal:abort.signal}).result();const recovery=f.bridge.getRecovery(f.ctx);assert.equal(recovery.reason,'cancelled');assert.equal(recovery.cleanup,'unknown');assert.equal(recovery.needsInspection,true);assert.equal(f.calls.length,1);
+});
+
+test('native recovery status exposes only a strictly validated Codex session UUID for inspection',async()=>{
+ const f=fixture();await f.bridge.initialize(f.ctx);const notices=[];f.ctx.ui.notify=raw=>notices.push(JSON.parse(raw));
+ for(const sessionId of [id,id.toUpperCase(),null,undefined,'PRIVATE_SESSION','../PRIVATE',' '+id,id+'\n',id+'; PRIVATE',id.replaceAll('-',''),123,{id}]){
+  f.entries.length=0;f.entries.push({type:'custom',customType:'yam.native-codex.v1',data:{id:'receipt',status:'failed',sessionId,identity:'PRIVATE_IDENTITY',cwd:'/PRIVATE_CWD',prompt:'PRIVATE_PROMPT',stderr:'PRIVATE_STDERR'}});
+  const expected=typeof sessionId==='string'&&[id,id.toUpperCase()].includes(sessionId)?sessionId:null,recovery=f.bridge.getRecovery(f.ctx);assert.equal(recovery.sessionId,expected);await f.commands['yam-native'].handler('status',f.ctx);assert.deepEqual(notices.at(-1),recovery);assert.doesNotMatch(JSON.stringify(recovery),/PRIVATE|identity|cwd|prompt|stderr/);assert.equal(recovery.needsInspection,true);
+ }
+ assert.equal(f.calls.length,0);
+});
+
+test('native recovery rejects control characters in receipt and legacy entry identifiers without trimming',async()=>{
+ const f=fixture();await f.bridge.initialize(f.ctx);
+ for(const suffix of ['\n','\r','\r\n','\u2028','\u2029','\x00']){
+  f.entries.length=0;f.entries.push({type:'custom',customType:'yam.native-codex.v1',id:'entry'+suffix,data:{id:'receipt'+suffix,status:'failed',sessionId:id}});const recovery=f.bridge.getRecovery(f.ctx);assert.equal(recovery.receiptId,null,JSON.stringify(suffix));assert.equal(recovery.sessionId,id);assert.equal(recovery.needsInspection,true);assert.throws(()=>f.bridge.reset(f.ctx,{receiptId:'receipt',confirmed:true}),/receipt|identif/i);
+ }
+});
+
+test('native refresh replaces same-id model metadata and republishes the physical catalog',async()=>{
+ const model={provider:'openai-codex',id:'same',input:['text'],contextWindow:1000,thinkingLevelMap:{high:'high'}};let current=model;const providers=[];
+ const bridge=api.createNativeCodex({registerCommand(){},registerProvider:(_p,v)=>providers.push(v)},{loadModels:async()=>[current],discover:async()=>[{kind:'codex',auth:'subscription',capabilities:['text','files','image_input']}]});
+ const ctx={modelRegistry:{getAll:()=>[]}};await bridge.initialize(ctx);
+ for(const patch of [{input:['text','image'],contextWindow:2000,thinkingLevelMap:{high:null}},{input:['text'],contextWindow:500,thinkingLevelMap:{high:'high'}}]){
+  current={...model,...patch};await bridge.initialize(ctx);const resolved=bridge.resolveModel(ctx,model);
+  assert.deepEqual(resolved.input,current.input);assert.equal(resolved.contextWindow,current.contextWindow);assert.deepEqual(resolved.thinkingLevelMap,current.thinkingLevelMap);assert.deepEqual(providers.at(-1).models.find(m=>m.id==='same'),resolved);
+ }
+ const count=providers.length;await bridge.initialize(ctx);assert.equal(providers.length,count,'unchanged discovery does not republish the catalog');
+});
+
+test('native fallback refresh ignores its own wrapped catalog and keeps fresh OAuth metadata',async()=>{
+ let source={provider:'openai',id:'same',name:'Model',input:['text'],contextWindow:1000};const providers=[];
+ const ctx={modelRegistry:{getAll:()=>[source,...providers.at(-1)?.models??[]],isUsingOAuth:m=>m.provider==='openai'}};
+ const bridge=api.createNativeCodex({registerCommand(){},registerProvider:(_p,v)=>providers.push(v)},{loadModels:async()=>[],discover:async()=>[{kind:'codex',auth:'subscription',capabilities:['text','files','image_input']}]});
+ await bridge.initialize(ctx);source={...source,input:['text','image']};await bridge.initialize(ctx);const resolved=bridge.resolveModel(ctx,source);
+ assert.deepEqual(resolved.input,['text','image']);assert.equal(resolved.name,'Codex CLI · Model');const count=providers.length;await bridge.initialize(ctx);assert.equal(providers.length,count);
+});
+
+test('T2 native preflight failures carry safe facts without replacing the legacy context-budget diagnostic',async()=>{
+ for(const kind of ['context','capability','cancel']){
+  const observed=[],f=fixture();await f.bridge.initialize(f.ctx);f.bridge.observeExecution(value=>observed.push(value));f.bridge.beginTurn(f.ctx);
+  const abort=new AbortController();if(kind==='cancel')abort.abort();if(kind==='capability')f.profile.capabilities=['text'];
+  const transcript=kind==='context'?{...context,messages:[{role:'user',content:'PRIVATE '+ 'x'.repeat(128000)}]}:context;
+  const result=await f.bridge.stream(f.bridge.resolveModel(f.ctx,f.original),transcript,{signal:abort.signal}).result();
+  assert.equal(result.failure?.category,kind==='cancel'?'cancelled':kind);assert.equal(result.failure.dispatch,'not-started');assert.equal(f.calls.length,0);assert.equal(f.entries.length,0);assert.doesNotMatch(JSON.stringify(result.failure),/PRIVATE|prompt|cwd|stderr/);
+  if(kind==='context')assert.equal(observed.at(-1).failure,'context-budget');
+ }
+});
+
+test('T2 native login failure survives initialization and execution discovery without guessing an empty catalog',async()=>{
+ const {createAgentDiscovery}=await import('../src-tauri/pi/agent-executor.mjs');
+ const discovery=createAgentDiscovery({identity:async()=> 'installed',probe:async()=>({code:1,stdout:'',stderr:'Not logged in\n'})}),f=fixture({discovery});
+ await f.bridge.initialize(f.ctx);assert.equal(f.bridge.discoveryFailure?.()?.code,'not-logged-in');f.bridge.beginTurn(f.ctx);
+ const result=await f.bridge.stream(f.bridge.resolveModel(f.ctx,f.original),context,{}).result();
+ assert.equal(result.failure?.category,'auth');assert.equal(result.failure.stage,'discovery');assert.equal(result.failure.dispatch,'not-started');assert.equal(f.entries.length,0);assert.equal(f.calls.length,0);
+ const unknown=fixture({discovery:async()=>[]});await unknown.bridge.initialize(unknown.ctx);unknown.bridge.beginTurn(unknown.ctx);const fallback=await unknown.bridge.stream(unknown.bridge.resolveModel(unknown.ctx,unknown.original),context,{}).result();assert.equal(fallback.failure?.category,'unknown');
+});
+
+test('T2 native missing session is a failed inspected receipt and cannot be silently resumed or replayed',async()=>{
+ const f=fixture({onExecute:()=>({finalText:'Done',sessionId:null})});await f.bridge.initialize(f.ctx);f.bridge.beginTurn(f.ctx);const model=f.bridge.resolveModel(f.ctx,f.original);
+ const result=await f.bridge.stream(model,context,{}).result();assert.equal(result.stopReason,'error');assert.equal(result.failure?.code,'native-session-missing');assert.equal(result.failure.dispatch,'started');
+ const recovery=f.bridge.getRecovery(f.ctx);assert.equal(recovery.status,'failed');assert.equal(recovery.failure.code,'native-session-missing');assert.equal(recovery.failure.nextAction,'inspect-task');assert.equal(recovery.sessionId,null);
+ f.bridge.beginTurn(f.ctx);await f.bridge.initialize(f.ctx);assert.equal((await f.bridge.stream(model,context,{}).result()).stopReason,'error');assert.equal(f.calls.length,1);
+ const readonly=await f.bridge.stream(model,{messages:context.messages},{toolChoice:'none'}).result();assert.equal(readonly.stopReason,'stop');assert.equal(f.entries.at(-1).data.status,'failed');
+});
+
+test('T2 receipt failure projection is allowlisted and legacy receipts remain conservative',async()=>{
+ const f=fixture({error:'quota exceeded PRIVATE_STDERR'});await f.bridge.initialize(f.ctx);f.bridge.beginTurn(f.ctx);const result=await f.bridge.stream(f.bridge.resolveModel(f.ctx,f.original),context,{}).result();
+ assert.equal(result.failure?.category,'unknown');assert.equal(result.failure.dispatch,'started');assert.equal(f.bridge.getRecovery(f.ctx).failure.nextAction,'inspect-task');
+ const latest=f.entries.at(-1).data;latest.failure.prompt='PRIVATE_PROMPT';latest.failure.stderr='PRIVATE_STDERR';latest.failure.cwd='/PRIVATE';latest.failure.nextAction='retry';
+ const restored=fixture();restored.entries.push(...structuredClone(f.entries));await restored.bridge.initialize(restored.ctx);restored.bridge.beginTurn(restored.ctx);
+ assert.doesNotMatch(JSON.stringify(restored.bridge.getRecovery(restored.ctx)),/PRIVATE|retry|prompt|stderr|cwd/);
+ delete restored.entries.at(-1).data.failure;assert.equal(restored.bridge.getRecovery(restored.ctx).reason,'execution-failed');assert.equal(restored.bridge.getRecovery(restored.ctx).failure,undefined);
+});
+
+test('T2 dispatched cancellation and receipt persistence retain inspection requirements',async()=>{
+ for(const reported of [true,false]){
+  const abort=new AbortController(),f=fixture({onExecute:o=>{if(reported)o.onLine(JSON.stringify({type:'thread.started',thread_id:id}));abort.abort();throw Error('cancelled');}});await f.bridge.initialize(f.ctx);f.bridge.beginTurn(f.ctx);
+  const result=await f.bridge.stream(f.bridge.resolveModel(f.ctx,f.original),context,{signal:abort.signal}).result();assert.equal(result.failure?.category,'cancelled');assert.equal(result.failure.dispatch,reported?'started':'unknown');assert.equal(f.bridge.getRecovery(f.ctx).failure.nextAction,'inspect-task');
+ }
+ const disk=fixture({persistAt:3});await disk.bridge.initialize(disk.ctx);disk.bridge.beginTurn(disk.ctx);const failed=await disk.bridge.stream(disk.bridge.resolveModel(disk.ctx,disk.original),context,{}).result();assert.equal(failed.failure?.code,'receipt-persistence');assert.equal(failed.failure.stage,'persistence');assert.equal(failed.failure.nextAction,'inspect-task');assert.ok(disk.bridge.getRecovery(disk.ctx));
 });

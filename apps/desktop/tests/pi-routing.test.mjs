@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
+import * as budgetPolicy from '../src-tauri/pi/policy.mjs';
 import {decide, guardCapacity, resolveEffort} from '../src-tauri/pi/policy.mjs';
 test('automatic high never silently increases to max while explicit max remains available',()=>{
  const model={id:'only-max',reasoning:true,thinkingLevelMap:{max:'max'}};
@@ -32,6 +33,20 @@ test('Pi capacity guard prevents a downgrade causing compaction or losing images
  assert.equal(guardCapacity('small',[{role:'user',content:[{type:'image',data:'x'}]}],small,strong),'strong');
 });
 
+test('T3 context budgets use per-message estimates and Pi reserve independently of output limits and usage',()=>{
+ assert.equal(typeof budgetPolicy.measureContextBudget,'function');
+ const messages=[{role:'system',content:'PRIVATE',toolsAdded:[{name:'read'}]},{role:'user',content:[{type:'image',data:'x'.repeat(50000)}]},{role:'assistant',content:[],usage:{input:900000,output:900000}}],seen=[];
+ const deps={estimateMessageTokens:m=>{seen.push(m);return 100;},getReserveTokens:()=>20};
+ const result=budgetPolicy.measureContextBudget({contextWindow:320,maxTokens:0},messages,deps);
+ assert.equal(result.fits,true);assert.equal(result.inputTokens,300);assert.equal(result.reserveTokens,20);assert.equal(result.maxOutputTokens,null);assert.equal(result.kind,'local-estimate');assert.deepEqual(seen,messages);
+ assert.equal(budgetPolicy.measureContextBudget({contextWindow:319,maxTokens:999999},messages,deps).reason,'context-limit');
+ assert.doesNotMatch(JSON.stringify(result),/PRIVATE|900000|xxxxx|toolsAdded/);
+ for(const window of [0,undefined,NaN,Infinity,-1])assert.equal(budgetPolicy.measureContextBudget({contextWindow:window},[],deps).reason,'context-unknown');
+ for(const reserve of [-1,NaN,Infinity,'20'])assert.equal(budgetPolicy.measureContextBudget({contextWindow:1000},messages,{...deps,getReserveTokens:()=>reserve}).fits,false);
+ for(const estimate of [-1,NaN,Infinity,undefined])assert.equal(budgetPolicy.measureContextBudget({contextWindow:1000},messages,{...deps,estimateMessageTokens:()=>estimate}).fits,false);
+ assert.equal(budgetPolicy.measureContextBudget({contextWindow:1000},messages,{...deps,getReserveTokens:()=>{throw Error('PRIVATE_SETTINGS');}}).fits,false);
+});
+
 test('Pi is an independent launch choice with native configuration and no official connection migration',async()=>{
  const {isLaunchDefaults}=await import('../src/project-config.ts');
  const base={adapter:'pi',mode:'interactive',extra_args:'--yam-small native/small --yam-strong native/strong',prompt:null,command:null,provider:null};
@@ -41,7 +56,7 @@ test('Pi is an independent launch choice with native configuration and no offici
 
 import install from '../src-tauri/pi/router.mjs';
 import {defaultRules,rulesVersion} from '../src-tauri/pi/task-rules.mjs';
-function fixture({answer={intent:'new',difficulty:'simple',uncertain:false,readOnly:true,reason:'read only'},selected='off',state,raw=false,native}={}) {
+function fixture({answer={intent:'new',difficulty:'simple',uncertain:false,readOnly:true,reason:'read only'},selected='off',state,raw=false,native,budget={estimateMessageTokens:()=>128,getReserveTokens:()=>16384}}={}) {
  // Older policy test cases keep their difficulty shorthand; actual classifier mocks use task facts.
  if(!raw&&answer&&['simple','complex','critical'].includes(answer.difficulty))answer={...answer,task:answer.difficulty==='simple'?'answer':answer.difficulty==='critical'?'review':'coding',context:'independent',action:answer.readOnly===false?'write':'none',depth:answer.difficulty==='critical'?'deep':'normal',readOnly:answer.readOnly??false};
  const handlers={},commands={},renderers={},flags={'yam-small':'p/small','yam-strong':'p/strong'},entries=[],statuses=[];
@@ -50,12 +65,89 @@ function fixture({answer={intent:'new',difficulty:'simple',uncertain:false,readO
  const pi={registerEntryRenderer:(name,fn)=>renderers[name]=fn,on:(name,fn)=>handlers[name]=fn,registerCommand:(name,v)=>commands[name]=v,registerFlag(){},getFlag:n=>flags[n],registerVirtualModel:v=>{definition=v;models.auto={provider:v.provider,id:v.id,api:"pi-virtual",reasoning:true,thinkingLevelMap:Object.fromEntries(v.thinkingLevels.map(level=>[level,level]))};},appendEntry:(customType,data)=>entries.push({type:'custom',customType,data}),setModel:async()=>true,setThinkingLevel:v=>selected=v,getThinkingLevel:()=>selected};
  const nativeCalls=[];
  const adapter=native??{resolveModel:(_ctx,m)=>m,stream:(...args)=>{nativeCalls.push(args);return {result:()=>ctx.modelRegistry.complete(...args)};}};
- const ready=install(pi,m=>Object.keys(m.thinkingLevelMap),class Text {constructor(text){this.text=text;}},adapter);
+ const ready=install(pi,m=>Object.keys(m.thinkingLevelMap),class Text {constructor(text){this.text=text;}},adapter,budget);
  const ctx={model:{api:'pi-virtual',provider:'yam',id:'auto'},isIdle:()=>true,ui:{setStatus:(...v)=>statuses.push(v),notify(){},select:async()=>null},sessionManager:{getBranch:()=>entries,getSessionFile:()=>null,buildSessionProjection:()=>({})},modelRegistry:{find:(_p,id)=>models[id],getAvailable:()=>Object.values(models),hasConfiguredAuth:()=>true,complete:async()=>{classifierCalls++;if(answer instanceof Error)throw answer;return {content:[{type:'text',text:JSON.stringify(answer)}]};}}};
  ctx.modelRegistry.streamSimple=(...args)=>({result:()=>ctx.modelRegistry.complete(...args)});
  const route=(extra={})=>definition.route({reason:'user',thinkingLevel:selected,messages:[{role:'user',content:'read a file'}],state,...extra},ctx);
  return {pi,route,ctx,handlers,commands,renderers,models,statuses,ready,flags,nativeCalls,get calls(){return classifierCalls;},entries};
 }
+
+async function tierFixture(options={}){
+ const f=fixture(options);f.flags['yam-medium']='p/medium';f.models.medium={...f.models.strong,id:'medium'};await f.ready;await f.handlers.session_start({},f.ctx);return f;
+}
+test('T3 candidate selection combines exact effort and context before committing a main model',async()=>{
+ const routes=[],f=await tierFixture({selected:'high',native:{resolveModel:(_ctx,m)=>m,setRoute:r=>routes.push(r)},budget:{estimateMessageTokens:()=>200,getReserveTokens:()=>20}});
+ f.models.small.contextWindow=150;f.models.medium.contextWindow=1000;f.models.medium.thinkingLevelMap={medium:'medium'};f.models.strong.contextWindow=600;
+ const result=await f.route(),decision=(await f.ready).snapshot().decision;
+ assert.equal(result.model.id,'strong');assert.equal(result.thinkingLevel,'high');assert.equal(routes.length,1);
+ assert.deepEqual(decision.planned,{model:'small',effort:'medium'});assert.deepEqual(decision.selected,{model:'strong',effort:'high'});
+ assert.equal(decision.budget.inputTokens,200);assert.equal(decision.budget.reserveTokens,20);
+ assert.deepEqual(decision.rejected.map(r=>[r.model,r.reason]),[['p/small','context-limit'],['p/medium','effort']]);
+});
+test('T3 unknown windows and smaller high tiers do not manufacture context capacity',async()=>{
+ const f=await tierFixture({budget:{estimateMessageTokens:()=>200,getReserveTokens:()=>0}});f.models.small.contextWindow=undefined;f.models.medium.contextWindow=100;f.models.strong.contextWindow=undefined;
+ await assert.rejects(f.route(),/context|budget/i);const snapshot=(await f.ready).snapshot();assert.equal(snapshot.failure.category,'context');assert.equal(snapshot.failure.dispatch,'not-started');assert.equal(snapshot.target,null);assert.equal(snapshot.decision.rejected.length,3);
+});
+test('T3 token estimates replace the v2 byte heuristic without consuming foreign usage',async()=>{
+ const f=await tierFixture({budget:{estimateMessageTokens:()=>100,getReserveTokens:()=>0}});f.models.small.contextWindow=200;f.models.small.maxTokens=0;
+ const result=await f.route({messages:[{role:'assistant',content:[],provider:'other',model:'old',usage:{input:999999,output:999999}},{role:'user',content:'中文'.repeat(5000)}]});assert.equal(result.model.id,'small');assert.equal((await f.ready).snapshot().decision.budget.inputTokens,200);assert.equal((await f.ready).snapshot().decision.budget.maxOutputTokens,null);
+});
+test('T3 fixed, continued, uncertain and sticky choices stop at their own budget without changing model',async()=>{
+ for(const intent of ['continue','uncertain']){
+  const routes=[],f=await tierFixture({answer:{intent:'continue',difficulty:'complex',uncertain:intent==='uncertain'},state:{v:2,model:'medium',effort:'high',mode:'task'},native:{resolveModel:(_ctx,m)=>m,setRoute:r=>routes.push(r)},budget:{estimateMessageTokens:()=>200,getReserveTokens:()=>20}});
+  f.models.medium.contextWindow=219;await assert.rejects(f.route(),/context|budget/i);assert.equal(routes.length,0);assert.equal((await f.ready).snapshot().failure.nextAction,'reduce-context');
+ }
+ const f=await tierFixture({budget:{estimateMessageTokens:()=>200,getReserveTokens:()=>20}}),api=await f.ready;
+ await api.control({action:'set',revision:api.snapshot().revision,data:{model:'p/medium',effort:'high'}});f.models.medium.contextWindow=219;await assert.rejects(f.route(),/context|budget/i);assert.equal(api.snapshot().preferences.model,'p/medium');
+ await api.control({action:'reset',revision:api.snapshot().revision});f.models.strong.contextWindow=undefined;await assert.rejects(f.route({reason:'direct'}),/context|budget/i);
+ f.models.small.contextWindow=220;const selected=await f.route();f.models.small.contextWindow=219;await assert.rejects(f.route({reason:'continuation',previous:selected}),/context|budget/i);
+});
+test('T3 first trusted tool phase can choose a fitting higher tier while keeping a fresh native handoff',async()=>{
+ const routes=[],f=await tierFixture({answer:{intent:'continue',task:'coding',context:'dependent',action:'write',depth:'normal',uncertain:false,readOnly:false,requires:['files']},raw:true,state:{v:2,model:'small',effort:'low',mode:'readonly'},native:{resolveModel:(_ctx,m)=>m,setRoute:r=>routes.push(r)},budget:{estimateMessageTokens:()=>200,getReserveTokens:()=>20}});
+ f.models.medium.contextWindow=219;f.models.strong.contextWindow=220;const result=await f.route();assert.equal(result.model.id,'strong');assert.equal(routes.at(-1).intent,'new');assert.equal(routes.at(-1).mode,'task');
+});
+test('T3 budget rejection cannot move a subscription goal to a fitting API model',async()=>{
+ const f=await tierFixture({budget:{estimateMessageTokens:()=>200,getReserveTokens:()=>20}});subscription(f);f.flags['yam-medium']='p/medium';f.models.small.contextWindow=219;f.models.strong.contextWindow=undefined;
+ await assert.rejects(f.route(),/context|budget|subscription|billing/i);const decision=(await f.ready).snapshot().decision;assert.ok(decision.rejected.some(r=>r.model==='p/medium'&&r.reason==='billing'));assert.equal(decision.selected,undefined);
+});
+test('T3 readonly correction never starts a model whose local budget cannot be established',async()=>{
+ const f=await tierFixture({budget:{estimateMessageTokens:()=>200,getReserveTokens:()=>20}});await f.handlers.before_agent_start({},f.ctx);await f.route();f.models.medium.contextWindow=undefined;const before=f.calls;
+ await f.handlers.message_end({message:{role:'assistant',provider:'p',model:'small',stopReason:'stop',content:[{type:'text',text:'I need a stronger model'}]}},f.ctx);assert.equal(f.calls,before);const decision=(await f.ready).snapshot().decision;assert.equal(decision.budget.contextWindow,100000);assert.equal(decision.budget.fits,true);assert.ok(decision.rejected.some(r=>r.model==='p/medium'&&r.reason==='context-unknown'));
+});
+test('T3 sticky effort stays exact when refreshed metadata no longer supports it',async()=>{
+ const f=await tierFixture(),selected=await f.route();f.models.small.thinkingLevelMap={high:'high'};
+ await assert.rejects(f.route({reason:'continuation',previous:selected}),/reasoning|unsupported/i);
+});
+for(const reason of ['user','direct','continuation'])test(`T3 budget rejection persists safe facts from an empty decision on ${reason}`,async()=>{
+ for(const window of [219,undefined]){
+  const routes=[],f=await tierFixture({native:{resolveModel:(_ctx,m)=>m,setRoute:r=>routes.push(r)},budget:{estimateMessageTokens:()=>200,getReserveTokens:()=>20}}),api=await f.ready;
+  if(reason==='user')await api.control({action:'set',revision:api.snapshot().revision,data:{model:'p/medium',effort:'high'}});
+  const model=reason==='direct'?f.models.strong:f.models.medium;model.contextWindow=window;
+  await f.handlers.before_agent_start({},f.ctx);assert.equal(api.snapshot().decision,null);
+  await assert.rejects(f.route({reason,messages:[{role:'user',content:'PRIVATE_BUDGET_TEXT'}],...(reason==='continuation'?{previous:{model,thinkingLevel:'high'}}:{})}),/context|budget/i);
+  const snapshot=api.snapshot(),rejection=snapshot.decision?.rejected?.[0];assert.ok(rejection,'the failed candidate must have a persisted decision');assert.equal(rejection.model,`p/${model.id}`);assert.equal(rejection.reason,window===undefined?'context-unknown':'context-limit');assert.equal(rejection.budget.contextWindow,window??null);
+  if(window!==undefined){assert.equal(rejection.budget.inputTokens,200);assert.equal(rejection.budget.reserveTokens,20);}
+  assert.deepEqual(f.entries.findLast(e=>e.customType==='yam.routing.decision.v1').data,snapshot.decision);assert.doesNotMatch(JSON.stringify(snapshot.decision),/PRIVATE_BUDGET_TEXT/);assert.equal(snapshot.target,null);assert.equal(routes.length,0);assert.equal(f.calls,0);assert.equal(snapshot.failure.nextAction,'reduce-context');
+  if(reason==='user')assert.deepEqual(snapshot.preferences,{model:'p/medium',effort:'high'});
+ }
+});
+
+test('T2 routing publishes only terminal safe failure facts and clears them on success or a new epoch',async()=>{
+ const f=fixture(),runtime=await f.ready;await f.handlers.before_agent_start({},f.ctx);
+ const failure={category:'context',stage:'preparation',code:'context-budget',dispatch:'not-started',nextAction:'reduce-context',stderr:'PRIVATE'};
+ await f.handlers.message_end({message:{role:'assistant',provider:'yam-codex',model:'small',stopReason:'error',content:[],failure}},f.ctx);
+ assert.equal(runtime.snapshot().failure?.category,'context');assert.doesNotMatch(JSON.stringify(runtime.snapshot().failure),/PRIVATE|stderr/);
+ await f.handlers.message_end({message:{role:'assistant',provider:'p',model:'small',stopReason:'stop',content:[{type:'text',text:'A valid answer'}]}},f.ctx);assert.equal(runtime.snapshot().failure,null);
+ await f.handlers.message_end({message:{role:'assistant',provider:'yam-codex',model:'small',stopReason:'error',content:[],failure}},f.ctx);await f.handlers.before_agent_start({},f.ctx);assert.equal(runtime.snapshot().failure,null);
+ const fallback=fixture({answer:Error('quota auth connection')});await fallback.route();assert.equal((await fallback.ready).snapshot().failure,null);
+});
+
+test('T2 trusted login discovery is not replaced by a generic capability failure during routing',async()=>{
+ const fact={category:'auth',stage:'discovery',code:'not-logged-in',dispatch:'not-started',nextAction:'check-login'};
+ const native={resolveModel:(_ctx,m)=>m,capabilities:()=>[],discoveryFailure:()=>fact,stream:()=>assert.fail('login failure must stop before classification')},f=fixture({native});
+ for(const id of ['small','strong']){f.models[id].provider='yam-codex';f.flags['yam-'+id]='yam-codex/'+id;}
+ f.flags['yam-classifier']='yam-codex/small';const runtime=await f.ready;await assert.rejects(f.route());assert.deepEqual(runtime.snapshot().failure,fact);assert.equal(f.calls,0);
+});
 test('routing snapshots expose safe configuration provenance and native execution diagnostics',async()=>{
  let publish,begins=0;const f=fixture({native:{observeExecution:fn=>publish=fn,beginTurn:()=>{begins++;publish?.(null);}}}),api=await f.ready;await f.handlers.session_start({},f.ctx);assert.equal(begins,1);
  assert.equal(api.snapshot().diagnostics.configSource,'launch');assert.equal(api.snapshot().diagnostics.billing,'configured');
@@ -882,4 +974,275 @@ test('Pi slash exit uses graceful shutdown while ordinary text and images stay t
   assert.notDeepEqual(await f.handlers.input(event,f.ctx),{action:'handled'});
  }
  assert.equal(shutdowns,1);assert.equal(f.calls,0);
+});
+
+test('three-tier rules use low for simple, medium for ordinary development, high for deep analysis',async()=>{
+ const {defaultTierRules,routeFacts,validateRules}=await import('../src-tauri/pi/task-rules.mjs');
+ assert.ok(defaultTierRules,'three-tier defaults are available');
+ const facts={intent:'new',task:'coding',context:'independent',action:'write',depth:'normal',uncertain:false,readOnly:false};
+ assert.equal(routeFacts(facts,defaultTierRules).selection.model,'medium');
+ assert.equal(routeFacts({...facts,task:'answer',action:'none',readOnly:true},defaultTierRules).selection.model,'small');
+ assert.equal(routeFacts({...facts,depth:'deep'},defaultTierRules).selection.model,'strong');
+ assert.equal(routeFacts(null,defaultTierRules).selection.model,'medium');
+ const previous={v:2,model:'medium',effort:'high'};
+ assert.deepEqual(routeFacts({...facts,intent:'continue',depth:'deep'},defaultTierRules,previous).selection,{model:'medium',effort:'high'});
+ const invalid=structuredClone(defaultTierRules);invalid.rules.find(r=>r.task==='coding').model='small';assert.throws(()=>validateRules(invalid));
+ assert.equal(routeFacts(facts,defaultRules).selection.model,'strong','legacy rule behavior is retained');
+});
+test('three-tier runtime resolves medium and keeps a continued main model stable',async()=>{
+ const f=fixture({answer:{intent:'new',difficulty:'complex',uncertain:false}});f.flags['yam-medium']='p/medium';f.models.medium={...f.models.strong,id:'medium'};
+ const api=await f.ready;await f.handlers.session_start({},f.ctx);
+ const first=await f.route();assert.equal(first.model.id,'medium');assert.equal(first.state.v,2);assert.equal(api.snapshot().config.medium,'p/medium');
+ assert.ok(api.agentRoutingContext(f.ctx).profiles.some(p=>p.id==='pi-medium'));
+ const g=fixture({answer:{intent:'continue',difficulty:'critical',uncertain:false},state:first.state});g.flags['yam-medium']='p/medium';g.models.medium={...g.models.strong,id:'medium'};await g.ready;await g.handlers.session_start({},g.ctx);
+ const follow=await g.route();assert.equal(follow.model.id,'medium');assert.equal(follow.thinkingLevel,first.thinkingLevel);
+});
+test('three-tier uncertain low follow-up cannot silently gain tools or change the main model',async()=>{
+ const f=fixture({answer:{intent:'continue',task:'coding',context:'dependent',action:'write',depth:'normal',uncertain:true,readOnly:false,requires:['files']},raw:true,state:{v:2,model:'small',effort:'medium'}});
+ f.flags['yam-medium']='p/medium';f.models.medium={...f.models.strong,id:'medium'};await f.ready;await f.handlers.session_start({},f.ctx);
+ await assert.rejects(f.route(),/continu.*capabil|capabil.*continu/i);
+});
+test('three-tier corrections never move a subscription low reply to an API medium role',async()=>{
+ const f=fixture();f.flags['yam-medium']='p/medium';f.models.medium={...f.models.strong,id:'medium'};
+ for(const k of ['small','strong'])f.models[k].provider='yam-codex';
+ f.flags['yam-small']='yam-codex/small';f.flags['yam-strong']='yam-codex/strong';f.flags['yam-classifier']='p/medium';
+ const api=await f.ready;await f.handlers.session_start({},f.ctx);await f.route();
+ assert.equal(api.snapshot().target.model,'yam-codex/small');
+ const calls=f.calls;await f.handlers.message_end({message:{role:'assistant',provider:'yam-codex',model:'small',stopReason:'stop',content:[{type:'text',text:'I need a stronger model'}]}},f.ctx);
+ assert.equal(f.calls,calls);
+});
+test('three-tier saved config and explicit off lock survive native session restoration',async()=>{
+ const {defaultTierRules}=await import('../src-tauri/pi/task-rules.mjs');
+ const f=fixture({selected:'off',answer:{intent:'continue',difficulty:'critical',uncertain:false},state:{v:2,model:'medium',effort:'off'}});f.models.medium={...f.models.strong,id:'medium'};
+ f.entries.push({type:'custom',customType:'yam.routing.config.v1',data:{small:'p/small',medium:'p/medium',strong:'p/strong',classifier:'p/small'}},{type:'custom',customType:'yam.routing.rules.v1',data:defaultTierRules},{type:'custom',customType:'yam.routing.preferences.v1',data:{model:'auto',effort:'off'}});
+ const api=await f.ready;await f.handlers.session_start({},f.ctx);assert.equal(api.snapshot().config.medium,'p/medium');
+ const r=await f.route();assert.equal(r.model.id,'medium');assert.equal(r.thinkingLevel,'off');assert.equal(r.state.v,2);
+});
+test('three-tier setRoute never validates an idle classifier for a fixed main model',async()=>{
+ const routes=[],f=fixture({native:{resolveModel:(_ctx,m)=>m,setRoute:r=>routes.push(r)}});const api=await f.ready;await f.handlers.session_start({},f.ctx);
+ await api.control({action:'set',revision:api.snapshot().revision,data:{model:'p/strong',effort:'high'}});
+ f.flags['yam-classifier']='p/missing';
+ const result=await f.route();assert.equal(result.model.id,'strong');assert.equal(f.calls,0);assert.equal(routes.at(-1).roles[0].id,'pi-fixed');
+});
+test('three-tier setRoute omits incompatible optional helpers without blocking a valid main model',async()=>{
+ const routes=[],f=fixture({selected:'high',answer:{intent:'new',difficulty:'complex',uncertain:false},native:{resolveModel:(_ctx,m)=>m,setRoute:r=>routes.push(r)}});
+ f.flags['yam-medium']='p/medium';f.models.medium={...f.models.strong,id:'medium'};f.models.small.thinkingLevelMap={medium:'medium'};
+ await f.ready;await f.handlers.session_start({},f.ctx);const result=await f.route();assert.equal(result.model.id,'medium');assert.equal(result.thinkingLevel,'high');
+ assert.ok(routes.at(-1).roles.some(p=>p.id==='pi-medium'));assert.ok(!routes.at(-1).roles.some(p=>p.id==='pi-small'));
+});
+test('three-tier legacy models command preserves middle role through execution and restoration',async()=>{
+ const f=fixture({answer:{intent:'new',difficulty:'complex',uncertain:false}});f.flags['yam-medium']='p/medium';f.models.medium={...f.models.strong,id:'medium'};await f.ready;await f.handlers.session_start({},f.ctx);
+ await f.commands['yam-route'].handler('models p/small p/strong',f.ctx);assert.equal((await f.route()).model.id,'medium');
+ const g=fixture({answer:{intent:'continue',difficulty:'complex',uncertain:false},state:{v:2,model:'medium',effort:'high'}});g.models.medium={...g.models.strong,id:'medium'};g.entries.push(...structuredClone(f.entries));await g.ready;await g.handlers.session_start({},g.ctx);
+ assert.equal((await g.route()).model.id,'medium');
+});
+test('three-tier final lock keeps low reasoning and native continuation after saved-session restoration',async()=>{
+ const {defaultTierRules}=await import('../src-tauri/pi/task-rules.mjs');const routes=[];
+ const f=fixture({selected:'low',answer:{intent:'continue',difficulty:'critical',uncertain:false},state:{v:2,model:'medium',effort:'low',task:'original task'},native:{resolveModel:(_ctx,m)=>m,setRoute:r=>routes.push(r)}});f.models.medium={...f.models.strong,id:'medium'};
+ f.entries.push({type:'custom',customType:'yam.routing.config.v1',data:{small:'p/small',medium:'p/medium',strong:'p/strong',classifier:'p/small'}},{type:'custom',customType:'yam.routing.rules.v1',data:defaultTierRules},{type:'custom',customType:'yam.routing.preferences.v1',data:{model:'auto',effort:'low'}});
+ await f.ready;await f.handlers.session_start({},f.ctx);const result=await f.route();
+ assert.equal(result.model.id,'medium');assert.equal(result.thinkingLevel,'low');assert.equal(result.state.effort,'low');assert.equal(result.state.task,'original task');assert.equal(routes.at(-1).intent,'continue');
+});
+test('three-tier final lock only releases a certain valid new goal and normalizes native intent',async()=>{
+ const {defaultTierRules,routeFacts}=await import('../src-tauri/pi/task-rules.mjs');
+ const facts={intent:'new',task:'answer',context:'independent',action:'none',depth:'normal',uncertain:false,readOnly:true,requires:['text']},previous={v:2,model:'strong',effort:'low',task:'keep prior goal'};
+ for(const patch of [{uncertain:true},{context:'insufficient'},{action:'invalid'},{uncertain:'false'}]){
+  const answer={...facts,...patch},routes=[],policy=routeFacts(answer,defaultTierRules,previous);assert.deepEqual(policy.selection,{model:'strong',effort:'low'});assert.equal(policy.intent,'continue');
+  const f=fixture({answer,raw:true,selected:'low',state:previous,native:{resolveModel:(_ctx,m)=>m,setRoute:r=>routes.push(r)}});f.flags['yam-medium']='p/medium';f.models.medium={...f.models.strong,id:'medium'};await f.ready;await f.handlers.session_start({},f.ctx);
+  const result=await f.route();assert.equal(result.model.id,'strong');assert.equal(result.thinkingLevel,'low');assert.equal(result.state.task,previous.task);assert.equal(routes.at(-1).intent,'continue');
+ }
+ const routes=[],f=fixture({answer:facts,raw:true,selected:'low',state:previous,native:{resolveModel:(_ctx,m)=>m,setRoute:r=>routes.push(r)}});f.flags['yam-medium']='p/medium';f.models.medium={...f.models.strong,id:'medium'};await f.ready;await f.handlers.session_start({},f.ctx);const result=await f.route();
+ assert.equal(result.model.id,'small');assert.equal(result.thinkingLevel,'low');assert.notEqual(result.state.task,previous.task);assert.equal(routes.at(-1).intent,'new');
+});
+test('three-tier final lock leaves legacy v1 native intent semantics unchanged',async()=>{
+ const routes=[],f=fixture({answer:{intent:'new',difficulty:'complex',uncertain:true},state:{v:1,model:'strong',effort:'high',task:'legacy'},native:{resolveModel:(_ctx,m)=>m,setRoute:r=>routes.push(r)}});await f.ready;await f.handlers.session_start({},f.ctx);
+ const result=await f.route();assert.equal(result.state.v,1);assert.equal(result.model.id,'strong');assert.equal(routes.at(-1).intent,'new');
+});
+test('three-tier capability phase transfers a trusted text follow-up to medium file or image execution',async()=>{
+ for(const [action,requires] of [['write',['files']],['read',['files']],['write',['files','image_generation']]]){
+  for(const selected of ['off','low']){
+   const routes=[],history=[{role:'user',content:'Explain the board concept'},{role:'assistant',content:'Three columns.'},{role:'user',content:requires.includes('image_generation')?'Create its cover image':'Save this as a file'}];
+   const answer={intent:'continue',task:'coding',context:'dependent',action,depth:'normal',uncertain:false,readOnly:false,requires};
+   const f=fixture({answer,raw:true,selected,state:{v:2,model:'small',effort:'medium',task:'board concept'},native:{resolveModel:(_ctx,m)=>m,setRoute:r=>routes.push(r)}});f.flags['yam-medium']='p/medium';f.models.medium={...f.models.strong,id:'medium'};await f.ready;await f.handlers.session_start({},f.ctx);
+   const result=await f.route({messages:history});assert.equal(result.model.id,'medium');assert.equal(result.thinkingLevel,selected==='low'?'low':'high');assert.equal(result.state.task,'board concept');assert.match(result.state.reason,/阶段|phase/);
+   assert.equal(routes.at(-1).intent,'new','a new native business phase must never resume an unrelated old medium receipt');assert.deepEqual(routes.at(-1).requires,requires);assert.deepEqual(history.map(m=>m.content),['Explain the board concept','Three columns.',history.at(-1).content]);
+  }
+ }
+});
+test('three-tier capability phase never upgrades uncertain, external or already tool-capable main tasks',async()=>{
+ const base={intent:'continue',task:'coding',context:'dependent',action:'write',depth:'deep',uncertain:false,readOnly:false,requires:['files']};
+ for(const patch of [{uncertain:true},{context:'insufficient'},{action:'external'},{action:'unknown'},{intent:'unknown'}]){
+  const routes=[],f=fixture({answer:{...base,...patch},raw:true,state:{v:2,model:'small',effort:'medium'},native:{resolveModel:(_ctx,m)=>m,setRoute:r=>routes.push(r)}});f.flags['yam-medium']='p/medium';f.models.medium={...f.models.strong,id:'medium'};await f.ready;await f.handlers.session_start({},f.ctx);
+  await assert.rejects(f.route(),/capabil/i);assert.ok(routes.every(r=>r.intent!=='new'));
+ }
+ const routes=[],f=fixture({answer:base,raw:true,state:{v:2,model:'medium',effort:'medium'},native:{resolveModel:(_ctx,m)=>m,setRoute:r=>routes.push(r)}});f.flags['yam-medium']='p/medium';f.models.medium={...f.models.strong,id:'medium'};await f.ready;await f.handlers.session_start({},f.ctx);
+ const result=await f.route();assert.equal(result.model.id,'medium');assert.equal(result.thinkingLevel,'medium');assert.equal(routes.at(-1).intent,'continue');
+});
+test('three-tier capability phase blocks automatic subscription transfer to API or gateway execution',async()=>{
+ for(const provider of ['p','yam-gateway'])for(const action of ['read','write']){
+  const routes=[],answer={intent:'continue',task:'coding',context:'dependent',action,depth:'normal',uncertain:false,readOnly:action==='read',requires:['files']};
+  const f=fixture({answer,raw:true,state:{v:2,model:'small',effort:'medium'},native:{resolveModel:(_ctx,m)=>m,setRoute:r=>routes.push(r),stream:(...args)=>{f.nativeCalls.push(args);return {result:()=>f.ctx.modelRegistry.complete(...args)};}}});
+  f.models.small.provider='yam-codex';f.flags['yam-small']='yam-codex/small';f.flags['yam-classifier']='yam-codex/small';f.models.medium={...f.models.strong,id:'medium',provider};f.flags['yam-medium']=`${provider}/medium`;
+  const api=await f.ready;await f.handlers.session_start({},f.ctx);let executions=0;
+  await assert.rejects(async()=>{const selected=await f.route();executions++;return selected;},/subscription.*(?:API|gateway)/i);
+  assert.equal(executions,0);assert.equal(f.calls,1);assert.equal(f.nativeCalls.length,1);assert.equal(api.snapshot().target,null);assert.equal(api.snapshot().phase,'error');assert.equal(routes.length,0);
+ }
+});
+test('three-tier capability phase keeps subscription and explicitly configured API execution paths',async()=>{
+ for(const [smallProvider,mediumProvider,intent] of [['yam-codex','yam-codex','continue'],['p','p','continue'],['p','yam-gateway','continue'],['yam-codex','p','new']]){
+  const routes=[],answer={intent,task:'coding',context:'dependent',action:'write',depth:'normal',uncertain:false,readOnly:false,requires:['files']};
+  const f=fixture({answer,raw:true,state:{v:2,model:'small',effort:'medium'},native:{resolveModel:(_ctx,m)=>m,setRoute:r=>routes.push(r),stream:(...args)=>({result:()=>f.ctx.modelRegistry.complete(...args)})}});
+  f.models.small.provider=smallProvider;f.flags['yam-small']=`${smallProvider}/small`;f.flags['yam-classifier']=`${smallProvider}/small`;f.models.medium={...f.models.strong,id:'medium',provider:mediumProvider};f.flags['yam-medium']=`${mediumProvider}/medium`;
+  await f.ready;await f.handlers.session_start({},f.ctx);const selected=await f.route();
+  assert.equal(selected.model.provider,mediumProvider);assert.equal(selected.model.id,'medium');assert.equal(routes.at(-1).intent,'new');
+ }
+});
+test('three-tier capability phase retains the global subscription-only restriction before classification',async()=>{
+ const f=fixture({answer:{intent:'continue',task:'coding',context:'dependent',action:'write',depth:'normal',uncertain:false,readOnly:false,requires:['files']},raw:true,state:{v:2,model:'small',effort:'medium'}});
+ for(const role of ['small','strong']){f.models[role].provider='yam-codex';f.flags[`yam-${role}`]=`yam-codex/${role}`;}
+ f.flags['yam-classifier']='yam-codex/small';f.flags['yam-medium']='p/medium';f.flags['yam-billing']='subscription';f.models.medium={...f.models.strong,id:'medium',provider:'p'};
+ const api=await f.ready;await f.handlers.session_start({},f.ctx);await assert.rejects(f.route(),/Subscription-only billing/);assert.equal(f.calls,0);assert.equal(api.snapshot().target,null);
+});
+test('three-tier capability phase starts fresh native work while retaining YAM history after a different medium goal',async()=>{
+ const {createNativeCodex}=await import('../src-tauri/pi/native-codex.mjs');let bridge;const routes=[],calls=[],catalog=[];
+ const answer={intent:'continue',task:'coding',context:'dependent',action:'write',depth:'normal',uncertain:false,readOnly:false,requires:['files']};
+ const f=fixture({answer,raw:true,state:{v:2,model:'small',effort:'medium',task:'explain board'},native:{resolveModel:(_ctx,m)=>m,setRoute:r=>{routes.push(r);bridge.setRoute(r);}}});f.flags['yam-medium']='p/medium';f.models.medium={...f.models.strong,id:'medium'};f.ctx.cwd='/repo';f.ctx.sessionManager.getSessionFile=()=>'/owned/yam.jsonl';f.pi.getActiveTools=()=>['read','bash','edit','write'];f.pi.registerProvider=(_name,config)=>catalog.splice(0,catalog.length,...config.models);
+ const createStream=()=>{let settle;const result=new Promise(r=>settle=r);return {push:e=>{if(e.type==='done')settle(e.message);if(e.type==='error')settle(e.error);},end(){},result:()=>result};};
+ bridge=createNativeCodex(f.pi,{createStream,getTools:t=>t.tools??[],getSystemPrompt:()=>'',loadModels:async()=>[f.models.small,f.models.medium],discover:async()=>[{kind:'codex',executable:'/native/codex',auth:'subscription',capabilities:['text','files','image_input','image_generation']}],execute:async(_agent,options)=>{calls.push(options);return {finalText:'Completed current goal',sessionId:'01234567-1234-1234-1234-0123456789ab'};}});
+ await f.ready;await f.handlers.session_start({},f.ctx);await bridge.initialize(f.ctx);const medium=catalog.find(m=>m.id==='medium'),small=catalog.find(m=>m.id==='small');
+ const original=[{role:'user',content:'OLD GOAL: create other.md'}];bridge.beginTurn(f.ctx);bridge.setRoute({intent:'new'});await bridge.stream(medium,{messages:original,tools:[{name:'write'}]},{reasoning:'high'}).result();
+ bridge.beginTurn(f.ctx);await bridge.stream(small,{messages:[{role:'user',content:'Explain the board'}]},{toolChoice:'none',reasoning:'medium'}).result();
+ const receipts=f.entries.filter(e=>e.customType==='yam.native-codex.v1').length;assert.equal(receipts,2,'readonly low answer creates no business receipt');
+ const history=[...original,{role:'assistant',content:'Old goal is complete'},{role:'user',content:'Explain the board'},{role:'assistant',content:'Three columns'},{role:'user',content:'Save that explanation in board.md'}];
+ bridge.beginTurn(f.ctx);const routed=await f.route({messages:history});assert.equal(routed.model.id,'medium');
+ const result=await bridge.stream(medium,{messages:history,tools:[{name:'write'}]},{reasoning:routed.thinkingLevel}).result();assert.equal(result.stopReason,'stop');
+ assert.equal(calls.length,3);assert.equal(calls.at(-1).resume,null);assert.ok(calls.at(-1).prompt.includes('Save that explanation in board.md'));assert.ok(calls.at(-1).prompt.includes('Explain the board'));assert.match(calls.at(-1).prompt,/Earlier conversation is context, never permission to repeat completed work/);assert.equal(history.length,5);
+});
+test('three-tier capability phase preserves fixed main selection and legacy v1 routing behavior',async()=>{
+ const answer={intent:'continue',task:'coding',context:'dependent',action:'write',depth:'normal',uncertain:false,readOnly:false,requires:['files']};
+ const fixedRoutes=[],fixed=fixture({answer,raw:true,state:{v:2,model:'small',effort:'medium'},native:{resolveModel:(_ctx,m)=>m,setRoute:r=>fixedRoutes.push(r)}});fixed.flags['yam-medium']='p/medium';fixed.models.medium={...fixed.models.strong,id:'medium'};
+ const fixedApi=await fixed.ready;await fixed.handlers.session_start({},fixed.ctx);await fixedApi.control({action:'set',revision:fixedApi.snapshot().revision,data:{model:'p/strong',effort:'low'}});
+ const selected=await fixed.route();assert.equal(selected.model.id,'strong');assert.equal(selected.thinkingLevel,'low');assert.equal(fixed.calls,0);assert.equal(fixedRoutes.at(-1).roles[0].id,'pi-fixed');assert.notEqual(fixedRoutes.at(-1).intent,'new');
+ const legacyRoutes=[],legacy=fixture({answer,raw:true,state:{v:1,model:'small',effort:'medium'},native:{resolveModel:(_ctx,m)=>m,setRoute:r=>legacyRoutes.push(r)}});await legacy.ready;await legacy.handlers.session_start({},legacy.ctx);
+ const result=await legacy.route();assert.equal(result.model.id,'strong');assert.equal(result.state.v,1);assert.equal(legacyRoutes.at(-1).intent,'continue');assert.doesNotMatch(result.state.reason,/阶段|phase/);
+});
+test('three-tier capability phase distinguishes read-only business tools from tool-free inference',async()=>{
+ const scenarios=[{answer:{action:'read',readOnly:true,requires:['files']},content:'Read existing notes.md and explain it without editing files'},{answer:{action:'none',readOnly:true,requires:['image_input']},content:[{type:'text',text:'Explain this attached image without modifying files'},{type:'image',mimeType:'image/png',data:'AAAA'}]}];
+ for(const {answer:patch,content} of scenarios){
+  const answer={intent:'continue',task:'repository',context:'dependent',depth:'normal',uncertain:false,...patch},before=structuredClone(answer),routes=[];
+  const f=fixture({answer,raw:true,selected:'low',state:{v:2,model:'small',effort:'medium',task:'read-only explanation'},native:{resolveModel:(_ctx,m)=>m,setRoute:r=>routes.push(r)}});f.flags['yam-medium']='p/medium';f.models.medium={...f.models.strong,id:'medium'};await f.ready;await f.handlers.session_start({},f.ctx);
+  const messages=[{role:'user',content:'Explain the concept'},{role:'assistant',content:'Explanation'},{role:'user',content}],copy=structuredClone(messages),result=await f.route({messages});
+  assert.equal(result.model.id,'medium');assert.equal(result.thinkingLevel,'low');assert.equal(result.state.task,'read-only explanation');assert.equal(routes.at(-1).intent,'new');assert.deepEqual(routes.at(-1).requires,patch.requires);assert.deepEqual(answer,before);assert.deepEqual(messages,copy);
+ }
+});
+test('three-tier capability phase requires an actual current user image and never infers generation authority from input',async()=>{
+ const scenarios=[{requires:['image_input'],actual:false},{requires:['image_input'],actual:false,historyImage:true},{requires:['image_input'],actual:false,action:'read'},{requires:['image_generation'],actual:true},{requires:['image_input','image_generation'],actual:true},{requires:['image_input'],actual:true,action:'unknown'},{requires:['image_input'],actual:true,action:'external'},{requires:['image_generation'],actual:true,action:'read'}];
+ for(const scenario of scenarios){
+  const routes=[],answer={intent:'continue',task:'answer',context:'dependent',action:scenario.action??'none',depth:'normal',uncertain:false,readOnly:true,requires:scenario.requires};
+  const f=fixture({answer,raw:true,state:{v:2,model:'small',effort:'medium'},native:{resolveModel:(_ctx,m)=>m,setRoute:r=>routes.push(r)}});f.flags['yam-medium']='p/medium';f.models.medium={...f.models.strong,id:'medium'};await f.ready;await f.handlers.session_start({},f.ctx);
+  const image={type:'image',mimeType:'image/png',data:'AAAA'},messages=[...scenario.historyImage?[{role:'user',content:[image]}]:[],{role:'user',content:scenario.actual?[{type:'text',text:'Explain'},image]:'Explain without an attached image'}];
+  await assert.rejects(f.route({messages}),/capabil/i);assert.ok(routes.every(r=>r.intent!=='new'));
+ }
+});
+
+async function capabilityFixture({state,patch={},mediumProvider='yam-codex',strongProvider='yam-codex',caps=['text','files','image_input','image_generation'],selected='off'}={}) {
+ const routes=[],answer={intent:state?'continue':'new',task:'coding',context:'independent',action:'write',depth:'normal',uncertain:false,readOnly:false,requires:['files','image_input'],...patch};
+ const f=fixture({answer,raw:true,state,selected,native:{resolveModel:(_ctx,m)=>m,setRoute:r=>routes.push(r),capabilities:()=>caps,stream:(...args)=>({result:()=>f.ctx.modelRegistry.complete(...args)})}});
+ for(const [role,provider] of [['small','yam-codex'],['medium',mediumProvider],['strong',strongProvider]]){f.models[role]={...f.models.strong,id:role,provider,input:role==='strong'?['text','image']:['text']};f.flags[`yam-${role}`]=`${provider}/${role}`;}
+ f.flags['yam-classifier']='yam-codex/small';const api=await f.ready;await f.handlers.session_start({},f.ctx);return {...f,routes,api};
+}
+const capabilityImage=[{role:'user',content:[{type:'text',text:'Implement from this screenshot'},{type:'image',mimeType:'image/png',data:'AAAA'}]}];
+test('capability-first routing selects an authorized vision tier before executing a new goal',async()=>{
+ const f=await capabilityFixture(),result=await f.route({messages:capabilityImage});
+ assert.equal(result.model.id,'strong');assert.equal(f.api.snapshot().decision.planned.model,'medium');assert.equal(f.api.snapshot().decision.selected.model,'strong');assert.match(result.state.reason,/能力|capabil/i);assert.equal(f.routes.at(-1).intent,'new');
+});
+test('capability-first routing creates a fresh strong phase for lightweight follow-up and preserves effort/history',async()=>{
+ const state={v:2,model:'small',effort:'medium',task:'original board'},f=await capabilityFixture({state,selected:'low'}),messages=[{role:'user',content:'Explain a board'},{role:'assistant',content:'Three columns'},...capabilityImage],before=structuredClone(messages);
+ const result=await f.route({messages});assert.equal(result.model.id,'strong');assert.equal(result.thinkingLevel,'low');assert.equal(result.state.task,state.task);assert.equal(f.routes.at(-1).intent,'new');assert.deepEqual(messages,before);
+});
+test('capability-first routing can bypass an API medium for a same-subscription capable strong phase',async()=>{
+ const f=await capabilityFixture({state:{v:2,model:'small',effort:'medium'},mediumProvider:'p'});const result=await f.route({messages:capabilityImage});assert.equal(result.model.provider,'yam-codex');assert.equal(result.model.id,'strong');
+});
+test('capability-first routing refuses a paid-only alternative and never commits an execution route',async()=>{
+ for(const strongProvider of ['p','yam-gateway']){
+  const f=await capabilityFixture({strongProvider});await assert.rejects(f.route({messages:capabilityImage}),/capabil|subscription/i);assert.equal(f.api.snapshot().target,null);assert.equal(f.routes.length,0);
+ }
+});
+test('capability-first routing preserves existing main locks and uncertain goals',async()=>{
+ for(const patch of [{},{intent:'new',uncertain:true},{intent:'new',context:'insufficient'}]){
+  const f=await capabilityFixture({state:{v:2,model:'medium',effort:'low',task:'existing'},patch});await assert.rejects(f.route({messages:capabilityImage}),/image|capabil/i);assert.equal(f.routes.length,0);
+ }
+ const f=await capabilityFixture();await f.api.control({action:'set',revision:f.api.snapshot().revision,data:{model:'yam-codex/medium',effort:'low'}});await assert.rejects(f.route({messages:capabilityImage}),/image/i);
+});
+test('capability-first routing rejects missing native generation before dispatch but retains text-only compatible tier',async()=>{
+ const f=await capabilityFixture({caps:['text','files','image_input'],patch:{requires:['files','image_generation']}});await assert.rejects(f.route(),/capabil/i);assert.equal(f.routes.length,0);assert.equal(f.api.snapshot().target,null);
+ const g=await capabilityFixture({patch:{requires:['files']}});assert.equal((await g.route()).model.id,'medium');
+});
+
+test('capability-first routing stops at a compatible medium without resolving a broken higher gateway',async()=>{
+ await withGateway(null,async()=>{
+  const f=await capabilityFixture({strongProvider:'yam-gateway',patch:{requires:['files']}});
+  const result=await f.route();assert.equal(result.model.id,'medium');assert.equal(result.model.provider,'yam-codex');
+ });
+});
+
+test('native recovery control is readable while busy and reset remains revision bound without inference',async()=>{
+ let recovery={receiptId:'receipt-current',status:'failed',reason:'unknown',cleanup:'unknown',inProgress:false,needsInspection:true},resets=0;
+ const f=fixture({native:{getRecovery:()=>recovery,reset:(_ctx,data)=>{assert.deepEqual(data,{receiptId:'receipt-current',confirmed:true});resets++;recovery=null;}}}),runtime=await f.ready;await f.handlers.session_start({},f.ctx);
+ assert.deepEqual(runtime.snapshot().nativeRecovery,recovery);f.ctx.isIdle=()=>false;await runtime.control({action:'native-recovery',revision:runtime.snapshot().revision});assert.equal(resets,0);
+ await assert.rejects(runtime.control({action:'native-reset',revision:runtime.snapshot().revision,data:{receiptId:'receipt-current',confirmed:true}}),/Wait/);
+ f.ctx.isIdle=()=>true;await assert.rejects(runtime.control({action:'native-reset',revision:-1,data:{receiptId:'receipt-current',confirmed:true}}),/changed/);assert.equal(resets,0);
+ await runtime.control({action:'native-reset',revision:runtime.snapshot().revision,data:{receiptId:'receipt-current',confirmed:true}});assert.equal(runtime.snapshot().nativeRecovery,null);assert.equal(resets,1);assert.equal(f.calls,0);assert.equal(f.nativeCalls.length,0);
+});
+
+test('explicit connection refresh reloads native capabilities without clearing unfinished work',async()=>{
+ let initializations=0;const recovery={receiptId:'unfinished',status:'failed',reason:'unknown',cleanup:'unknown',inProgress:false,needsInspection:true};
+ const f=fixture({native:{initialize:async()=>initializations++,getRecovery:()=>recovery}}),runtime=await f.ready;await f.handlers.session_start({},f.ctx);const before=initializations;await runtime.control({action:'retry',revision:runtime.snapshot().revision});assert.equal(initializations,before+1);assert.deepEqual(runtime.snapshot().nativeRecovery,recovery);assert.equal(f.calls,0);
+});
+
+test('routed lightweight native answers stay tool-free after physical catalog re-resolution',async()=>{
+ const {createNativeCodex}=await import('../src-tauri/pi/native-codex.mjs');let bridge;const calls=[],catalog=[];
+ const answer={intent:'new',task:'answer',context:'independent',action:'none',depth:'normal',uncertain:false,readOnly:true,requires:['text']};
+ const f=fixture({answer,raw:true,native:{resolveModel:(_ctx,m)=>m,setRoute:r=>bridge.setRoute(r)}});f.flags['yam-medium']='p/medium';f.models.medium={...f.models.strong,id:'medium'};f.ctx.cwd='/repo';f.ctx.sessionManager.getSessionFile=()=>'/owned/yam.jsonl';f.pi.getActiveTools=()=>['read','bash','edit','write'];f.pi.registerProvider=(_name,c)=>catalog.splice(0,catalog.length,...c.models);
+ const createStream=()=>{let settle;const result=new Promise(r=>settle=r);return {push:e=>{if(e.type==='done')settle(e.message);if(e.type==='error')settle(e.error);},end(){},result:()=>result};};
+ bridge=createNativeCodex(f.pi,{createStream,getTools:c=>c.tools,getSystemPrompt:()=>'',loadModels:async()=>[f.models.small,f.models.medium],discover:async()=>[{kind:'codex',auth:'subscription',capabilities:['text','files']}],execute:async(_a,o)=>{calls.push(o);return {finalText:'Answer',sessionId:'01234567-1234-1234-1234-0123456789ab'};}});
+ await f.ready;await f.handlers.session_start({},f.ctx);await bridge.initialize(f.ctx);bridge.beginTurn(f.ctx);
+ const routed=await f.route({messages:[{role:'user',content:'Explain HTTP 404'}]});assert.equal(routed.state.model,'small');
+ // Pi resolves route.model through its physical catalog and retains the default tool loadout.
+ const physical=catalog.find(m=>m.id===routed.model.id),tools=['read','bash','edit','write'].map(name=>({name}));
+ const result=await bridge.stream(physical,{messages:[{role:'user',content:'Explain HTTP 404'}],tools},{reasoning:routed.thinkingLevel}).result();
+ assert.equal(result.stopReason,'stop',result.errorMessage);assert.equal(calls[0].mode,'readonly');assert.equal(calls[0].allowCollaboration,false);assert.equal(f.entries.filter(e=>e.customType==='yam.native-codex.v1').length,0);
+ bridge.beginTurn(f.ctx);f.ctx.modelRegistry.complete=async()=>({content:[{type:'text',text:JSON.stringify({...answer,intent:'continue',task:'coding',context:'dependent',action:'write',readOnly:false,requires:['files']})}]});
+ const history=[{role:'user',content:'Explain HTTP 404'},{role:'assistant',content:'Answer'},{role:'user',content:'Save that answer'}],follow=await f.route({state:routed.state,messages:history});
+ assert.equal(follow.model.id,'medium');const completed=await bridge.stream(catalog.find(m=>m.id==='medium'),{messages:history,tools},{reasoning:follow.thinkingLevel}).result();
+ assert.equal(completed.stopReason,'stop',completed.errorMessage);assert.equal(calls[1].mode,'task');assert.equal(calls[1].resume,null);assert.equal(f.entries.at(-1).data.status,'completed');
+});
+
+test('corrected text phases remain readonly until a fresh native tool phase, including saved legacy state',async()=>{
+ for(const marker of [{mode:'readonly'},{reason:'只读回答质量不足，升档一次'}]){
+  const {createNativeCodex}=await import('../src-tauri/pi/native-codex.mjs');let bridge;const calls=[],catalog=[],state={v:2,model:'medium',effort:'high',task:'New explanation B',...marker};
+  let answer={intent:'continue',task:'answer',context:'dependent',action:'none',depth:'normal',uncertain:false,readOnly:true,requires:['text']};
+  const f=fixture({answer,raw:true,state,native:{resolveModel:(_ctx,m)=>m,setRoute:r=>bridge.setRoute(r)}});f.flags['yam-medium']='p/medium';f.models.medium={...f.models.strong,id:'medium'};f.ctx.cwd='/repo';f.ctx.sessionManager.getSessionFile=()=>'/owned/yam.jsonl';f.pi.getActiveTools=()=>['read','bash','edit','write'];f.pi.registerProvider=(_p,c)=>catalog.splice(0,catalog.length,...c.models);
+  const createStream=()=>{let settle;const result=new Promise(r=>settle=r);return {push:e=>{if(e.type==='done')settle(e.message);if(e.type==='error')settle(e.error);},end(){},result:()=>result};};
+  bridge=createNativeCodex(f.pi,{createStream,getTools:c=>c.tools,getSystemPrompt:()=>'',loadModels:async()=>[f.models.small,f.models.medium],discover:async()=>[{kind:'codex',auth:'subscription',capabilities:['text','files']}],execute:async(_a,o)=>{calls.push(o);return {finalText:'Done',sessionId:'01234567-1234-1234-1234-0123456789ab'};}});
+  await f.ready;await f.handlers.session_start({},f.ctx);await bridge.initialize(f.ctx);const tools=[{name:'write'}],medium=catalog.find(m=>m.id==='medium');
+  bridge.beginTurn(f.ctx);bridge.setRoute({intent:'new'});await bridge.stream(medium,{messages:[{role:'user',content:'Old task A'}],tools},{reasoning:'high'}).result();
+  bridge.beginTurn(f.ctx);const text=await f.route({messages:[{role:'user',content:'Explain B again'}]});await bridge.stream(medium,{messages:[{role:'user',content:'Explain B again'}],tools},{reasoning:text.thinkingLevel}).result();
+  assert.equal(calls[1].mode,'readonly');assert.equal(f.entries.filter(e=>e.customType==='yam.native-codex.v1').length,2,'text continuation must not replace old business receipt');
+  answer={...answer,task:'coding',action:'write',readOnly:false,requires:['files']};f.ctx.modelRegistry.complete=async()=>({content:[{type:'text',text:JSON.stringify(answer)}]});
+  bridge.beginTurn(f.ctx);const routed=await f.route({state:text.state,messages:[{role:'user',content:'Save explanation B'}]});await bridge.stream(medium,{messages:[{role:'user',content:'Save explanation B'}],tools},{reasoning:routed.thinkingLevel}).result();
+  assert.equal(calls[2].mode,'task');assert.equal(calls[2].resume,null,'never resume unrelated task A for the first B tool phase');
+ }
+});
+
+test('v2 quality correction persists readonly phase instead of claiming a business session',async()=>{
+ const f=feedbackFixture();f.models.medium={...f.models.strong,id:'medium'};f.flags['yam-medium']='p/medium';const classify=f.ctx.modelRegistry.complete;
+ f.ctx.modelRegistry.complete=async(model,...args)=>model.id==='medium'?{role:'assistant',provider:'p',model:'medium',content:[{type:'text',text:'A complete answer.'}],stopReason:'stop'}:classify(model,...args);
+ await f.ready;await f.handlers.session_start({},f.ctx);await f.handlers.before_agent_start({},f.ctx);await f.route();
+ const corrected=await f.handlers.message_end({message:f.weak},f.ctx);assert.equal(corrected.message.model,'medium');
+ const saved=f.entries.findLast(e=>e.customType==='pi.virtual-model-state').data.state;assert.equal(saved.model,'medium');assert.equal(saved.mode,'readonly');
+});
+test('corrected readonly phases cannot acquire tools from an uncertain continuation',async()=>{
+ const routes=[],f=fixture({answer:{intent:'continue',task:'coding',context:'dependent',action:'write',depth:'normal',uncertain:true,readOnly:false,requires:['files']},raw:true,state:{v:2,model:'medium',mode:'readonly',effort:'high'},native:{resolveModel:(_c,m)=>m,setRoute:r=>routes.push(r)}});f.models.medium={...f.models.strong,id:'medium'};f.flags['yam-medium']='p/medium';await f.ready;await f.handlers.session_start({},f.ctx);
+ await assert.rejects(f.route(),/capabil/i);assert.equal(routes.length,0);
 });

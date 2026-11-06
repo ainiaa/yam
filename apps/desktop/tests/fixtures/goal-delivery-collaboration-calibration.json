@@ -1,0 +1,117 @@
+{
+  "version": 1,
+  "origin": "repository-defect-reconstructed-replay",
+  "description": "Confirmed YAM repository defects reconstructed by reversing the listed fixes. Not unprocessed production business tasks.",
+  "files": {
+    "router.mjs": "9c7efc8b969553e980f8122d13e465d6485cb5d872a502bf6ab99684e40f0b1c",
+    "native-codex.mjs": "107ccb9b1dc48343a7b27dafd48decfdefd00ee36cc82600633a8950ba606faf",
+    "agent-executor.mjs": "2e0ecee39af446c1b89cde828bafd34636f073b13a373ca9a4a1343094424a90",
+    "handoff-context.mjs": "1165e8ebd33f820a3f4892a02774684492058157321bee5a608da2e010e61120",
+    "control.mjs": "317adb0b367e52115794c99b8c263de8023d5fe459a0bbe69f7a9582f463d4a0",
+    "policy.mjs": "fa24db1e25c0546d0fd842dbc0b35b2263a629e83a435863afa28e5261de7c72",
+    "task-rules.mjs": "4f31484504bbebea4a28d65139803d73a457b3b4a4227a4ffa6e52b5b32d78f3"
+  },
+  "cases": [
+    {
+      "id": "R1",
+      "mode": "task",
+      "source": "apps/desktop/tests/pi-routing.test.mjs; confirmed repository defect reconstructed replay",
+      "prompt": "修复这些真实YAM仓库缺陷的隔离重建回放：Pi会将路由结果重新解析为physical catalog model，默认tools仍存在，轻量回答不得变成可写原生任务；纠正升档后的readonly文本续问也必须保持只读（包括旧state的中文reason标记），首次明确写入应建立fresh工具阶段，不得resume其他旧任务。保持可写任务、固定选择、计费边界与现有接口。\n先写replay.test.mjs复现，再改实现并实际执行node --test replay.test.mjs。只允许修改router.mjs,native-codex.mjs,replay.test.mjs,review-integration.json。其余模块和AGENTS.md逐字保留。不要查看其他目录或隐藏验收。",
+      "targets": [
+        "router.mjs",
+        "native-codex.mjs"
+      ],
+      "patches": [
+        {
+          "file": "native-codex.mjs",
+          "fixed": "readonly=route?.mode==='readonly'||model.yamNativeMode",
+          "broken": "readonly=model.yamNativeMode"
+        },
+        {
+          "file": "router.mjs",
+          "fixed": "const readonlyPhase=!fixed&&continuing&&(request.state.model==='small'||request.state.mode==='readonly'||request.state.reason==='只读回答质量不足，升档一次');",
+          "broken": "const readonlyPhase=!fixed&&continuing&&request.state.model==='small';"
+        }
+      ],
+      "brokenHashes": {
+        "router.mjs": "ecded2b126d2c6aa66a0193b345cd371df9f71c20c9aefee473b13801213d39d",
+        "native-codex.mjs": "6c5c6368a147d3b0a2da4af6c0cea4dd6364816af188bcb9d80ff9daabbd7622",
+        "agent-executor.mjs": "2e0ecee39af446c1b89cde828bafd34636f073b13a373ca9a4a1343094424a90",
+        "handoff-context.mjs": "1165e8ebd33f820a3f4892a02774684492058157321bee5a608da2e010e61120",
+        "control.mjs": "317adb0b367e52115794c99b8c263de8023d5fe459a0bbe69f7a9582f463d4a0",
+        "policy.mjs": "fa24db1e25c0546d0fd842dbc0b35b2263a629e83a435863afa28e5261de7c72",
+        "task-rules.mjs": "4f31484504bbebea4a28d65139803d73a457b3b4a4227a4ffa6e52b5b32d78f3"
+      },
+      "oracleHash": "65ceac27860f46d7af31bb5f31838a24fa5c82c0e873e9800364a03c3ee2f349",
+      "arms": [
+        {
+          "id": "sol-single",
+          "model": "gpt-6.1-sol",
+          "effort": "high",
+          "collaboration": false
+        },
+        {
+          "id": "sol-luna-required",
+          "model": "gpt-6.1-sol",
+          "effort": "high",
+          "collaboration": true
+        }
+      ]
+    },
+    {
+      "id": "R2",
+      "mode": "task",
+      "source": "apps/desktop/tests/native-codex.test.mjs; confirmed repository defect reconstructed replay",
+      "prompt": "修复真实YAM仓库缺陷的隔离重建回放：同ID模型刷新必须更新input/contextWindow/thinkingLevelMap并发布新catalog；fallback目录不能把本适配器自己的wrapped model作为原始OAuth模型，不能重复Codex CLI前缀；目录内容不变时不能重复发布。保持resolveModel对非ChatGPT模型的行为与现有接口。\n先写replay.test.mjs复现，再改实现并实际执行node --test replay.test.mjs。只允许修改native-codex.mjs,replay.test.mjs,review-integration.json。其余模块和AGENTS.md逐字保留。不要查看其他目录或隐藏验收。",
+      "targets": [
+        "native-codex.mjs"
+      ],
+      "patches": [
+        {
+          "file": "native-codex.mjs",
+          "fixed": "function register(m,batch=false,refresh=false){\n  if(refresh||!models.has(m.id)){",
+          "broken": "function register(m,batch=false){\n  if(!models.has(m.id)){"
+        },
+        {
+          "file": "native-codex.mjs",
+          "fixed": "const before=JSON.stringify([...models.values()]);",
+          "broken": "const before=models.size;"
+        },
+        {
+          "file": "native-codex.mjs",
+          "fixed": "all.filter(m=>m.provider!==provider&&isChatGPT(ctx,m)))register(m,true,true);",
+          "broken": "all.filter(m=>isChatGPT(ctx,m)))register(m,true);"
+        },
+        {
+          "file": "native-codex.mjs",
+          "fixed": "if(JSON.stringify([...models.values()])!==before)registerCatalog();",
+          "broken": "if(models.size!==before)registerCatalog();"
+        }
+      ],
+      "brokenHashes": {
+        "router.mjs": "9c7efc8b969553e980f8122d13e465d6485cb5d872a502bf6ab99684e40f0b1c",
+        "native-codex.mjs": "f739ed1f07dc6cd6db31ff3dade88d4ab7223105d092e51753b16d69e0ff5e2f",
+        "agent-executor.mjs": "2e0ecee39af446c1b89cde828bafd34636f073b13a373ca9a4a1343094424a90",
+        "handoff-context.mjs": "1165e8ebd33f820a3f4892a02774684492058157321bee5a608da2e010e61120",
+        "control.mjs": "317adb0b367e52115794c99b8c263de8023d5fe459a0bbe69f7a9582f463d4a0",
+        "policy.mjs": "fa24db1e25c0546d0fd842dbc0b35b2263a629e83a435863afa28e5261de7c72",
+        "task-rules.mjs": "4f31484504bbebea4a28d65139803d73a457b3b4a4227a4ffa6e52b5b32d78f3"
+      },
+      "oracleHash": "eea69c6584963efa312e3a1c6f0c89460f75f2ab14ceea249c7c3c6400a1848e",
+      "arms": [
+        {
+          "id": "sol-luna-required",
+          "model": "gpt-6.1-sol",
+          "effort": "high",
+          "collaboration": true
+        },
+        {
+          "id": "sol-single",
+          "model": "gpt-6.1-sol",
+          "effort": "high",
+          "collaboration": false
+        }
+      ]
+    }
+  ]
+}
