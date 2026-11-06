@@ -216,3 +216,7 @@ test('CI fixes standard runner and test concurrency without changing the package
  for(const command of ['pnpm test:coverage','cargo clippy','cargo test --doc','pnpm tauri build'])assert.ok(workflow.includes('/usr/bin/time -l '+command),command);
  assert.match(ciJob('package'),/CARGO_LOG: cargo::core::compiler::fingerprint=info/);
 });
+
+test('CI pins the bundled Node runtime with network permission denial for calibration validators',()=>{
+ for(const name of ['quick','frontend','native','package'])assert.match(ciJob(name),/node-version: ['"]26\.10\.0['"]/);
+});
