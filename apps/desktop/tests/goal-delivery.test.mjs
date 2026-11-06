@@ -86,3 +86,17 @@ test('image proof parses bounded top-level awaited calls and ignores code-shaped
  for(const input of ['// '+call,'const documentation = `'+call+'`;','async function unused(){'+call+'}','const unused=async()=>{'+call+'};','if(false){'+call+'}','await evil.tools.image_gen__imagegen({});'])assert.equal(api.inspectNativeTrace([...trace(root,'main'),event(input)]).imageCalls.length,0,input);
  for(const input of [call+'\n'+call,'await tools.image_gen__imagegen(input);','await tools.image_gen__imagegen({referenced_image_paths:paths});'])assert.throws(()=>api.inspectNativeTrace([...trace(root,'main'),event(input)]),/manual|unsupported|ambiguous/i);
 });
+
+test('release live acceptance supplies the same SDK context budget contract as the production entry',async()=>{
+ const {readFile}=await import('node:fs/promises'),source=await readFile(new URL('../../../scripts/goal-delivery-acceptance.mjs',import.meta.url),'utf8');
+ assert.match(source,/moduleAt\('node_modules\/@earendil-works\/pi-ai\/dist\/utils\/estimate\.js'\)/);
+ assert.match(source,/install\(api,getSupportedThinkingLevels,Text,bridge,\{estimateMessageTokens,getReserveTokens:model=>SettingsManager\.inMemory\(pi\.getSettings\(\)\)\.getCompactionReserveTokens\(model\)\}\)/);
+});
+test('release readonly acceptance uses captured native output without a persisted business receipt',()=>{
+ assert.equal(typeof api.checkReadonlyReply,'function');
+ const job={mode:'readonly',model:'gpt-6-luna',allowCollaboration:false,exitCode:0,argv:['codex','exec','--model','gpt-6-luna','--ephemeral'],finalText:'HELLO WORLD',events:[{type:'thread.started'},{type:'item.completed',itemType:'agent_message'},{type:'turn.completed'}]};
+ const message={role:'assistant',provider:'yam-codex',model:'gpt-6-luna',stopReason:'stop',content:[{type:'text',text:'HELLO WORLD'}]};
+ const proof=api.checkReadonlyReply(message,job);assert.equal(proof.finalText,'HELLO WORLD');assert.equal(proof.modelEvidence,'native-cli-argv');assert.equal(proof.businessReceiptRequired,false);
+ for(const patch of [{mode:'task'},{allowCollaboration:true},{exitCode:1},{finalText:'wrong'},{events:[{type:'thread.started'}]},{events:[...job.events,{type:'error'}]},{events:[...job.events,{type:'item.completed',itemType:'command_execution'}]},{argv:['gpt-6-luna','--ephemeral']}])assert.throws(()=>api.checkReadonlyReply(message,{...job,...patch}));
+ assert.throws(()=>api.checkReadonlyReply({...message,model:'other'},job));assert.throws(()=>api.checkReadonlyReply({...message,stopReason:'error'},job));assert.throws(()=>api.checkReadonlyReply(message,{...job,argv:['codex','exec']}));
+});

@@ -35,7 +35,8 @@ export function createNativeCodex(pi,{createStream,getTools,getSystemPrompt,norm
   return {receiptId,sessionId,status:receipt.status,reason,cleanup:receipt.recovery?.cleanup==='unconfirmed'?'unconfirmed':'unknown',inProgress,needsInspection:!inProgress,...receipt.failure?{failure:projectFailure({...receipt.failure,...receipt.recovery?.cleanup==='unconfirmed'?{dispatch:'unknown'}:{}})}:{}};
  }
  function reset(context,data,proof){
-  if(context!==ctx||proof&&(proof.epoch!==executionEpoch||proof.receipt!==records().at(-1)))throw Error('Native task changed; refresh recovery information');
+  // Pi creates fresh callback contexts while retaining the same session manager.
+  if(context.sessionManager!==ctx?.sessionManager||proof&&(proof.epoch!==executionEpoch||proof.receipt!==records().at(-1)))throw Error('Native task changed; refresh recovery information');
   if(!context.isIdle()||activeReceipt?.epoch===executionEpoch)throw Error('Wait for the current task to stop');
   if(!data||Object.keys(data).some(k=>!['receiptId','confirmed'].includes(k))||data.confirmed!==true)throw Error('Invalid native reset confirmation');
   const current=getRecovery(context),latest=records().at(-1),legacyProof=proof&&proof.receipt===latest;

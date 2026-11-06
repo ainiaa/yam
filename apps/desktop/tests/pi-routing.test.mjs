@@ -1246,3 +1246,19 @@ test('corrected readonly phases cannot acquire tools from an uncertain continuat
  const routes=[],f=fixture({answer:{intent:'continue',task:'coding',context:'dependent',action:'write',depth:'normal',uncertain:true,readOnly:false,requires:['files']},raw:true,state:{v:2,model:'medium',mode:'readonly',effort:'high'},native:{resolveModel:(_c,m)=>m,setRoute:r=>routes.push(r)}});f.models.medium={...f.models.strong,id:'medium'};f.flags['yam-medium']='p/medium';await f.ready;await f.handlers.session_start({},f.ctx);
  await assert.rejects(f.route(),/capabil/i);assert.equal(routes.length,0);
 });
+
+test('release legacy v1 lightweight goal cannot leave an unrelated strong receipt for its tool follow-up',async()=>{
+ const {createNativeCodex}=await import('../src-tauri/pi/native-codex.mjs');let bridge;const calls=[],catalog=[];
+ const facts={intent:'new',task:'answer',context:'independent',action:'none',depth:'normal',uncertain:false,readOnly:true,requires:['text']};
+ const f=fixture({answer:facts,raw:true,native:{resolveModel:(_ctx,m)=>m,setRoute:r=>bridge.setRoute(r)}});f.ctx.cwd='/repo';f.ctx.sessionManager.getSessionFile=()=>'/owned/yam.jsonl';f.pi.getActiveTools=()=>['read','bash','edit','write'];f.pi.registerProvider=(_p,c)=>catalog.splice(0,catalog.length,...c.models);
+ const createStream=()=>{let settle;const result=new Promise(r=>settle=r);return {push:e=>{if(e.type==='done')settle(e.message);if(e.type==='error')settle(e.error);},end(){},result:()=>result};};
+ bridge=createNativeCodex(f.pi,{createStream,getTools:c=>c.tools,getSystemPrompt:()=>'',loadModels:async()=>[f.models.small,f.models.strong],discover:async()=>[{kind:'codex',auth:'subscription',capabilities:['text','files']}],execute:async(_a,o)=>{calls.push(o);return {finalText:'Done',sessionId:'01234567-1234-1234-1234-0123456789ab'};}});
+ await f.ready;await f.handlers.session_start({},f.ctx);await bridge.initialize(f.ctx);const tools=[{name:'write'}],strong=catalog.find(m=>m.id==='strong');
+ bridge.beginTurn(f.ctx);bridge.setRoute({intent:'new'});await bridge.stream(strong,{messages:[{role:'user',content:'Old task A'}],tools},{reasoning:'high'}).result();
+ bridge.beginTurn(f.ctx);const simple=await f.route({messages:[{role:'user',content:'Explain B'}]});assert.equal(simple.state.v,1);assert.equal(simple.state.model,'small');
+ await bridge.stream(catalog.find(m=>m.id==='small'),{messages:[{role:'user',content:'Explain B'}],tools},{reasoning:simple.thinkingLevel}).result();
+ assert.equal(calls[1].mode,'task','legacy v1 preserves its existing business-receipt boundary');
+ f.ctx.modelRegistry.complete=async()=>({content:[{type:'text',text:JSON.stringify({...facts,intent:'continue',task:'coding',context:'dependent',action:'write',readOnly:false,requires:['files']})}]});
+ bridge.beginTurn(f.ctx);const follow=await f.route({state:simple.state,messages:[{role:'user',content:'Save explanation B'}]});await bridge.stream(strong,{messages:[{role:'user',content:'Save explanation B'}],tools},{reasoning:follow.thinkingLevel}).result();
+ assert.equal(calls[2].resume,null,'B never resumes completed task A');assert.equal(calls[2].mode,'task');
+});

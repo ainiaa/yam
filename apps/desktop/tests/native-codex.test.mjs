@@ -420,3 +420,14 @@ test('T2 dispatched cancellation and receipt persistence retain inspection requi
  }
  const disk=fixture({persistAt:3});await disk.bridge.initialize(disk.ctx);disk.bridge.beginTurn(disk.ctx);const failed=await disk.bridge.stream(disk.bridge.resolveModel(disk.ctx,disk.original),context,{}).result();assert.equal(failed.failure?.code,'receipt-persistence');assert.equal(failed.failure.stage,'persistence');assert.equal(failed.failure.nextAction,'inspect-task');assert.ok(disk.bridge.getRecovery(disk.ctx));
 });
+
+test('release recovery accepts fresh callback contexts for the same session manager after CLI status',async()=>{
+ const f=fixture({error:'failed'});await f.bridge.initialize(f.ctx);f.bridge.beginTurn(f.ctx);await f.bridge.stream(f.bridge.resolveModel(f.ctx,f.original),context,{}).result();
+ const recovery=f.bridge.getRecovery(f.ctx),before=f.entries.length,commandContext={...f.ctx};await f.commands['yam-native'].handler('status',commandContext);
+ f.bridge.reset(f.ctx,{receiptId:recovery.receiptId,confirmed:true});assert.equal(f.entries.length,before+1);assert.equal(f.bridge.getRecovery(f.ctx),null);assert.equal(f.calls.length,1);
+});
+test('release recovery still rejects a foreign session manager with a copied receipt identifier',async()=>{
+ const f=fixture({error:'failed'});await f.bridge.initialize(f.ctx);f.bridge.beginTurn(f.ctx);await f.bridge.stream(f.bridge.resolveModel(f.ctx,f.original),context,{}).result();const recovery=f.bridge.getRecovery(f.ctx),before=f.entries.length;
+ const foreign={...f.ctx,sessionManager:{...f.ctx.sessionManager,getBranch:()=>structuredClone(f.entries)}};
+ assert.throws(()=>f.bridge.reset(foreign,{receiptId:recovery.receiptId,confirmed:true}),/changed|refresh/i);assert.equal(f.entries.length,before);assert.equal(f.calls.length,1);
+});

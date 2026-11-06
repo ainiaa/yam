@@ -427,7 +427,7 @@ export default async function install(pi,supportedLevels,Text,native,budgetDepen
   else try{next.effort=workingEffort(model,next.effort,request.thinkingLevel);}catch(e){if(continuing||fixed||next.model!=='small'||connection(model).billing==='subscription'&&connection(regular).billing!=='subscription')throw e;model=regular;next.model='strong';next.effort=workingEffort(model,next.effort,request.thinkingLevel);}
   compatible(model);
   if(!supports(model,next.model))throw nativeError('capability-unavailable','Selected main model lacks required capabilities; main session preserved.');
-  const mode=!fixed&&(next.model==='small'||readonlyPhase&&!phaseHandoff)?'readonly':'task';
+  const mode=taskRules.v===2&&!fixed&&(next.model==='small'||readonlyPhase&&!phaseHandoff)?'readonly':'task';
   native?.setRoute?.({intent:phaseHandoff?'new':intent,mode,requires:needs,roles:executionProfiles(ctx)});
   const reason=capabilityAdjusted?'能力、推理与上下文预算匹配，选择同计费授权的兼容模型':phaseHandoff?'只读任务转入中档工具执行阶段':cached?'保留近期缓存，预计成本更低':policy.rule==='fallback'?(taskRules.v===2?'分类或上下文不足，选择中档主模型':'分类或上下文不足，保守选择强模型'):`任务规则：${policy.rule}`;
   Object.assign(decision,{selected:{model:next.model,effort:next.effort},...budget?{budget}:{}});saveDecision();
