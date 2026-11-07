@@ -18,4 +18,10 @@ Converge 工具仓库的覆盖率适配和 Review v3 修复不混入本 YAM 提�
 
 源码提交为 `4ede482c5b7914cc863b3a81c6038f497dd02c02`。22 个源码/测试文件逐一匹配已验收内容哈希。按仓库规范执行原生只读 `codex review --base 3472fc761d8e0b5aa5f979456fce135d3fbe72fa`，退出码 0，耗时 141.657 秒，结论为未发现生命周期处理、持久化恢复、基线存储或 UI 集成中的可操作回归。完整命令和原始输出指纹见 [复核元数据](evidence/stable-source-review.json)，结论原文见 [复核输出](evidence/stable-source-review.txt)。reviewer 未重跑测试、未启动 GUI。
 
-后续提交只补录本节和验收索引/复核文件，不修改经复核的源码与测试。此次只推送功能分支，未创建 PR；当前工作流仅由 main push 或 PR 触发，因此没有此分支的远端 CI 通过结论。合并或发布前仍需执行仓库规定的远端门禁；本次不合并、不创建 tag、不发布。
+后续提交只补录本节和验收索引/复核文件，不修改经复核的源码与测试。初始分支推送没有触发远端 CI；用户随后授权创建 [PR #4](https://github.com/ainiaa/yam/pull/4)，跟进完整 CI 并处理真实失败，暂不合并或发布。
+
+## 远端 CI 记录入口
+
+以 [PR #4 的 Checks](https://github.com/ainiaa/yam/pull/4/checks) 和 PR 正文中的 CI 验收记录为远端真源，按最终 PR HEAD 核对运行 SHA、路线及每项结果。由于包含产品代码，本 PR 应走 full：plan、frontend、native、package、desktop 必须通过；quick 只在计划未选中时允许明确 skipped。
+
+本节提交时 CI 尚未结束，不预写通过。运行完成或修复后的最终结果补充到同一个 PR 正文，并保留旧运行链接、失败原因和实测时间；完整 API 快照/日志保留本机忽略目录 .artifacts/lifecycle-pr-20261107/。这样，最终 CI 结论能够绑定已经检查的 HEAD，无需为了补写结论而再次修改源码提交。GitHub runner 的 package 是测试工件，不是 Release。自动合并保持关闭，本轮不合并、不创建 tag、不发布。

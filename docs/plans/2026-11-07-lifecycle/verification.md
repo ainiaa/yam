@@ -16,7 +16,7 @@
 | 最终 native Trace 复跑 | 退出 0，重新执行绑定测试、变异、覆盖率和 CodeGraph | 314.04 秒 |
 | 最终清单审计 | 退出 0，覆盖全部冻结清单 | 0.66 秒 |
 
-不需要 Claude API 或订阅即可执行本轮本地回归；测试用本地事件、临时文件和故障注入，定向与终验进程移除了 Claude/Anthropic 凭证环境变量。独立审查实际使用 `codex-exec-v1 / openai`。没有真实 Claude、GUI、浏览器 opt-in 或 Windows/Linux 实机验收；未打发布包。远端 CI 不在此本地验收结论内，不能用此摘要声称尚未运行的 CI 已通过。
+不需要 Claude API 或订阅即可执行本轮本地回归；测试用本地事件、临时文件和故障注入，定向与终验进程移除了 Claude/Anthropic 凭证环境变量。独立审查实际使用 `codex-exec-v1 / openai`。没有真实 Claude、GUI、浏览器 opt-in 或 Windows/Linux 实机验收；未打发布包。远端 CI 不在此本地验收结论内，另以 [PR #4 的 Checks](https://github.com/ainiaa/yam/pull/4/checks) 和 PR 正文记录最终 HEAD 的实测结果；本地摘要不替代远端门禁。
 
 ## 首轮验证（以下为历史记录）
 

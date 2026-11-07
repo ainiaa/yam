@@ -1306,8 +1306,7 @@
     "real Claude/API integration",
     "GUI and browser opt-in acceptance",
     "Windows/Linux runtime",
-    "packaging/release",
-    "remote CI (not yet triggered)"
+    "packaging/release"
   ],
   "historical_records_note": "Earlier blocked runs and failed logs remain in local .artifacts/converge-acceptance-20261107 and lifecycle-20261107; they do not count as current passing evidence.",
   "committed_source_review": {
@@ -1316,5 +1315,21 @@
     "metadata_sha256": "19e6ac5d342e417c8ae8aa09192b2bd1c02c61c4831ba91baf8fb4b044e5c8fa",
     "result": "no_actionable_regressions",
     "source_files_match_accepted_hashes": true
+  },
+  "remote_ci_record": {
+    "pull_request": "https://github.com/ainiaa/yam/pull/4",
+    "checks": "https://github.com/ainiaa/yam/pull/4/checks",
+    "result_location": "PR body and matching-head GitHub Checks; local archive remains a record of local acceptance.",
+    "expected_route": "full",
+    "required_jobs": [
+      "plan",
+      "frontend",
+      "native",
+      "package",
+      "desktop"
+    ],
+    "quick": "skipped only when not selected by plan",
+    "merge_authorized": false,
+    "release_authorized": false
   }
 }
