@@ -1610,6 +1610,14 @@ impl SessionManager {
                 return Err("Session cleanup timed out; the application remains open".into());
             }
         }
+        let history = self
+            .history
+            .lock()
+            .map_err(|_| "Session history lock poisoned")?
+            .clone();
+        if let Some(history) = history {
+            history.save_pending_start_failures()?;
+        }
         let mut runtime = self
             .agent_bridge
             .lock()
@@ -3062,6 +3070,49 @@ fn finish_session_with<R: tauri::Runtime>(
         pending.take();
     }
     session.completed.1.notify_all();
+    Ok(())
+}
+
+fn retry_session_finish_with<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    manager: &SessionManager,
+    id: &str,
+    notify: impl FnOnce(&AppHandle<R>, &str, &str),
+) -> Result<(), String> {
+    let session = manager
+        .sessions
+        .lock()
+        .map_err(|_| "Session manager lock poisoned")?
+        .get(id)
+        .cloned();
+    let Some(session) = session else {
+        let record = manager.history(app)?.get(id)?;
+        return if is_terminal(&record.status) {
+            Ok(())
+        } else {
+            Err("Session finalization is unavailable".into())
+        };
+    };
+    if !session_has_exited(&session)? {
+        return Err("Session is still running; no process was stopped".into());
+    }
+    if session
+        .pending_finish
+        .try_lock()
+        .map_err(|_| "Session saving is busy")?
+        .is_none()
+    {
+        return Err("Session has not reached final persistence".into());
+    }
+    finish_session_with(app, &manager.sessions, &session, None, notify)?;
+    if !*session
+        .completed
+        .0
+        .lock()
+        .map_err(|_| "Completion lock poisoned")?
+    {
+        return Err("Session final persistence is still pending".into());
+    }
     Ok(())
 }
 
@@ -4713,116 +4764,126 @@ fn create_session_with_effects<R: tauri::Runtime>(
         launch_executable.as_ref().and_then(|path| path.to_str()),
     )?;
     let log = log.commit();
-    if restored_offset > 0 {
-        history.update(
-            &summary.session_id,
-            "starting",
-            None,
-            None,
-            Some(restored_offset),
-        )?;
-    }
-    let mut interactive_assets = None;
-    if let Some(integration) = integration {
-        match integration {
-            Ok(prepared) => {
-                if pi_identity.is_some() {
-                    builder.env("YAM_PI_GENERATION", &prepared.generation);
-                }
-                if let Err(reason) = connect_agent(
-                    &app,
-                    history.clone(),
-                    &summary.session_id,
-                    &prepared,
-                    &mut builder,
-                ) {
-                    history.unavailable_agent(&summary.session_id, &reason)?;
-                    history.agent_shell(&summary.session_id)?;
-                }
-                #[cfg(unix)]
-                {
-                    let (shell, assets) = interactive_shell::wrap(
-                        &history.root,
-                        builder,
-                        summary.launch.as_ref(),
-                        Some(&prepared),
-                        &summary.session_id,
-                        (false, false),
-                    )?;
-                    builder = shell;
-                    interactive_assets = Some(assets);
-                }
-            }
-            Err(reason) => history.unavailable_agent(&summary.session_id, &reason)?,
+    // Every failure after the history commit must leave a terminal outcome, even before spawn.
+    let preparation = (|| -> Result<_, String> {
+        if restored_offset > 0 {
+            history.update(
+                &summary.session_id,
+                "starting",
+                None,
+                None,
+                Some(restored_offset),
+            )?;
         }
-    }
-    #[cfg(unix)]
-    if ordinary
-        && matches!(
-            builder
-                .get_argv()
-                .first()
-                .and_then(|p| Path::new(p).file_name())
-                .and_then(|p| p.to_str()),
-            Some("zsh" | "bash")
-        )
-    {
-        let (shell, assets) = interactive_shell::wrap(
-            &history.root,
-            builder,
-            None,
-            None,
-            &summary.session_id,
-            (
-                directory_reporting == Some(true),
-                command_reporting == Some(true),
-            ),
-        )?;
-        builder = shell;
-        interactive_assets = Some(assets);
-    }
-    if let Some(native_id) = resume_id
-        .as_deref()
-        .or(gemini_identity.as_deref())
-        .or(pi_identity.as_deref())
-    {
-        history.bind_resume_identity(&summary.session_id, native_id)?;
-    }
+        let mut interactive_assets = None;
+        if let Some(integration) = integration {
+            match integration {
+                Ok(prepared) => {
+                    if pi_identity.is_some() {
+                        builder.env("YAM_PI_GENERATION", &prepared.generation);
+                    }
+                    if let Err(reason) = connect_agent(
+                        &app,
+                        history.clone(),
+                        &summary.session_id,
+                        &prepared,
+                        &mut builder,
+                    ) {
+                        history.unavailable_agent(&summary.session_id, &reason)?;
+                        history.agent_shell(&summary.session_id)?;
+                    }
+                    #[cfg(unix)]
+                    {
+                        let (shell, assets) = interactive_shell::wrap(
+                            &history.root,
+                            builder,
+                            summary.launch.as_ref(),
+                            Some(&prepared),
+                            &summary.session_id,
+                            (false, false),
+                        )?;
+                        builder = shell;
+                        interactive_assets = Some(assets);
+                    }
+                }
+                Err(reason) => history.unavailable_agent(&summary.session_id, &reason)?,
+            }
+        }
+        #[cfg(unix)]
+        if ordinary
+            && matches!(
+                builder
+                    .get_argv()
+                    .first()
+                    .and_then(|p| Path::new(p).file_name())
+                    .and_then(|p| p.to_str()),
+                Some("zsh" | "bash")
+            )
+        {
+            let (shell, assets) = interactive_shell::wrap(
+                &history.root,
+                builder,
+                None,
+                None,
+                &summary.session_id,
+                (
+                    directory_reporting == Some(true),
+                    command_reporting == Some(true),
+                ),
+            )?;
+            builder = shell;
+            interactive_assets = Some(assets);
+        }
+        if let Some(native_id) = resume_id
+            .as_deref()
+            .or(gemini_identity.as_deref())
+            .or(pi_identity.as_deref())
+        {
+            history.bind_resume_identity(&summary.session_id, native_id)?;
+        }
+        let (child, directory_assets, directory_warning, command_warning) =
+            zsh_directory_reporting::spawn(
+                private_root,
+                builder,
+                directory_reporting == Some(true) && interactive_assets.is_none(),
+                command_reporting == Some(true) && interactive_assets.is_none(),
+                |builder| {
+                    if let Some((source, cwd_identity)) = &project_source {
+                        project_config::revalidate(
+                            source,
+                            &initial_cwd,
+                            cwd_identity,
+                            private_root,
+                        )?;
+                    }
+                    if let Some(environment) = &provider_environment {
+                        environment.validate_before_spawn()?;
+                    }
+                    spawn_command(pair.slave.as_ref(), builder)
+                },
+            )?;
+        Ok((
+            child,
+            interactive_assets,
+            directory_assets,
+            directory_warning,
+            command_warning,
+        ))
+    })();
     #[allow(unused_mut)]
     let (
         mut child,
+        interactive_assets,
         directory_reporting_assets,
         directory_reporting_warning,
         command_reporting_warning,
-    ) = match zsh_directory_reporting::spawn(
-        private_root,
-        builder,
-        directory_reporting == Some(true) && interactive_assets.is_none(),
-        command_reporting == Some(true) && interactive_assets.is_none(),
-        |builder| {
-            if let Some((source, cwd_identity)) = &project_source {
-                project_config::revalidate(source, &initial_cwd, cwd_identity, private_root)?;
-            }
-            if let Some(environment) = &provider_environment {
-                environment.validate_before_spawn()?;
-            }
-            spawn_command(pair.slave.as_ref(), builder)
-        },
-    ) {
+    ) = match preparation {
         Ok(result) => result,
         Err(error) => {
             return report_spawn_failure(
                 &error,
                 has_profile_env,
-                |reason| {
-                    history.update(
-                        &summary.session_id,
-                        "failed",
-                        None,
-                        Some(reason.to_string()),
-                        None,
-                    )
-                },
+                |reason| history.record_start_failure(&summary.session_id, reason),
                 |reason| {
                     let _ = app.emit(
                         "session-state",
@@ -4853,13 +4914,7 @@ fn create_session_with_effects<R: tauri::Runtime>(
         Err(error) => {
             let _ = child.kill();
             let _ = child.wait();
-            history.update(
-                &summary.session_id,
-                "failed",
-                None,
-                Some(error.clone()),
-                None,
-            )?;
+            history.record_start_failure(&summary.session_id, &error)?;
             return Err(error);
         }
     };
@@ -5201,7 +5256,7 @@ fn resize_session(
     result
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn stop_session(manager: State<'_, SessionManager>, session_id: String) -> Result<(), String> {
     proxy!(
         manager,
@@ -5216,6 +5271,46 @@ fn stop_session(manager: State<'_, SessionManager>, session_id: String) -> Resul
         .cloned()
         .ok_or_else(|| format!("Unknown session: {session_id}"))?;
     request_session_stop(&session)
+}
+
+#[tauri::command(async)]
+fn session_finish_pending(
+    manager: State<'_, SessionManager>,
+    session_id: String,
+) -> Result<bool, String> {
+    proxy!(
+        manager,
+        "session_finish_pending",
+        serde_json::json!({"session_id":session_id})
+    );
+    let session = manager
+        .sessions
+        .lock()
+        .map_err(|_| "Session manager lock poisoned")?
+        .get(&session_id)
+        .cloned();
+    match session {
+        Some(session) => Ok(session
+            .pending_finish
+            .try_lock()
+            .map_err(|_| "Session saving is busy")?
+            .is_some()),
+        None => Ok(false),
+    }
+}
+
+#[tauri::command(async)]
+fn retry_session_finish(
+    app: AppHandle,
+    manager: State<'_, SessionManager>,
+    session_id: String,
+) -> Result<(), String> {
+    proxy!(
+        manager,
+        "retry_session_finish",
+        serde_json::json!({"session_id":session_id})
+    );
+    retry_session_finish_with(&app, &manager, &session_id, background::notify_lifecycle)
 }
 
 #[tauri::command]
@@ -6335,6 +6430,8 @@ pub fn run() {
                     desktop_windows::write_session,
                     desktop_windows::resize_session,
                     stop_session,
+                    session_finish_pending,
+                    retry_session_finish,
                     list_session_summaries,
                     get_session,
                     history_overview,
@@ -7701,6 +7798,99 @@ mod tests {
         (root.join("sessions"), summary)
     }
 
+    #[test]
+    fn lifecycle_start_recovers_failed_outcome_after_transient_history_write_error() {
+        let (root, mut summary) = test_history();
+        let history = super::HistoryStore::open(root.clone()).unwrap();
+        summary.status = "starting".into();
+        history.start(&summary).unwrap();
+        let obstruction = root.join("sessions.json.tmp");
+        std::fs::create_dir(&obstruction).unwrap();
+        assert!(history
+            .record_start_failure(&summary.session_id, "Cannot prepare session")
+            .is_err());
+        assert_eq!(history.list().unwrap()[0].status, "starting");
+        std::fs::remove_dir(obstruction).unwrap();
+        let record = history.list().unwrap().pop().unwrap();
+        assert_eq!(record.status, "failed");
+        assert_eq!(record.reason.as_deref(), Some("Cannot prepare session"));
+        assert!(record.notification_pending);
+        let reopened = super::HistoryStore::open(root.clone()).unwrap();
+        assert_eq!(reopened.list().unwrap()[0], record);
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn lifecycle_start_shutdown_saves_pending_failure_without_another_history_read() {
+        let (root, mut summary) = test_history();
+        let history = Arc::new(HistoryStore::open(root.clone()).unwrap());
+        summary.status = "starting".into();
+        history.start(&summary).unwrap();
+        let obstruction = root.join("sessions.json.tmp");
+        std::fs::create_dir(&obstruction).unwrap();
+        assert!(history
+            .record_start_failure(&summary.session_id, "Preparation failed")
+            .is_err());
+        std::fs::remove_dir(obstruction).unwrap();
+        let manager = super::SessionManager::default();
+        *manager.history.lock().unwrap() = Some(history);
+        assert!(manager.sessions.lock().unwrap().is_empty());
+        manager.shutdown().unwrap();
+        let reopened = HistoryStore::open(root.clone()).unwrap();
+        let saved = reopened.list().unwrap().pop().unwrap();
+        assert_eq!(saved.status, "failed");
+        assert_eq!(saved.reason.as_deref(), Some("Preparation failed"));
+        assert!(saved.notification_pending);
+        std::fs::remove_dir_all(root.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn lifecycle_start_shutdown_stays_open_until_pending_failure_can_be_saved() {
+        let (root, mut summary) = test_history();
+        let history = Arc::new(HistoryStore::open(root.clone()).unwrap());
+        summary.status = "starting".into();
+        history.start(&summary).unwrap();
+        let obstruction = root.join("sessions.json.tmp");
+        std::fs::create_dir(&obstruction).unwrap();
+        assert!(history
+            .record_start_failure(&summary.session_id, "Preparation failed")
+            .is_err());
+        let manager = super::SessionManager::default();
+        *manager.history.lock().unwrap() = Some(history);
+        assert!(manager.shutdown().is_err());
+        assert!(!manager
+            .shutdown_complete
+            .load(std::sync::atomic::Ordering::Acquire));
+        std::fs::remove_dir(obstruction).unwrap();
+        manager.shutdown().unwrap();
+        assert!(manager
+            .shutdown_complete
+            .load(std::sync::atomic::Ordering::Acquire));
+        let reopened = HistoryStore::open(root.clone()).unwrap();
+        assert_eq!(
+            reopened.list().unwrap()[0].reason.as_deref(),
+            Some("Preparation failed")
+        );
+        std::fs::remove_dir_all(root.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn lifecycle_start_does_not_commit_without_room_for_a_failed_record() {
+        let (root, mut summary) = test_history();
+        let history = super::HistoryStore::open(root.clone()).unwrap();
+        summary.status = "starting".into();
+        history.start(&summary).unwrap();
+        let starting_size = std::fs::metadata(root.join("sessions.json")).unwrap().len();
+        summary
+            .cwd
+            .push_str(&"x".repeat((MAX_SESSION_HISTORY_BYTES - starting_size) as usize));
+        assert!(
+            history.start(&summary).is_err(),
+            "cannot leave a starting record with no room to finalize"
+        );
+        assert_eq!(history.records.lock().unwrap()[0].summary.cwd, "/tmp");
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
     #[test]
     fn history_test_directories_are_process_scoped_and_unique() {
         let (first, _) = test_history();

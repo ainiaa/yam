@@ -173,6 +173,8 @@ def run(manifest):
             result = subprocess.run([binary, "--list", "--format=terse", *arguments], cwd=manifest.parent, env=listing_env, text=True, capture_output=True, check=True, timeout=30)
             return test_names(result.stdout)
         groups.extend(partition(binary, inventory(), inventory("--ignored")))
+    if not any(not ignored for group in groups for ignored in group[2].values()):
+        raise ValueError("Coverage requires a nonempty executable test inventory")
     print(json.dumps({"binaries": len(binaries), "groups": len(groups), "tests": sum(len(group[2]) for group in groups), "ignored": sum(sum(group[2].values()) for group in groups)}), flush=True)
     run_groups(groups, env, cwd=manifest.parent)
     cargo(["llvm-cov", "report", "--locked", "--fail-under-lines=85"])

@@ -1,5 +1,7 @@
 // Author: Jeff.Liu. Application-owned translation resources.
 export const zh:Record<string,string>={
+"Final saving needs attention. Retry saving without restarting the task.":"最终保存需要处理。可重试保存，无需重新执行任务。",
+"Retry saving session":"重试保存会话",
 "Context budget unavailable or exceeded":"上下文预算不可确认或已超限",
 "Local context estimate":"本地上下文估算",
 "local reserve":"本地预留",
@@ -421,7 +423,7 @@ export const zh:Record<string,string>={
  "Keep baseline":"保留原基线",
  "Reading local snapshot…":"正在读取本地快照…",
  "Tracked working-tree text only. Untracked files compare names only. Index-only changes are not included.":"仅比较 Git 已跟踪文件的工作区文本。未跟踪文件只比较名称；仅改变暂存状态不计入文本差异。",
- "Up to 2048 tracked paths and 16 MiB per baseline; 32 MiB total. Baselines are kept only while this YAM window is open.":"每个基线最多 2048 个跟踪路径、16 MiB，合计最多 32 MiB。基线仅在本次 YAM 窗口开启期间保留。",
+ "Up to 4 baselines, 2048 tracked paths and 16 MiB per baseline; 32 MiB total storage. Baselines are saved privately until explicitly cleared.":"最多保留 4 个基线，每个最多 2048 个跟踪路径、16 MiB，存储合计最多 32 MiB。基线私密保存，直至你明确清除。",
  "No comparable text changes since baseline.":"基线后没有可比较的文本变化。",
  "files could not be compared; binary, large, linked or unreadable files may have changed.":"个文件无法比较；二进制、大文件、链接或不可读文件仍可能发生变化。",
  "Compare {{value0}}":"比较 {{value0}}",
@@ -1912,4 +1914,11 @@ export const zh:Record<string,string>={
 "Native work may have changed files or external state. Inspect before retrying.": "原生任务可能已经修改文件或外部状态。请检查后再决定是否重试。",
 "Refresh current state": "刷新当前状态",
 "Current state refreshed. This does not confirm whether the previous action succeeded or failed.": "已刷新当前状态。这不代表已确认上一次操作成功或失败。",
+  "Agent turn failed or was interrupted. Tests and task acceptance are not verified by YAM.": "Agent 回合失败或已中断。测试结果与任务验收尚未经 YAM 验证。",
+  "Agent response available. Tests and task acceptance are not verified by YAM.": "Agent 已返回响应。测试结果与任务验收尚未经 YAM 验证。",
+  "Process ended. Tests and task acceptance are not verified by YAM.": "进程已结束。测试结果与任务验收尚未经 YAM 验证。",
+  "Task status recorded. Tests and task acceptance are not verified by YAM.": "任务状态已记录。测试结果与任务验收尚未经 YAM 验证。",
+  "Review task changes": "检查任务变更",
+  "View task files": "查看任务文件",
+  "Review recorded output": "检查已记录的输出",
 };

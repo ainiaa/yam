@@ -1,0 +1,2 @@
+    Checking yam-desktop v0.1.12 (<workspace>/apps/desktop/src-tauri)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.20s

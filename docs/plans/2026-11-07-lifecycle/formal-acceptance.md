@@ -1,0 +1,27 @@
+# 生命周期正式验收
+
+作者：Jeff.Liu
+
+基线提交为 `3472fc761d8e0b5aa5f979456fce135d3fbe72fa`。最终验收源码指纹为 `ea798c29816255c317c2569113ac6a6a3c6a7fe637068917622d4e47a4341d1b`，受管状态 `complete`，用户回执 `ready`。这对应提交整理前的源码工作区快照；提交后 Git HEAD/文档元数据变化不冒充原回执的 Source Receipt。
+
+六项验收均通过：异步输入/缩放/停止、启动失败补偿、已退出任务的单独保存重试、私有有界基线持久化、结果与证据入口关联，以及拒绝空/全 ignored 清单的原生覆盖率启动器。规格和质量 Review v3 独立盲审均通过；最终 Trace 复跑与清单审计通过，本轮任务锁已释放。
+
+本轮还关闭了复审确认的边界问题：后台正常关闭前必须保存尚未进入活动列表的启动失败，写入不可用时保持开启供重试；Windows Job 绑定失败沿用同一补偿路径。Claude 复用旧 prompt ID 后，未完成回合退出会清除当前引用，历史收件箱保留；已证实的成功、失败或中断结果不丢失。
+
+[acceptance.json](acceptance.json) 是可公开归档索引，保存本轮 22 个源码/测试文件的内容哈希、六项验收、原始测试/复核回执指纹和最终审计结果；[验证记录](verification.md) 说明实际命令、结果和跳过项。它不替代原始校验器或完整 Source Receipt。完整回执、旧失败记录和原始计划保留在本地忽略目录 `.artifacts/root-causes-20261107/`、`.artifacts/converge-acceptance-20261107/` 和 `.artifacts/lifecycle-20261107/`；不把其他任务的本地文件清单上传到公开仓库。日志归档规范化主机路径和行尾空白，原始与归档哈希分别记录。
+
+Converge 工具仓库的覆盖率适配和 Review v3 修复不混入本 YAM 提交；本仓只包含非空测试清单守卫及其回归。原 85% 原生覆盖率门槛保持不变，无新增依赖、版本号、tag 或发布动作。
+
+用户已明确授权整理、提交和推送。稳定提交的独立源码复核与远端分支结果另行补录；此处本地验收不代表远端 CI、真实 Claude 联调、GUI 或 Windows/Linux 实机已经验证。
+
+## 稳定提交复核
+
+源码提交为 `4ede482c5b7914cc863b3a81c6038f497dd02c02`。22 个源码/测试文件逐一匹配已验收内容哈希。按仓库规范执行原生只读 `codex review --base 3472fc761d8e0b5aa5f979456fce135d3fbe72fa`，退出码 0，耗时 141.657 秒，结论为未发现生命周期处理、持久化恢复、基线存储或 UI 集成中的可操作回归。完整命令和原始输出指纹见 [复核元数据](evidence/stable-source-review.json)，结论原文见 [复核输出](evidence/stable-source-review.txt)。reviewer 未重跑测试、未启动 GUI。
+
+后续提交只补录本节和验收索引/复核文件，不修改经复核的源码与测试。初始分支推送没有触发远端 CI；用户随后授权创建 [PR #4](https://github.com/ainiaa/yam/pull/4)，跟进完整 CI 并处理真实失败，暂不合并或发布。
+
+## 远端 CI 记录入口
+
+以 [PR #4 的 Checks](https://github.com/ainiaa/yam/pull/4/checks) 和 PR 正文中的 CI 验收记录为远端真源，按最终 PR HEAD 核对运行 SHA、路线及每项结果。由于包含产品代码，本 PR 应走 full：plan、frontend、native、package、desktop 必须通过；quick 只在计划未选中时允许明确 skipped。
+
+本节提交时 CI 尚未结束，不预写通过。运行完成或修复后的最终结果补充到同一个 PR 正文，并保留旧运行链接、失败原因和实测时间；完整 API 快照/日志保留本机忽略目录 .artifacts/lifecycle-pr-20261107/。这样，最终 CI 结论能够绑定已经检查的 HEAD，无需为了补写结论而再次修改源码提交。GitHub runner 的 package 是测试工件，不是 Release。自动合并保持关闭，本轮不合并、不创建 tag、不发布。

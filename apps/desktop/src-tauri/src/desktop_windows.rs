@@ -1579,7 +1579,7 @@ fn create_session_with<R: tauri::Runtime>(
     result
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub(super) fn write_session<R: tauri::Runtime>(
     window: Webview<R>,
     manager: State<'_, SessionManager>,
@@ -1603,7 +1603,7 @@ pub(super) fn write_session<R: tauri::Runtime>(
         || super::write_session(manager.clone(), session_id, data),
     )
 }
-#[tauri::command]
+#[tauri::command(async)]
 pub(super) fn resize_session<R: tauri::Runtime>(
     window: Webview<R>,
     manager: State<'_, SessionManager>,

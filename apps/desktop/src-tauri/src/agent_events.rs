@@ -115,6 +115,13 @@ impl AgentState {
                 if self.process_run.as_deref() != Some(run) {
                     return Ok(None);
                 }
+                // An unfinished prompt can reuse an older Claude turn ID; its receipt is historical.
+                if !matches!(
+                    self.phase.as_str(),
+                    "response_finished" | "needs_attention" | "failed" | "interrupted" | "shell"
+                ) {
+                    self.turn_id = None;
+                }
                 self.phase = "shell".into();
                 self.integration = "disconnected".into();
                 self.permission_keys.clear();
@@ -1287,6 +1294,55 @@ mod tests {
         assert_eq!(s.inbox[1].kind, "response_finished");
         assert!(s.inbox.iter().all(|entry| !entry.read));
     }
+    #[test]
+    fn lifecycle_delivery_exit_after_reused_claude_prompt_cannot_expose_an_old_response() {
+        let mut s = state();
+        s.process_run = Some("process-one".into());
+        let native = |kind: &str| {
+            let mut value = event(kind, Some("one"));
+            value.source = Some("claude".into());
+            value
+        };
+        s.apply(&native("UserPromptSubmit")).unwrap();
+        s.apply(&native("ResponseReady")).unwrap();
+        let old_receipt = s.inbox[0].clone();
+        s.apply(&native("UserPromptSubmit")).unwrap();
+        assert_eq!(s.phase, "working");
+        let mut foreign_exit = event("ProcessExit", Some("other-process"));
+        let current = s.clone();
+        s.apply(&foreign_exit).unwrap();
+        assert_eq!(s, current);
+        foreign_exit.turn_id = Some("process-one".into());
+        s.apply(&foreign_exit).unwrap();
+        assert_eq!(s.phase, "shell");
+        assert_eq!(s.integration, "disconnected");
+        assert_eq!(
+            s.turn_id, None,
+            "an unfinished prompt has no current response to display"
+        );
+        assert_eq!(
+            s.inbox,
+            vec![old_receipt],
+            "historical evidence must remain intact"
+        );
+    }
+
+    #[test]
+    fn lifecycle_delivery_exit_keeps_a_current_terminal_outcome() {
+        for kind in ["ResponseReady", "TurnComplete", "TurnFailed", "Interrupt"] {
+            let mut s = state();
+            s.process_run = Some("process-one".into());
+            s.apply(&event("UserPromptSubmit", Some("one"))).unwrap();
+            s.apply(&event(kind, Some("one"))).unwrap();
+            let receipt = s.inbox.clone();
+            for _ in 0..2 {
+                s.apply(&event("ProcessExit", Some("process-one"))).unwrap();
+                assert_eq!(s.turn_id.as_deref(), Some("one"), "{kind}");
+                assert_eq!(s.inbox, receipt);
+            }
+        }
+    }
+
     #[test]
     fn claude_repeated_submit_id_uses_later_native_turn_without_guessing() {
         let native = |kind: &str, turn: &str| {

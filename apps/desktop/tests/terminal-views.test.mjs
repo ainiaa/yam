@@ -195,7 +195,7 @@ test('a newer stop during replay cannot be replaced by an older buffered running
  const h=harness(async()=>({data:'A',offset:0,end_offset:1}),true);h.refs.terminalViews.current=new TerminalViews(1);
  h.refs.pendingState.current.set('a',{session_id:'a',status:'running'});
  const loading=h.open(record('a'));await new Promise(setImmediate);
- const args={isMainWindow:true,desktopWindow:{restore_blocked:false},zoomedPaneIdRef:{current:null},terminalPaneZoomIntent:{current:0},setZoomedPaneId(){},setTerminalPaneZoom(){},...layoutOperations,terminalPaneId,terminalPaneIndex,createTerminalScroll,updateTerminalScroll,setRecoveryRevision(){},...h.refs,active:true,notifySession(){},refreshHistory(){},terminalStatuses:new Set(['stopped']),applyStateEvent(_term,event){h.refs.selectedRecord.current.status=event.status;}};
+ const args={finishPending:{current:new Set()},finishQueries:{current:new Map()},isMainWindow:true,desktopWindow:{restore_blocked:false},zoomedPaneIdRef:{current:null},terminalPaneZoomIntent:{current:0},setZoomedPaneId(){},setTerminalPaneZoom(){},...layoutOperations,terminalPaneId,terminalPaneIndex,createTerminalScroll,updateTerminalScroll,setRecoveryRevision(){},...h.refs,active:true,notifySession(){},refreshHistory(){},terminalStatuses:new Set(['stopped']),applyStateEvent(_term,event){h.refs.selectedRecord.current.status=event.status;}};
  const handler=new Function(...Object.keys(args),stateJs+';return handler')(...Object.values(args));
  handler({payload:{session_id:'a',status:'stopped'}});
  h.writes.shift()();await loading;
@@ -379,7 +379,7 @@ test('a late running projection cannot revive a newer stopped lifecycle',async()
 });
 
 
-test('actual background recovery invalidates old frames without claiming a buffer overflow',()=>{
+test('actual background recovery invalidates old frames without claiming a buffer overflow',async()=>{
  let callback;
  function locate(node){
   if(ts.isCallExpression(node)&&node.expression.getText(source)==='listen'&&node.arguments[0]?.text==='background-gap')callback=node.arguments[1].getText(source);
@@ -389,10 +389,10 @@ test('actual background recovery invalidates old frames without claiming a buffe
  const callbackJs=ts.transpileModule(layoutHelpers.join('\n')+'\nconst callback='+callback,{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText;
  for(const missing of [false,true]){
   const view={record:{id:'a'},cursor:9,ready:true,firstAttachment:true,dirty:false,lifecycleRevision:4,viewportRevision:2};
-  let clears=0,refreshes=0,reopens=0;const errors=[];
-  const args={isMainWindow:true,desktopWindow:{restore_blocked:false},zoomedPaneIdRef:{current:null},terminalPaneZoomIntent:{current:0},setZoomedPaneId(){},setTerminalPaneZoom(){},...layoutOperations,terminalPaneId,terminalPaneIndex,createTerminalScroll,updateTerminalScroll,setRecoveryRevision(){},layoutRestore:{current:{version:0,pending:false}},setLayoutRestoreReady(){},terminalLayoutRef:{current:{panes:['a']}},terminalViews:{current:{all:[view],get:()=>view}},outputCursor:{current:9},pendingOutput:{current:{clear(){clears++}}},setError:message=>errors.push(message),refreshHistory(){refreshes++},selectedRecord:{current:{id:'a'}},openHistory(){reopens++}};
+  let clears=0,refreshes=0,reopens=0;const errors=[],saveQueries=[];
+  const args={sessionId:{current:'a'},refreshSessionFinish:id=>saveQueries.push(id),isMainWindow:true,desktopWindow:{restore_blocked:false},zoomedPaneIdRef:{current:null},terminalPaneZoomIntent:{current:0},setZoomedPaneId(){},setTerminalPaneZoom(){},...layoutOperations,terminalPaneId,terminalPaneIndex,createTerminalScroll,updateTerminalScroll,setRecoveryRevision(){},layoutRestore:{current:{version:0,pending:false}},setLayoutRestoreReady(){},terminalLayoutRef:{current:{panes:['a']}},terminalViews:{current:{all:[view],get:()=>view}},outputCursor:{current:9},pendingOutput:{current:{clear(){clears++}}},setError:message=>errors.push(message),refreshHistory(){refreshes++},selectedRecord:{current:{id:'a'}},openHistory(){reopens++}};
   const onGap=new Function(...Object.keys(args),callbackJs+';return callback')(...Object.values(args));
-  onGap({payload:{missing_events:missing}});
+  onGap({payload:{missing_events:missing}});await new Promise(setImmediate);assert.deepEqual(saveQueries,['a']);
   assert.equal(view.cursor,null);assert.equal(view.ready,false);assert.equal(view.dirty,true);
   assert.equal(view.lifecycleRevision,5);assert.equal(view.viewportRevision,3);
   assert.equal(args.outputCursor.current,null);assert.equal(clears,1);assert.equal(refreshes,1);assert.equal(reopens,1);
@@ -470,7 +470,7 @@ test('T5 explicit reconnect reaches the real openHistory replay without invalida
  await h.open(record('s-existing'));const view=h.refs.terminalViews.current.get('s-existing'),before=reads;
  view.ready=false;view.writable=false;view.availability='owner_unavailable';h.refs.ownerConnectionAvailable.current={available:false,version:1};
  let reconnectCode;const find=n=>{if(ts.isFunctionDeclaration(n)&&n.name?.text==='reconnectBackground')reconnectCode=n.getText(source);ts.forEachChild(n,find);};find(source);assert.ok(reconnectCode);
- const commands=[],errors=[],args={...h.args,reconnectPending:{current:false},setReconnecting(){},refreshHistory:async()=>{},setError:value=>errors.push(value),invoke:async(name)=>{commands.push(name);return name==='get_session'?record('s-existing'):undefined;},openHistory:h.open};
+ const commands=[],errors=[],args={...h.args,refreshSessionFinish:async()=>{},reconnectPending:{current:false},setReconnecting(){},refreshHistory:async()=>{},setError:value=>errors.push(value),invoke:async(name)=>{commands.push(name);return name==='get_session'?record('s-existing'):undefined;},openHistory:h.open};
  const reconnect=new Function(...Object.keys(args),ts.transpileModule(reconnectCode,{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText+';return reconnectBackground;')(...Object.values(args));
  await reconnect();assert.deepEqual(commands,['reconnect_background','get_session']);assert.deepEqual(errors.filter(Boolean),[]);
  assert.equal(view.ready,true);assert.equal(view.availability,'available');assert.equal(reads,before+1);assert.equal(h.refs.terminalViews.current.size,1);assert.equal(h.refs.sessionId.current,'s-existing');
@@ -484,7 +484,7 @@ test('T5 reconnect restores every visible pane while preserving the selected pan
  for(const view of h.refs.terminalViews.current.all){view.ready=false;view.availability='owner_unavailable';}
  h.refs.ownerConnectionAvailable.current={available:false,version:1};
  let reconnectCode;const find=n=>{if(ts.isFunctionDeclaration(n)&&n.name?.text==='reconnectBackground')reconnectCode=n.getText(source);ts.forEachChild(n,find);};find(source);
- const args={...h.args,reconnectPending:{current:false},setReconnecting(){},refreshHistory:async()=>{},setError(){},invoke:async(name,parameters)=>name==='get_session'?record(parameters.sessionId):undefined,openHistory:h.open};
+ const args={...h.args,refreshSessionFinish:async()=>{},reconnectPending:{current:false},setReconnecting(){},refreshHistory:async()=>{},setError(){},invoke:async(name,parameters)=>name==='get_session'?record(parameters.sessionId):undefined,openHistory:h.open};
  await new Function(...Object.keys(args),ts.transpileModule(reconnectCode,{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText+';return reconnectBackground;')(...Object.values(args))();
  assert.equal(h.refs.terminalViews.current.get('s-left').ready,true);assert.equal(h.refs.terminalViews.current.get('s-right').ready,true);assert.equal(h.refs.sessionId.current,'s-left');assert.equal(h.refs.terminalLayoutRef.current.focused,0);
 });

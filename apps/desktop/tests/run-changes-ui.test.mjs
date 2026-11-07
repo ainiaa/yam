@@ -37,3 +37,22 @@ test('baseline IPC commands and UI are reachable through existing project tools'
  const app=readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8'),native=readFileSync(new URL('../src-tauri/src/lib.rs',import.meta.url),'utf8');assert.match(app,/<RunChanges\s/);
  for(const name of ['get_run_baseline_info','capture_run_baseline','compare_run_baseline','clear_run_baseline'])assert.match(native,new RegExp(`run_changes::${name}`));
 });
+test('baseline retention is explicit and survives closing the GUI',async()=>{
+ const f=fixture();await f.settle();assert.match(f.text(),/saved privately until explicitly cleared/);
+ assert.doesNotMatch(f.text(),/kept only while this YAM window is open/);f.cleanup();
+});
+test('directory aliases are compared by the backend identity check, with clearing still available',async()=>{
+ const f=fixture();await f.settle();f.button('Record baseline').props.onClick();await f.settle();
+ f.props.root='/another';f.render();await f.settle();
+ assert.equal(f.button('Compare since baseline').props.disabled,false);
+ f.button('Compare since baseline').props.onClick();await f.settle();assert.equal(f.calls.at(-1)[0],'compare_run_baseline');
+ assert.equal(f.button('Clear baseline').props.disabled,false);f.cleanup();
+});
+
+test('baseline metadata and clearing do not require an available project directory',()=>{
+ const native=readFileSync(new URL('../src-tauri/src/run_changes.rs',import.meta.url),'utf8');
+ for(const command of ['get_run_baseline_info','clear_run_baseline']){
+  const body=native.split(`pub(crate) async fn ${command}(`)[1].split('\n#[tauri::command')[0];
+  assert.doesNotMatch(body,/project_files::session_root\(/);assert.match(body,/project_files::session_directory\(/);
+ }
+});

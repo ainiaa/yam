@@ -2,13 +2,13 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
-    sync::{LazyLock, Mutex},
     time::{Duration, Instant},
 };
 const MAX_FILES: usize = 2048;
 const MAX_BYTES: usize = 16 * 1024 * 1024;
 const MAX_STORED_BYTES: usize = 32 * 1024 * 1024;
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct BaselineInfo {
     id: String,
     root: String,
@@ -33,13 +33,14 @@ pub(crate) struct Report {
     skipped: usize,
     patch: Option<Patch>,
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum Content {
     Text(String),
     Missing,
     Unavailable,
 }
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Snapshot {
     root: PathBuf,
     stamp: (u64, u64),
@@ -47,16 +48,26 @@ struct Snapshot {
     untracked: BTreeSet<String>,
     bytes: usize,
 }
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Baseline {
     info: BaselineInfo,
     snapshot: Snapshot,
 }
-#[derive(Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Store {
+    version: u8,
     entries: BTreeMap<String, Baseline>,
 }
-// shortcut: baselines stay in this GUI process; persist privately only if cross-restart comparison is requested.
-static STORE: LazyLock<Mutex<Store>> = LazyLock::new(|| Mutex::new(Store::default()));
+impl Default for Store {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            entries: BTreeMap::new(),
+        }
+    }
+}
 #[cfg(unix)]
 fn root_stamp(root: &Path) -> Result<(u64, u64), String> {
     use std::os::unix::fs::MetadataExt;
@@ -195,13 +206,11 @@ fn diff_text(before: &str, after: &str) -> Result<String, String> {
     String::from_utf8(result.stdout).map_err(|_| "round_unavailable".into())
 }
 impl Store {
-    fn info(&self, root: &Path, session: &str) -> Result<Option<BaselineInfo>, String> {
+    fn info(&self, _root: &Path, session: &str) -> Result<Option<BaselineInfo>, String> {
         let Some(value) = self.entries.get(session) else {
             return Ok(None);
         };
-        if value.snapshot.root != root {
-            return Err("round_context_changed".into());
-        }
+        // Metadata remains available for explicit replacement after a directory change.
         Ok(Some(value.info.clone()))
     }
     fn capture(
@@ -352,30 +361,198 @@ impl Store {
             patch,
         })
     }
-    fn clear(&mut self, root: &Path, session: &str, id: &str) -> Result<(), String> {
-        let entry = self
-            .entries
+    fn clear(&mut self, _root: &Path, session: &str, id: &str) -> Result<(), String> {
+        self.entries
             .get(session)
             .filter(|entry| entry.info.id == id)
             .ok_or("round_baseline_changed")?;
-        if entry.snapshot.root != root {
-            return Err("round_context_changed".into());
-        }
         self.entries.remove(session);
         Ok(())
     }
 }
+fn with_store<T>(
+    directory: &Path,
+    write: bool,
+    action: impl FnOnce(&mut Store) -> Result<T, String>,
+) -> Result<T, String> {
+    use std::io::{Read, Write};
+    let _lock = crate::background::OwnerLock::acquire(directory).map_err(|_| "round_busy")?;
+    // Once the owner lock is held, any staging file belongs to an interrupted writer.
+    let staging_id_part =
+        |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_hexdigit());
+    for entry in std::fs::read_dir(directory).map_err(|_| "round_storage_unavailable")? {
+        let entry = entry.map_err(|_| "round_storage_unavailable")?;
+        let name = entry.file_name();
+        if name
+            .to_str()
+            .and_then(|name| name.strip_prefix("baselines-s-"))
+            .and_then(|name| name.strip_suffix(".tmp"))
+            .and_then(|id| id.split_once('-'))
+            .is_some_and(|(time, sequence)| staging_id_part(time) && staging_id_part(sequence))
+        {
+            std::fs::remove_file(entry.path()).map_err(|_| "round_storage_unavailable")?;
+        }
+    }
+    let path = directory.join("baselines.json");
+    let mut store = match std::fs::symlink_metadata(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Store::default(),
+        Err(_) => return Err("round_storage_unavailable".into()),
+        Ok(_) => {
+            let file = crate::background::private_file(&path, false)
+                .map_err(|_| "round_storage_unavailable")?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if file
+                    .metadata()
+                    .map_err(|_| "round_storage_unavailable")?
+                    .nlink()
+                    != 1
+                {
+                    return Err("round_storage_unavailable".into());
+                }
+            }
+            let mut bytes = Vec::new();
+            file.take(MAX_STORED_BYTES as u64 + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|_| "round_storage_unavailable")?;
+            if bytes.len() > MAX_STORED_BYTES {
+                return Err("round_storage_full".into());
+            }
+            let store: Store =
+                serde_json::from_slice(&bytes).map_err(|_| "round_storage_unavailable")?;
+            store.validate()?;
+            store
+        }
+    };
+    let result = action(&mut store)?;
+    if write {
+        store.validate()?;
+        let bytes = serde_json::to_vec(&store).map_err(|_| "round_storage_unavailable")?;
+        if bytes.len() > MAX_STORED_BYTES {
+            return Err("round_storage_full".into());
+        }
+        let temporary = directory.join(format!("baselines-{}.tmp", crate::next_session_id()));
+        let saved = (|| -> Result<(), String> {
+            let mut file = crate::background::private_file(&temporary, true)
+                .map_err(|_| "round_storage_unavailable")?;
+            file.write_all(&bytes)
+                .and_then(|_| file.sync_all())
+                .map_err(|_| "round_storage_unavailable")?;
+            drop(file);
+            std::fs::rename(&temporary, &path).map_err(|_| "round_storage_unavailable")?;
+            #[cfg(unix)]
+            std::fs::File::open(directory)
+                .and_then(|file| file.sync_all())
+                .map_err(|_| "round_storage_unavailable")?;
+            Ok(())
+        })();
+        if saved.is_err() {
+            let _ = std::fs::remove_file(temporary);
+        }
+        saved?;
+    }
+    Ok(result)
+}
+
+impl Store {
+    fn validate(&self) -> Result<(), String> {
+        let invalid = || "round_storage_unavailable".to_string();
+        if self.version != 1 || self.entries.len() > 4 {
+            return Err(invalid());
+        }
+        let mut total = 0usize;
+        for (session, entry) in &self.entries {
+            let snapshot = &entry.snapshot;
+            if crate::session_id_from_link(&format!("yam://session/{session}")).is_none()
+                || !snapshot.root.is_absolute()
+                || Path::new(&entry.info.root) != snapshot.root
+                || entry.info.id.len() > 256
+                || !entry.info.id.starts_with("baseline-")
+                || snapshot.files.len() > MAX_FILES
+                || snapshot.untracked.len() > MAX_FILES
+                || entry.info.files != snapshot.files.len()
+                || snapshot
+                    .files
+                    .keys()
+                    .chain(snapshot.untracked.iter())
+                    .any(|name| {
+                        name.is_empty()
+                            || name.len() > 4096
+                            || name.contains('\0')
+                            || !Path::new(name)
+                                .components()
+                                .all(|part| matches!(part, std::path::Component::Normal(_)))
+                    })
+            {
+                return Err(invalid());
+            }
+            let bytes = snapshot.untracked.iter().map(String::len).sum::<usize>()
+                + snapshot
+                    .files
+                    .iter()
+                    .map(|(name, value)| {
+                        name.len()
+                            + match value {
+                                Content::Text(text) => text.len(),
+                                _ => 0,
+                            }
+                    })
+                    .sum::<usize>();
+            if bytes != snapshot.bytes || bytes > MAX_BYTES {
+                return Err(invalid());
+            }
+            total += bytes;
+        }
+        if total > MAX_STORED_BYTES {
+            return Err("round_storage_full".into());
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn validate_storage(directory: &Path) -> Result<(), String> {
+    match std::fs::symlink_metadata(directory) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        _ => {}
+    }
+    with_store(directory, false, |_| Ok(()))
+}
+
+pub(crate) fn remove_sessions(directory: &Path, ids: &[String]) -> Result<(), String> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    match std::fs::symlink_metadata(directory) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        _ => {}
+    }
+    with_store(directory, true, |store| {
+        store.entries.retain(|session, _| !ids.contains(session));
+        Ok(())
+    })
+}
+
+fn store_directory<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf, String> {
+    use tauri::Manager;
+    Ok(app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "round_storage_unavailable")?
+        .join("sessions")
+        .join("run-baselines"))
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub(crate) async fn get_run_baseline_info(
     app: tauri::AppHandle,
     session_id: String,
 ) -> Result<Option<BaselineInfo>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let root = crate::project_files::session_root(&app, session_id.clone())?;
-        STORE
-            .try_lock()
-            .map_err(|_| "round_busy")?
-            .info(&root, &session_id)
+        let root = crate::project_files::session_directory(&app, session_id.clone())?;
+        with_store(&store_directory(&app)?, false, |store| {
+            store.info(&root, &session_id)
+        })
     })
     .await
     .map_err(|_| "round_unavailable")?
@@ -387,12 +564,12 @@ pub(crate) async fn capture_run_baseline(
     expected_id: Option<String>,
 ) -> Result<BaselineInfo, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let root = crate::project_files::session_root(&app, session_id.clone())?;
-        STORE.try_lock().map_err(|_| "round_busy")?.capture(
-            &root,
-            &session_id,
-            expected_id.as_deref(),
-        )
+        // Resolve pending history deletion before taking the baseline lock.
+        crate::project_files::session_directory(&app, session_id.clone())?;
+        with_store(&store_directory(&app)?, true, |store| {
+            let root = crate::project_files::session_root(&app, session_id.clone())?;
+            store.capture(&root, &session_id, expected_id.as_deref())
+        })
     })
     .await
     .map_err(|_| "round_unavailable")?
@@ -406,12 +583,9 @@ pub(crate) async fn compare_run_baseline(
 ) -> Result<Report, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let root = crate::project_files::session_root(&app, session_id.clone())?;
-        STORE.try_lock().map_err(|_| "round_busy")?.compare(
-            &root,
-            &session_id,
-            &baseline_id,
-            path.as_deref(),
-        )
+        with_store(&store_directory(&app)?, false, |store| {
+            store.compare(&root, &session_id, &baseline_id, path.as_deref())
+        })
     })
     .await
     .map_err(|_| "round_unavailable")?
@@ -423,11 +597,10 @@ pub(crate) async fn clear_run_baseline(
     baseline_id: String,
 ) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let root = crate::project_files::session_root(&app, session_id.clone())?;
-        STORE
-            .try_lock()
-            .map_err(|_| "round_busy")?
-            .clear(&root, &session_id, &baseline_id)
+        let root = crate::project_files::session_directory(&app, session_id.clone())?;
+        with_store(&store_directory(&app)?, true, |store| {
+            store.clear(&root, &session_id, &baseline_id)
+        })
     })
     .await
     .map_err(|_| "round_unavailable")?
@@ -480,6 +653,203 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+    #[test]
+    fn run_changes_deleted_sessions_release_persisted_capacity_idempotently() {
+        let _serial = crate::git_context::f3_serial_query_test();
+        let repo = Repo::new();
+        let storage = repo.0.join("baseline-store");
+        for id in ["s-1", "s-2", "s-3", "s-4"] {
+            with_store(&storage, true, |store| store.capture(&repo.0, id, None)).unwrap();
+        }
+        assert!(with_store(&storage, true, |store| store.capture(&repo.0, "s-5", None)).is_err());
+        remove_sessions(&storage, &["s-2".into()]).unwrap();
+        remove_sessions(&storage, &["s-2".into()]).unwrap();
+        with_store(&storage, false, |store| {
+            assert!(store.info(&repo.0, "s-2")?.is_none());
+            for id in ["s-1", "s-3", "s-4"] {
+                assert!(store.info(&repo.0, id)?.is_some());
+            }
+            Ok(())
+        })
+        .unwrap();
+        with_store(&storage, true, |store| store.capture(&repo.0, "s-5", None)).unwrap();
+    }
+    #[test]
+    fn run_changes_metadata_and_clear_survive_project_removal() {
+        let _serial = crate::git_context::f3_serial_query_test();
+        let project = Repo::new();
+        let storage = Repo::new();
+        let directory = storage.0.join(".git/baselines");
+        let baseline = with_store(&directory, true, |store| {
+            store.capture(&project.0, "s-gone", None)
+        })
+        .unwrap();
+        fs::remove_dir_all(&project.0).unwrap();
+        assert_eq!(
+            with_store(&directory, false, |store| store.info(&project.0, "s-gone"))
+                .unwrap()
+                .unwrap()
+                .id,
+            baseline.id
+        );
+        assert!(with_store(&directory, false, |store| store.compare(
+            &project.0,
+            "s-gone",
+            &baseline.id,
+            None
+        ))
+        .is_err());
+        with_store(&directory, true, |store| {
+            store.clear(&project.0, "s-gone", &baseline.id)
+        })
+        .unwrap();
+        assert!(
+            with_store(&directory, false, |store| store.info(&project.0, "s-gone"))
+                .unwrap()
+                .is_none()
+        );
+    }
+    #[test]
+    fn run_changes_persisted_baseline_survives_reload_replace_and_clear() {
+        use std::os::unix::fs::MetadataExt;
+        let _serial = crate::git_context::f3_serial_query_test();
+        let repo = Repo::new();
+        let directory = repo.0.join(".git/baselines");
+        let first = with_store(&directory, true, |store| {
+            store.capture(&repo.0, "s-owned", None)
+        })
+        .unwrap();
+        let restored =
+            with_store(&directory, false, |store| store.info(&repo.0, "s-owned")).unwrap();
+        assert_eq!(restored.map(|v| v.id), Some(first.id.clone()));
+        assert_eq!(
+            fs::metadata(directory.join("baselines.json"))
+                .unwrap()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        fs::write(repo.0.join("a.txt"), "after reload\n").unwrap();
+        let report = with_store(&directory, false, |store| {
+            store.compare(&repo.0, "s-owned", &first.id, Some("a.txt"))
+        })
+        .unwrap();
+        assert!(report.patch.unwrap().text.contains("+after reload"));
+        assert!(with_store(&directory, true, |store| store
+            .capture(&repo.0, "s-owned", None))
+        .is_err());
+        let next = with_store(&directory, true, |store| {
+            store.capture(&repo.0, "s-owned", Some(&first.id))
+        })
+        .unwrap();
+        assert_ne!(next.id, first.id);
+        assert!(with_store(&directory, true, |store| store
+            .clear(&repo.0, "s-owned", &first.id))
+        .is_err());
+        with_store(&directory, true, |store| {
+            store.clear(&repo.0, "s-owned", &next.id)
+        })
+        .unwrap();
+        assert!(
+            with_store(&directory, false, |store| store.info(&repo.0, "s-owned"))
+                .unwrap()
+                .is_none()
+        );
+    }
+    #[test]
+    fn run_changes_persisted_old_directory_can_be_reviewed_replaced_or_cleared() {
+        let _serial = crate::git_context::f3_serial_query_test();
+        let repo = Repo::new();
+        let other = Repo::new();
+        let directory = repo.0.join(".git/baselines");
+        let original = with_store(&directory, true, |store| {
+            store.capture(&repo.0, "s-owned", None)
+        })
+        .unwrap();
+        let info = with_store(&directory, false, |store| store.info(&other.0, "s-owned"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(info.id, original.id);
+        assert_eq!(info.root, repo.0.to_string_lossy());
+        assert!(with_store(&directory, false, |store| store.compare(
+            &other.0,
+            "s-owned",
+            &original.id,
+            None
+        ))
+        .is_err());
+        with_store(&directory, true, |store| {
+            store.clear(&other.0, "s-owned", &original.id)
+        })
+        .unwrap();
+        assert!(
+            with_store(&directory, false, |store| store.info(&repo.0, "s-owned"))
+                .unwrap()
+                .is_none()
+        );
+        let next = with_store(&directory, true, |store| {
+            store.capture(&other.0, "s-owned", None)
+        })
+        .unwrap();
+        assert_eq!(next.root, other.0.to_string_lossy());
+    }
+
+    #[test]
+    fn run_changes_persisted_store_recovers_abandoned_atomic_staging() {
+        use std::os::unix::fs::symlink;
+        let _serial = crate::git_context::f3_serial_query_test();
+        let repo = Repo::new();
+        let directory = repo.0.join(".git/baselines");
+        with_store(&directory, true, |_| Ok(())).unwrap();
+        let abandoned = directory.join("baselines-s-a-1.tmp");
+        let linked = directory.join("baselines-s-b-2.tmp");
+        let unrelated = directory.join("baselines-not-ours.tmp");
+        fs::write(&abandoned, b"interrupted snapshot").unwrap();
+        fs::write(&unrelated, b"leave this alone").unwrap();
+        symlink(&unrelated, &linked).unwrap();
+        validate_storage(&directory).unwrap();
+        assert!(!abandoned.exists());
+        assert!(fs::symlink_metadata(&linked).is_err());
+        assert_eq!(fs::read(&unrelated).unwrap(), b"leave this alone");
+        assert!(directory.join("baselines.json").is_file());
+    }
+    #[test]
+    fn run_changes_persisted_store_rejects_corrupt_shared_linked_and_oversized_files() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let _serial = crate::git_context::f3_serial_query_test();
+        let repo = Repo::new();
+        let directory = repo.0.join(".git/baselines");
+        with_store(&directory, true, |store| {
+            store.capture(&repo.0, "s-owned", None)
+        })
+        .unwrap();
+        let path = directory.join("baselines.json");
+        assert!(path.is_file(), "a successful capture must be durable");
+        let original = fs::read(&path).unwrap();
+        fs::write(&path, b"broken").unwrap();
+        assert!(with_store(&directory, false, |_| Ok(())).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"broken");
+        fs::write(&path, &original).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(with_store(&directory, false, |_| Ok(())).is_err());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let other = directory.join("other.json");
+        fs::rename(&path, &other).unwrap();
+        symlink(&other, &path).unwrap();
+        assert!(with_store(&directory, false, |_| Ok(())).is_err());
+        fs::remove_file(&path).unwrap();
+        fs::hard_link(&other, &path).unwrap();
+        assert!(with_store(&directory, false, |_| Ok(())).is_err());
+        fs::remove_file(&path).unwrap();
+        fs::rename(&other, &path).unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(MAX_STORED_BYTES as u64 + 1)
+            .unwrap();
+        assert!(with_store(&directory, false, |_| Ok(())).is_err());
     }
     #[test]
     fn ignore_fix_run_baseline_respects_configured_patterns_and_compares_tracked_text() {

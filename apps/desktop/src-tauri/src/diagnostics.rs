@@ -578,6 +578,7 @@ mod tests {
         super::super::SessionManager {
             background_owner: true,
             history: Mutex::new(Some(Arc::new(super::super::HistoryStore {
+                pending_start_failures: Default::default(),
                 archive_pending: std::sync::atomic::AtomicBool::new(false),
                 root: root.to_owned(),
                 records: Mutex::new(records),

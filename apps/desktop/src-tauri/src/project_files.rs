@@ -291,13 +291,20 @@ fn save(_root: &Path, _name: &str, _revision: &str, _text: &str) -> Result<Docum
     Err("file_platform_unavailable".into())
 }
 
-pub(crate) fn session_root(app: &tauri::AppHandle, session_id: String) -> Result<PathBuf, String> {
+pub(crate) fn session_directory(
+    app: &tauri::AppHandle,
+    session_id: String,
+) -> Result<PathBuf, String> {
     let session = crate::get_session(app.clone(), app.state(), session_id)
         .map_err(|_| "file_session_unavailable")?;
     if session.summary.ssh.is_some() {
         return Err("file_session_unavailable".into());
     }
-    std::fs::canonicalize(session.summary.cwd).map_err(|_| "file_session_unavailable".into())
+    Ok(PathBuf::from(session.summary.cwd))
+}
+pub(crate) fn session_root(app: &tauri::AppHandle, session_id: String) -> Result<PathBuf, String> {
+    std::fs::canonicalize(session_directory(app, session_id)?)
+        .map_err(|_| "file_session_unavailable".into())
 }
 #[tauri::command(rename_all = "snake_case")]
 pub(crate) async fn list_project_files(

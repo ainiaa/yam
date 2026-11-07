@@ -1,0 +1,10 @@
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -3082 +3082 @@
+-    let session = manager
++    let session = manager
+--- a/src/background.rs
++++ b/src/background.rs
+@@ -519 +519 @@
+-    if matches!(command, "get_git_changes" | "cancel_git_changes") {
++    if matches!(command, "get_git_changes" | "cancel_git_changes") {

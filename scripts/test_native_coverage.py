@@ -138,6 +138,26 @@ print('test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered ou
             with self.subTest(status=status), mock.patch.object(coverage.subprocess, "run", side_effect=command), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()), self.assertRaises((RuntimeError, subprocess.CalledProcessError)):
                 coverage.run(Path("/tmp/package/Cargo.toml"))
 
+    def test_empty_or_all_ignored_inventories_never_report_coverage(self):
+        for listing, ignored in [("", ""), ("disabled: test\n", "disabled: test\n")]:
+            commands = []
+            def command(argv, **kwargs):
+                commands.append(argv)
+                if "show-env" in argv:
+                    output = "LLVM_PROFILE_FILE='/tmp/coverage-%p.profraw'\n"
+                elif argv[:2] == ["cargo", "test"]:
+                    output = json.dumps({"reason":"compiler-artifact","profile":{"test":True},"executable":"/tmp/lib"})
+                elif argv[0] == "/tmp/lib":
+                    output = ignored if "--ignored" in argv else listing
+                else:
+                    output = ""
+                return subprocess.CompletedProcess(argv, 0, output, "")
+            with self.subTest(listing=listing), mock.patch.object(coverage.subprocess, "run", side_effect=command), mock.patch.object(coverage, "run_groups") as execute, contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(ValueError, "nonempty"):
+                    coverage.run(Path("/tmp/package/Cargo.toml"))
+                execute.assert_not_called()
+                self.assertFalse(any("report" in argv for argv in commands))
+
     def test_compile_once_and_report_only_after_audited_groups_pass(self):
         with tempfile.TemporaryDirectory() as directory:
             commands = []
