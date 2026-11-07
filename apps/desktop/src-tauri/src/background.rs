@@ -603,6 +603,8 @@ pub(crate) fn validate_command(command: &str, args: &serde_json::Value) -> Resul
         | "archive_session"
         | "restore_archive"
         | "get_session"
+        | "session_finish_pending"
+        | "retry_session_finish"
         | "test_notification"
         | "recover_terminal_agent" => (&["session_id"], &["session_id"]),
         "start_terminal_agent" => (
@@ -724,6 +726,13 @@ pub(crate) fn validate_command(command: &str, args: &serde_json::Value) -> Resul
         || required.iter().any(|key| !args.contains_key(*key))
     {
         return Err("Invalid background command arguments".into());
+    }
+    if matches!(command, "session_finish_pending" | "retry_session_finish")
+        && args["session_id"]
+            .as_str()
+            .is_none_or(|id| super::session_id_from_link(&format!("yam://session/{id}")).is_none())
+    {
+        return Err("Invalid final persistence session identity".into());
     }
     if command == "open_terminal_stream"
         && (args["cols"]
@@ -1179,6 +1188,10 @@ fn dispatch(app: &tauri::AppHandle, request: Request) -> Result<serde_json::Valu
                 }
                 #[cfg(not(unix))]
                 return Err("Managed Shell recovery is unavailable on this platform".into());
+            }
+            if request.command == "retry_session_finish" {
+                super::retry_session_finish(app.clone(), manager, argument(args, "session_id")?)?;
+                return Ok(serde_json::Value::Null);
             }
             if request.command == "cli_start" {
                 let private = app.path().app_data_dir().map_err(|_| "cli_unavailable")?;
@@ -1647,6 +1660,10 @@ fn dispatch_with<'a>(
         "stop_session" => {
             serde_json::to_value(super::stop_session(manager, argument(args, "session_id")?)?)
         }
+        "session_finish_pending" => serde_json::to_value(super::session_finish_pending(
+            manager,
+            argument(args, "session_id")?,
+        )?),
         "write_session" => serde_json::to_value(super::write_session(
             manager,
             argument(args, "session_id")?,
@@ -3444,6 +3461,22 @@ mod tests {
         assert!(validate_command("recover_terminal_agent", &serde_json::json!({})).is_err());
     }
     #[test]
+    fn lifecycle_finish_rpc_requires_only_a_bounded_session_identity() {
+        for command in ["session_finish_pending", "retry_session_finish"] {
+            assert!(
+                validate_command(command, &serde_json::json!({"session_id":"s-owned"})).is_ok()
+            );
+            for args in [
+                serde_json::json!({}),
+                serde_json::json!({"session_id":"../other"}),
+                serde_json::json!({"session_id":"s-owned","force":true}),
+            ] {
+                assert!(validate_command(command, &args).is_err());
+            }
+        }
+    }
+
+    #[test]
     fn dispatcher_accepts_only_known_commands_and_their_exact_argument_shape() {
         assert!(validate_command("history_overview", &serde_json::json!({})).is_ok());
         assert!(
@@ -4626,6 +4659,7 @@ mod cli_read_tests {
             records: Mutex::new(records),
             revision: AtomicU64::new(0),
             instance: "fixture".into(),
+            pending_start_failures: Default::default(),
             archive_pending: AtomicBool::new(false),
         });
         let manager = super::super::SessionManager::default();
@@ -4775,6 +4809,7 @@ mod cli_namespace_tests {
             records: Mutex::new(Vec::new()),
             revision: AtomicU64::new(0),
             instance: "SECRET-native-identity".into(),
+            pending_start_failures: Default::default(),
             archive_pending: AtomicBool::new(false),
         }));
         manager
@@ -4988,6 +5023,7 @@ mod cli_event_tests {
             records: Mutex::new(vec![record]),
             revision: AtomicU64::new(0),
             instance: "fixture".into(),
+            pending_start_failures: Default::default(),
             archive_pending: AtomicBool::new(false),
         });
         *manager.history.lock().unwrap() = Some(store.clone());
@@ -5207,6 +5243,7 @@ mod cli_event_tests {
             records: Mutex::new(vec![record]),
             revision: AtomicU64::new(0),
             instance: "fixture".into(),
+            pending_start_failures: Default::default(),
             archive_pending: AtomicBool::new(false),
         })
     }

@@ -868,6 +868,38 @@ fn macos_exit_poll_leaves_running_child_running() {
 }
 
 #[test]
+fn lifecycle_finish_retry_preserves_other_running_sessions_and_notifies_once() {
+    use tauri::Manager;
+    let (session, reader, root) = test_session("printf saved-tail; exit 0");
+    let mut fixture = Rust85Session { session, root, parser: None };
+    fixture.parser();
+    let blocked = fixture.root.join(format!("{}.frame.json", fixture.id()));
+    std::fs::create_dir(&blocked).unwrap();
+    let app = fixture.app();
+    let manager = app.state::<super::SessionManager>();
+    closure_t02_wait_workers(super::spawn_session_threads_with(
+        app.handle(), manager.sessions.clone(), fixture.session.clone(), reader, |_, _, _| {},
+    ));
+    let other = Rust85Session::new("sleep 30");
+    manager.sessions.lock().unwrap().insert(other.id(), other.session.clone());
+    let notifications = std::cell::RefCell::new(Vec::new());
+    assert!(super::retry_session_finish_with(app.handle(), &manager, &fixture.id(), |_, id, _| notifications.borrow_mut().push(id.to_owned())).is_err());
+    assert!(manager.sessions.lock().unwrap().contains_key(&fixture.id()));
+    std::fs::remove_dir(blocked).unwrap();
+    super::retry_session_finish_with(app.handle(), &manager, &fixture.id(), |_, id, _| notifications.borrow_mut().push(id.to_owned())).unwrap();
+    assert!(!manager.sessions.lock().unwrap().contains_key(&fixture.id()));
+    assert!(!super::session_has_exited(&other.session).unwrap());
+    assert!(manager.sessions.lock().unwrap().contains_key(&other.id()));
+    super::retry_session_finish_with(app.handle(), &manager, &fixture.id(), |_, _, _| panic!("retry cannot republish")).unwrap();
+    assert_eq!(*notifications.borrow(), [fixture.id()]);
+    assert_eq!(std::fs::read(fixture.session.history.log_path(&fixture.id())).unwrap(), b"saved-tail");
+    assert!(super::retry_session_finish_with(app.handle(), &manager, &other.id(), |_, _, _| panic!("live task cannot publish")).is_err());
+    assert!(!super::session_has_exited(&other.session).unwrap());
+    assert!(super::retry_session_finish_with(app.handle(), &manager, "s-unknown", |_, _, _| {}).is_err());
+    manager.sessions.lock().unwrap().clear();
+}
+
+#[test]
 fn closure_t02_frame_publication_failure_keeps_session_until_same_finalizer_recovers() {
     use tauri::Manager;
     let (session, reader, root) = test_session(r#"exec /bin/sh -c "printf frame-tail; exit 0""#);
@@ -1424,6 +1456,45 @@ fn closure_t01_ambiguous_commit_never_reads_linked_history_to_delete_log() {
         log.exists(),
         "FIFO history is uncertain and cannot authorize deletion"
     );
+}
+
+#[test]
+fn lifecycle_start_preparation_failure_is_terminal_and_retryable() {
+    use tauri::Manager;
+    let _serial = super::worktree_manager::serial_owner_test();
+    let mut fixture = Rust85Session::new("exit 0");
+    fixture.parser();
+    closure_t01_shell(&fixture.root);
+    let app = closure_t01_app(&fixture);
+    let manager = app.state::<super::SessionManager>();
+    let started = T01Started::default();
+    let blocked = fixture.root.join("interactive-shells");
+    std::fs::write(&blocked, b"not a directory").unwrap();
+    let error = closure_t01_start(
+        &fixture, &app, None, None,
+        |_, _| panic!("preparation failure cannot spawn"),
+        |_, _, _, _, _| panic!("ordinary shell cannot connect bridge"),
+        &started,
+    ).err().unwrap();
+    assert!(manager.sessions.lock().unwrap().is_empty());
+    assert!(started.borrow().is_empty());
+    let record = fixture.session.history.list().unwrap().into_iter()
+        .find(|r| r.summary.session_id != fixture.id()).unwrap();
+    assert_eq!(record.status, "failed", "preparation error: {error}");
+    assert!(record.ended_at.is_some());
+    assert!(record.reason.is_some());
+    assert!(fixture.session.history.log_path(&record.summary.session_id).exists());
+    std::fs::remove_file(blocked).unwrap();
+    let reply = closure_t01_start(
+        &fixture, &app, None, None,
+        |slave, builder| slave.spawn_command(builder).map_err(|e| e.to_string()),
+        |_, _, _, _, _| panic!("ordinary shell cannot connect bridge"),
+        &started,
+    ).unwrap();
+    assert_ne!(reply.summary.session_id, record.summary.session_id);
+    assert_eq!(started.borrow().len(), 1);
+    assert_eq!(fixture.session.history.get(&record.summary.session_id).unwrap().status, "failed");
+    manager.sessions.lock().unwrap().clear();
 }
 
 #[test]

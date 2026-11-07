@@ -45,7 +45,7 @@ export function RunChanges({sessionId,root,active,invoke=nativeInvoke,onOpenFile
    {ready&&c.busy&&<p role="status">{t('Reading local snapshot…')}</p>}
    {ready&&c.error&&<p role="alert">{runError(c.error)}</p>}
    <p>{t('Tracked working-tree text only. Untracked files compare names only. Index-only changes are not included.')}</p>
-   <p>{t('Up to 2048 tracked paths and 16 MiB per baseline; 32 MiB total. Baselines are kept only while this YAM window is open.')}</p>
+   <p>{t('Up to 4 baselines, 2048 tracked paths and 16 MiB per baseline; 32 MiB total storage. Baselines are saved privately until explicitly cleared.')}</p>
    {report&&<>
     {report.rows.length===0&&<p role="status">{t('No comparable text changes since baseline.')}</p>}
     {report.skipped>0&&<p role="status">{report.skipped} {t('files could not be compared; binary, large, linked or unreadable files may have changed.')}</p>}

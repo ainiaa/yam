@@ -133,7 +133,7 @@ import { SessionLogExport } from "./SessionLogExport";
 import {sessionRecovery,type SessionAvailability} from "./session-recovery";
 import {SessionInbox} from "./SessionInbox";
 import {captureAttention,isCurrentAttention} from "./attention-actions";
-import {agentLabel,type AgentState,type AgentReceipt} from "./agent-events";
+import {agentLabel,taskDeliveryNotice,type AgentState,type AgentReceipt} from "./agent-events";
 import {sessionRuntimeInfo} from "./session-runtime-info";
 import { NotificationQueue, inferAgentPhase, discardAttentionRetries, terminalStatuses } from "./notifications";
 import "@xterm/xterm/css/xterm.css";
@@ -642,6 +642,8 @@ function App() {
   const outputCursor = useRef<number | null>(null);
   const selectedRecord = useRef<SessionRecord | null>(null);
   const pendingState = useRef(new Map<string, SessionStateEvent>());
+  const finishPending=useRef(new Set<string>()),finishRetries=useRef(new Set<string>());
+  const finishQueries=useRef(new Map<string,symbol>());
   const agentOutputWindow = useRef("");
   const notifications = useRef(new NotificationQueue());
   const retryNotifications = useRef(new Map<string, SessionStateEvent>());
@@ -813,6 +815,7 @@ function App() {
   async function saveLaunchDefaults(){if(!isMainWindow){openMainSettings();return;}try{const defaults=projectLaunchFields(formLaunch);await invoke("set_launch_defaults",{defaults});setGlobalLaunchDefaults(defaults);try{localStorage.setItem("yam.lastSessionCli",JSON.stringify(defaults.adapter==="custom"?"shell":defaults.adapter));setLaunchDefaultsNotice("Defaults saved for new sessions.");}catch{setLaunchDefaultsNotice("Defaults saved, but the last CLI choice could not be updated.");}}catch(reason){setLaunchDefaultsNotice(String(reason));}}
 
   const [session, setSession] = useState<SessionSummary | null>(null);
+  useEffect(()=>{if(session?.session_id)void refreshSessionFinish(session.session_id);},[session?.session_id]);
   const [sessionStatus, setSessionStatus] = useState("idle");
   const [agentPhase, setAgentPhase] = useState<AgentPhase>("idle");
   const [starting, setStarting] = useState(false);
@@ -1254,6 +1257,7 @@ function App() {
     for (const [name, callback] of [
       ["agent-state", (_payload: { session_id: string; data: string }) => {void refreshHistory();}],
       ["session-error", (payload: { session_id: string; data: string }) => {
+        if(payload.session_id)void refreshSessionFinish(payload.session_id);
         if(payload.session_id==="") {
           cancelLayoutRestore(false,false);
           ownerConnectionAvailable.current={available:false,version:ownerConnectionAvailable.current.version+1};
@@ -1292,7 +1296,7 @@ function App() {
       for (const view of terminalViews.current.all) view.dirty=true;
       if(event.payload?.missing_events!==false) setError("Background event buffer exceeded its limit. Reloading the latest terminal state.");
       void refreshHistory();
-      for(let pane=0;pane<terminalLayoutRef.current.panes.length;pane++){const id=terminalLayoutRef.current.panes[pane],record=id?terminalViews.current.get(id)?.record:null;if(record)void openHistory(record,false,pane);}
+      for(let pane=0;pane<terminalLayoutRef.current.panes.length;pane++){const id=terminalLayoutRef.current.panes[pane],record=id?terminalViews.current.get(id)?.record:null;if(record)void Promise.resolve(openHistory(record,false,pane)).then(()=>{if(sessionId.current===id)void refreshSessionFinish(id!);});}
     }).then(unlisten => { if (active) extraListeners.push(unlisten); else unlisten(); });
     async function selectNotificationSession(id: string, restoreOnFailure=false) {
       cancelLayoutRestore(true,false);
@@ -1433,6 +1437,10 @@ function App() {
     void listen<SessionStateEvent>("session-state", (event) => {
       if (!active) return;
       const live = ["starting", "running"].includes(event.payload.status);
+      if(!live){
+        finishQueries.current.delete(event.payload.session_id);
+        if(finishPending.current.delete(event.payload.session_id))setRecoveryRevision(value=>value+1);
+      }
       terminalViews.current.setRunning(event.payload.session_id, live);
       const view = terminalViews.current.get(event.payload.session_id);
       if (view) { if(!live)view.reportedCwd=null;view.live = live; view.status = event.payload.status; view.dirty=true; view.lifecycleRevision++; }
@@ -1732,6 +1740,7 @@ function App() {
         const record=await invoke<SessionRecord>("get_session",{sessionId:id});if(!attached())return;
         await openHistory(record,false,pane,layoutVersion);
       }
+      if(attached()&&sessionId.current)void refreshSessionFinish(sessionId.current);
     }catch{if(terminalMounted.current&&(ownerConnectionAvailable.current.version===version||ownerConnectionAvailable.current.version===version+1))setError("The original background connection is unavailable. Tasks were not restarted. Reopen YAM if the owner has exited.");}
     finally{reconnectPending.current=false;if(terminalMounted.current)setReconnecting(false);}
   }
@@ -1746,6 +1755,33 @@ function App() {
       if (!terminalMounted.current || detailVersion.current !== version || sessionId.current !== id) return;
       setError(reason instanceof Error ? reason.message : String(reason));
     }
+  }
+
+  async function refreshSessionFinish(id:string){
+    if(finishRetries.current.has(id))return;
+    const query=Symbol();
+    finishQueries.current.set(id,query);
+    const owner=ownerConnectionAvailable.current.version;
+    const view=terminalViews.current.get(id),revision=view?.lifecycleRevision;
+    try{
+      const pending=await invoke<boolean>("session_finish_pending",{sessionId:id});
+      if(!terminalMounted.current||finishQueries.current.get(id)!==query||ownerConnectionAvailable.current.version!==owner)return;
+      if(view&&(view.disposed||terminalViews.current.get(id)!==view||view.lifecycleRevision!==revision))return;
+      if(pending===true)finishPending.current.add(id);else if(pending===false)finishPending.current.delete(id);
+      setRecoveryRevision(value=>value+1);
+    }catch{/* Older owners may not expose final persistence state. */}
+    finally{if(finishQueries.current.get(id)===query)finishQueries.current.delete(id);}
+  }
+  async function retrySessionSave(){
+    const id=sessionId.current;
+    if(!id||!finishPending.current.has(id)||finishRetries.current.has(id)||!ownerConnectionAvailable.current.available)return;
+    const version=detailVersion.current;finishQueries.current.delete(id);finishRetries.current.add(id);setRecoveryRevision(value=>value+1);
+    try{
+      await invoke("retry_session_finish",{sessionId:id});
+      finishPending.current.delete(id);void refreshHistory();
+    }catch(reason){
+      if(terminalMounted.current&&detailVersion.current===version&&sessionId.current===id)setError(String(reason));
+    }finally{finishRetries.current.delete(id);if(terminalMounted.current)setRecoveryRevision(value=>value+1);}
   }
 
   async function retrySavedLayout(){await layoutRestoreRetry.current?.();}
@@ -3563,6 +3599,12 @@ function App() {
         </section>
         <ConversationView onTerminal={()=>showConversation(false)} roundRevision={conversationRoundRevision(currentAgent)} visible={conversationOpen} available={ownerConnectionAvailable.current.available} scope={JSON.stringify([ownerConnectionAvailable.current.version,session?.session_id,currentAgent?.generation,currentAgent?.agent_session_id,session?.cwd,session?.launch])} target={session?.launch?.adapter==="codex"&&!session.ssh&&currentAgent?.generation&&currentAgent.agent_session_id?{sessionId:session.session_id,threadId:currentAgent.agent_session_id,generation:currentAgent.generation}:null} invoke={invoke}/>
         {!ownerConnectionAvailable.current.available&&<div className="terminal-notice" role="alert">{t("Background connection unavailable. Tasks were not restarted.")}<button type="button" disabled={reconnecting} onClick={()=>void reconnectBackground()}>{t("Reconnect background")}</button></div>}
+        {session&&finishPending.current.has(session.session_id)&&<div className="terminal-notice" role="status"><span>{t("Final saving needs attention. Retry saving without restarting the task.")}</span><button type="button" disabled={!ownerConnectionAvailable.current.available||finishRetries.current.has(session.session_id)} onClick={()=>void retrySessionSave()}>{t("Retry saving session")}</button></div>}
+        {session?.launch&&!session.ssh&&taskDeliveryNotice(currentAgent,sessionStatus)&&<div className="terminal-notice" role="status">
+          <span>{t(taskDeliveryNotice(currentAgent,sessionStatus)!)}</span>
+          {isMainWindow&&<><button type="button" onClick={()=>{setProjectToolsTab("changes");setProjectToolsPath(session.cwd);setProjectToolsOpen(true);}}>{t("Review task changes")}</button><button type="button" onClick={()=>{setProjectToolsTab("files");setProjectToolsPath(session.cwd);setProjectToolsOpen(true);}}>{t("View task files")}</button></>}
+          <button type="button" onClick={()=>setLogSearchOpen(true)}>{t("Review recorded output")}</button>
+        </div>}
         {recoveryNotice && <div className="terminal-notice" role="status"><span>{t(recoveryNotice)}</span>{session&&!isRunning&&<div className="session-ended-actions">{canContinue&&<button type="button" onClick={resumeSelectedSession}>{t(recovery.chooseNative?"Choose saved conversation…":"Continue conversation")}</button>}{recovery.canOpenTerminal&&<button type="button" onClick={openSelectedTerminal}>{t("Open new terminal")}</button>}{recovery.canRunAgain&&(session.ssh||session.command||session.launch&&session.launch.adapter!=="shell")&&<button type="button" aria-label={session.ssh?t("Reconnect SSH"):t("Run again (new task)")} title={session.ssh?t("Reconnect SSH (new connection)"):t("Run again (new task)")} disabled={!recovery.canRunAgain} onClick={rerunSelectedSession}>{session.ssh?t("Reconnect SSH"):t("Run again (new task)")}</button>}</div>}</div>}
         {directoryReportingError&&<div className="terminal-notice" role="alert">{t(directoryReportingError)}<button type="button" onClick={()=>(isMainWindow?setDirectoryReportingOpen(true):void openMainSettings("directory-reporting"))}>{t("Zsh directory reporting settings")}</button></div>}
         {commandReportingError&&<div className="terminal-notice" role="alert">{t(commandReportingError)}<button type="button" onClick={()=>(isMainWindow?setCommandReportingOpen(true):void openMainSettings("command-reporting"))}>{t("Command status reporting settings")}</button></div>}

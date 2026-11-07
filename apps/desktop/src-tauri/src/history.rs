@@ -4,6 +4,7 @@ use super::{
 };
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
@@ -12,12 +13,26 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+const START_FAILURE_REASON_BYTES: usize = 128;
+const START_OUTCOME_RESERVE_BYTES: u64 = 1024;
+
+fn fits_hot_history(records: &[SessionRecord], encoded_bytes: usize) -> bool {
+    // Each starting record must still fit its bounded failure reason and terminal metadata.
+    let starting = records
+        .iter()
+        .filter(|record| record.status == "starting")
+        .count() as u64;
+    (encoded_bytes as u64).saturating_add(starting.saturating_mul(START_OUTCOME_RESERVE_BYTES))
+        <= MAX_SESSION_HISTORY_BYTES
+}
+
 static CAPACITY_GENERATION: AtomicU64 = AtomicU64::new(0);
 static CAPACITY_LOCK: Mutex<()> = Mutex::new(());
 
 pub(crate) struct HistoryStore {
     pub(crate) root: PathBuf,
     pub(crate) records: Mutex<Vec<SessionRecord>>,
+    pub(crate) pending_start_failures: Mutex<BTreeMap<String, (String, u64)>>,
     pub(crate) revision: AtomicU64,
     pub(crate) instance: String,
     pub(crate) archive_pending: AtomicBool,
@@ -196,6 +211,7 @@ impl HistoryStore {
         let store = Self {
             root,
             records: Mutex::new(records),
+            pending_start_failures: Mutex::new(BTreeMap::new()),
             revision: AtomicU64::new(0),
             instance: next_session_id(),
             archive_pending: AtomicBool::new(false),
@@ -215,7 +231,7 @@ impl HistoryStore {
         let temp_path = self.root.join("sessions.json.tmp");
         let data = serde_json::to_vec_pretty(records)
             .map_err(|error| format!("Failed to encode session history: {error}"))?;
-        if data.len() as u64 > MAX_SESSION_HISTORY_BYTES {
+        if !fits_hot_history(records, data.len()) {
             return Err(
                 "Session history budget reached; unread agent receipts were preserved".into(),
             );
@@ -333,6 +349,73 @@ impl HistoryStore {
         });
         self.save_locked(&updated)?;
         *records = updated;
+        Ok(())
+    }
+
+    pub(crate) fn record_start_failure(
+        &self,
+        session_id: &str,
+        reason: &str,
+    ) -> Result<(), String> {
+        let stored_reason = if reason.len() <= START_FAILURE_REASON_BYTES {
+            reason
+        } else {
+            "Session startup failed; see the task error for details"
+        };
+        let mut records = self
+            .records
+            .lock()
+            .map_err(|_| "Session history lock poisoned")?;
+        if !records
+            .iter()
+            .any(|record| record.summary.session_id == session_id && record.status == "starting")
+        {
+            return Err("Session is no longer starting".into());
+        }
+        self.pending_start_failures
+            .lock()
+            .map_err(|_| "Session history lock poisoned")?
+            .insert(session_id.into(), (stored_reason.into(), unix_timestamp()));
+        self.flush_start_failures(&mut records)
+    }
+
+    pub(crate) fn save_pending_start_failures(&self) -> Result<(), String> {
+        let mut records = self
+            .records
+            .lock()
+            .map_err(|_| "Session history lock poisoned")?;
+        self.flush_start_failures(&mut records)
+    }
+
+    fn flush_start_failures(&self, records: &mut Vec<SessionRecord>) -> Result<(), String> {
+        let mut pending = self
+            .pending_start_failures
+            .lock()
+            .map_err(|_| "Session history lock poisoned")?;
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let mut updated = records.clone();
+        let mut changed = false;
+        for record in updated
+            .iter_mut()
+            .filter(|record| record.status == "starting")
+        {
+            if let Some((reason, ended_at)) = pending.get(&record.summary.session_id) {
+                record.status = "failed".into();
+                record.summary.status = "failed".into();
+                record.exit_code = None;
+                record.reason = Some(reason.clone());
+                record.ended_at = Some(*ended_at);
+                record.notification_pending = true;
+                changed = true;
+            }
+        }
+        if changed {
+            self.save_locked(&updated)?;
+            *records = updated;
+        }
+        pending.clear();
         Ok(())
     }
 
@@ -1840,6 +1923,7 @@ impl HistoryStore {
             root,
         };
         Self::validate_delete_transaction(&txn)?;
+        crate::run_changes::validate_storage(&self.root.join("run-baselines"))?;
         self.archive_pending.store(true, Ordering::Release);
         #[cfg(test)]
         if fault == "transaction_publication" {
@@ -2013,6 +2097,11 @@ impl HistoryStore {
             archive_json(&dir.join("last-deletion.json"), receipt, 64 * 1024)?;
             Self::delete_fault("receipt_sync", fault)?;
         }
+        // Cleanup shares the durable deletion transaction and is replayed before completion.
+        crate::run_changes::remove_sessions(
+            &self.root.join("run-baselines"),
+            &receipt.deleted_ids,
+        )?;
         // Unknown staging members are retained and reported; never recursively remove a directory.
         fs::remove_dir(&stage).map_err(|_| DELETE_STORAGE)?;
         sync_directory(dir)?;
@@ -2356,7 +2445,9 @@ impl HistoryStore {
         }
         let hot =
             serde_json::to_vec_pretty(&updated).map_err(|_| "Cannot encode session history")?;
-        if hot.len() as u64 > MAX_SESSION_HISTORY_BYTES {
+        if hot.len() as u64 > MAX_SESSION_HISTORY_BYTES
+            || (restore && !fits_hot_history(&updated, hot.len()))
+        {
             return Err(
                 "Session history exceeds 32 MiB; archive more sessions before restoring".into(),
             );
@@ -2508,6 +2599,8 @@ impl HistoryStore {
         {
             self.recover_archive_locked(&mut records)?;
         }
+        // A read can still use the durable history while the write error persists.
+        let _ = self.flush_start_failures(&mut records);
         Ok(records)
     }
     fn recover_archive(&self) -> Result<(), String> {
@@ -3504,6 +3597,86 @@ mod tests {
             assert!(fixture.history.get("s-00000").is_ok());
             assert!(fixture.history.get("s-00001").is_ok());
         }
+    }
+    #[test]
+    fn lifecycle_invalid_baseline_storage_does_not_commit_or_strand_archive_deletion() {
+        let fixture = retention_fixture(2, 1);
+        let storage = fixture.history.root.join("run-baselines");
+        super::super::background::private_root(&storage).unwrap();
+        let path = storage.join("baselines.json");
+        let mut file = super::super::background::private_file(&path, true).unwrap();
+        file.write_all(b"corrupt baseline").unwrap();
+        drop(file);
+        let preview = deletion_preview(&fixture.history, &["s-00000"]);
+        let token = preview["preview_id"].as_str().unwrap();
+        assert!(fixture
+            .history
+            .delete_result(token, &Default::default(), &Default::default())
+            .is_err());
+        assert!(!fixture
+            .history
+            .root
+            .join("archive/transaction.json")
+            .exists());
+        assert!(!fixture.history.archive_pending.load(Ordering::Acquire));
+        assert_fixture_intact(&fixture, &["s-00000", "s-00001", "s-00002"]);
+        let reopened = HistoryStore::open(fixture.history.root.clone()).unwrap();
+        assert!(reopened.get("s-00000").is_ok());
+        assert!(reopened.get("s-00002").is_ok());
+        assert_eq!(fs::read(&path).unwrap(), b"corrupt baseline");
+    }
+    #[test]
+    fn lifecycle_baseline_cleanup_failure_is_recovered_with_the_deletion_transaction() {
+        let fixture = retention_fixture(2, 1);
+        let storage = fixture.history.root.join("run-baselines");
+        super::super::background::private_root(&storage).unwrap();
+        let baseline = serde_json::json!({"info":{"id":"baseline-owned","root":"/project","captured_at":1,"files":0,"skipped":0},"snapshot":{"root":"/project","stamp":[0,0],"files":{},"untracked":[],"bytes":0}});
+        archive_json(
+            &storage.join("baselines.json"),
+            &serde_json::json!({"version":1,"entries":{"s-00000":baseline,"s-00001":baseline}}),
+            64 * 1024,
+        )
+        .unwrap();
+        let preview = deletion_preview(&fixture.history, &["s-00000"]);
+        let token = preview["preview_id"].as_str().unwrap();
+        let lock = std::cell::RefCell::new(None);
+        let error = fixture
+            .history
+            .delete_with_hook(token, &Default::default(), &Default::default(), || {
+                *lock.borrow_mut() =
+                    Some(super::super::background::OwnerLock::acquire(&storage).unwrap());
+            })
+            .unwrap_err();
+        assert!(error.contains("round_busy"));
+
+        assert!(fixture
+            .history
+            .root
+            .join("archive/transaction.json")
+            .exists());
+        let receipt: DeletionResult = archive_read(
+            &fixture.history.root.join("archive/last-deletion.json"),
+            64 * 1024,
+        )
+        .unwrap();
+        assert!(!receipt.complete);
+        drop(lock.borrow_mut().take());
+        let reopened = HistoryStore::open(fixture.history.root.clone()).unwrap();
+        let result = reopened
+            .delete_result(token, &Default::default(), &Default::default())
+            .unwrap();
+        assert!(result.complete);
+        assert_eq!(result.deleted_ids, ["s-00000"]);
+        let saved: serde_json::Value =
+            archive_read(&storage.join("baselines.json"), 64 * 1024).unwrap();
+        assert!(saved["entries"].get("s-00000").is_none());
+        assert!(saved["entries"].get("s-00001").is_some());
+        assert!(!fixture
+            .history
+            .root
+            .join("archive/transaction.json")
+            .exists());
+        assert_fixture_intact(&fixture, &["s-00001", "s-00002"]);
     }
     #[test]
     fn t05_lost_response_retry_returns_committed_ids_without_deleting_another_record() {

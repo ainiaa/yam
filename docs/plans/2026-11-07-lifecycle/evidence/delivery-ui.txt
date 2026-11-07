@@ -1,0 +1,13 @@
+✔ a native response offers review without claiming tests passed (0.756833ms)
+✔ failed and stopped processes remain distinguishable from an agent response (0.11425ms)
+✔ delivery evidence buttons open the current task files, changes and recorded log (243.321416ms)
+✔ a new run with no result cannot borrow an earlier generation or turn receipt (0.096667ms)
+✔ failed and interrupted current turns still expose evidence with a live shell (0.089209ms)
+ℹ tests 5
+ℹ suites 0
+ℹ pass 5
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 372.020209

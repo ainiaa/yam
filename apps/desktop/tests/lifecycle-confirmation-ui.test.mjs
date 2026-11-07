@@ -9,9 +9,37 @@ function stopHarness(reply=false){const calls=[],errors=[],pending={current:fals
 test('T5 cancelling shared native confirmation never sends shutdown',async()=>{const h=stopHarness(false);await h.run();assert.deepEqual(h.calls,['confirm_stop_all']);assert.deepEqual(h.errors,[]);assert.equal(h.args.stopAllPending.current,false);});
 test('T5 only explicit true confirmation stops all, and failure retains a safe error',async()=>{for(const answer of [true,false,null,'true',{}]){const h=stopHarness(answer);await h.run();assert.equal(h.calls.includes('stop_all_and_quit'),answer===true);}const h=stopHarness(()=>{throw Error('SECRET_NATIVE_ERROR');});await h.run();assert.equal(h.calls.includes('stop_all_and_quit'),false);assert.equal(h.errors.length,1);assert.doesNotMatch(h.errors[0],/SECRET_NATIVE_ERROR/);});
 test('T5 duplicate global-stop clicks share one confirmation and unmounted GUI never shuts down',async()=>{let resolve;const h=stopHarness(()=>new Promise(ok=>resolve=ok));const first=h.run();await h.run();assert.equal(h.calls.length,1);h.args.terminalMounted.current=false;resolve(true);await first;assert.deepEqual(h.calls,['confirm_stop_all']);});
-function reconnectHarness(fail=false){const calls=[],errors=[],opened=[],owner={current:{available:false,version:2}},mounted={current:true};const args={reconnectPending:{current:false},setReconnecting(){},ownerConnectionAvailable:owner,terminalMounted:mounted,layoutRestore:{current:{version:1}},terminalLayoutRef:{current:{panes:['s-existing']}},setRecoveryRevision(){},setError:v=>errors.push(v),refreshHistory:async()=>{},invoke:async(name,parameters)=>{calls.push([name,parameters]);if(fail)throw Error('SECRET_BACKEND');return name==='get_session'?{summary:{session_id:'s-existing'},status:'running'}:undefined;},openHistory:async(record,...rest)=>{opened.push(record.summary.session_id);return{};}};return{calls,errors,owner,mounted,args,opened,run:actual('reconnectBackground',args)};}
+function reconnectHarness(fail=false){const calls=[],errors=[],opened=[],owner={current:{available:false,version:2}},mounted={current:true};const args={sessionId:{current:'s-existing'},refreshSessionFinish:async()=>{},reconnectPending:{current:false},setReconnecting(){},ownerConnectionAvailable:owner,terminalMounted:mounted,layoutRestore:{current:{version:1}},terminalLayoutRef:{current:{panes:['s-existing']}},setRecoveryRevision(){},setError:v=>errors.push(v),refreshHistory:async()=>{},invoke:async(name,parameters)=>{calls.push([name,parameters]);if(fail)throw Error('SECRET_BACKEND');return name==='get_session'?{summary:{session_id:'s-existing'},status:'running'}:undefined;},openHistory:async(record,...rest)=>{opened.push(record.summary.session_id);return{};}};return{calls,errors,owner,mounted,args,opened,run:actual('reconnectBackground',args)};}
 test('T5 explicit reconnect reattaches original task, with no create or rerun command',async()=>{const h=reconnectHarness();await h.run();assert.deepEqual(h.calls.map(c=>c[0]),['reconnect_background','get_session']);assert.deepEqual(h.opened,['s-existing']);assert.equal(h.owner.current.available,true);assert.equal(h.owner.current.version,3);assert.equal(h.args.reconnectPending.current,false);});
 test('T5 reconnect failure preserves unavailable owner and never starts replacement tasks',async()=>{const h=reconnectHarness(true);await h.run();assert.equal(h.owner.current.available,false);assert.deepEqual(h.opened,[]);assert.deepEqual(h.calls.map(c=>c[0]),['reconnect_background']);assert.match(h.errors.at(-1),/original background/i);assert.doesNotMatch(h.errors.at(-1),/SECRET_BACKEND/);});
 test('T5 reconnect ignores stale owner replies and prevents duplicate attempts',async()=>{const h=reconnectHarness();let resolve;h.args.invoke=async name=>{h.calls.push([name]);return new Promise(ok=>resolve=ok);};h.run=actual('reconnectBackground',h.args);const first=h.run();await h.run();assert.equal(h.calls.length,1);h.owner.current={available:false,version:4};resolve();await first;assert.equal(h.owner.current.version,4);assert.equal(h.owner.current.available,false);assert.deepEqual(h.opened,[]);});
 test('T5 current-task stop stays scoped and lifecycle meanings are visible',async()=>{const calls=[];await actual('stopSession',{sessionId:{current:'s-current'},isRunning:true,detailVersion:{current:1},terminalMounted:{current:true},invoke:async(name,args)=>calls.push([name,args]),setError(){}})();assert.deepEqual(calls,[['stop_session',{sessionId:'s-current'}]]);assert.match(app,/Hide session keeps/);assert.match(app,/Closing this GUI keeps/);assert.match(app,/Stop session affects only/);assert.match(app,/onClick=\{\(\)=>void stopAllAndQuit\(\)\}/);assert.match(app,/Reconnect background/);});
 test('T5 tray and GUI use the same native confirmation and read-only reconnect is registered',()=>{const rust=readFileSync(new URL('../src-tauri/src/system_entry.rs',import.meta.url),'utf8'),lib=readFileSync(new URL('../src-tauri/src/lib.rs',import.meta.url),'utf8');assert.match(rust,/confirm_stop_all/);assert.match(rust,/if confirmed/);assert.match(lib,/system_entry::confirm_stop_all/);assert.match(lib,/background::reconnect_background/);});
+test('saving retry is scoped, deduplicated and never stops or restarts a task',async()=>{
+ const calls=[],pending={current:new Set(['s-save'])},busy={current:new Set()},selected={current:'s-save'};let release;
+ const bindings={sessionId:selected,finishPending:pending,finishRetries:busy,finishQueries:{current:new Map()},ownerConnectionAvailable:{current:{available:true}},detailVersion:{current:1},terminalMounted:{current:true},setRecoveryRevision(){},setError(){},refreshHistory:async()=>{},invoke:async(name,args)=>{calls.push([name,args]);return new Promise(resolve=>release=resolve);}};
+ const run=actual('retrySessionSave',bindings),first=run();await run();
+ assert.deepEqual(calls,[['retry_session_finish',{sessionId:'s-save'}]]);release();await first;
+ assert.equal(pending.current.has('s-save'),false);assert.equal(busy.current.size,0);
+ await run();assert.equal(calls.length,1);
+});
+
+test('same-session reconnect recovers missed pending-save state without restarting tasks',async()=>{
+ const h=reconnectHarness();
+ const native=h.args.invoke;h.args.invoke=async(name,args)=>name==='session_finish_pending'?(h.calls.push([name,args]),true):native(name,args);
+ h.args.finishPending={current:new Set()};h.args.finishRetries={current:new Set()};h.args.finishQueries={current:new Map()};h.args.terminalViews={current:new Map()};
+ h.args.refreshSessionFinish=actual('refreshSessionFinish',h.args);h.run=actual('reconnectBackground',h.args);
+ await h.run();await new Promise(setImmediate);
+ assert.equal(h.args.finishPending.current.has('s-existing'),true);
+ assert.deepEqual(h.calls.map(([name])=>name),['reconnect_background','get_session','session_finish_pending']);
+});
+
+test('late negative save query cannot hide a newer positive for the same task',async()=>{
+ const replies=[],pending={current:new Set()},finishQueries={current:new Map()};
+ const refresh=actual('refreshSessionFinish',{terminalMounted:{current:true},ownerConnectionAvailable:{current:{version:1}},terminalViews:{current:new Map()},finishPending:pending,finishQueries,finishRetries:{current:new Set()},setRecoveryRevision(){},invoke:()=>new Promise(resolve=>replies.push(resolve))});
+ const stale=refresh('s-save'),fresh=refresh('s-save');
+ replies[1](true);await fresh;
+ replies[0](false);await stale;
+ assert.equal(pending.current.has('s-save'),true);
+ assert.equal(finishQueries.current.size,0);
+});

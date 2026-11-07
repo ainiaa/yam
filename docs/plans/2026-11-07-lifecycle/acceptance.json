@@ -1,0 +1,1313 @@
+{
+  "schema_version": 1,
+  "kind": "portable_acceptance_archive",
+  "author": "Jeff.Liu",
+  "date": "2026-11-07",
+  "scope_note": "Archival index, not original runner-verifiable Evidence Receipt/Plan. Full local originals remain ignored; no unrelated Source Receipt inventory is exported.",
+  "command_note": "command_display and log host paths/trailing whitespace are normalized; original receipt fingerprints and raw file hashes are retained unchanged.",
+  "baseline_commit": "3472fc761d8e0b5aa5f979456fce135d3fbe72fa",
+  "accepted_source_fingerprint": "ea798c29816255c317c2569113ac6a6a3c6a7fe637068917622d4e47a4341d1b",
+  "state_status": "complete",
+  "report_outcome": "ready",
+  "open_issue_count": 0,
+  "verified_runtime_and_test_files": [
+    {
+      "path": "apps/desktop/src-tauri/src/agent_events.rs",
+      "sha256": "db4fac7180ec4f229e6a5e1756b00be36cc2c1c874d33d48c6790358b8503170"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/background.rs",
+      "sha256": "48412095f160724298966324817a43f542f1795fff8822de10f8076206506cbf"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/coverage_state_tests.rs",
+      "sha256": "1c6a9674c62347192095d105a54e65cd1356680d658bc8a57096d8f515d097fb"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/desktop_windows.rs",
+      "sha256": "24caf931aa7abda016bfc7796e35674f333af15f9037d1926a919ce3b7882dcd"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/diagnostics.rs",
+      "sha256": "e5e629c319a1f5c76e5f7ad69f89520f6eb3bb47c0f3233a92b73203f45ef372"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/history.rs",
+      "sha256": "4a355f3df515b09a4a0aa108df42e9e21cc61b644f1e4a1bc8fabaf5ae59750f"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/lib.rs",
+      "sha256": "859cd9177e2dc132a46fd2d541652aa2d90bf629a12eb8ed17a45a861625230e"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/project_files.rs",
+      "sha256": "1a3c806f568dbd48a7c59946be960d290fde4110b33682f215719a5ed90e738a"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/run_changes.rs",
+      "sha256": "8a6552543dc456f20cf40ed0dd3ea6d784e4c38b140ec90acbfbf241fd6069aa"
+    },
+    {
+      "path": "apps/desktop/src/App.tsx",
+      "sha256": "bcb7c0076a131c669cb9f710622ff448dc3653b065430940e7c02a241b554394"
+    },
+    {
+      "path": "apps/desktop/src/RunChanges.tsx",
+      "sha256": "d9ad66088d29af7a57788622b5ca8c7004adf9cf13b44cde12cb4c7e4b9416c9"
+    },
+    {
+      "path": "apps/desktop/src/agent-events.ts",
+      "sha256": "fa24505db2c8b8b4f7780f7d57d63e2dc7f6aaea80873a4b47fc8708d613ee12"
+    },
+    {
+      "path": "apps/desktop/src/translations.zh.ts",
+      "sha256": "cf2acca896370fbc0a0dc7962853e009f70c687c1640b4d11799cf9b6455c5ca"
+    },
+    {
+      "path": "apps/desktop/tests/browser-window-ui.test.mjs",
+      "sha256": "b70e18148d0d85948854b7a07c00f11acd16fda95945a1167e12ab02c22ff45e"
+    },
+    {
+      "path": "apps/desktop/tests/lifecycle-confirmation-ui.test.mjs",
+      "sha256": "b30415e011e9a8f70547787042857a2bd3b365764b09428f279525ea3c180f85"
+    },
+    {
+      "path": "apps/desktop/tests/run-changes-ui.test.mjs",
+      "sha256": "7d149527461f925391258506e26c89635a64dd4df2e00e5f7fa278a0bdc4f5b4"
+    },
+    {
+      "path": "apps/desktop/tests/session-start-responsiveness.test.mjs",
+      "sha256": "10aed7331b095f0f8f8d9e88dc878026606574f71d04071e9c6e430142d2f50a"
+    },
+    {
+      "path": "apps/desktop/tests/task-delivery.test.mjs",
+      "sha256": "7e5500ee749aa5c8c9df3f157789928ed287eb7f789746af4c3273634670b1cc"
+    },
+    {
+      "path": "apps/desktop/tests/terminal-layout-restore.test.mjs",
+      "sha256": "863713e8e24183ecf08b516225dfecbe6b871c8bc3dbd6ff7d00d52f8685f3a3"
+    },
+    {
+      "path": "apps/desktop/tests/terminal-views.test.mjs",
+      "sha256": "986378333f9115189f2d70bb5cf854b3492b88e1d582e26a554ffd7b2e8969ef"
+    },
+    {
+      "path": "scripts/native-coverage.py",
+      "sha256": "bba868ac8986c4d919173c6fc73598200da47ba699e1a9164486b383c13a11a0"
+    },
+    {
+      "path": "scripts/test_native_coverage.py",
+      "sha256": "967562e31a62f7b9b9f8b90e1dd5cf2e17f2fe4299558492d4367d7811a2ce2a"
+    }
+  ],
+  "acceptance": [
+    {
+      "criterion": "High-frequency IPC remains responsive without weakening ordering or ownership",
+      "freshness": "fresh",
+      "result": "pass"
+    },
+    {
+      "criterion": "Post-commit startup failures persist failed outcomes without orphan starting records",
+      "freshness": "fresh",
+      "result": "pass"
+    },
+    {
+      "criterion": "A completed process can retry final persistence without stopping other sessions",
+      "freshness": "fresh",
+      "result": "pass"
+    },
+    {
+      "criterion": "Run diff baselines survive GUI restart with private bounded storage",
+      "freshness": "fresh",
+      "result": "pass"
+    },
+    {
+      "criterion": "Task completion UI exposes result and evidence without claiming test success",
+      "freshness": "fresh",
+      "result": "pass"
+    },
+    {
+      "criterion": "Grouped native coverage requires an exhaustive nonempty executable test inventory and enforces the unchanged 85 percent line threshold",
+      "freshness": "fresh",
+      "result": "pass"
+    }
+  ],
+  "test_evidence": [
+    {
+      "criterion": "High-frequency IPC remains responsive without weakening ordering or ownership",
+      "tests": [
+        {
+          "id": "T1",
+          "selector": "apps/desktop/tests/session-start-responsiveness.test.mjs",
+          "kind": "contract",
+          "scenarios": [
+            "normal",
+            "boundary",
+            "contract"
+          ],
+          "red": {
+            "schema_version": 2,
+            "exit_code": 1,
+            "receipt_fingerprint": "f52d71bbbebacf924a4d5745bc64982d7e880cac74197c8ff1dd23380d955072",
+            "runner_fingerprint": "4138f8eb3a92c62f3f9801e1b86b96c0a20b1eb1670c53e5a8cb8ee0ba4e0932",
+            "evidence_level": "observed",
+            "stdout_fingerprint": "b6afda1081dee60a0971cef7cc868d93909d80c3a35e92a1dde001d371ed90a2",
+            "stderr_fingerprint": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "source_fingerprint": "a2b438725555ef39659ecd9345a7beffc3a763c06c305bd2a23208fff2e41285",
+            "command_display": "node --test apps/desktop/tests/session-start-responsiveness.test.mjs",
+            "test_check": {
+              "errors": 0,
+              "executed": 6,
+              "failed": 3,
+              "passed": 3,
+              "skipped": 0,
+              "xfailed": 0,
+              "xpassed": 0
+            }
+          },
+          "green": [
+            {
+              "schema_version": 2,
+              "exit_code": 0,
+              "receipt_fingerprint": "1156774f7e9d05e9142a29fe393eaee5e1796197f065ff1e54bdb9526c6c53e4",
+              "runner_fingerprint": "4138f8eb3a92c62f3f9801e1b86b96c0a20b1eb1670c53e5a8cb8ee0ba4e0932",
+              "evidence_level": "observed",
+              "stdout_fingerprint": "11ffa6784b8b64ff8f27f95973a2227a2ec2f08c47b8541871ce224b35ea23e0",
+              "stderr_fingerprint": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "source_fingerprint": "ea798c29816255c317c2569113ac6a6a3c6a7fe637068917622d4e47a4341d1b",
+              "command_display": "node --test apps/desktop/tests/session-start-responsiveness.test.mjs",
+              "test_check": {
+                "passed": 6,
+                "failed": 0,
+                "errors": 0,
+                "skipped": 0,
+                "xfailed": 0,
+                "xpassed": 0,
+                "executed": 6
+              }
+            },
+            {
+              "schema_version": 2,
+              "exit_code": 0,
+              "receipt_fingerprint": "60bbca3abe28dc32c9e68d24fbce4ecd01c9e25bef3193c5afcb81d9cbc82d64",
+              "runner_fingerprint": "4138f8eb3a92c62f3f9801e1b86b96c0a20b1eb1670c53e5a8cb8ee0ba4e0932",
+              "evidence_level": "observed",
+              "stdout_fingerprint": "666e5e48e6c3c7ef3dfb982e429eb94d316612f947b4fb1433b89888580ac827",
+              "stderr_fingerprint": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "source_fingerprint": "ea798c29816255c317c2569113ac6a6a3c6a7fe637068917622d4e47a4341d1b",
+              "command_display": "node --test apps/desktop/tests/session-start-responsiveness.test.mjs",
+              "test_check": {
+                "passed": 6,
+                "failed": 0,
+                "errors": 0,
+                "skipped": 0,
+                "xfailed": 0,
+                "xpassed": 0,
+                "executed": 6
+              }
+            },
+            {
+              "schema_version": 2,
+              "exit_code": 0,
+              "receipt_fingerprint": "d27aa04febd79902ebd94a7737eef7b908f7e1d4d878daeb7e86bfa6a63b5ce1",
+              "runner_fingerprint": "4138f8eb3a92c62f3f9801e1b86b96c0a20b1eb1670c53e5a8cb8ee0ba4e0932",
+              "evidence_level": "observed",
+              "stdout_fingerprint": "c0d891ec2c7dd3de6ad579497f6182db95dc84df6365b18536f0cfd4e1e15d76",
+              "stderr_fingerprint": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "source_fingerprint": "ea798c29816255c317c2569113ac6a6a3c6a7fe637068917622d4e47a4341d1b",
+              "command_display": "node --test apps/desktop/tests/session-start-responsiveness.test.mjs",
+              "test_check": {
+                "passed": 6,
+                "failed": 0,
+                "errors": 0,
+                "skipped": 0,
+                "xfailed": 0,
+                "xpassed": 0,
+                "executed": 6
+              }
+            }
+          ],
+          "mutation": null
+        }
+      ]
+    },
+    {
+      "criterion": "Post-commit startup failures persist failed outcomes without orphan starting records",
+      "tests": [
+        {
+          "id": "T2",
+          "selector": "lifecycle_start_",
+          "kind": "integration",
+          "scenarios": [
+            "error",
+            "normal"
+          ],
+          "red": {
+            "schema_version": 2,
+            "exit_code": 101,
+            "receipt_fingerprint": "f8413b77f1b1ffaf30d225906c927cb8db209249cc7381c7e93732aef7b1b70a",
+            "runner_fingerprint": "4138f8eb3a92c62f3f9801e1b86b96c0a20b1eb1670c53e5a8cb8ee0ba4e0932",
+            "evidence_level": "observed",
+            "stdout_fingerprint": "34e22434b34ca29aaa2ed1a96f23eb94212a0aaec9a58847b1858b8cdaad6b79",
+            "stderr_fingerprint": "24e9467a46abd084d814bc093efa6e61cf256235ef7ed5fc2d0c60ef7f650157",
+            "source_fingerprint": "5127d7fc34bd7786b5fef8c8ed5756314afd15de065529e3bda54498e6451336",
+            "command_display": "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked lifecycle_start_",
+            "test_check": {
+              "errors": 0,
+              "executed": 5,
+              "failed": 2,
+              "passed": 3,
+              "skipped": 0,
+              "xfailed": 0,
+              "xpassed": 0
+            }
+          },
+          "green": [
+            {
+              "schema_version": 2,
+              "exit_code": 0,
+              "receipt_fingerprint": "632d011bd3ee00d6cdeb5dfba9317c619e42780385fccec50f4c45caaa2ea8d7",
+              "runner_fingerprint": "4138f8eb3a92c62f3f9801e1b86b96c0a20b1eb1670c53e5a8cb8ee0ba4e0932",
+              "evidence_level": "observed",
+              "stdout_fingerprint": "3a34ac248f6737c5d00988753e0f4e232d56c7c0c62291bc08eb9555c0fb6320",
+              "stderr_fingerprint": "9acd770b049b78fc4096cbc88076b9a003af04859626d0d5ca3e8819c187a8b2",
+              "source_fingerprint": "ea798c29816255c317c2569113ac6a6a3c6a7fe637068917622d4e47a4341d1b",
+              "command_display": "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked lifecycle_start_",
+              "test_check": {
+                "passed": 5,
+                "failed": 0,
+                "errors": 0,
+                "skipped": 0,
+                "xfailed": 0,
+                "xpassed": 0,
+                "executed": 5
+              }
+            },
+            {
+              "schema_version": 2,
+              "exit_code": 0,
+              "receipt_fingerprint": "3c01fc1e8488df3413cc62e859134986100119d43513371d942f9c606a87f13d",
+              "runner_fingerprint": "4138f8eb3a92c62f3f9801e1b86b96c0a20b1eb1670c53e5a8cb8ee0ba4e0932",
+              "evidence_level": "observed",
+              "stdout_fingerprint": "330b8ad97905810128587e2c6de20816c7ede491d291756a122162bdd3530b0a",
+              "stderr_fingerprint": "2abdd9b7498ec21afaab2169f859bff3d2983846f07a1f5eadf7ff5ecba3f40e",
+              "source_fingerprint": "ea798c29816255c317c2569113ac6a6a3c6a7fe637068917622d4e47a4341d1b",
+              "command_display": "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked lifecycle_start_",
+              "test_check": {
+                "passed": 5,
+                "failed": 0,
+                "errors": 0,
+                "skipped": 0,
+                "xfailed": 0,
+                "xpassed": 0,
+                "executed": 5
+              }
+            },
+            {
+              "schema_version": 2,
+              "exit_code": 0,
+              "receipt_fingerprint": "00327deae6d6319e41b5c9fbc2bac5e2ee783cffae07fb35036b836357b41c58",
+              "runner_fingerprint": "4138f8eb3a92c62f3f9801e1b86b96c0a20b1eb1670c53e5a8cb8ee0ba4e0932",
+              "evidence_level": "observed",
+              "stdout_fingerprint": "14aaa9d5c5378a5350e860e0cffec55bf00841809b8a87acaf7a11800446da57",
+              "stderr_fingerprint": "0f4784710fbf57f9d492e68af5785a0da35e5922a0bfd9d627564af2e84fa84f",
+              "source_fingerprint": "ea798c29816255c317c2569113ac6a6a3c6a7fe637068917622d4e47a4341d1b",
+              "command_display": "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked lifecycle_start_",
+              "test_check": {
+                "passed": 5,
+                "failed": 0,
+                "errors": 0,
+                "skipped": 0,
+                "xfailed": 0,
+                "xpassed": 0,
+                "executed": 5
+              }
+            }
+          ],
+          "mutation": null
+        }
+      ]
+    },
+    {
+      "criterion": "A completed process can retry final persistence without stopping other sessions",
+      "tests": [
+        {
+          "id": "T3",
+          "selector": "lifecycle_finish_",
+          "kind": "integration",
+          "scenarios": [
+            "error",
+            "authorization",
+            "concurrency",
+            "idempotency"
+          ],
+          "red": {
+            "schema_version": 2,
+            "exit_code": 101,
+            "receipt_fingerprint": "848c9d1edf55b63601def26ce3083c849865e767f4bece82dd9e38182c4396a9",
+            "runner_fingerprint": "4138f8eb3a92c62f3f9801e1b86b96c0a20b1eb1670c53e5a8cb8ee0ba4e0932",
+            "evidence_level": "observed",
+            "stdout_fingerprint": "634694bb45dc7d7f2d7ac0db60b3937206e86f652b32a95d012f7c782a3574ff",
+            "stderr_fingerprint": "37a12dd2b52dcee14472b7229c1fc7fb8717cef84ef6dbb880646f31704ccd94",
+            "source_fingerprint": "314d88ad211ef1c3cd4d1e53e0605ed686ffd601885c4e50331a1b99fa9bdac2",
+            "command_display": "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked lifecycle_finish_",
+            "test_check": {
+              "errors": 0,
+              "executed": 1,
+              "failed": 1,
+              "passed": 0,
+              "skipped": 0,
+              "xfailed": 0,
+              "xpassed": 0
+            }
+          },
+          "green": [
+            {
+              "schema_version": 2,
+              "exit_code": 0,
+              "receipt_fingerprint": "62ab7d624927a67d71b3ab3fd39f8d7d7a4b1527cb2b69d148ffc2833ddafb59",
+              "runner_fingerprint": "4138f8eb3a92c62f3f9801e1b86b96c0a20b1eb1670c53e5a8cb8ee0ba4e0932",
+              "evidence_level": "observed",
+              "stdout_fingerprint": "91e0e683ef148bb1e7219e1362ba0b890199e0769ab763ad5602fd332534698a",
+              "stderr_fingerprint": "0f4784710fbf57f9d492e68af5785a0da35e5922a0bfd9d627564af2e84fa84f",
+              "source_fingerprint": "ea798c29816255c317c2569113ac6a6a3c6a7fe637068917622d4e47a4341d1b",
+              "command_display": "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked lifecycle_finish_",
+              "test_check": {
+                "passed": 2,
+                "failed": 0,
+                "errors": 0,
+                "skipped": 0,
+                "xfailed": 0,
+                "xpassed": 0,
+                "executed": 2
+              }
+            },
+            {
+              "schema_version": 2,
+              "exit_code": 0,
+              "receipt_fingerprint": "abf85b9b5409137a966f077a51b6383bc5efd3a4fefed5f12a0c507aa3b9be52",
+              "runner_fingerprint": "4138f8eb3a92c62f3f9801e1b86b96c0a20b1eb1670c53e5a8cb8ee0ba4e0932",
+              "evidence_level": "observed",
+              "stdout_fingerprint": "29af4ef6847cc629f4bb1854ae40d6bfb889a2726be399b460230f953a8f1492",
+              "stderr_fingerprint": "b298bd785fc8b0848d4fd8ceb912cb1f0fb5fbe4d8c94e75bfe729b9de705381",
+              "source_fingerprint": "ea798c29816255c317c2569113ac6a6a3c6a7fe637068917622d4e47a4341d1b",
+              "command_display": "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked lifecycle_finish_",
+              "test_check": {
+                "passed": 2,
+                "failed": 0,
+                "errors": 0,
+                "skipped": 0,
+                "xfailed": 0,
+                "xpassed": 0,
+                "executed": 2
+              }
+            },
+            {
+              "schema_version": 2,
+              "exit_code": 0,
+              "receipt_fingerprint": "482fee28c7c1136376ae45de5645696665a9815df095e67f0b6e0a2604cc1cf9",
+              "runner_fingerprint": "4138f8eb3a92c62f3f9801e1b86b96c0a20b1eb1670c53e5a8cb8ee0ba4e0932",
+              "evidence_level": "observed",
+              "stdout_fingerprint": "91e0e683ef148bb1e7219e1362ba0b890199e0769ab763ad5602fd332534698a",
+              "stderr_fingerprint": "b298bd785fc8b0848d4fd8ceb912cb1f0fb5fbe4d8c94e75bfe729b9de705381",
+              "source_fingerprint": "ea798c29816255c317c2569113ac6a6a3c6a7fe637068917622d4e47a4341d1b",
+              "command_display": "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked lifecycle_finish_",
+              "test_check": {
+                "passed": 2,
+                "failed": 0,
+                "errors": 0,
+                "skipped": 0,
+                "xfailed": 0,
+                "xpassed": 0,
+                "executed": 2
+              }
+            }
+          ],
+          "mutation": {
+            "schema_version": 2,
+            "exit_code": 0,
+            "receipt_fingerprint": "fc1609b66ef85dc1a7ae343b6bf99a66d94ab0f3349c1c9ac8cdaf5587e70f80",
+            "runner_fingerprint": "4138f8eb3a92c62f3f9801e1b86b96c0a20b1eb1670c53e5a8cb8ee0ba4e0932",
+            "evidence_level": "observed",
+            "stdout_fingerprint": "ea12651ad400990ebe0ebbbf5b6da2dec578b9907ab20ad8a1b89527e6852142",
+            "stderr_fingerprint": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "source_fingerprint": "ea798c29816255c317c2569113ac6a6a3c6a7fe637068917622d4e47a4341d1b",
+            "command_display": "cargo mutants --manifest-path apps/desktop/src-tauri/Cargo.toml --no-config --baseline run --no-shuffle --all-logs --caught --jobs 1 --timeout 180 --re '^(?:src/lib\\.rs:3082:5:\\ replace\\ retry_session_finish_with\\ \\->\\ Result<\\(\\),\\ String>\\ with\\ Ok\\(\\(\\)\\)|src/background\\.rs:519:5:\\ replace\\ validate_command\\ \\->\\ Result<\\(\\),\\ String>\\ with\\ Ok\\(\\(\\)\\))$' --in-diff .artifacts/root-causes-20261107/mutation-scope.diff --output <workspace>/.artifacts/root-causes-20261107/mutants-results --cargo-arg=--locked --cargo-arg=--offline -- --lib lifecycle_finish_ -- --test-threads=2",
+            "mutation_check": {
+              "selector": "lifecycle_finish_",
+              "generated": 2,
+              "killed": 2,
+              "tests": 2
+            }
+          }
+        },
+        {
+          "id": "T3-contract",
+          "selector": "lifecycle_finish_",
+          "kind": "contract",
+          "scenarios": [
+            "contract",
+            "boundary"
+          ],
+          "red": {
+            "schema_version": 2,
+            "exit_code": 101,
+            "receipt_fingerprint": "848c9d1edf55b63601def26ce3083c849865e767f4bece82dd9e38182c4396a9",
+            "runner_fingerprint": "4138f8eb3a92c62f3f9801e1b86b96c0a20b1eb1670c53e5a8cb8ee0ba4e0932",
+            "evidence_level": "observed",
+            "stdout_fingerprint": "634694bb45dc7d7f2d7ac0db60b3937206e86f652b32a95d012f7c782a3574ff",
+            "stderr_fingerprint": "37a12dd2b52dcee14472b7229c1fc7fb8717cef84ef6dbb880646f31704ccd94",
+            "source_fingerprint": "314d88ad211ef1c3cd4d1e53e0605ed686ffd601885c4e50331a1b99fa9bdac2",
+            "command_display": "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked lifecycle_finish_",
+            "test_check": {
+              "errors": 0,
+              "executed": 1,
+              "failed": 1,
+              "passed": 0,
+              "skipped": 0,
+              "xfailed": 0,
+              "xpassed": 0
+            }
+          },
+          "green": [
+            {
+              "schema_version": 2,
+              "exit_code": 0,
+              "receipt_fingerprint": "6b8e58cb685ffe27f6041cfd7a48b124b1f232cb4350dbf49825497f2faad429",
+              "runner_fingerprint": "4138f8eb3a92c62f3f9801e1b86b96c0a20b1eb1670c53e5a8cb8ee0ba4e0932",
+              "evidence_level": "observed",
+              "stdout_fingerprint": "3197d0634b21c0fc96686cea363eb4815aad56d47b3c0acec066803f58a4dcf4",
+              "stderr_fingerprint": "3ce5c56c17c77f3dc8807adee23c5b15343cdcfa253df7124f1c57f5a392b3b1",
+              "source_fingerprint": "ea798c29816255c317c2569113ac6a6a3c6a7fe637068917622d4e47a4341d1b",
+              "command_display": "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked lifecycle_finish_",
+              "test_check": {
+                "passed": 2,
+                "failed": 0,
+                "errors": 0,
+                "skipped": 0,
+                "xfailed": 0,
+                "xpassed": 0,
+                "executed": 2
+              }
+            },
+            {
+              "schema_version": 2,
+              "exit_code": 0,
+              "receipt_fingerprint": "c20b979f04dbb958b0a66e0429bf59c3a9235ba1ddf100ab01ac227d314904d5",
+              "runner_fingerprint": "4138f8eb3a92c62f3f9801e1b86b96c0a20b1eb1670c53e5a8cb8ee0ba4e0932",
+              "evidence_level": "observed",
+              "stdout_fingerprint": "91e0e683ef148bb1e7219e1362ba0b890199e0769ab763ad5602fd332534698a",
+              "stderr_fingerprint": "54c3191fc006680e96b00c0470e7ee485604826ba362ef775dc65b14b1bf5737",
+              "source_fingerprint": "ea798c29816255c317c2569113ac6a6a3c6a7fe637068917622d4e47a4341d1b",
+              "command_display": "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked lifecycle_finish_",
+              "test_check": {
+                "passed": 2,
+                "failed": 0,
+                "errors": 0,
+                "skipped": 0,
+                "xfailed": 0,
+                "xpassed": 0,
+                "executed": 2
+              }
+            },
+            {
+              "schema_version": 2,
+              "exit_code": 0,
+              "receipt_fingerprint": "2a709ae3969930d78547a45f0e483f74ae3e288eaf7d1fc41fb8e1c20ee9507a",
+              "runner_fingerprint": "4138f8eb3a92c62f3f9801e1b86b96c0a20b1eb1670c53e5a8cb8ee0ba4e0932",
+              "evidence_level": "observed",
+              "stdout_fingerprint": "3197d0634b21c0fc96686cea363eb4815aad56d47b3c0acec066803f58a4dcf4",
+              "stderr_fingerprint": "0f4784710fbf57f9d492e68af5785a0da35e5922a0bfd9d627564af2e84fa84f",
+              "source_fingerprint": "ea798c29816255c317c2569113ac6a6a3c6a7fe637068917622d4e47a4341d1b",
+              "command_display": "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked lifecycle_finish_",
+              "test_check": {
+                "passed": 2,
+                "failed": 0,
+                "errors": 0,
+                "skipped": 0,
+                "xfailed": 0,
+                "xpassed": 0,
+                "executed": 2
+              }
+            }
+          ],
+          "mutation": {
+            "schema_version": 2,
+            "exit_code": 0,
+            "receipt_fingerprint": "e6d12aaa4cc783c9a345ac9bdf52c4b59effd50161a48790f38d8a468092d4d5",
+            "runner_fingerprint": "4138f8eb3a92c62f3f9801e1b86b96c0a20b1eb1670c53e5a8cb8ee0ba4e0932",
+            "evidence_level": "observed",
+            "stdout_fingerprint": "fc3e0ddaa477f61178430e2c86b4978e222cf9e12c2a5c854f91a5a4842d2802",
+            "stderr_fingerprint": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "source_fingerprint": "ea798c29816255c317c2569113ac6a6a3c6a7fe637068917622d4e47a4341d1b",
+            "command_display": "cargo mutants --manifest-path apps/desktop/src-tauri/Cargo.toml --no-config --baseline run --no-shuffle --all-logs --caught --jobs 1 --timeout 180 --re '^(?:src/lib\\.rs:3082:5:\\ replace\\ retry_session_finish_with\\ \\->\\ Result<\\(\\),\\ String>\\ with\\ Ok\\(\\(\\)\\)|src/background\\.rs:519:5:\\ replace\\ validate_command\\ \\->\\ Result<\\(\\),\\ String>\\ with\\ Ok\\(\\(\\)\\))$' --in-diff .artifacts/root-causes-20261107/mutation-scope.diff --output <workspace>/.artifacts/root-causes-20261107/mutants-results --cargo-arg=--locked --cargo-arg=--offline -- --lib lifecycle_finish_ -- --test-threads=2",
+            "mutation_check": {
+              "selector": "lifecycle_finish_",
+              "generated": 2,
+              "killed": 2,
+              "tests": 2
+            }
+          }
+        },
+        {
+          "id": "T3-ui",
+          "selector": "apps/desktop/tests/lifecycle-confirmation-ui.test.mjs",
+          "kind": "integration",
+          "scenarios": [
+            "concurrency",
+            "boundary",
+            "error"
+          ],
+          "red": {
+            "schema_version": 2,
+            "exit_code": 1,
+            "receipt_fingerprint": "37f8a84601c12de584d614c30789c2be5399016dd598f8302aaf102d733c8586",
+            "runner_fingerprint": "4138f8eb3a92c62f3f9801e1b86b96c0a20b1eb1670c53e5a8cb8ee0ba4e0932",
+            "evidence_level": "observed",
+            "stdout_fingerprint": "17cc97f4098cfb8714b6dd3152f42d3b8436d5a86c6db90df5806a277de475ca",
+            "stderr_fingerprint": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "source_fingerprint": "d6c0f5c7bf6ce61c7ec3104138dfbf6ad4a7b4af815dcb49458e810687a3631d",
+            "command_display": "node --test apps/desktop/tests/lifecycle-confirmation-ui.test.mjs",
+            "test_check": {
+              "errors": 0,
+              "executed": 11,
+              "failed": 1,
+              "passed": 10,
+              "skipped": 0,
+              "xfailed": 0,
+              "xpassed": 0
+            }
+          },
+          "green": [
+            {
+              "schema_version": 2,
+              "exit_code": 0,
+              "receipt_fingerprint": "d6d2ccaaf2cc45f26821744cd407105995e4d683ecd7be527fdc228dcba13958",
+              "runner_fingerprint": "4138f8eb3a92c62f3f9801e1b86b96c0a20b1eb1670c53e5a8cb8ee0ba4e0932",
+              "evidence_level": "observed",
+              "stdout_fingerprint": "6b453d75e10394f3427aa12f038513044840fcee9d912352e9765c739439b058",
+              "stderr_fingerprint": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "source_fingerprint": "ea798c29816255c317c2569113ac6a6a3c6a7fe637068917622d4e47a4341d1b",
+              "command_display": "node --test apps/desktop/tests/lifecycle-confirmation-ui.test.mjs",
+              "test_check": {
+                "passed": 11,
+                "failed": 0,
+                "errors": 0,
+                "skipped": 0,
+                "xfailed": 0,
+                "xpassed": 0,
+                "executed": 11
+              }
+            },
+            {
+              "schema_version": 2,
+              "exit_code": 0,
+              "receipt_fingerprint": "722702ccc29f58d9b1f12beef4a6b57e821cc5f2713902fcaf416ee3020014cb",
+              "runner_fingerprint": "4138f8eb3a92c62f3f9801e1b86b96c0a20b1eb1670c53e5a8cb8ee0ba4e0932",
+              "evidence_level": "observed",
+              "stdout_fingerprint": "1573b89dd1970afbf011bef7de5d9c5b2b5856c90cf090fdd77bbd4b822f8734",
+              "stderr_fingerprint": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "source_fingerprint": "ea798c29816255c317c2569113ac6a6a3c6a7fe637068917622d4e47a4341d1b",
+              "command_display": "node --test apps/desktop/tests/lifecycle-confirmation-ui.test.mjs",
+              "test_check": {
+                "passed": 11,
+                "failed": 0,
+                "errors": 0,
+                "skipped": 0,
+                "xfailed": 0,
+                "xpassed": 0,
+                "executed": 11
+              }
+            },
+            {
+              "schema_version": 2,
+              "exit_code": 0,
+              "receipt_fingerprint": "d26bc635f56a77cc84acc6bba27897c24e06aa6ffca54a945a90c8ce1483c098",
+              "runner_fingerprint": "4138f8eb3a92c62f3f9801e1b86b96c0a20b1eb1670c53e5a8cb8ee0ba4e0932",
+              "evidence_level": "observed",
+              "stdout_fingerprint": "8545c43138001a55d5d9cea46636ca2f417f4a00361825220ea79ade1a879e5c",
+              "stderr_fingerprint": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "source_fingerprint": "ea798c29816255c317c2569113ac6a6a3c6a7fe637068917622d4e47a4341d1b",
+              "command_display": "node --test apps/desktop/tests/lifecycle-confirmation-ui.test.mjs",
+              "test_check": {
+                "passed": 11,
+                "failed": 0,
+                "errors": 0,
+                "skipped": 0,
+                "xfailed": 0,
+                "xpassed": 0,
+                "executed": 11
+              }
+            }
+          ],
+          "mutation": null
+        }
+      ]
+    },
+    {
+      "criterion": "Run diff baselines survive GUI restart with private bounded storage",
+      "tests": [
+        {
+          "id": "T4",
+          "selector": "run_changes_persisted_",
+          "kind": "integration",
+          "scenarios": [
+            "normal",
+            "boundary",
+            "error",
+            "authorization"
+          ],
+          "red": {
+            "schema_version": 2,
+            "exit_code": 101,
+            "receipt_fingerprint": "54d72e3c64ec77ecbcf46bebc4214378aaaadc81c0bc18a36fa7404bc4a33028",
+            "runner_fingerprint": "4138f8eb3a92c62f3f9801e1b86b96c0a20b1eb1670c53e5a8cb8ee0ba4e0932",
+            "evidence_level": "observed",
+            "stdout_fingerprint": "9a4f08e8ab690f9da21d93e3d835f99b829b5a06f4ab3b182b1041310a69eb98",
+            "stderr_fingerprint": "fa51253211c5b47b665317fbb72b5532056b69b60f1d2814d6bd599438434113",
+            "source_fingerprint": "b1d47aa421d6f2d839b962a880fe6246e9054f4309831bb6b1ea7a8954b78649",
+            "command_display": "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked run_changes_persisted_",
+            "test_check": {
+              "errors": 0,
+              "executed": 2,
+              "failed": 2,
+              "passed": 0,
+              "skipped": 0,
+              "xfailed": 0,
+              "xpassed": 0
+            }
+          },
+          "green": [
+            {
+              "schema_version": 2,
+              "exit_code": 0,
+              "receipt_fingerprint": "46e7ae58af30e62bfc5fbcbc53a08dd99746bb05e1c1b64f3d5df54baf5366c7",
+              "runner_fingerprint": "4138f8eb3a92c62f3f9801e1b86b96c0a20b1eb1670c53e5a8cb8ee0ba4e0932",
+              "evidence_level": "observed",
+              "stdout_fingerprint": "1dbd21af466f13a4ef1c2ad67c13e3083044ff93f009c541a4267ecad875d0a7",
+              "stderr_fingerprint": "161475b972daaf955f0401f8d1b2ffb1938d512b588f1a1e75c8977b42745f24",
+              "source_fingerprint": "ea798c29816255c317c2569113ac6a6a3c6a7fe637068917622d4e47a4341d1b",
+              "command_display": "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked run_changes_persisted_",
+              "test_check": {
+                "passed": 4,
+                "failed": 0,
+                "errors": 0,
+                "skipped": 0,
+                "xfailed": 0,
+                "xpassed": 0,
+                "executed": 4
+              }
+            },
+            {
+              "schema_version": 2,
+              "exit_code": 0,
+              "receipt_fingerprint": "7610448bfc3037001264657246a8321df5c5cae8d4e51644086bbcc6a84f6c37",
+              "runner_fingerprint": "4138f8eb3a92c62f3f9801e1b86b96c0a20b1eb1670c53e5a8cb8ee0ba4e0932",
+              "evidence_level": "observed",
+              "stdout_fingerprint": "ecf2bd60a2f0641781685ebe65bbe88e9a4006c661039e740ab9d0169026f090",
+              "stderr_fingerprint": "54c3191fc006680e96b00c0470e7ee485604826ba362ef775dc65b14b1bf5737",
+              "source_fingerprint": "ea798c29816255c317c2569113ac6a6a3c6a7fe637068917622d4e47a4341d1b",
+              "command_display": "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked run_changes_persisted_",
+              "test_check": {
+                "passed": 4,
+                "failed": 0,
+                "errors": 0,
+                "skipped": 0,
+                "xfailed": 0,
+                "xpassed": 0,
+                "executed": 4
+              }
+            },
+            {
+              "schema_version": 2,
+              "exit_code": 0,
+              "receipt_fingerprint": "07b18e807e208635ec184fc5ffbb0ceb837c64f666751498b471e9e242040967",
+              "runner_fingerprint": "4138f8eb3a92c62f3f9801e1b86b96c0a20b1eb1670c53e5a8cb8ee0ba4e0932",
+              "evidence_level": "observed",
+              "stdout_fingerprint": "5af5ea958f955b357f052fde8c7270cceea621c96f37f5a65268e570048b18fe",
+              "stderr_fingerprint": "0f4784710fbf57f9d492e68af5785a0da35e5922a0bfd9d627564af2e84fa84f",
+              "source_fingerprint": "ea798c29816255c317c2569113ac6a6a3c6a7fe637068917622d4e47a4341d1b",
+              "command_display": "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked run_changes_persisted_",
+              "test_check": {
+                "passed": 4,
+                "failed": 0,
+                "errors": 0,
+                "skipped": 0,
+                "xfailed": 0,
+                "xpassed": 0,
+                "executed": 4
+              }
+            }
+          ],
+          "mutation": null
+        }
+      ]
+    },
+    {
+      "criterion": "Task completion UI exposes result and evidence without claiming test success",
+      "tests": [
+        {
+          "id": "T5",
+          "selector": "lifecycle_delivery_",
+          "kind": "contract",
+          "scenarios": [
+            "normal",
+            "error",
+            "contract"
+          ],
+          "red": {
+            "schema_version": 2,
+            "exit_code": 101,
+            "receipt_fingerprint": "4edcaf35bbbac2e4b768cc945c4e2a44417b63dde24fb1ecaccdfe78393c09c2",
+            "runner_fingerprint": "4138f8eb3a92c62f3f9801e1b86b96c0a20b1eb1670c53e5a8cb8ee0ba4e0932",
+            "evidence_level": "observed",
+            "stdout_fingerprint": "5b276039d7a6efaca3007c7a61e518fd586361de6d8b01f64bc317e46b50b114",
+            "stderr_fingerprint": "e970743d10a9139ddf3b5780dbdef54990cd28d098e6b2e0d9ea837e5606920e",
+            "source_fingerprint": "5127d7fc34bd7786b5fef8c8ed5756314afd15de065529e3bda54498e6451336",
+            "command_display": "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked lifecycle_delivery_",
+            "test_check": {
+              "errors": 0,
+              "executed": 2,
+              "failed": 1,
+              "passed": 1,
+              "skipped": 0,
+              "xfailed": 0,
+              "xpassed": 0
+            }
+          },
+          "green": [
+            {
+              "schema_version": 2,
+              "exit_code": 0,
+              "receipt_fingerprint": "11f956d8404f77f2b8096940036a06a5689645b747f3a5be17817f14dd490646",
+              "runner_fingerprint": "4138f8eb3a92c62f3f9801e1b86b96c0a20b1eb1670c53e5a8cb8ee0ba4e0932",
+              "evidence_level": "observed",
+              "stdout_fingerprint": "2307c8b205cbf4401cf314a576133e44b7183e07187c4302f0f9c4cae0daf1c1",
+              "stderr_fingerprint": "0f4784710fbf57f9d492e68af5785a0da35e5922a0bfd9d627564af2e84fa84f",
+              "source_fingerprint": "ea798c29816255c317c2569113ac6a6a3c6a7fe637068917622d4e47a4341d1b",
+              "command_display": "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked lifecycle_delivery_",
+              "test_check": {
+                "passed": 2,
+                "failed": 0,
+                "errors": 0,
+                "skipped": 0,
+                "xfailed": 0,
+                "xpassed": 0,
+                "executed": 2
+              }
+            },
+            {
+              "schema_version": 2,
+              "exit_code": 0,
+              "receipt_fingerprint": "46c1f286fb35d332a3e53e215223f15e8e2a9741784765dcf46a6756eeb51e0b",
+              "runner_fingerprint": "4138f8eb3a92c62f3f9801e1b86b96c0a20b1eb1670c53e5a8cb8ee0ba4e0932",
+              "evidence_level": "observed",
+              "stdout_fingerprint": "2307c8b205cbf4401cf314a576133e44b7183e07187c4302f0f9c4cae0daf1c1",
+              "stderr_fingerprint": "b298bd785fc8b0848d4fd8ceb912cb1f0fb5fbe4d8c94e75bfe729b9de705381",
+              "source_fingerprint": "ea798c29816255c317c2569113ac6a6a3c6a7fe637068917622d4e47a4341d1b",
+              "command_display": "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked lifecycle_delivery_",
+              "test_check": {
+                "passed": 2,
+                "failed": 0,
+                "errors": 0,
+                "skipped": 0,
+                "xfailed": 0,
+                "xpassed": 0,
+                "executed": 2
+              }
+            },
+            {
+              "schema_version": 2,
+              "exit_code": 0,
+              "receipt_fingerprint": "c93aea470f8051c116270fd8fe982ebfa3b035fc52ae6064aaef0211c4950651",
+              "runner_fingerprint": "4138f8eb3a92c62f3f9801e1b86b96c0a20b1eb1670c53e5a8cb8ee0ba4e0932",
+              "evidence_level": "observed",
+              "stdout_fingerprint": "2307c8b205cbf4401cf314a576133e44b7183e07187c4302f0f9c4cae0daf1c1",
+              "stderr_fingerprint": "eecd7985b3907856aa5b657532ee41169ce2f9359785e9d64ed774778b3e7932",
+              "source_fingerprint": "ea798c29816255c317c2569113ac6a6a3c6a7fe637068917622d4e47a4341d1b",
+              "command_display": "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked lifecycle_delivery_",
+              "test_check": {
+                "passed": 2,
+                "failed": 0,
+                "errors": 0,
+                "skipped": 0,
+                "xfailed": 0,
+                "xpassed": 0,
+                "executed": 2
+              }
+            }
+          ],
+          "mutation": null
+        }
+      ]
+    },
+    {
+      "criterion": "Grouped native coverage requires an exhaustive nonempty executable test inventory and enforces the unchanged 85 percent line threshold",
+      "tests": [
+        {
+          "id": "T6",
+          "selector": "scripts.test_native_coverage.NativeCoverageTests.test_empty_or_all_ignored_inventories_never_report_coverage",
+          "kind": "unit",
+          "scenarios": [
+            "boundary",
+            "error"
+          ],
+          "red": {
+            "schema_version": 2,
+            "exit_code": 1,
+            "receipt_fingerprint": "92de581b3ad45aec00c22d2ff2f0cc91b71e96a5a150a5ab7f8a8bc21406e0c3",
+            "runner_fingerprint": "4138f8eb3a92c62f3f9801e1b86b96c0a20b1eb1670c53e5a8cb8ee0ba4e0932",
+            "evidence_level": "observed",
+            "stdout_fingerprint": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stderr_fingerprint": "b3c6b9a2a6510bea4c59669f30526dd61fa84b71d70c2922f43c410ab076e3fc",
+            "source_fingerprint": "ae538936ca33f214433af3be12b70d1949cc71d40291cf62e221c1e06e71cad0",
+            "command_display": "python3 -m unittest scripts.test_native_coverage.NativeCoverageTests.test_empty_or_all_ignored_inventories_never_report_coverage -v",
+            "test_check": {
+              "errors": 0,
+              "executed": 2,
+              "failed": 2,
+              "passed": 0,
+              "skipped": 0,
+              "xfailed": 0,
+              "xpassed": 0
+            }
+          },
+          "green": [
+            {
+              "schema_version": 2,
+              "exit_code": 0,
+              "receipt_fingerprint": "28673c70be208dd52b989f6acdeb4834f1bd7b1793e58b7bfb9e7a49deff6cf0",
+              "runner_fingerprint": "4138f8eb3a92c62f3f9801e1b86b96c0a20b1eb1670c53e5a8cb8ee0ba4e0932",
+              "evidence_level": "observed",
+              "stdout_fingerprint": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "stderr_fingerprint": "6315c74ab979112a1822d1aeae6a2603925c5eb7c104ae0884bd22e5d84245f1",
+              "source_fingerprint": "ea798c29816255c317c2569113ac6a6a3c6a7fe637068917622d4e47a4341d1b",
+              "command_display": "python3 -m unittest scripts.test_native_coverage.NativeCoverageTests.test_empty_or_all_ignored_inventories_never_report_coverage -v",
+              "test_check": {
+                "passed": 1,
+                "failed": 0,
+                "errors": 0,
+                "skipped": 0,
+                "xfailed": 0,
+                "xpassed": 0,
+                "executed": 1
+              }
+            },
+            {
+              "schema_version": 2,
+              "exit_code": 0,
+              "receipt_fingerprint": "28673c70be208dd52b989f6acdeb4834f1bd7b1793e58b7bfb9e7a49deff6cf0",
+              "runner_fingerprint": "4138f8eb3a92c62f3f9801e1b86b96c0a20b1eb1670c53e5a8cb8ee0ba4e0932",
+              "evidence_level": "observed",
+              "stdout_fingerprint": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "stderr_fingerprint": "6315c74ab979112a1822d1aeae6a2603925c5eb7c104ae0884bd22e5d84245f1",
+              "source_fingerprint": "ea798c29816255c317c2569113ac6a6a3c6a7fe637068917622d4e47a4341d1b",
+              "command_display": "python3 -m unittest scripts.test_native_coverage.NativeCoverageTests.test_empty_or_all_ignored_inventories_never_report_coverage -v",
+              "test_check": {
+                "passed": 1,
+                "failed": 0,
+                "errors": 0,
+                "skipped": 0,
+                "xfailed": 0,
+                "xpassed": 0,
+                "executed": 1
+              }
+            },
+            {
+              "schema_version": 2,
+              "exit_code": 0,
+              "receipt_fingerprint": "28673c70be208dd52b989f6acdeb4834f1bd7b1793e58b7bfb9e7a49deff6cf0",
+              "runner_fingerprint": "4138f8eb3a92c62f3f9801e1b86b96c0a20b1eb1670c53e5a8cb8ee0ba4e0932",
+              "evidence_level": "observed",
+              "stdout_fingerprint": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "stderr_fingerprint": "6315c74ab979112a1822d1aeae6a2603925c5eb7c104ae0884bd22e5d84245f1",
+              "source_fingerprint": "ea798c29816255c317c2569113ac6a6a3c6a7fe637068917622d4e47a4341d1b",
+              "command_display": "python3 -m unittest scripts.test_native_coverage.NativeCoverageTests.test_empty_or_all_ignored_inventories_never_report_coverage -v",
+              "test_check": {
+                "passed": 1,
+                "failed": 0,
+                "errors": 0,
+                "skipped": 0,
+                "xfailed": 0,
+                "xpassed": 0,
+                "executed": 1
+              }
+            }
+          ],
+          "mutation": null
+        }
+      ]
+    }
+  ],
+  "coverage": {
+    "threshold": 85,
+    "measured_lines_percent": 87.27,
+    "receipt": {
+      "schema_version": 2,
+      "exit_code": 0,
+      "receipt_fingerprint": "5032ee4f3f0e7ab9c8fb5212f0d65c77f0eaecd42cb5cccee275816c1da00116",
+      "runner_fingerprint": "4138f8eb3a92c62f3f9801e1b86b96c0a20b1eb1670c53e5a8cb8ee0ba4e0932",
+      "evidence_level": "observed",
+      "stdout_fingerprint": "14e9b85e0be668ce2ca610e7a332719291230353c93d3c917adadb0baa1aef7d",
+      "stderr_fingerprint": "6e894c89bee6b0cbaca414a20d63783973f0e94dbad15e3834337128422f4f8f",
+      "source_fingerprint": "ea798c29816255c317c2569113ac6a6a3c6a7fe637068917622d4e47a4341d1b",
+      "command_display": "python3 scripts/native-coverage.py"
+    }
+  },
+  "frontend": {
+    "tests": 2618,
+    "passed": 2613,
+    "skipped": 5,
+    "failed": 0,
+    "coverage_lines": 99.8,
+    "coverage_branches": 94.58,
+    "coverage_functions": 96.45,
+    "test_file_concurrency": 1
+  },
+  "reviews": [
+    {
+      "axis": "spec",
+      "profile": {
+        "budget": {
+          "max_output_chars": 24000,
+          "max_turns": 1,
+          "timeout_seconds": 600
+        },
+        "effective": {
+          "model": "gpt-6.1-sol",
+          "provider": "openai",
+          "reasoning_effort": "high"
+        },
+        "permissions": {
+          "network": "egress",
+          "shell": false,
+          "workspace": "read"
+        },
+        "profile_fingerprint": "5fa552d615317b7d62fd249ead2b9a25b9f6056c2ea6e1b13a662c3a1879a83c",
+        "requested": {
+          "model": "gpt-6.1-sol",
+          "reasoning_effort": "high"
+        },
+        "role": "reviewer",
+        "runner_id": "codex-exec-v1",
+        "schema_version": 1,
+        "worker_id": "reviewer-1"
+      },
+      "launch_fingerprint": "9ba797072df27cfc06d2eb018dcf46afcf0219e110d0d2fddbba565659a86038",
+      "result_receipt_fingerprint": "0d7646f9f9855553d6a09abcfba145db2c9fbfc755a9feae9680ae1a9b2d8859",
+      "review_record": {
+        "axis": "spec",
+        "finding_fingerprints": [],
+        "finding_records": [],
+        "independent": true,
+        "mode": "blind",
+        "phase": "initial",
+        "request_fingerprint": "d84e9ba9c80f3cf9c4bc9fbf68269392ff745df6210fe0a1d29d20f45f4d744c",
+        "reviewer_ref": "reviewer-1",
+        "source_fingerprint": "ea798c29816255c317c2569113ac6a6a3c6a7fe637068917622d4e47a4341d1b",
+        "status": "pass",
+        "task_id": "task-227360c105af5000f0d1c81b5826366693774540a536e2780ea38c29b6b5dbf0"
+      },
+      "raw_file_sha256": "bf79657d67232ab02e40d9637894231107160674257a1e7de45e0bf37b6f3e36"
+    },
+    {
+      "axis": "quality",
+      "profile": {
+        "budget": {
+          "max_output_chars": 24000,
+          "max_turns": 1,
+          "timeout_seconds": 600
+        },
+        "effective": {
+          "model": "gpt-6.1-sol",
+          "provider": "openai",
+          "reasoning_effort": "high"
+        },
+        "permissions": {
+          "network": "egress",
+          "shell": false,
+          "workspace": "read"
+        },
+        "profile_fingerprint": "5fa552d615317b7d62fd249ead2b9a25b9f6056c2ea6e1b13a662c3a1879a83c",
+        "requested": {
+          "model": "gpt-6.1-sol",
+          "reasoning_effort": "high"
+        },
+        "role": "reviewer",
+        "runner_id": "codex-exec-v1",
+        "schema_version": 1,
+        "worker_id": "reviewer-1"
+      },
+      "launch_fingerprint": "5ff2609924a457eaa0f90b4d8dec4532b78bd1c38c872627d9dcc9f41d0ee51a",
+      "result_receipt_fingerprint": "74d84829901cf198eb671833253c6627c5d45401dc4f1876810202c19b1cf3f1",
+      "review_record": {
+        "axis": "quality",
+        "finding_fingerprints": [],
+        "finding_records": [],
+        "independent": true,
+        "mode": "blind",
+        "phase": "initial",
+        "request_fingerprint": "c21e6bd7a25f886fd68ef11999a1a6c4b6f2d19d7d2cc69c95099c6118954b21",
+        "reviewer_ref": "reviewer-1",
+        "source_fingerprint": "ea798c29816255c317c2569113ac6a6a3c6a7fe637068917622d4e47a4341d1b",
+        "status": "pass",
+        "task_id": "task-227360c105af5000f0d1c81b5826366693774540a536e2780ea38c29b6b5dbf0"
+      },
+      "raw_file_sha256": "0bce315af22a21040609eb14195eb39b980f830b627581e7d4ec06909e494aef"
+    }
+  ],
+  "final_rerun": {
+    "schema_version": 2,
+    "exit_code": 0,
+    "receipt_fingerprint": "7e0fb6d5cdadde48234d3c4016bd3b245dad74380c2b41eb08b938710a645016",
+    "runner_fingerprint": "4138f8eb3a92c62f3f9801e1b86b96c0a20b1eb1670c53e5a8cb8ee0ba4e0932",
+    "evidence_level": "observed",
+    "stdout_fingerprint": "0d259d27bc1ff2533d79ecf6fe05689f03cbf89f02b09dfce44f0292e232bdbb",
+    "stderr_fingerprint": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "source_fingerprint": "ea798c29816255c317c2569113ac6a6a3c6a7fe637068917622d4e47a4341d1b",
+    "command_display": "/opt/homebrew/opt/python@3.14/bin/python3.14 <workspace>/.artifacts/root-causes-20261107/verify-frozen-source.txt rerun <source-workspace>/.git/convergent-delivery/state/2517ae3479d4d6110617d3ff56a45e75fee234d402a9d02502f662b50e8e32cc/415d231b29ea6bfc2778272caf4e01325d1284f693fdf19e468279acf05a93ac/d24d342529221479487a3328092b49a89b45f3a73c999205c1f7440199486498.json"
+  },
+  "manifest_audit": {
+    "schema_version": 2,
+    "exit_code": 0,
+    "receipt_fingerprint": "4ba61a884eb00ff2a14b1dcaf24e07644841b58108854ea7a62357ad2e43f5c8",
+    "runner_fingerprint": "4138f8eb3a92c62f3f9801e1b86b96c0a20b1eb1670c53e5a8cb8ee0ba4e0932",
+    "evidence_level": "observed",
+    "stdout_fingerprint": "4be06446d36872c8c2b381b20f7c91158eefad04e71560035e036c8849a1d6a3",
+    "stderr_fingerprint": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "source_fingerprint": "ea798c29816255c317c2569113ac6a6a3c6a7fe637068917622d4e47a4341d1b",
+    "command_display": "/opt/homebrew/opt/python@3.14/bin/python3.14 <workspace>/.artifacts/root-causes-20261107/verify-frozen-source.txt audit <source-workspace>/.git/convergent-delivery/state/2517ae3479d4d6110617d3ff56a45e75fee234d402a9d02502f662b50e8e32cc/415d231b29ea6bfc2778272caf4e01325d1284f693fdf19e468279acf05a93ac/d24d342529221479487a3328092b49a89b45f3a73c999205c1f7440199486498.json"
+  },
+  "cleanup": {
+    "status": "released"
+  },
+  "plan_summary": {
+    "plan_id": "task-26a236d050d08795afa7bceac735f518e8def5340418567739a2cc5dd19733bf",
+    "raw_plan_sha256": "ceb90eb13dc524981bb2596d13c6e27f72cca02763803338bd3b242ebe263b38",
+    "tasks": [
+      {
+        "task_id": "T1",
+        "task_kind": "vertical_slice",
+        "goal": "High-frequency IPC remains responsive without weakening ordering or ownership",
+        "outcomes": [
+          "High-frequency IPC remains responsive without weakening ordering or ownership"
+        ],
+        "depends_on": [],
+        "owned_paths": [
+          "apps/desktop/src-tauri/src/desktop_windows.rs",
+          "apps/desktop/src-tauri/src/lib.rs",
+          "apps/desktop/tests/session-start-responsiveness.test.mjs",
+          "docs/plans/2026-11-07-lifecycle"
+        ],
+        "acceptance": [
+          "High-frequency IPC remains responsive without weakening ordering or ownership"
+        ]
+      },
+      {
+        "task_id": "T2",
+        "task_kind": "vertical_slice",
+        "goal": "Post-commit startup failures persist failed outcomes without orphan starting records",
+        "outcomes": [
+          "Post-commit startup failures persist failed outcomes without orphan starting records"
+        ],
+        "depends_on": [
+          "T1"
+        ],
+        "owned_paths": [
+          "apps/desktop/src-tauri/src/lib.rs",
+          "apps/desktop/src-tauri/src/coverage_state_tests.rs"
+        ],
+        "acceptance": [
+          "Post-commit startup failures persist failed outcomes without orphan starting records"
+        ]
+      },
+      {
+        "task_id": "T3",
+        "task_kind": "vertical_slice",
+        "goal": "A completed process can retry final persistence without stopping other sessions",
+        "outcomes": [
+          "A completed process can retry final persistence without stopping other sessions"
+        ],
+        "depends_on": [
+          "T2"
+        ],
+        "owned_paths": [
+          "apps/desktop/src-tauri/src/lib.rs",
+          "apps/desktop/src-tauri/src/background.rs",
+          "apps/desktop/src-tauri/src/coverage_state_tests.rs",
+          "apps/desktop/src/App.tsx",
+          "apps/desktop/src/session-recovery.ts",
+          "apps/desktop/src/i18n.ts",
+          "apps/desktop/tests/lifecycle-confirmation-ui.test.mjs",
+          "apps/desktop/tests/session-recovery.test.mjs",
+          "apps/desktop/src/translations.zh.ts",
+          "docs/plans/2026-11-07-lifecycle",
+          "apps/desktop/tests/terminal-views.test.mjs",
+          "apps/desktop/tests/browser-window-ui.test.mjs"
+        ],
+        "acceptance": [
+          "A completed process can retry final persistence without stopping other sessions"
+        ]
+      },
+      {
+        "task_id": "T4",
+        "task_kind": "vertical_slice",
+        "goal": "Run diff baselines survive GUI restart with private bounded storage",
+        "outcomes": [
+          "Run diff baselines survive GUI restart with private bounded storage"
+        ],
+        "depends_on": [
+          "T3"
+        ],
+        "owned_paths": [
+          "apps/desktop/src-tauri/src/run_changes.rs",
+          "apps/desktop/src/RunChanges.tsx",
+          "apps/desktop/src/translations.zh.ts",
+          "apps/desktop/tests/run-changes-ui.test.mjs",
+          "docs/plans/2026-11-07-lifecycle",
+          "apps/desktop/src-tauri/src/lib.rs",
+          "apps/desktop/src-tauri/src/history.rs",
+          "apps/desktop/src-tauri/src/project_files.rs"
+        ],
+        "acceptance": [
+          "Run diff baselines survive GUI restart with private bounded storage"
+        ]
+      },
+      {
+        "task_id": "T5",
+        "task_kind": "vertical_slice",
+        "goal": "Task completion UI exposes result and evidence without claiming test success",
+        "outcomes": [
+          "Task completion UI exposes result and evidence without claiming test success"
+        ],
+        "depends_on": [
+          "T4"
+        ],
+        "owned_paths": [
+          "apps/desktop/src/App.tsx",
+          "apps/desktop/src/i18n.ts",
+          "apps/desktop/src/RunChanges.tsx",
+          "apps/desktop/tests",
+          "docs/plans/2026-11-07-lifecycle",
+          "apps/desktop/src/translations.zh.ts",
+          "apps/desktop/src/agent-events.ts"
+        ],
+        "acceptance": [
+          "Task completion UI exposes result and evidence without claiming test success"
+        ]
+      }
+    ]
+  },
+  "local_raw_files": [
+    {
+      "relative_path": ".artifacts/root-causes-20261107/trace-final.json",
+      "sha256": "e9511bbfa1bc54c10e3bf4346b25408a2a391837c8f82eef72509693e700ebe3"
+    },
+    {
+      "relative_path": ".artifacts/root-causes-20261107/report.json",
+      "sha256": "041efcc87c701f468b9df07ebbe24e65a54d65bccc6ee584fb22d27be7e16a86"
+    },
+    {
+      "relative_path": ".artifacts/root-causes-20261107/spec.json",
+      "sha256": "bf79657d67232ab02e40d9637894231107160674257a1e7de45e0bf37b6f3e36"
+    },
+    {
+      "relative_path": ".artifacts/root-causes-20261107/quality.json",
+      "sha256": "0bce315af22a21040609eb14195eb39b980f830b627581e7d4ec06909e494aef"
+    },
+    {
+      "relative_path": ".artifacts/root-causes-20261107/final-verification-receipt.json",
+      "sha256": "21f3d297bf08d031bc3cae41c71cc1646c38625c9956ce00439a83ac7a2be5d1"
+    },
+    {
+      "relative_path": ".artifacts/root-causes-20261107/manifest-audit-receipt.json",
+      "sha256": "ddfbfbc050f36e120ec321e8e3d6254f5e113a8c55652bde9740ffaafc52a4b9"
+    },
+    {
+      "relative_path": ".artifacts/root-causes-20261107/lease-cleanup.json",
+      "sha256": "4ffd4e34c3250c16a7af16982c82d901be39bb4a1b067a575cca08f268ecd6e5"
+    }
+  ],
+  "archived_logs": [
+    {
+      "file": "evidence/frontend-coverage.txt",
+      "local_raw_sha256": "c77eab38984981ea03ab61cc1549f1941b12059526fa8caa1d2d6ca456e06612",
+      "archived_sha256": "603ab43e2ca33da7eb2fe45775f1aa7130522d82485e4ea82444f1bdc54a7520",
+      "path_normalized": true,
+      "local_raw_name": "frontend-coverage.log",
+      "normalization": [
+        "host_paths",
+        "trailing_whitespace"
+      ]
+    },
+    {
+      "file": "evidence/frontend-build.txt",
+      "local_raw_sha256": "e2a5ace41e3015b80edf234552e58d06dc371d14eb35487fc226ac039cd338e8",
+      "archived_sha256": "626f3d1e300748822d198925e8409d4e2ed14ab8b2ad53955726fa827bcf8e91",
+      "path_normalized": true,
+      "local_raw_name": "frontend-build.log",
+      "normalization": [
+        "host_paths",
+        "trailing_whitespace"
+      ]
+    },
+    {
+      "file": "evidence/native-line-coverage.txt",
+      "local_raw_sha256": "e9d054eca8922b709188f2af08e56dba7f484342b2e58cc8a6042adf80b2c02a",
+      "archived_sha256": "e9d054eca8922b709188f2af08e56dba7f484342b2e58cc8a6042adf80b2c02a",
+      "path_normalized": true,
+      "local_raw_name": "native-line-coverage.log",
+      "normalization": [
+        "host_paths",
+        "trailing_whitespace"
+      ]
+    },
+    {
+      "file": "evidence/clippy.txt",
+      "local_raw_sha256": "6c81848bf2ea0d8497d0ac4f1bd3cf51c18008beba6192027dfedf036f81812d",
+      "archived_sha256": "b6041c1431a898d9e7aee7b1ab2f49013a47abeedc4920a11c8c5ecf32a8b39b",
+      "path_normalized": true,
+      "local_raw_name": "clippy.log",
+      "normalization": [
+        "host_paths",
+        "trailing_whitespace"
+      ]
+    },
+    {
+      "file": "evidence/doctest.txt",
+      "local_raw_sha256": "b824c00e0110cde1975c987414690cb3cf6c3c377b65c669d1f69bfd8a34f233",
+      "archived_sha256": "379d320d5ba066a11eddecb1a1604ca647d3029bf9a805b6bc7abfdab1f74a4c",
+      "path_normalized": true,
+      "local_raw_name": "doctest.log",
+      "normalization": [
+        "host_paths",
+        "trailing_whitespace"
+      ]
+    },
+    {
+      "file": "evidence/delivery-ui.txt",
+      "local_raw_sha256": "075c43922f1404ba34999cd2765ff0d463331f12b33f959cc598b4c58dce11c6",
+      "archived_sha256": "075c43922f1404ba34999cd2765ff0d463331f12b33f959cc598b4c58dce11c6",
+      "path_normalized": true,
+      "local_raw_name": "delivery-ui.log",
+      "normalization": [
+        "host_paths",
+        "trailing_whitespace"
+      ]
+    },
+    {
+      "file": "evidence/mutation-scope.diff",
+      "archived_sha256": "98ff865c387930c2fca99097143a551a917817ce94f19cf2416f0aa7f579c52e",
+      "local_raw_sha256": "98ff865c387930c2fca99097143a551a917817ce94f19cf2416f0aa7f579c52e",
+      "path_normalized": false
+    }
+  ],
+  "skipped": [
+    "real Claude/API integration",
+    "GUI and browser opt-in acceptance",
+    "Windows/Linux runtime",
+    "packaging/release",
+    "remote CI (not yet triggered)"
+  ],
+  "historical_records_note": "Earlier blocked runs and failed logs remain in local .artifacts/converge-acceptance-20261107 and lifecycle-20261107; they do not count as current passing evidence."
+}

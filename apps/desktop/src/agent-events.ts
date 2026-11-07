@@ -1,6 +1,23 @@
 export type AgentReceipt = {id:string;revision:number;turn_id:string;kind:string;delivery:string;read:boolean;error:string|null};
 export type AgentState = {cli_path?:string|null;cli_version?:string|null;cli_platform?:string|null;generation?:string;process_run?:string|null;turn_id?:string|null;revision?:number;phase:string;integration:string;agent_session_id:string|null;inbox:AgentReceipt[]};
 export function unreadCount(agent?:AgentState):number{return agent?.inbox.filter(entry=>!entry.read).length??0;}
+export function taskDeliveryNotice(agent?:AgentState,status='running'):string|null{
+ if(status==='succeeded')return 'Process ended. Tests and task acceptance are not verified by YAM.';
+ if(['failed','stopped','needs_attention'].includes(status))return 'Task status recorded. Tests and task acceptance are not verified by YAM.';
+ if(!['starting','running'].includes(status))return null;
+ const outcomes=['response_finished','needs_attention','failed','interrupted'];
+ let outcome=agent?.integration==='connected'?agent.phase:undefined;
+ if(agent?.phase==='shell'&&agent.generation&&agent.turn_id){
+  const prefix=`${agent.generation}:${agent.turn_id}:`;
+  for(let i=agent.inbox.length-1;i>=0;i--){
+   const receipt=agent.inbox[i];
+   if(receipt.turn_id===agent.turn_id&&receipt.id.startsWith(prefix)&&outcomes.includes(receipt.kind)){outcome=receipt.kind;break;}
+  }
+ }
+ if(outcome==='response_finished'||outcome==='needs_attention')return 'Agent response available. Tests and task acceptance are not verified by YAM.';
+ if(outcome==='failed'||outcome==='interrupted')return 'Agent turn failed or was interrupted. Tests and task acceptance are not verified by YAM.';
+ return null;
+}
 export function agentLabel(agent?:AgentState,status="running"):string{
  if(agent?.phase==='shell')return ['starting','running'].includes(status)?'Shell · waiting for input':'Agent exited';
  if(!agent||agent.integration.startsWith('unavailable'))return 'Integration unavailable';
