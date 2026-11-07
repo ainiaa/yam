@@ -1309,5 +1309,12 @@
     "packaging/release",
     "remote CI (not yet triggered)"
   ],
-  "historical_records_note": "Earlier blocked runs and failed logs remain in local .artifacts/converge-acceptance-20261107 and lifecycle-20261107; they do not count as current passing evidence."
+  "historical_records_note": "Earlier blocked runs and failed logs remain in local .artifacts/converge-acceptance-20261107 and lifecycle-20261107; they do not count as current passing evidence.",
+  "committed_source_review": {
+    "reviewed_commit": "4ede482c5b7914cc863b3a81c6038f497dd02c02",
+    "metadata": "evidence/stable-source-review.json",
+    "metadata_sha256": "19e6ac5d342e417c8ae8aa09192b2bd1c02c61c4831ba91baf8fb4b044e5c8fa",
+    "result": "no_actionable_regressions",
+    "source_files_match_accepted_hashes": true
+  }
 }
