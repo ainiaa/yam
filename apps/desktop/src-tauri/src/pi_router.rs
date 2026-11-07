@@ -57,6 +57,7 @@ pub(super) fn command(
                 | "--thinking"
                 | "--provider"
                 | "--yam-small"
+                | "--yam-medium"
                 | "--yam-strong"
                 | "--yam-classifier"
                 | "--yam-gateway"
@@ -133,6 +134,7 @@ pub(super) fn stage(root: &Path) -> Result<PathBuf, String> {
         ("policy.mjs", include_str!("../pi/policy.mjs")),
         ("task-rules.mjs", include_str!("../pi/task-rules.mjs")),
         ("control.mjs", include_str!("../pi/control.mjs")),
+        ("failure.mjs", include_str!("../pi/failure.mjs")),
         ("agent-plan.mjs", include_str!("../pi/agent-plan.mjs")),
         (
             "agent-executor.mjs",
@@ -296,6 +298,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("yam-pi-rules-{}", next_session_id()));
         let entry = super::stage(&root).unwrap();
         assert!(entry.parent().unwrap().join("task-rules.mjs").is_file());
+        assert!(entry.parent().unwrap().join("failure.mjs").is_file());
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
@@ -454,6 +457,15 @@ pub(super) fn control_request(
 ) -> Result<serde_json::Value, String> {
     use std::net::{Shutdown, SocketAddr, TcpStream};
     use std::time::Duration;
+    let control_failure = |sent: bool| {
+        serde_json::json!({"controlFailure":{
+            "category":if sent {"unknown"} else {"connection"},
+            "stage":"control",
+            "code":if sent {"control-result-unknown"} else {"control-unavailable"},
+            "dispatch":if sent {"unknown"} else {"not-started"},
+            "nextAction":"refresh-state"
+        }})
+    };
     require_pi(record)?;
     if record.status != "running" || record.agent.generation != generation {
         return Err("Pi runtime ended or changed; refresh before changing routing".into());
@@ -463,8 +475,17 @@ pub(super) fn control_request(
         .keys()
         .any(|k| !["action", "revision", "data"].contains(&k.as_str()))
         || request["revision"].as_u64().is_none()
-        || !["set", "reset", "retry", "catalog", "rules", "preview"]
-            .contains(&request["action"].as_str().unwrap_or(""))
+        || ![
+            "set",
+            "reset",
+            "retry",
+            "catalog",
+            "rules",
+            "preview",
+            "native-recovery",
+            "native-reset",
+        ]
+        .contains(&request["action"].as_str().unwrap_or(""))
         || request.to_string().len() > 32768
     {
         return Err("Invalid Pi control".into());
@@ -474,39 +495,50 @@ pub(super) fn control_request(
         [127, 0, 0, 1],
         value["port"].as_u64().ok_or("Invalid Pi control port")? as u16,
     ));
-    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))
-        .map_err(|_| "Pi control connection unavailable")?;
-    stream
+    let mut stream = match TcpStream::connect_timeout(&address, Duration::from_secs(2)) {
+        Ok(stream) => stream,
+        Err(_) => return Ok(control_failure(false)),
+    };
+    if stream
         .set_read_timeout(Some(Duration::from_secs(18)))
-        .map_err(|_| "Pi control timeout unavailable")?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(2)))
-        .map_err(|_| "Pi control timeout unavailable")?;
+        .is_err()
+        || stream
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .is_err()
+    {
+        return Ok(control_failure(false));
+    }
     let mut wire = request;
     wire["token"] = value["token"].clone();
     wire["generation"] = generation.into();
-    stream
+    // Once sending begins, even a rejection can follow a mutation whose publication failed.
+    if stream
         .write_all(wire.to_string().as_bytes())
         .and_then(|_| stream.shutdown(Shutdown::Write))
-        .map_err(|_| "Pi control disconnected")?;
+        .is_err()
+    {
+        return Ok(control_failure(true));
+    }
     let mut bytes = Vec::new();
-    stream
+    if stream
         .take(2 * 1024 * 1024 + 1)
         .read_to_end(&mut bytes)
-        .map_err(|_| "Pi control response unavailable")?;
+        .is_err()
+    {
+        return Ok(control_failure(true));
+    }
     if bytes.len() > 2 * 1024 * 1024 {
-        return Err("Pi control response exceeds limit".into());
+        return Ok(control_failure(true));
     }
-    let response: serde_json::Value =
-        serde_json::from_slice(&bytes).map_err(|_| "Invalid Pi control response")?;
-    if response["ok"] != true {
-        return Err(response["error"]
-            .as_str()
-            .unwrap_or("Pi control rejected")
-            .to_string());
-    }
-    if response["state"]["generation"] != generation {
-        return Err("Pi runtime changed".into());
+    let response: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(response) => response,
+        Err(_) => return Ok(control_failure(true)),
+    };
+    if response["ok"] != true
+        || response["state"]["generation"] != generation
+        || response["state"]["revision"].as_u64().is_none()
+    {
+        return Ok(control_failure(true));
     }
     // Never forward arbitrary fields (including a descriptor credential) to the webview.
     Ok(serde_json::json!({"state":response["state"],"models":response["models"]}))
@@ -758,24 +790,95 @@ mod control_tests {
         assert!(control_request(&root, &record, "g", request.clone()).is_err());
         record.status = "running".into();
         let worker = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
-                .unwrap();
-            let mut raw = String::new();
-            stream.read_to_string(&mut raw).unwrap();
-            let wire: serde_json::Value = serde_json::from_str(&raw).unwrap();
-            assert_eq!(wire["token"], token);
-            assert_eq!(wire["generation"], "g");
-            assert_eq!(wire["action"], "preview");
-            stream.write_all(serde_json::json!({"ok":true,"token":token,"state":{"generation":"g","revision":2},"models":[]}).to_string().as_bytes()).unwrap();
+            for action in ["preview", "native-recovery", "native-reset"] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                    .unwrap();
+                let mut raw = String::new();
+                stream.read_to_string(&mut raw).unwrap();
+                let wire: serde_json::Value = serde_json::from_str(&raw).unwrap();
+                assert_eq!(wire["token"], token);
+                assert_eq!(wire["generation"], "g");
+                assert_eq!(wire["action"], action);
+                stream.write_all(serde_json::json!({"ok":true,"token":token,"state":{"generation":"g","revision":2},"models":[]}).to_string().as_bytes()).unwrap();
+            }
         });
         let reply = control_request(&root, &record, "g", request).unwrap();
-        worker.join().unwrap();
         assert!(reply.get("token").is_none());
         assert_eq!(reply["state"]["revision"], 2);
+        for action in ["native-recovery", "native-reset"] {
+            let request = serde_json::json!({"action":action,"revision":1,"data":{"receiptId":"receipt-current","confirmed":true}});
+            assert!(control_request(&root, &record, "old", request.clone()).is_err());
+            record.status = "stopped".into();
+            assert!(control_request(&root, &record, "g", request.clone()).is_err());
+            record.status = "running".into();
+            let reply = control_request(&root, &record, "g", request).unwrap();
+            assert!(reply.get("token").is_none());
+        }
+        worker.join().unwrap();
         record.summary.launch = None;
         assert!(read_state(&root, &record).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn pi_router_control_failure_distinguishes_pre_send_from_unknown_after_send() {
+        use std::net::TcpListener;
+        let root = std::env::temp_dir().join(format!(
+            "yam-pi-failure-{}",
+            crate::gemini_resume::new_id().unwrap()
+        ));
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let path = control_file(&root, "s-pi-failure").unwrap();
+        let token = "b".repeat(64);
+        let descriptor = serde_json::json!({"v":1,"port":address.port(),"token":token,"state":{"generation":"g","revision":1}});
+        crate::background::private_file(&path, true)
+            .unwrap()
+            .write_all(descriptor.to_string().as_bytes())
+            .unwrap();
+        let agent = crate::agent_events::AgentState {
+            generation: "g".into(),
+            ..Default::default()
+        };
+        let record: crate::SessionRecord = serde_json::from_value(serde_json::json!({"summary":{"session_id":"s-pi-failure","cwd":"/tmp","command":null,"status":"running","launch":{"adapter":"pi","mode":"interactive","extra_args":"","prompt":null}},"status":"running","exit_code":null,"reason":null,"started_at":0,"ended_at":null,"agent":agent})).unwrap();
+        let replies = ["not json".to_string(), serde_json::json!({"ok":false,"error":"PRIVATE_TOKEN","token":token}).to_string(), serde_json::json!({"ok":true,"state":{"generation":"other","revision":2},"token":token}).to_string(), String::new()];
+        let worker = std::thread::spawn(move || {
+            for reply in replies {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                    .unwrap();
+                let mut wire = String::new();
+                stream.read_to_string(&mut wire).unwrap();
+                stream.write_all(reply.as_bytes()).unwrap();
+            }
+        });
+        for _ in 0..4 {
+            let reply = control_request(
+                &root,
+                &record,
+                "g",
+                serde_json::json!({"action":"reset","revision":1}),
+            )
+            .unwrap();
+            assert_eq!(reply["controlFailure"]["code"], "control-result-unknown");
+            assert_eq!(reply["controlFailure"]["dispatch"], "unknown");
+            assert_eq!(reply["controlFailure"]["nextAction"], "refresh-state");
+            assert!(!reply.to_string().contains("PRIVATE_TOKEN"));
+            assert!(!reply.to_string().contains("bbbbbbbb"));
+            assert!(reply.get("state").is_none());
+        }
+        worker.join().unwrap();
+        let reply = control_request(
+            &root,
+            &record,
+            "g",
+            serde_json::json!({"action":"reset","revision":1}),
+        )
+        .unwrap();
+        assert_eq!(reply["controlFailure"]["code"], "control-unavailable");
+        assert_eq!(reply["controlFailure"]["dispatch"], "not-started");
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]

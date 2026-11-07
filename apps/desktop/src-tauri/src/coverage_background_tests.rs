@@ -1394,6 +1394,7 @@ fn rust85_owner_git_wrappers_fail_without_client_and_query_only_a_private_non_re
         fixture.root.to_string_lossy().into(),
         "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".into(),
         None,
+        None,
         None
     ))
     .is_err());

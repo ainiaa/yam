@@ -557,6 +557,7 @@ fn query_snapshot(
 #[derive(Default)]
 struct QueryOutput<'a> {
     changes: Option<(&'a str, Option<(&'a str, &'a str)>)>,
+    baseline: Option<&'a str>,
     inventory: Option<&'a mut TrackedInventory>,
 }
 fn query_snapshot_changes(
@@ -568,7 +569,11 @@ fn query_snapshot_changes(
     output: QueryOutput<'_>,
     cancel: Option<&AtomicBool>,
 ) -> Result<(GitContext, Option<CleanupSnapshot>, Option<GitChanges>), String> {
-    let QueryOutput { changes, inventory } = output;
+    let QueryOutput {
+        changes,
+        inventory,
+        baseline,
+    } = output;
     check_cancel(cancel)?;
     let _query = QUERY_GATE.try_lock().map_err(|_| "git_busy")?;
     let mut budget = Budget {
@@ -634,6 +639,9 @@ fn query_snapshot_changes(
         &["rev-parse", "--is-inside-work-tree"],
     )?;
     if !discover.status.success() {
+        if baseline.is_some() {
+            return Err("git_baseline_unavailable".into());
+        }
         return Ok((
             GitContext {
                 kind: "not_repository".into(),
@@ -649,6 +657,7 @@ fn query_snapshot_changes(
                 root: None,
                 rows: Vec::new(),
                 patch: None,
+                comparison: None,
             }),
         ));
     }
@@ -739,6 +748,15 @@ fn query_snapshot_changes(
     {
         return Err("git_conversion_unsupported".into());
     }
+    let comparison = baseline
+        .map(|reference| -> Result<GitComparison, String> {
+            Ok(GitComparison {
+                reference: reference.into(),
+                base: resolve_commit(git, &root, &env, &mut budget, cancel, reference)?,
+                head: oid.clone().ok_or("git_baseline_unavailable")?,
+            })
+        })
+        .transpose()?;
     let tracked = git_command_cancel(
         cancel,
         git,
@@ -994,7 +1012,34 @@ fn query_snapshot_changes(
         return Err("git_submodule_unavailable".into());
     }
     let change_result = if let Some((token, selected)) = changes {
-        let rows = parse_change_rows(&status.stdout)?;
+        let rows = if let Some(comparison) = &comparison {
+            let diff = git_command_cancel(
+                cancel,
+                git,
+                &root,
+                &safe_env,
+                &mut budget,
+                &[
+                    "diff",
+                    "--raw",
+                    "-z",
+                    "--no-abbrev",
+                    "--no-renames",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--ignore-submodules=none",
+                    &comparison.base,
+                    &comparison.head,
+                    "--",
+                ],
+            )?;
+            if !diff.status.success() {
+                return Err("git_query_failed".into());
+            }
+            parse_committed_rows(&diff.stdout)?
+        } else {
+            parse_change_rows(&status.stdout)?
+        };
         let patch = if let Some((selected_path, side)) = selected {
             let row = rows
                 .iter()
@@ -1004,6 +1049,7 @@ fn query_snapshot_changes(
                 Some("unsupported")
             } else if (side == "staged" && row.staged == " ")
                 || (side == "worktree" && row.worktree == " ")
+                || (side == "committed" && row.committed.is_none())
             {
                 return Err("git_context_changed".into());
             } else {
@@ -1029,6 +1075,9 @@ fn query_snapshot_changes(
                 ];
                 if side == "staged" {
                     args.push("--cached");
+                }
+                if let Some(comparison) = &comparison {
+                    args.extend([comparison.base.as_str(), comparison.head.as_str()]);
                 }
                 args.extend(["--", selected_path]);
                 let stat = git_command_cancel(cancel, git, &root, &safe_env, &mut budget, &args)?;
@@ -1072,6 +1121,7 @@ fn query_snapshot_changes(
             root: Some(parts[0].into()),
             rows,
             patch,
+            comparison: comparison.clone(),
         })
     } else {
         None
@@ -1145,6 +1195,34 @@ fn query_snapshot_changes(
     };
     if final_oid != oid {
         return Err("git_context_changed".into());
+    }
+    if let Some(comparison) = &comparison {
+        if resolve_commit(git, &root, &env, &mut budget, cancel, &comparison.reference)?
+            != comparison.base
+        {
+            return Err("git_context_changed".into());
+        }
+        let current_branch = git_command_cancel(
+            cancel,
+            git,
+            &path,
+            &env,
+            &mut budget,
+            &["symbolic-ref", "--quiet", "--short", "HEAD"],
+        )?;
+        let current_branch = if current_branch.status.success() {
+            Some(
+                String::from_utf8(current_branch.stdout)
+                    .map_err(|_| "git_query_failed")?
+                    .trim_end()
+                    .to_owned(),
+            )
+        } else {
+            None
+        };
+        if current_branch != branch {
+            return Err("git_context_changed".into());
+        }
     }
     if has_submodule && status.stdout.is_empty() && staged.stdout.is_empty() {
         return Err("git_submodule_unavailable".into());
@@ -1515,7 +1593,7 @@ mod tests {
         let mut sentinel = Command::new("/bin/sleep").arg("30").spawn().unwrap();
         let worker = std::thread::spawn(move || {
             F3_TEST_GIT.with(|value| *value.borrow_mut() = Some(executable));
-            let result = query_changes(&path, "closure-t09", "owned-client", token, None);
+            let result = query_changes(&path, "closure-t09", "owned-client", token, None, None);
             F3_TEST_GIT.with(|value| *value.borrow_mut() = None);
             result
         });
@@ -1556,7 +1634,7 @@ mod tests {
         );
         assert!(CHANGE_REGISTRY.lock().unwrap().active.is_none());
         assert!(
-            query_changes(&repo.0, "closure-t09", "owned-client", token, None).is_ok(),
+            query_changes(&repo.0, "closure-t09", "owned-client", token, None, None).is_ok(),
             "same token is reusable after admitted query cleanup"
         );
     }
@@ -2158,6 +2236,7 @@ mod tests {
             false,
             QueryOutput {
                 changes: Some(("ignore-test", Some(("file.txt", "worktree")))),
+                baseline: None,
                 inventory: Some(&mut inventory),
             },
             None,
@@ -2345,6 +2424,40 @@ mod tests {
     }
 
     #[test]
+    fn branch_compare_snapshot_rejects_moved_baseline_and_same_oid_branch_switch() {
+        let _serial = serial_query_test();
+        for change in ["baseline", "branch"] {
+            let repo = Repo::new();
+            repo.commit();
+            let base = repo.git(&["rev-parse", "HEAD"]);
+            repo.git(&["branch", "baseline", &base]);
+            fs::write(repo.0.join("file.txt"), "committed\n").unwrap();
+            repo.git(&["commit", "-am", "change"]);
+            repo.git(&["branch", "other"]);
+            let head = repo.git(&["rev-parse", "HEAD"]);
+            let result = query_snapshot_changes(
+                &repo.0,
+                &crate::find_executable("git").unwrap(),
+                config_environment().unwrap(),
+                || {
+                    if change == "baseline" {
+                        repo.git(&["update-ref", "refs/heads/baseline", &head]);
+                    } else {
+                        repo.git(&["symbolic-ref", "HEAD", "refs/heads/other"]);
+                    }
+                },
+                false,
+                QueryOutput {
+                    changes: Some(("branch-snapshot", None)),
+                    baseline: Some("baseline"),
+                    ..Default::default()
+                },
+                None,
+            );
+            assert_eq!(result.unwrap_err(), "git_context_changed");
+        }
+    }
+    #[test]
     fn f3_unborn_unicode_literal_binary_and_deleted_changes() {
         let _serial = serial_query_test();
         let repo = Repo::new();
@@ -2352,7 +2465,7 @@ mod tests {
         fs::write(repo.0.join(name), "first\n").unwrap();
         repo.git(&["--literal-pathspecs", "add", "--", name]);
         let token = "d2345678-1234-4234-8234-123456789abc";
-        let patch = query_changes(&repo.0, "o", "u", token, Some((name, "staged")))
+        let patch = query_changes(&repo.0, "o", "u", token, Some((name, "staged")), None)
             .unwrap()
             .patch
             .unwrap();
@@ -2361,7 +2474,7 @@ mod tests {
         repo.git(&["commit", "-m", "unicode fixture"]);
         fs::write(repo.0.join(name), [0, 1, 2, 3]).unwrap();
         assert_eq!(
-            query_changes(&repo.0, "o", "u", token, Some((name, "worktree")))
+            query_changes(&repo.0, "o", "u", token, Some((name, "worktree")), None)
                 .unwrap()
                 .patch
                 .unwrap()
@@ -2369,7 +2482,7 @@ mod tests {
             "binary"
         );
         fs::remove_file(repo.0.join(name)).unwrap();
-        assert!(query_changes(&repo.0, "o", "u", token, None)
+        assert!(query_changes(&repo.0, "o", "u", token, None, None)
             .unwrap()
             .rows
             .iter()
@@ -2383,7 +2496,7 @@ mod tests {
         let token = "e2345678-1234-4234-8234-123456789abc";
         fs::write(repo.0.join("new"), "SECRET").unwrap();
         assert_eq!(
-            query_changes(&repo.0, "o", "p", token, Some(("new", "worktree")))
+            query_changes(&repo.0, "o", "p", token, Some(("new", "worktree")), None)
                 .unwrap()
                 .patch
                 .unwrap()
@@ -2391,12 +2504,28 @@ mod tests {
             "unsupported"
         );
         assert_eq!(
-            query_changes(&repo.0, "o", "p", token, Some(("not-listed", "staged"))).unwrap_err(),
+            query_changes(
+                &repo.0,
+                "o",
+                "p",
+                token,
+                Some(("not-listed", "staged")),
+                None
+            )
+            .unwrap_err(),
             "git_context_changed"
         );
         fs::write(repo.0.join("file.txt"), "line\n".repeat(60000)).unwrap();
         assert_eq!(
-            query_changes(&repo.0, "o", "p", token, Some(("file.txt", "worktree"))).unwrap_err(),
+            query_changes(
+                &repo.0,
+                "o",
+                "p",
+                token,
+                Some(("file.txt", "worktree")),
+                None
+            )
+            .unwrap_err(),
             "git_output_limit"
         );
     }
@@ -2419,6 +2548,7 @@ mod tests {
                 "o",
                 "p",
                 "f2345678-1234-4234-8234-123456789abc",
+                None,
                 None
             )
             .unwrap_err(),
@@ -2440,9 +2570,11 @@ mod tests {
                         worktree: "M".into(),
                         untracked: false,
                         unsupported: false,
+                        committed: None,
                     })
                     .collect(),
                 patch: None,
+                comparison: None,
             };
             let current = serde_json::to_vec(&value).unwrap().len();
             assert!(current <= bytes);
@@ -2485,6 +2617,7 @@ mod tests {
                 "o",
                 "p",
                 "62345678-1234-4234-8234-123456789abc",
+                None,
                 None
             )
             .unwrap_err(),
@@ -2551,6 +2684,7 @@ mod tests {
             "client",
             "12345678-1234-4234-8234-123456789abc",
             None,
+            None,
         )
         .unwrap();
         let row = value.rows.iter().find(|r| r.path == "file.txt").unwrap();
@@ -2576,6 +2710,7 @@ mod tests {
                 "client",
                 "12345678-1234-4234-8234-123456789abc",
                 Some(("file.txt", side)),
+                None,
             )
             .unwrap();
             let patch = result.patch.unwrap();
@@ -2591,7 +2726,7 @@ mod tests {
         let token = "a2345678-1234-4234-8234-123456789abc";
         cancel_changes("owner", "early", token).unwrap();
         assert_eq!(
-            query_changes(&repo.0, "owner", "early", token, None).unwrap_err(),
+            query_changes(&repo.0, "owner", "early", token, None, None).unwrap_err(),
             "git_cancelled"
         );
     }
@@ -2706,6 +2841,8 @@ pub(crate) struct GitChange {
     pub worktree: String,
     pub untracked: bool,
     pub unsupported: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committed: Option<String>,
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2723,6 +2860,103 @@ pub(crate) struct GitChanges {
     pub root: Option<String>,
     pub rows: Vec<GitChange>,
     pub patch: Option<GitPatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comparison: Option<GitComparison>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GitComparison {
+    pub reference: String,
+    pub base: String,
+    pub head: String,
+}
+
+pub(crate) fn valid_baseline(reference: &str) -> bool {
+    !reference.is_empty()
+        && reference.len() <= 256
+        && !reference.starts_with('-')
+        && !reference
+            .chars()
+            .any(|c| c.is_control() || c.is_whitespace())
+}
+fn resolve_commit(
+    git: &Path,
+    root: &Path,
+    env: &[(OsString, OsString)],
+    budget: &mut Budget,
+    cancel: Option<&AtomicBool>,
+    reference: &str,
+) -> Result<String, String> {
+    if !valid_baseline(reference) {
+        return Err("git_invalid_request".into());
+    }
+    let revision = format!("{reference}^{{commit}}");
+    let result = git_command_cancel(
+        cancel,
+        git,
+        root,
+        env,
+        budget,
+        &["rev-parse", "--verify", "--end-of-options", &revision],
+    )?;
+    if !result.status.success() {
+        return Err("git_baseline_unavailable".into());
+    }
+    let oid = String::from_utf8(result.stdout)
+        .map_err(|_| "git_conversion_unsupported")?
+        .trim_end()
+        .to_owned();
+    if oid.len() != 40 || !oid.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("git_conversion_unsupported".into());
+    }
+    Ok(oid)
+}
+fn parse_committed_rows(bytes: &[u8]) -> Result<Vec<GitChange>, String> {
+    if !bytes.is_empty() && !bytes.ends_with(&[0]) {
+        return Err("git_query_failed".into());
+    }
+    let mut fields = bytes.split(|b| *b == 0).filter(|part| !part.is_empty());
+    let mut rows = Vec::new();
+    while let Some(metadata) = fields.next() {
+        let meta: Vec<_> = metadata.split(|b| *b == b' ').collect();
+        if meta.len() != 5
+            || meta[0].len() != 7
+            || meta[0][0] != b':'
+            || meta[1].len() != 6
+            || meta[4].len() != 1
+            || !b"ADMT".contains(&meta[4][0])
+        {
+            return Err("git_query_failed".into());
+        }
+        if &meta[0][1..] == b"160000" || meta[1] == b"160000" {
+            return Err("git_submodule_unavailable".into());
+        }
+        let name = fields.next().ok_or("git_query_failed")?;
+        let name = std::str::from_utf8(name).map_err(|_| "git_conversion_unsupported")?;
+        if name.is_empty()
+            || name.len() > 4096
+            || name.chars().any(char::is_control)
+            || Path::new(name).is_absolute()
+            || name
+                .split(['/', '\\'])
+                .any(|part| part.is_empty() || part == "..")
+        {
+            return Err("git_conversion_unsupported".into());
+        }
+        if rows.len() >= 4096 {
+            return Err("git_output_limit".into());
+        }
+        rows.push(GitChange {
+            path: name.into(),
+            staged: " ".into(),
+            worktree: " ".into(),
+            untracked: false,
+            unsupported: false,
+            committed: Some((meta[4][0] as char).to_string()),
+        });
+    }
+    Ok(rows)
 }
 
 #[derive(Default)]
@@ -2830,6 +3064,7 @@ fn parse_change_rows(bytes: &[u8]) -> Result<Vec<GitChange>, String> {
             worktree: (entry[1] as char).to_string(),
             untracked: &entry[..2] == b"??",
             unsupported,
+            committed: None,
         });
     }
     Ok(rows)
@@ -2842,7 +3077,13 @@ pub(crate) fn query_changes(
     client: &str,
     token: &str,
     selected: Option<(&str, &str)>,
+    baseline: Option<&str>,
 ) -> Result<GitChanges, String> {
+    if baseline.is_some_and(|reference| !valid_baseline(reference))
+        || selected.is_some_and(|(_, side)| (side == "committed") != baseline.is_some())
+    {
+        return Err("git_invalid_request".into());
+    }
     let admission = ChangeAdmission::new(owner, client, token)?;
     let git = crate::find_executable("git").ok_or("git_missing")?;
     #[cfg(test)]
@@ -2858,6 +3099,7 @@ pub(crate) fn query_changes(
         false,
         QueryOutput {
             changes: Some((token, selected)),
+            baseline,
             ..Default::default()
         },
         Some(&admission.flag),

@@ -47,7 +47,7 @@ jobs:
           version: 10
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: '26.10.0'
           cache: pnpm
           cache-dependency-path: apps/desktop/pnpm-lock.yaml
       - uses: actions/setup-python@v5
@@ -73,7 +73,7 @@ jobs:
           version: 10
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: '26.10.0'
           cache: pnpm
           cache-dependency-path: apps/desktop/pnpm-lock.yaml
       - uses: actions/setup-python@v5
@@ -145,7 +145,7 @@ jobs:
           version: 10
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: '26.10.0'
           cache: pnpm
           cache-dependency-path: apps/desktop/pnpm-lock.yaml
       - uses: actions/setup-python@v5
@@ -222,7 +222,7 @@ jobs:
           version: 10
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: '26.10.0'
           cache: pnpm
           cache-dependency-path: apps/desktop/pnpm-lock.yaml
       - uses: actions/setup-python@v5

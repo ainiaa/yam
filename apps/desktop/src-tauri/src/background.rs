@@ -519,7 +519,7 @@ pub(crate) fn validate_command(command: &str, args: &serde_json::Value) -> Resul
     if matches!(command, "get_git_changes" | "cancel_git_changes") {
         let object = args.as_object().ok_or("git_invalid_request")?;
         let allowed: &[&str] = if command == "get_git_changes" {
-            &["path", "query_token", "selected_path", "side"]
+            &["path", "query_token", "selected_path", "side", "baseline"]
         } else {
             &["query_token"]
         };
@@ -550,9 +550,24 @@ pub(crate) fn validate_command(command: &str, args: &serde_json::Value) -> Resul
                             || path
                                 .split(['/', '\\'])
                                 .any(|part| part == ".." || part.is_empty())
-                    }) || !matches!(args["side"].as_str(), Some("staged" | "worktree")))))
+                    }) || !matches!(
+                        args["side"].as_str(),
+                        Some("staged" | "worktree" | "committed")
+                    ))))
         {
             return Err("git_invalid_request".into());
+        }
+        if command == "get_git_changes" {
+            let baseline = object.get("baseline");
+            if baseline.is_some_and(|value| {
+                value
+                    .as_str()
+                    .is_none_or(|reference| !super::git_context::valid_baseline(reference))
+            }) || object.contains_key("side")
+                && ((args["side"] == "committed") != baseline.is_some())
+            {
+                return Err("git_invalid_request".into());
+            }
         }
         return Ok(());
     }
@@ -5963,6 +5978,145 @@ mod git_changes_contract_tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
     const TOKEN: &str = "12345678-1234-4234-8234-123456789abc";
+    struct BranchRepo(std::path::PathBuf);
+    impl BranchRepo {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "yam-branch-{}-{}",
+                std::process::id(),
+                super::super::next_session_id()
+            ));
+            std::fs::create_dir(&root).unwrap();
+            let repo = Self(std::fs::canonicalize(root).unwrap());
+            repo.git(&["init", "-b", "fixture"]);
+            repo
+        }
+        fn git(&self, args: &[&str]) -> String {
+            let output = std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "-c",
+                    "user.name=Jeff.Liu",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                ])
+                .args(args)
+                .current_dir(&self.0)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "fixture Git failed");
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        }
+        fn query(
+            &self,
+            baseline: Option<&str>,
+            selected: Option<(&str, &str)>,
+        ) -> Result<serde_json::Value, String> {
+            let mut args = json!({"path":self.0,"query_token":TOKEN});
+            if let Some(baseline) = baseline {
+                args["baseline"] = baseline.into();
+            }
+            if let Some((path, side)) = selected {
+                args["selected_path"] = path.into();
+                args["side"] = side.into();
+            }
+            dispatch_git_changes(&Request {
+                version: 1,
+                token: "unused-direct-dispatch".into(),
+                instance: "branch-fixture".into(),
+                client: "branch-fixture".into(),
+                id: 1,
+                command: "get_git_changes".into(),
+                args,
+            })
+            .unwrap()
+        }
+    }
+    impl Drop for BranchRepo {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    #[test]
+    fn branch_compare_committed_patch_excludes_index_worktree_and_untracked_without_writes() {
+        let _serial = super::super::git_context::f3_serial_query_test();
+        let repo = BranchRepo::new();
+        std::fs::write(repo.0.join("file.txt"), "before\n").unwrap();
+        repo.git(&["add", "file.txt"]);
+        repo.git(&["commit", "-m", "baseline"]);
+        let base = repo.git(&["rev-parse", "HEAD"]);
+        std::fs::write(repo.0.join("file.txt"), "committed\n").unwrap();
+        repo.git(&["commit", "-am", "change"]);
+        let head = repo.git(&["rev-parse", "HEAD"]);
+        std::fs::write(repo.0.join("file.txt"), "staged-only\n").unwrap();
+        repo.git(&["add", "file.txt"]);
+        std::fs::write(repo.0.join("file.txt"), "worktree-only\n").unwrap();
+        std::fs::write(repo.0.join("untracked"), "private\n").unwrap();
+        let index = std::fs::read(repo.0.join(".git/index")).unwrap();
+        let status = repo.git(&["status", "--porcelain=v1"]);
+        let value = repo.query(Some(&base), Some(("file.txt", "committed")));
+        assert!(value.is_ok(), "{value:?}");
+        let value = value.unwrap();
+        assert_eq!(value["comparison"]["base"], base);
+        assert_eq!(value["comparison"]["head"], head);
+        let text = value["patch"]["text"].as_str().unwrap();
+        assert!(text.contains("+committed"));
+        assert!(!text.contains("staged-only") && !text.contains("worktree-only"));
+        assert_eq!(value["rows"].as_array().unwrap().len(), 1);
+        assert_eq!(value["rows"][0]["committed"], "M");
+        assert_eq!(repo.git(&["status", "--porcelain=v1"]), status);
+        assert_eq!(std::fs::read(repo.0.join(".git/index")).unwrap(), index);
+        assert!(repo.query(None, None).unwrap()["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["untracked"] == true));
+        assert!(repo.query(Some("refs/heads/missing"), None).is_err());
+    }
+    #[test]
+    fn branch_compare_rename_delete_binary_and_literal_paths_are_explicit() {
+        let _serial = super::super::git_context::f3_serial_query_test();
+        let repo = BranchRepo::new();
+        for name in ["old.txt", "deleted.txt", ":(glob)新 file.txt"] {
+            std::fs::write(repo.0.join(name), "before\n").unwrap();
+        }
+        repo.git(&["add", "."]);
+        repo.git(&["commit", "-m", "baseline"]);
+        let base = repo.git(&["rev-parse", "HEAD"]);
+        repo.git(&["mv", "old.txt", "renamed.txt"]);
+        repo.git(&["rm", "deleted.txt"]);
+        std::fs::write(repo.0.join(":(glob)新 file.txt"), "changed\n").unwrap();
+        std::fs::write(repo.0.join("binary.dat"), [0, 1, 2]).unwrap();
+        repo.git(&["add", "."]);
+        repo.git(&["commit", "-m", "changes"]);
+        let value = repo.query(Some(&base), None).unwrap();
+        let rows = value["rows"].as_array().unwrap();
+        assert!(rows
+            .iter()
+            .any(|row| row["path"] == "old.txt" && row["committed"] == "D"));
+        assert!(rows
+            .iter()
+            .any(|row| row["path"] == "renamed.txt" && row["committed"] == "A"));
+        assert_eq!(
+            repo.query(Some(&base), Some(("binary.dat", "committed")))
+                .unwrap()["patch"]["kind"],
+            "binary"
+        );
+        assert!(repo
+            .query(Some(&base), Some((":(glob)新 file.txt", "committed")))
+            .unwrap()["patch"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("+changed"));
+        assert_eq!(
+            repo.query(Some(&base), Some(("missing.txt", "committed")))
+                .unwrap_err(),
+            "git_context_changed"
+        );
+    }
     #[test]
     fn f3_query_schema_allows_list_and_exact_selected_side() {
         assert!(validate_command(
@@ -5973,6 +6127,25 @@ mod git_changes_contract_tests {
         for side in ["staged", "worktree"] {
             assert!(validate_command("get_git_changes", &json!({"path":"/fixture/repo","query_token":TOKEN,"selected_path":"目录/file.txt","side":side})).is_ok());
         }
+    }
+    #[test]
+    fn branch_compare_schema_requires_explicit_baseline_and_matching_side() {
+        assert!(validate_command("get_git_changes", &json!({"path":"/fixture/repo","query_token":TOKEN,"baseline":"HEAD~1","selected_path":"file.txt","side":"committed"})).is_ok());
+        for baseline in [
+            json!(""),
+            json!("--all"),
+            json!("main\n"),
+            json!(4),
+            json!(null),
+        ] {
+            assert!(validate_command(
+                "get_git_changes",
+                &json!({"path":"/fixture/repo","query_token":TOKEN,"baseline":baseline})
+            )
+            .is_err());
+        }
+        assert!(validate_command("get_git_changes", &json!({"path":"/fixture/repo","query_token":TOKEN,"side":"committed","selected_path":"file.txt"})).is_err());
+        assert!(validate_command("get_git_changes", &json!({"path":"/fixture/repo","query_token":TOKEN,"baseline":"main","side":"staged","selected_path":"file.txt"})).is_err());
     }
     #[test]
     fn f3_cancel_schema_allows_exact_token() {
@@ -6030,6 +6203,7 @@ fn dispatch_git_changes(request: &Request) -> Option<Result<serde_json::Value, S
             &request.client,
             token,
             selected,
+            request.args["baseline"].as_str(),
         )?)
         .map_err(|_| "git_query_failed".into())
     })())

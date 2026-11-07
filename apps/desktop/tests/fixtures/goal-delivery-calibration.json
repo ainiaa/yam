@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "origin": "existing-task-derived-synthetic-variants",
+  "description": "Four bounded synthetic variants derived from existing YAM acceptance and parameter-validation work; not a sample of production business tasks.",
+  "cases": [
+    {
+      "id": "C1",
+      "source": "docs/plans/2026-11-06-goal-delivery/T3.md#simple; derived JSON transformation variant",
+      "mode": "readonly",
+      "prompt": "只根据提供的JSON整理数据。按id升序排序；title去掉首尾空白并把连续空白合并成一个空格；保留字符大小写与所有id。只输出JSON对象，唯一字段items，不添加说明或其他字段。输入：{\"items\":[{\"id\":3,\"title\":\"  Ship  now \"},{\"id\":1,\"title\":\" 中文\\t测试 \"},{\"id\":2,\"title\":\"Build\\n carefully\"}]}",
+      "files": {},
+      "arms": [
+        {"id":"luna-single","model":"gpt-6-luna","effort":"medium","collaboration":false},
+        {"id":"sol-single","model":"gpt-6.1-sol","effort":"medium","collaboration":false}
+      ]
+    },
+    {
+      "id": "C2",
+      "source": "docs/plans/2026-11-06-goal-delivery/T3.md#failure-evidence; synthetic permission-error log variant",
+      "mode": "readonly",
+      "prompt": "只依据以下虚构日志给出机器可判定结论，不猜测实际权限或重试结果。仅输出JSON对象：cause（permission-denied或timeout）、evidence（恰好两条直接证明错误及任务失败的日志行ID，按原顺序）、completed（布尔）、safeNextStep（inspect-permissions或retry-write）。日志：L1 start task report-write；L2 write report.json failed EACCES permission denied；L3 task failed, no retry attempted；L4 cleanup finished。不要工具、文件操作或其他Agent。",
+      "files": {},
+      "arms": [
+        {"id":"sol-single","model":"gpt-6.1-sol","effort":"medium","collaboration":false},
+        {"id":"luna-single","model":"gpt-6-luna","effort":"medium","collaboration":false}
+      ]
+    },
+    {
+      "id": "C3",
+      "source": "scripts/goal-delivery-acceptance.mjs normalizeTitle acceptance; synthetic fresh implementation variant",
+      "mode": "task",
+      "prompt": "在当前隔离目录test first实现normalize-title.mjs及normalize-title.test.mjs。导出normalizeTitle(value)：非字符串抛TypeError；trim并把连续空白合成单个空格；全空白抛RangeError；规范化后的长度超过80个Unicode码点抛RangeError。覆盖正常、中文/emoji的80/81边界和非法输入，使用node --test normalize-title.test.mjs执行。只改这两个文件，不安装依赖，不画图。完成后简短报告实际测试结果。",
+      "files": {},
+      "arms": [
+        {"id":"sol-single","model":"gpt-6.1-sol","effort":"high","collaboration":false},
+        {"id":"sol-optional-luna","model":"gpt-6.1-sol","effort":"high","collaboration":true}
+      ]
+    },
+    {
+      "id": "C4",
+      "source": "apps/desktop/src/pi-routing.ts parameter-validation pattern; synthetic parseInt trailing-input bug variant",
+      "mode": "task",
+      "prompt": "test first修复当前parse-limit.mjs中的parseLimit(value)，更新parse-limit.test.mjs并执行node --test parse-limit.test.mjs。契约：undefined返回默认20；其他非字符串抛TypeError；字符串trim后必须为一个或多个ASCII数字，允许前导零；数值必须是1..100的整数，否则抛RangeError。拒绝空白、负数、小数、指数和尾随垃圾，例如12x。测试正常、边界、错误场景。仅改这两个文件，保留导出接口，不安装依赖。完成后简短报告实际测试结果。",
+      "files": {
+        "parse-limit.mjs": "export function parseLimit(value){if(value===undefined)return 20;const n=parseInt(value,10);if(!Number.isFinite(n)||n<1||n>100)throw new RangeError('limit');return n;}\n",
+        "parse-limit.test.mjs": "import {test} from 'node:test';import assert from 'node:assert/strict';import {parseLimit} from './parse-limit.mjs';test('default and normal',()=>{assert.equal(parseLimit(undefined),20);assert.equal(parseLimit('12'),12);});\n"
+      },
+      "arms": [
+        {"id":"sol-optional-luna","model":"gpt-6.1-sol","effort":"high","collaboration":true},
+        {"id":"sol-single","model":"gpt-6.1-sol","effort":"high","collaboration":false}
+      ]
+    }
+  ]
+}

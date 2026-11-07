@@ -29,6 +29,19 @@ export function guardCapacity(role,messages,small,strong) {
  const reserve=Math.min(small.maxTokens??8192,Math.floor(small.contextWindow/4));
  return images||bytes+reserve>small.contextWindow?'strong':'small';
 }
+export function measureContextBudget(model,messages,{estimateMessageTokens,getReserveTokens}={}) {
+ const positive=value=>Number.isSafeInteger(value)&&value>0;
+ const result={kind:'local-estimate',inputTokens:null,reserveTokens:null,contextWindow:positive(model?.contextWindow)?model.contextWindow:null,maxOutputTokens:positive(model?.maxTokens)?model.maxTokens:null,fits:false,reason:'context-unknown'};
+ if(result.contextWindow===null)return result;
+ try{
+  result.reason='estimate-unavailable';let tokens=0;
+  for(const message of messages){const value=estimateMessageTokens(message);if(!Number.isSafeInteger(value)||value<0||!Number.isSafeInteger(tokens+value))return result;tokens+=value;}
+  result.inputTokens=tokens;result.reason='reserve-unavailable';const reserve=getReserveTokens(model);
+  if(!Number.isSafeInteger(reserve)||reserve<0)return result;
+  result.reserveTokens=reserve;result.fits=tokens<=result.contextWindow-reserve;result.reason=result.fits?null:'context-limit';
+ }catch{}
+ return result;
+}
 export function preferCachedModel(role,messages,small,strong,now=Date.now()) {
  if(role!=='small')return role;
  const index=messages.findLastIndex(m=>m.role==='assistant'),last=messages[index],u=last?.usage;
@@ -56,7 +69,7 @@ export function splitModel(value) {
  return [value.slice(0,i),value.slice(i+1)];
 }
 export function launchOption(name,argv=process.argv) {
- const valued=new Set(['--extension','-e','--session','--session-dir','--model','--thinking','--provider','--yam-small','--yam-strong','--yam-classifier','--yam-gateway','--yam-fixed-model','--yam-effort','--yam-rules','--tools','--skill','--append-system-prompt','--system-prompt','--prompt-template','--theme']);
+ const valued=new Set(['--extension','-e','--session','--session-dir','--model','--thinking','--provider','--yam-small','--yam-medium','--yam-strong','--yam-classifier','--yam-gateway','--yam-fixed-model','--yam-effort','--yam-rules','--tools','--skill','--append-system-prompt','--system-prompt','--prompt-template','--theme']);
  let result;
  for(let i=0;i<argv.length;i++) {
   const arg=argv[i];if(arg==='--')break;

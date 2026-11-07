@@ -5,9 +5,24 @@ import {tmpdir} from 'node:os';
 import {join,dirname,basename} from 'node:path';
 const api=await import('../src-tauri/pi/agent-executor.mjs').catch(e=>{if(e.code==='ERR_MODULE_NOT_FOUND')return {};throw e;});
 const uuid='01234567-1234-1234-1234-0123456789ab';
+const failureApi=await import('../src-tauri/pi/failure.mjs').catch(error=>{if(error.code==='ERR_MODULE_NOT_FOUND')return {};throw error;});
 async function withCLI(source,run){const dir=await mkdtemp(join(tmpdir(),'yam-agent-'));try{const file=join(dir,'fake.mjs');await writeFile(file,`#!${process.execPath}\n${source}`);await chmod(file,0o755);return await run(file,dir);}finally{await rm(dir,{recursive:true,force:true});}}
 async function groupStopped(pid){for(let n=0;n<100;n++){try{process.kill(-pid,0);}catch(error){if(error.code==='ESRCH')return true;if(error.code!=='EPERM')throw error;}await new Promise(r=>setTimeout(r,20));}return false;}
 test('agent executor exports process, protocol and discovery boundaries',()=>{for(const name of ['runProcess','invocation','parseEvents','discoverAgents','executeAgent'])assert.equal(typeof api[name],'function',name);});
+test('recovery process observation captures the owned group and observer errors still clean it up',async()=>{
+ await withCLI("console.log('ready');",async file=>{const seen=[];const result=await api.runProcess(file,[],{onSpawn:value=>seen.push(value)});assert.equal(result.code,0);assert.equal(seen.length,1);assert.ok(Number.isSafeInteger(seen[0].pid)&&seen[0].pid>0);assert.equal(seen[0].pgid,seen[0].pid);assert.equal(await groupStopped(seen[0].pid),true);});
+ await withCLI('setInterval(()=>{},1000)',async file=>{let observed;await assert.rejects(api.runProcess(file,[],{timeoutMs:5000,onSpawn:value=>{observed=value;throw Error('observer failed');}}),/observer failed/);assert.ok(observed);assert.equal(await groupStopped(observed.pid),true);});
+ let observed=false;await assert.rejects(api.runProcess('/not/exist',[],{onSpawn:()=>{observed=true;}}),/ENOENT|spawn/);assert.equal(observed,false);
+});
+test('T2 repair streaming malformed JSON is a protocol failure while caller callback errors stay unknown',async()=>{
+ for(const malformed of [true,false])await withCLI(`process.stdout.write(${JSON.stringify('not-json\n')});`,async(file,dir)=>{
+  if(!malformed)await writeFile(file,`#!${process.execPath}\nprocess.stdout.write(${JSON.stringify(JSON.stringify({type:'thread.started',thread_id:uuid})+'\n')});`);
+  // Protocol assertions must allow coverage-instrumented child startup, as neighboring CLI fixtures do.
+  await assert.rejects(api.executeAgent({kind:'codex',executable:file,auth:'subscription'},{prompt:'Inspect',cwd:dir,timeoutMs:5000,onLine:()=>{throw Error('Caller failed with quota text');}}),error=>{
+   const failure=failureApi.failureOf(error);assert.equal(failure.code,malformed?'protocol-invalid':'unknown');assert.equal(failure.stage,'execution');assert.ok(['started','unknown'].includes(failure.dispatch));assert.equal(failure.nextAction,'inspect-task');return true;
+  });
+ });
+});
 test('native CLI invocation uses stdin, preserved sandboxes and explicit subscription channel',{skip:!api.invocation},()=>{
  const input='$(touch /tmp/not-allowed); `echo nope`';
  const p=api.invocation({id:'codex',kind:'codex',executable:'/native/codex',auth:'subscription'},{prompt:input,resume:uuid,sessionDirectory:'/owned/children'});
@@ -75,6 +90,60 @@ test('catalog uses native auth status and declared image support without reading
 test('native task execution checks exit codes and never retries failures',{skip:!api.executeAgent},async()=>{
  let calls=0;const runner=async()=>{calls++;return {code:1,stdout:'',stderr:'not logged in'};};
  await assert.rejects(api.executeAgent({kind:'codex',executable:'/codex',auth:'subscription'},{prompt:'task'},runner),/exit/i);assert.equal(calls,1);
+});
+
+test('T2 failure facts trust owned codes rather than arbitrary authentication or quota messages',()=>{
+ assert.equal(typeof failureApi.failureOf,'function');
+ for(const message of ['quota exceeded','not logged in','context length exceeded','ECONNREFUSED']){
+  const error=Object.assign(Error(message),{failure:{code:'not-logged-in',category:'auth',stage:'discovery',dispatch:'not-started',nextAction:'check-login'},stderr:'PRIVATE_STDERR'});
+  assert.deepEqual(failureApi.failureOf(error,{stage:'execution',dispatch:'started'}),{category:'unknown',stage:'execution',code:'unknown',dispatch:'started',nextAction:'inspect-task'});
+ }
+ const original=failureApi.nativeError('context-budget','PRIVATE_PROMPT',{stage:'preparation',dispatch:'not-started'});
+ const aggregate=Object.assign(new AggregateError([original,Error('PRIVATE_CLEANUP')],'PRIVATE_MESSAGE',{cause:original}),{mayBeRunning:true});
+ assert.deepEqual(failureApi.failureOf(aggregate),{category:'context',stage:'preparation',code:'context-budget',dispatch:'unknown',nextAction:'inspect-task'});
+ assert.doesNotMatch(JSON.stringify(failureApi.failureOf(aggregate)),/PRIVATE/);
+ assert.deepEqual(failureApi.projectFailure({code:'untrusted-code',category:'quota',stage:'invented',dispatch:'none',nextAction:'retry',prompt:'PRIVATE'}),{category:'unknown',stage:'execution',code:'unknown',dispatch:'unknown',nextAction:'inspect-task'});
+});
+
+test('T2 discovery diagnoses only the verified complete login-status response without changing its array API',async()=>{
+ for(const [result,expected] of [
+  [{code:1,stdout:'',stderr:'Not logged in\n'},'not-logged-in'],
+  [{code:0,stdout:'',stderr:'Not logged in\n'},'native-unavailable'],
+  [{code:1,stdout:'prefix',stderr:'Not logged in\n'},'native-unavailable'],
+  [{code:1,stdout:'',stderr:'quota exceeded; Not logged in\n'},'native-unavailable'],
+  [{code:1,stdout:'',stderr:'Not logged in'},'native-unavailable'],
+ ]){
+  const failures=[],agents=await api.discoverAgents({codex:'/native/codex'},async()=>result,{onFailure:(kind,failure)=>failures.push({kind,failure})});
+  assert.deepEqual(agents,[]);assert.equal(failures.length,1);assert.equal(failures[0].kind,'codex');assert.equal(failures[0].failure.code,expected);assert.equal(failures[0].failure.dispatch,'not-started');
+  assert.equal(failures[0].failure.category,expected==='not-logged-in'?'auth':'unknown');assert.doesNotMatch(JSON.stringify(failures),/stderr|quota exceeded/);
+ }
+ const failures=[];await api.discoverAgents({codex:'/native/codex'},async()=>{throw Object.assign(Error('not logged in'),{code:'ENOENT'});},{onFailure:(_kind,value)=>failures.push(value)});
+ assert.equal(failures[0].category,'unknown');assert.equal(failures[0].stage,'discovery');
+});
+
+test('T2 cached discovery preserves execution diagnostics and clears them on a verified login',async()=>{
+ let loggedIn=false;const failures=[],discover=api.createAgentDiscovery({identity:async()=> 'installed',probe:async(_file,args)=>args[0]==='features'?{code:0,stdout:'',stderr:''}:loggedIn?{code:0,stdout:'Logged in using ChatGPT\n',stderr:''}:{code:1,stdout:'',stderr:'Not logged in\n'}});
+ assert.deepEqual(await discover({codex:'/native/codex'},{execution:true,onFailure:(kind,value)=>failures.push({kind,value})}),[]);
+ assert.equal(failures[0].value.code,'not-logged-in');loggedIn=true;
+ assert.equal((await discover({codex:'/native/codex'},{execution:true,onFailure:()=>assert.fail('successful probe has no failure')}))[0].auth,'subscription');
+});
+
+test('T2 local process facts distinguish cancellation spawn timeout exit and unclassified protocol failures',async()=>{
+ const before=new AbortController();before.abort();await assert.rejects(api.runProcess('/not/exist',[],{signal:before.signal}),e=>e.failure?.code==='cancelled'&&e.failure.dispatch==='not-started');
+ await assert.rejects(api.runProcess('/not/exist',[]),e=>e.failure?.code==='spawn-failed'&&e.failure.category==='execution'&&e.failure.dispatch==='not-started');
+ await withCLI('setInterval(()=>{},1000)',async file=>{
+  await assert.rejects(api.runProcess(file,[],{timeoutMs:30}),e=>e.failure?.code==='process-timeout'&&e.failure.category==='execution'&&e.failure.dispatch==='started'&&e.failure.nextAction==='inspect-task');
+  const abort=new AbortController();setTimeout(()=>abort.abort(),30);await assert.rejects(api.runProcess(file,[],{signal:abort.signal}),e=>e.failure?.code==='cancelled'&&e.failure.dispatch==='started');
+ });
+ await assert.rejects(api.executeAgent({kind:'codex',executable:'/native/codex',auth:'subscription'},{prompt:'task'},async()=>({code:1,stdout:'',stderr:'not logged in quota exceeded'})),e=>e.failure?.code==='process-exit'&&e.failure.category==='execution'&&e.failure.dispatch==='started');
+ assert.throws(()=>api.parseEvents('codex',JSON.stringify({type:'turn.failed',error:{message:'quota exceeded',code:'invented_quota_code'}})),e=>e.failure?.category==='unknown'&&e.failure.code==='native-reported-error');
+ assert.throws(()=>api.validateAgentPrompt('x'.repeat(api.maxAgentPromptCharacters+1)),e=>e.failure?.code==='context-budget'&&e.failure.dispatch==='not-started');
+});
+
+test('T2 persistent Codex execution requires a reported session even when a resume ID was supplied',async()=>{
+ const profile={kind:'codex',executable:'/native/codex',auth:'subscription'},stdout=[{type:'item.completed',item:{type:'agent_message',text:'Done'}},{type:'turn.completed'}].map(JSON.stringify).join('\n');
+ for(const resume of [null,uuid])await assert.rejects(api.executeAgent(profile,{prompt:'task',resume},async()=>({code:0,stdout,stderr:''})),e=>e.failure?.code==='native-session-missing'&&e.failure.stage==='verification'&&e.failure.dispatch==='started'&&e.failure.nextAction==='inspect-task');
+ const readonly=await api.executeAgent(profile,{prompt:'summary',mode:'readonly'},async()=>({code:0,stdout,stderr:''}));assert.equal(readonly.sessionId,null);assert.equal(readonly.finalText,'Done');
 });
 test('image requests require actual image artifacts, not a fluent success claim',{skip:!api.executeAgent},async()=>{
  const stdout=[{type:'thread.started',thread_id:uuid},{type:'item.completed',item:{type:'agent_message',text:'I generated an image'}},{type:'turn.completed'}].map(JSON.stringify).join('\n');
@@ -262,11 +331,94 @@ test('native signal cleanup preserves an existing host SIGINT handler',{skip:pro
  });
 });
 
+test('host termination drains native independent tool groups before preserving signal behavior',{skip:process.platform==='win32'},async t=>{
+ const {spawn}=await import('node:child_process'),{readFile}=await import('node:fs/promises'),url=new URL('../src-tauri/pi/agent-executor.mjs',import.meta.url).href;
+ const tool="process.on('SIGTERM',()=>process.exit(0));process.send('READY');setInterval(()=>{},1000);";
+ const nativeSource=`const {spawn}=require('node:child_process'),{writeFileSync}=require('node:fs');let child,interrupts=0;const record=()=>writeFileSync(process.argv[1],JSON.stringify({native:process.pid,tool:child.pid,interrupts}));process.on('SIGTERM',()=>{});process.on('SIGINT',()=>{interrupts++;record();process.kill(-child.pid,'SIGTERM');if(process.argv[2]!=='fallback')setTimeout(()=>process.exit(130),120);});child=spawn(process.execPath,['-e',${JSON.stringify(tool)}],{detached:true,stdio:['ignore','ignore','ignore','ipc']});child.on('message',()=>{record();console.log('READY');});setInterval(()=>{},1000);`;
+ for(const mode of ['SIGTERM','SIGINT','SIGHUP','listener','once-listener','mixed','repeated','fallback'])await t.test(mode,async()=>{
+  const hasHandler=['listener','once-listener','mixed'].includes(mode),signal=hasHandler?'SIGINT':['repeated','fallback'].includes(mode)?'SIGTERM':mode;
+  const listener=hasHandler?`setInterval(()=>{},1000);process.${mode==='listener'?'on':'once'}('SIGINT',()=>{console.log('HANDLED');${mode==='once-listener'?"setTimeout(()=>console.log('ALIVE'),2300);":''}});`:'';
+  await withCLI(`import {runProcess} from ${JSON.stringify(url)};${listener}await runProcess(process.execPath,['-e',${JSON.stringify(nativeSource)},process.argv[2],${JSON.stringify(mode)}],{gracefulInterrupt:true,onLine:l=>console.log(l)}).catch(error=>{if(!error.mayBeRunning)throw error;});`,async(file,dir)=>{
+   const pidFile=join(dir,'owned.json'),host=spawn(file,[pidFile],{stdio:['ignore','pipe','pipe']});let pids,deadline,repeated;
+   const exited=new Promise((resolve,reject)=>{host.on('exit',(code,signal)=>resolve({code,signal}));host.on('error',reject);});
+   try{
+    await Promise.race([new Promise(r=>host.stdout.once('data',r)),new Promise((_,reject)=>deadline=setTimeout(()=>reject(Error('host not ready')),3000))]);clearTimeout(deadline);pids=JSON.parse(await readFile(pidFile,'utf8'));
+    const handled=hasHandler?new Promise(r=>host.stdout.once('data',r)):null,survived=mode==='once-listener'?new Promise(resolve=>host.stdout.on('data',chunk=>{if(String(chunk).includes('ALIVE'))resolve();})):null;
+    host.kill(signal);if(['repeated','mixed'].includes(mode))repeated=setTimeout(()=>host.kill(mode==='mixed'?'SIGTERM':signal),25);
+    if(handled){assert.match(String(await Promise.race([handled,new Promise((_,reject)=>deadline=setTimeout(()=>reject(Error('existing handler did not run')),1500))])),/HANDLED/);clearTimeout(deadline);}
+    if(survived){await Promise.race([survived,exited.then(()=>{throw Error('once listener host terminated after native cleanup');}),new Promise((_,reject)=>deadline=setTimeout(()=>reject(Error('once listener host did not remain active')),4000))]);clearTimeout(deadline);}
+    if(!hasHandler||mode==='mixed'){const result=await Promise.race([exited,new Promise((_,reject)=>deadline=setTimeout(()=>reject(Error('host did not terminate')),5000))]);clearTimeout(deadline);assert.equal(result.signal,mode==='mixed'?'SIGTERM':signal);}
+    assert.ok(await groupStopped(pids.tool),'independent tool group survived host '+mode);assert.ok(await groupStopped(pids.native),'native group survived host '+mode);assert.equal(JSON.parse(await readFile(pidFile,'utf8')).interrupts,1,'native received duplicate interrupts');
+    if(hasHandler&&mode!=='mixed'){assert.equal(host.exitCode,null);assert.equal(host.signalCode,null);}
+   }finally{clearTimeout(deadline);clearTimeout(repeated);for(const pid of [pids?.tool,pids?.native].filter(Number.isInteger))try{process.kill(-pid,'SIGKILL');}catch(error){if(error.code!=='ESRCH')throw error;}if(host.exitCode===null&&host.signalCode===null)host.kill('SIGKILL');await exited;}
+  });
+ });
+});
+
 test('image validation rejects files and allocations replaced during asynchronous decoding',async()=>{
  const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR4nGP8zwACTGCSAQANHQEDgslx/wAAAABJRU5ErkJggg==','base64');
  for(const mode of ['unchanged','symlink','directory','overwrite','earlier-image','document'])await withCLI('',async(file,dir)=>{
   let root,image,doc,decodes=0;const outside=dir+'-outside.png';await writeFile(outside,png);
   const runner=async(_f,_a,o)=>{root=JSON.parse(o.input.match(/Image artifact directory: ("[^\n]+")/)[1]);image=join(root,'cover.png');await writeFile(image,png);const paths=[image];if(mode==='earlier-image'){const next=join(root,'next.png');await writeFile(next,png);paths.push(next);}if(mode==='document'){doc=join(dir,'article.md');await writeFile(doc,'# Article');paths.unshift(doc);}return {code:0,stderr:'',stdout:[{type:'thread.started',thread_id:uuid},{type:'item.completed',item:{type:'agent_message',text:JSON.stringify({summary:'Image',artifacts:paths})}},{type:'turn.completed'}].map(JSON.stringify).join('\n')};};
   try{const result=api.executeAgent({kind:'codex',executable:file,auth:'subscription'},{prompt:'Native image',cwd:dir,sessionDirectory:join(dir,'sessions'),requires:['image_generation'],validateImage:async()=>{decodes++;if(mode==='symlink'){await unlink(image);await symlink(outside,image);}if(mode==='directory'){await rename(root,root+'-original');await mkdir(root);await writeFile(image,png);}if(mode==='overwrite'||mode==='earlier-image'&&decodes===2)await writeFile(image,'changed');if(mode==='document'){await unlink(doc);await symlink(outside,doc);}return true;}},runner);if(mode==='unchanged')assert.equal((await result).artifacts.length,1);else await assert.rejects(result,/changed|symlink|allocation|directory/i);}finally{await rm(outside,{force:true});}
+ });
+});
+
+test('only explicitly enabled subscription main tasks get bounded native multi-agent configuration',()=>{
+ const profile={kind:'codex',executable:'/native/codex',auth:'subscription',model:'gpt-main'};
+ const main=api.invocation(profile,{prompt:'Complete and verify the goal',allowCollaboration:true});
+ for(const argument of ['--ignore-user-config','agents.max_depth=1','agents.max_concurrent_threads_per_session=3','forced_login_method="chatgpt"','model_provider="openai"'])assert.ok(main.args.includes(argument),argument);
+ assert.ok(main.args.some((v,i)=>v==='--enable'&&main.args[i+1]==='multi_agent'));
+ assert.equal(main.env.OPENAI_API_KEY,undefined);assert.equal(main.env.CODEX_API_KEY,undefined);assert.equal(main.env.OPENAI_BASE_URL,undefined);
+ for(const options of [{},{allowCollaboration:'true'},{mode:'readonly',allowCollaboration:true}]){
+  const job=api.invocation(profile,{prompt:'Do only this assigned task',...options});
+  assert.ok(job.args.some((v,i)=>v==='--disable'&&job.args[i+1]==='multi_agent'));
+  assert.ok(!job.args.some((v,i)=>v==='--enable'&&job.args[i+1]==='multi_agent'));
+ }
+});
+
+test('isolated native inference and collaboration retain only the observed system proxy feature value',async()=>{
+ for(const value of [true,false,undefined]){
+  const features='image_generation stable true\n'+(value===undefined?'':'respect_system_proxy under development '+value+'\n')+'unrelated_feature stable '+(!value)+'\n';
+  const [profile]=await api.discoverAgents({codex:'/native/codex'},async(_file,args)=>({code:0,stdout:args[0]==='features'?features:'Logged in using ChatGPT',stderr:''}));
+  for(const options of [{mode:'readonly'},{allowCollaboration:true}]){
+   const job=api.invocation(profile,{prompt:'Isolated work',...options}),overrides=job.args.filter(s=>s.startsWith('features.respect_system_proxy='));
+   assert.deepEqual(overrides,value===undefined?[]:['features.respect_system_proxy='+value]);
+   assert.ok(!job.args.some(s=>s.startsWith('agents.')&&!['agents.max_depth=1','agents.max_concurrent_threads_per_session=3'].includes(s)));
+  }
+ }
+});
+
+test('native image capabilities cannot be inferred from a later feature line',async()=>{
+ const [profile]=await api.discoverAgents({codex:'/native/codex'},async(_file,args)=>({code:0,stdout:args[0]==='features'?'image_generation stable false\nother_feature stable true\n':'Logged in using ChatGPT',stderr:''}));assert.ok(!profile.capabilities.includes('image_generation'));
+});
+
+test('native Codex cancellation interrupts gracefully so its separately grouped tool process is stopped',async()=>{
+ const childSource="process.on('SIGTERM',()=>process.exit(0));setInterval(()=>{},1000);";
+ const source=`import {spawn} from 'node:child_process';let child;process.on('SIGTERM',()=>process.exit(143));process.on('SIGINT',()=>{if(child)process.kill(-child.pid,'SIGTERM');setTimeout(()=>process.exit(130),50);});process.stdin.resume();process.stdin.on('end',()=>{child=spawn(process.execPath,['-e',${JSON.stringify(childSource)}],{detached:true,stdio:'ignore'});console.log(JSON.stringify({type:'heartbeat_ready',pid:child.pid}));setInterval(()=>{},1000);});`;
+ for(const mode of ['abort','shutdown'])await withCLI(source,async file=>{
+  const abort=new AbortController();let pid,ready;const started=new Promise(resolve=>ready=resolve);
+  try{
+   const execution=assert.rejects(api.executeAgent({kind:'codex',executable:file,auth:'subscription'},{prompt:'cancel fixture',signal:abort.signal,onLine:line=>{const event=JSON.parse(line);if(event.type==='heartbeat_ready'){pid=event.pid;ready();if(mode==='abort')setTimeout(()=>abort.abort(),80);}}}),/aborted|exit/);
+   await started;if(mode==='shutdown'){await new Promise(resolve=>setTimeout(resolve,80));await api.stopAgents().catch(error=>{if(!error.mayBeRunning)throw error;});}await execution;
+   assert.ok(Number.isInteger(pid));assert.equal(await groupStopped(pid),true,'Native tool group survived '+mode);
+  }finally{if(pid)try{process.kill(-pid,'SIGKILL');}catch(e){if(e.code!=='ESRCH')throw e;}}
+ });
+});
+
+test('forced fallback after an unacknowledged native interrupt stays uncertain and preserves replay protection',async()=>{
+ await withCLI("process.on('SIGINT',()=>{});process.on('SIGTERM',()=>{});console.log(process.pid);setInterval(()=>{},1000);",async file=>{
+  const abort=new AbortController();let pid;
+  await assert.rejects(api.runProcess(file,[],{gracefulInterrupt:true,signal:abort.signal,onLine:line=>{pid=Number(line);abort.abort();}}),error=>error.mayBeRunning===true);
+  assert.equal(await groupStopped(pid),true,'Outer native process group was not hard stopped');
+ });
+});
+
+test('graceful success exit cannot resolve after uncertain descendant pipe cleanup',async()=>{
+ const descendant="process.on('SIGTERM',()=>{});process.on('SIGINT',()=>{});process.send('ready');setInterval(()=>{},1000);";
+ for(const mode of ['exit','shutdown'])await withCLI(`import {spawn} from 'node:child_process';process.on('SIGINT',()=>process.exit(0));const child=spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:['ignore','inherit','inherit','ipc']});child.on('message',()=>{console.log(JSON.stringify({root:process.pid,child:child.pid}));${mode==='exit'?'process.exit(0);':'setInterval(()=>{},1000);'}});`,async file=>{
+  let ready,root;const started=new Promise(resolve=>ready=resolve),execution=api.runProcess(file,[],{gracefulInterrupt:true,timeoutMs:10000,onLine:line=>{root=JSON.parse(line).root;ready();}}).then(value=>({value}),error=>({error}));
+  try{await started;if(mode==='shutdown')await api.stopAgents().catch(error=>{if(!error.mayBeRunning)throw error;});const result=await execution;assert.equal(result.error?.mayBeRunning,true,mode+' uncertainty became successful code '+result.value?.code);assert.equal(await groupStopped(root),true);}
+  finally{if(root)try{process.kill(-root,'SIGKILL');}catch(error){if(error.code!=='ESRCH')throw error;}}
  });
 });

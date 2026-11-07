@@ -44,6 +44,8 @@ codex -c 'sandbox_mode="read-only"' -c 'approval_policy="never"' review --base B
 
 ## CI 覆盖与缓存（全量路线）
 
+- CI 的 Node 固定为项目终端运行时已采用的 `26.10.0`。校准验证器的 `--permission` 网络拒绝能力自 Node 25 起提供，Node 24 不满足此隔离检查；不得把连接被拒绝当作权限被拒绝，也不得为旧环境放宽安全断言。
+
 - 所有作业显式使用标准 ARM `macos-26`（文档基线 3 CPU / 7 GiB），避免 `latest` 切换系统大版本；该标签不锁定 GitHub 的具体镜像构建或物理主机。前端覆盖率固定 6 个测试文件并发；Cargo 构建固定 3 个任务，覆盖率编译保留 2 个任务。每个重作业记录实际 CPU、内存和并发配置，不再依赖 CPU 数推导测试并发。
 - 缓存恢复前，用 `native-coverage.py --prepare-cache` 为 CI 新建的空 target 目录写入标准 `CACHEDIR.TAG`；已有目录一律拒绝，不能给未知目录补标签后删除。原生额外初始化独立 coverage 目录；不改缓存路径或键，继续复用现有依赖。覆盖率清理的非零退出和工具吞掉退出码后输出的 warning 都必须阻止后续编译及放行。
 - 耗时步骤通过 macOS `/usr/bin/time -l` 将墙钟、CPU、峰值内存和 I/O 指标写入现有日志；原生另记录清理/编译/报告阶段及分组耗时。仅打包开启 Cargo fingerprint info，以定位重编译原因；不新增性能报告或上传产物。

@@ -14,3 +14,5 @@ test('owned runtime error and notice strings have Chinese resources, including f
 test('Chinese fallback eligibility describes platform and connection without a version gate',()=>{setLocale('zh-CN');try{assert.equal(t('Unverified platform or connection'),'平台或连接尚未验证');}finally{setLocale('en');}});
 
 test('layout preset labels translate in the Chinese interface',()=>{setLocale('zh-CN');try{assert.equal(t('Single'),'单窗');assert.equal(t('Stacked'),'上下');}finally{setLocale('en');}});
+
+test('Pi runtime changes localize refresh errors while retaining unknown diagnostics',()=>{setLocale('zh-CN');try{assert.notEqual(t('Pi runtime changed'),'Pi runtime changed');assert.equal(t('Error: Pi runtime changed'),t('Pi runtime changed'));assert.equal(t('RAW runtime detail'),'RAW runtime detail');}finally{setLocale('en');}});

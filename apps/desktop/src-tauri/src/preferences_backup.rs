@@ -44,22 +44,25 @@ fn portable_policy(value: &Value) -> bool {
             .is_some_and(|s| !s.trim().is_empty() && s.encode_utf16().count() <= limit)
     };
     let levels = ["medium", "high", "xhigh", "max"];
-    if !fields(
-        value,
-        &[
-            "v",
-            "small",
-            "strong",
-            "classifier",
-            "model",
-            "effort",
-            "billing",
-            "rules",
-        ],
-    ) || value["v"] != 1
-        || !["small", "strong", "classifier"]
-            .iter()
-            .all(|key| model(&value[key]))
+    let tiered = value["v"] == 2;
+    let mut keys = vec![
+        "v",
+        "small",
+        "strong",
+        "classifier",
+        "model",
+        "effort",
+        "billing",
+        "rules",
+    ];
+    let mut roles = vec!["small", "strong", "classifier"];
+    if tiered {
+        keys.push("medium");
+        roles.push("medium");
+    }
+    if !fields(value, &keys)
+        || !(value["v"] == 1 || tiered)
+        || !roles.iter().all(|key| model(&value[key]))
         || !(value["model"] == "auto" || model(&value["model"]))
         || !value["effort"].as_str().is_some_and(|v| {
             [
@@ -74,8 +77,10 @@ fn portable_policy(value: &Value) -> bool {
         return false;
     }
     if value["billing"] == "subscription"
-        && ["small", "strong", "classifier", "model"]
+        && roles
             .iter()
+            .copied()
+            .chain(std::iter::once("model"))
             .any(|key| {
                 let key = value[key].as_str().unwrap_or("");
                 key != "auto" && !key.starts_with("yam-codex/") && !key.starts_with("openai-codex/")
@@ -85,10 +90,10 @@ fn portable_policy(value: &Value) -> bool {
     }
     let policy = &value["rules"];
     if !fields(policy, &["v", "rules", "fallback"])
-        || policy["v"] != 1
+        || !(policy["v"] == 1 || tiered && policy["v"] == 2)
         || policy.to_string().len() > 6000
         || !fields(&policy["fallback"], &["model", "effort"])
-        || policy["fallback"]["model"] != "strong"
+        || policy["fallback"]["model"] != if policy["v"] == 2 { "medium" } else { "strong" }
         || !policy["fallback"]["effort"]
             .as_str()
             .is_some_and(|v| ["high", "xhigh", "max"].contains(&v))
@@ -118,12 +123,13 @@ fn portable_policy(value: &Value) -> bool {
             && rule["examples"]
                 .as_array()
                 .is_some_and(|rows| rows.len() <= 4 && rows.iter().all(|v| text(v, 160)))
-            && rule["model"]
-                .as_str()
-                .is_some_and(|v| ["small", "strong"].contains(&v))
+            && rule["model"].as_str().is_some_and(|v| {
+                ["small", "strong"].contains(&v) || policy["v"] == 2 && v == "medium"
+            })
             && rule["effort"].as_str().is_some_and(|v| levels.contains(&v))
             && (["transform", "answer"].contains(&task)
-                || rule["model"] == "strong" && rule["effort"] != "medium")
+                || (rule["model"] == "strong" || policy["v"] == 2 && rule["model"] == "medium")
+                    && rule["effort"] != "medium")
     })
 }
 pub(super) fn encode(raw: &str) -> Result<Vec<u8>, &'static str> {
@@ -279,5 +285,33 @@ mod tests {
             }
             assert!(encode(&value.to_string()).is_err(), "{kind}");
         }
+    }
+    #[test]
+    fn portable_pi_policy_export_three_tier_retains_medium_and_subscription_floor() {
+        let mut value = portable_backup();
+        value["piRouting"]["v"] = 2.into();
+        value["piRouting"]["medium"] = "yam-codex/medium".into();
+        value["piRouting"]["rules"]["v"] = 2.into();
+        value["piRouting"]["rules"]["fallback"]["model"] = "medium".into();
+        value["piRouting"]["rules"]["rules"][2]["model"] = "medium".into();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&encode(&value.to_string()).unwrap()).unwrap(),
+            value
+        );
+        for medium in [
+            serde_json::json!(null),
+            serde_json::json!("p/paid"),
+            serde_json::json!(""),
+        ] {
+            let mut invalid = value.clone();
+            invalid["piRouting"]["medium"] = medium;
+            assert!(encode(&invalid.to_string()).is_err());
+        }
+        let mut invalid = value.clone();
+        invalid["piRouting"]["rules"]["rules"][2]["model"] = "small".into();
+        assert!(encode(&invalid.to_string()).is_err());
+        invalid = value;
+        invalid["piRouting"]["v"] = 1.into();
+        assert!(encode(&invalid.to_string()).is_err());
     }
 }

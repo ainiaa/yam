@@ -15,6 +15,40 @@ test("T10 palette provides finite existing actions and filters without execution
  assert.ok(palette.paletteEntries("",sessions,true).some(x=>x.action==="resume"));assert.deepEqual(palette.paletteEntries("中😀",sessions,false).map(x=>x.sessionId),['s-a']);assert.equal(effects,0);
  assert.ok(!entries.some(x=>['stop','delete','run_again'].includes(x.action)));assert.equal(palette.paletteEntries('no-match',sessions,false).length,0);
 });
+
+test('palette distinguishes same-title sessions and searches existing project, directory, agent and status',()=>{
+ const records=[
+  {id:'s-billing',title:'修复登录',project:'支付平台',cwd:'/work/billing',agent:'Codex',status:'Permission required'},
+  {id:'s-admin',title:'修复登录',project:'管理后台',cwd:'C:\\work\\admin',agent:'Claude',status:'Running'},
+ ];
+ const entries=palette.paletteEntries('修复登录',records,false);
+ assert.deepEqual(entries.map(entry=>entry.sessionId),['s-billing','s-admin']);
+ assert.equal(entries[0].label,'修复登录');
+ for(const text of ['支付平台','/work/billing','Codex','Permission required'])assert.ok(entries[0].detail.includes(text));
+ for(const [query,id] of [['支付平台','s-billing'],['BILLING','s-billing'],['管理后台 claude','s-admin'],['C:\\work\\admin','s-admin'],['permission','s-billing']])assert.deepEqual(palette.paletteEntries(query,records,false).map(entry=>entry.sessionId),[id]);
+ assert.deepEqual(palette.paletteEntries('支付平台 claude',records,false),[]);
+ assert.equal(records[0].title,'修复登录');
+});
+
+test('palette metadata remains optional, preserves result bounds and never interprets markup',()=>{
+ assert.equal(palette.paletteEntries('Unicode',sessions,false)[0].label,sessions[0].title);
+ assert.equal(palette.paletteEntries('exited',sessions,false)[0].sessionId,'s-b');
+ const records=Array.from({length:150},(_,i)=>({id:'s-'+i,title:'<script>literal</script>',cwd:'/中文/😀',status:'unknown'}));
+ const entries=palette.paletteEntries('  中文  ',records,false);
+ assert.equal(entries.length,100);assert.equal(entries[0].label,'<script>literal</script>');
+ assert.ok(entries[0].detail.includes('unknown'));assert.deepEqual(palette.paletteEntries('not loaded',[],false),[]);
+});
+
+test('actual App supplies saved project names, directory, adapter and trustworthy status to palette',async()=>{
+ const fs=await import('node:fs/promises'),ts=await import('typescript'),{projectKey,projectName}=await import('../src/workspaces.ts'),{agentLabel}=await import('../src/agent-events.ts');
+ const source=await englishUiReadAsync(fs.readFile,new URL('../src/App.tsx',import.meta.url),'utf8'),tree=ts.default.createSourceFile('App.tsx',source,ts.default.ScriptTarget.Latest,true,ts.default.ScriptKind.TSX);let expression;
+ const walk=node=>{if(ts.default.isVariableDeclaration(node)&&node.name.getText(tree)==='commandEntries')expression=node.initializer.getText(tree);ts.default.forEachChild(node,walk);};walk(tree);assert.ok(expression);
+ const values={paletteEntries:palette.paletteEntries,paletteQuery:'支付平台',orderedHistory:[{summary:{session_id:'s-a',cwd:'/work/billing',title:'修复登录',adapter:'codex',mode:'interactive'},status:'running',agent:{phase:'needs_permission',integration:'connected',unread_count:1}}],projects:[{path:'/work/billing/',name:'支付平台'}],projectKey,projectName,adapters:[{id:'codex',label:'Codex'}],titleFor:summary=>summary.title,statusLabels:{running:'Running'},agentLabel,t:value=>value,canContinue:false,shortcutHint:()=>'',shortcuts:{},shortcutMac:false,canReopenTerminalTab:()=>false};
+ const execute=()=>new Function(...Object.keys(values),ts.default.transpile('return '+expression,{target:ts.default.ScriptTarget.ES2022}))(...Object.values(values));
+ const entries=execute();assert.equal(entries[0]?.sessionId,'s-a');for(const text of ['支付平台','/work/billing','Codex','Permission required'])assert.ok(entries[0].detail.includes(text),text);
+ values.paletteQuery='billing';values.projects=[];values.orderedHistory[0]={summary:{session_id:'s-a',cwd:'/work/billing',title:'修复登录',adapter:null,mode:null},status:'unknown',agent:{phase:'idle',integration:'unavailable',unread_count:0}};
+ const terminal=execute()[0];assert.ok(terminal.detail.includes('Terminal'));assert.ok(terminal.detail.includes('unknown'));assert.ok(!terminal.detail.includes('Ready'));
+});
 test("T10 palette opening respects IME, input, dialog and modifier boundaries",()=>{
  assert.equal(palette.paletteShortcut(event,false,false),true);assert.equal(palette.paletteShortcut({...event,metaKey:false,ctrlKey:true},false,false),true);
  for(const change of [{isComposing:true},{repeat:true},{altKey:true},{shiftKey:false},{metaKey:false},{key:'k'}])assert.equal(palette.paletteShortcut({...event,...change},false,false),false);
@@ -64,6 +98,23 @@ async function actualAppAction(name,values){
  values={zoomedPaneIdRef:{current:null},...layoutOperations,showTerminalLayout(){},reconcileTerminalLayoutSelection(){},layoutRestore:{current:{version:0,pending:false}},setLayoutRestoreReady(){},terminalLayoutRef:{current:{mode:'single',panes:[values.sessionId?.current??null],focused:0,revision:0}},setTerminalLayout:()=>{},...values};
  return new Function(...Object.keys(values),ts.default.transpile(helpers.join('\n')+'\n'+found,{target:ts.default.ScriptTarget.ES2022})+';return '+name+';')(...Object.values(values));
 }
+test('cancelled palette navigation never opens a session after its pending lookup resolves',async()=>{
+ for(const action of ['switch','previous']){
+  let resolve;const record=new Promise(r=>{resolve=r;}),calls=[],values={paletteOpen:true,paletteVersion:{current:0},previousSession:{current:'s-next'},executePaletteEntry:palette.executePaletteEntry,detailVersion:{current:0},terminalStatuses:new Set(['succeeded']),invoke:()=>record,openHistory:async()=>{calls.push('opened');},openTerminal:async()=>{calls.push('opened');},setError:value=>calls.push(['error',value]),setPaletteOpen:value=>calls.push(['palette',value])};
+  values.openSession=await actualAppAction('openSession',values);values.closeCommandPalette=await actualAppAction('closeCommandPalette',values);
+  const choose=await actualAppAction('choosePaletteEntry',values),pending=choose({action,sessionId:'s-next'});values.closeCommandPalette();const before=structuredClone(calls);resolve({summary:{session_id:'s-next'},status:'succeeded'});await pending;assert.deepEqual(calls,before);
+ }
+});
+test('explicit openSession validity is passed through to the attachment boundary',async()=>{
+ for(const status of ['running','succeeded']){
+  const captures=[],valid=()=>true,values={detailVersion:{current:0},terminalStatuses:new Set(['succeeded']),invoke:async()=>({summary:{session_id:'s-next'},status}),openHistory:async(...args)=>{captures.push(args[4]);},openTerminal:async(...args)=>{captures.push(args[3]);},setError:assert.fail};
+  const open=await actualAppAction('openSession',values);await open('s-next',undefined,valid);assert.deepEqual(captures,[valid]);
+ }
+});
+test('successful palette dismissal preserves the committed navigation for its queued fit callback',async()=>{
+ let scope,open=true;const values={paletteOpen:true,paletteVersion:{current:0},previousSession:{current:null},executePaletteEntry:palette.executePaletteEntry,setError:assert.fail,setPaletteOpen:value=>{open=value;},openSession:async(_id,_attached,valid)=>{scope=valid;return true;}};
+ values.closeCommandPalette=await actualAppAction('closeCommandPalette',values);await (await actualAppAction('choosePaletteEntry',values))({action:'switch',sessionId:'s-next'});assert.equal(open,false);assert.equal(scope(),true);
+});
 test("T10 actual App permanent receipt clears pins and persisted metadata only for deleted IDs",async()=>{
  let pins=['s-deleted','s-keep'];const stored=new Map([['yam.pinnedSessions',JSON.stringify(pins)]]),refs={pinnedSessionsRef:{current:pins},previousSession:{current:null},selectedRecord:{current:null},viewClaimSelection:{current:0},paneClaimSelection:{current:new Map()},detailVersion:{current:0},selectionVersion:{current:0},sessionId:{current:null},terminal:{current:null},fitAddon:{current:null},outputCursor:{current:null}};
  const values={windowPreferenceKey:name=>windowPreferenceKey("main",name),...refs,setSessionTitles:f=>f({}),terminalViews:{current:{get:()=>null,setProtected:()=>{},retain:()=>{}}},pendingOutput:{current:new Map()},pendingState:{current:new Map()},setSession:()=>{},setSessionStatus:()=>{},setPinnedSessions:v=>{pins=typeof v==='function'?v(pins):v;},localStorage:{getItem:key=>stored.get(key)??null,setItem:(key,value)=>stored.set(key,value),removeItem:key=>stored.delete(key)},setError:reason=>assert.fail(reason)};

@@ -6,6 +6,12 @@ export type WorktreeCreatePreview=ManagedWorktree&{reference:string;revision:num
 export type WorktreeCreateRequest={root:string;target:string;reference:string;branch:string|null};
 type Invoke=(name:string,args:Record<string,unknown>)=>Promise<unknown>;
 
+export function suggestWorktree(root:string,suffix:string):{target:string;branch:string} {
+ const base=root.replace(/[\\/]+$/,"");
+ if(!base||/^[A-Za-z]:$/.test(base)||!(/^(\/|[A-Za-z]:[\\/]|\\\\)/.test(base)))return {target:"",branch:""};
+ return {target:base+"-task-"+suffix,branch:"codex/task-"+suffix};
+}
+
 const recordKeys=["attempt","session_id","repository","common_dir","target","branch","commit","state","checkout_complete","session_claimed"];
 export function isManagedWorktree(value:unknown):value is ManagedWorktree {
  if(!value||typeof value!=="object"||Array.isArray(value))return false;

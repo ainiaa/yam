@@ -3,15 +3,15 @@ import {useEffect,useRef,useState} from 'react';
 import {openUrl} from '@tauri-apps/plugin-opener';
 import {Select} from './Select';
 import {t} from './i18n';
-import {defaultRules,validateRules,rulesVersion,type TaskRules,type TaskRule} from '../src-tauri/pi/task-rules.mjs';
-import {buildPiArgs,parsePiDraft,piLevels,piSetupMapping,piSetupStorageKey,restorePiSetup,selectPiSetupModel,validatePiDraft,verifyPiSetup,type PiDraft,type PiModel,type PiRoutingState,type PiSnapshot} from './pi-routing';
+import {defaultRules,defaultTierRules,validateRules,rulesVersion,type TaskRules,type TaskRule} from '../src-tauri/pi/task-rules.mjs';
+import {buildPiArgs,parsePiDraft,piLevels,piSetupMapping,piSetupStorageKey,restorePiSetup,selectPiSetupModel,validatePiDraft,verifyPiSetup,type NativeFailure,type PiDraft,type PiModel,type PiRoutingState,type PiSnapshot} from './pi-routing';
 type Invoke=<T>(command:string,args?:Record<string,unknown>)=>Promise<T>;
 function ModelOptions({models,value}:{models:PiModel[];value:string}){return <>{!models.some(m=>m.key===value)&&value&&<option value={value}>{value}</option>}{models.map(m=><option key={m.key} value={m.key}>{m.name} · {t(m.source==='chatgpt-subscription'?'ChatGPT subscription':m.source==='magpie'||m.key.startsWith('yam-gateway/')?'Magpie gateway':m.billing==='api'?'Pi native API':m.billing==='subscription'?'Pi native subscription':'Pi native')} · {m.key}</option>)}</>;}
 export function PiRoutingConfig({args,cwd,invoke,onChange,onValidity,installedGateways=[]}:{args:string;cwd:string;invoke:Invoke;onChange:(args:string)=>void;onValidity:(state:{valid:boolean;scope:string})=>void;installedGateways?:string[]}){
  const root=useRef<HTMLFieldSetElement>(null),version=useRef(0),[visible,setVisible]=useState(false),[models,setModels]=useState<PiModel[]>([]),[busy,setBusy]=useState(false),[error,setError]=useState<string|null>(null),[warning,setWarning]=useState<string|null>(null);
  let draft:PiDraft|null=null,parseError:string|null=null;try{draft=parsePiDraft(args);}catch(e){parseError=String(e);}
  const [setupOpen,setSetupOpen]=useState(()=>!draft?.small&&!draft?.strong);
- let taskRules=null;try{taskRules=validateRules(draft?.rules?JSON.parse(draft.rules):defaultRules);}catch{}
+ let taskRules=null;try{taskRules=validateRules(draft?.rules?JSON.parse(draft.rules):draft?.medium?defaultTierRules:defaultRules);}catch{}
  const gateway=draft?.gateway??null,scope=JSON.stringify([cwd,gateway]);
  const [verified,setVerified]=useState('');
  const [setupModels,setSetupModels]=useState<PiModel[]>([]),[setupModel,setSetupModel]=useState(''),[setupStatus,setSetupStatus]=useState(''),[setupGateway,setSetupGateway]=useState('http://127.0.0.1:3425');
@@ -46,7 +46,7 @@ export function PiRoutingConfig({args,cwd,invoke,onChange,onValidity,installedGa
    if(current!==version.current||argsRef.current!==original||scopeRef.current!==scope)return;
    setSetupStatusScope(JSON.stringify([cwd,result.mapping.gateway]));
    try{localStorage.setItem(piSetupStorageKey,JSON.stringify(result.mapping));}catch{setSetupStatus('Model verified, but this device could not save the routing defaults.');onChange(result.args);return;}
-   onChange(result.args);setSetupStatus('Model verified. The same model is selected for all three roles; you can change them below.');
+   onChange(result.args);setSetupStatus(result.warning??(result.mapping.medium?'Model verified. Routing uses three execution tiers; you can change their models below.':'Model verified. The same model is selected for all three roles; you can change them below.'));
   }catch(e){if(current===version.current&&scopeRef.current===scope)setSetupStatus(e instanceof Error&&['Invalid billing policy','Subscription-only billing requires a Codex subscription model.'].includes(e.message)?e.message:'Model verification failed. Check login, access and connection, or choose another model.');}
   finally{if(current===version.current)setBusy(false);}
  }
@@ -62,7 +62,7 @@ export function PiRoutingConfig({args,cwd,invoke,onChange,onValidity,installedGa
   catch{setSetupStatus('Saved routing policy is unavailable or conflicts with the current billing policy.');}
  }
  return <fieldset className="pi-routing-config" ref={root}><legend>{t('Pi automatic routing')}</legend>
-  <p className="settings-help">{t('Pi keeps the same native conversation and tools. Model and reasoning can be automatic or fixed independently.')}</p>
+  <p className="settings-help">{t('Pi keeps this chat history. ChatGPT subscription tasks use the official Codex CLI with its default native Skills and tools. Model and reasoning can be automatic or fixed independently.')}</p>
   <details className="pi-routing-advanced" open={setupOpen} onToggle={e=>setSetupOpen(e.currentTarget.open)}><summary>{t('Quick model setup')}</summary>
    <p className="settings-help">{t('Scan configured Pi, Codex and local Magpie models. Verification sends a short test request and may use your selected connection quota.')}</p>
    <button type="button" disabled={busy||!cwd.trim()} onClick={()=>void discoverSetup()}>{t('Find available models')}</button>
@@ -77,14 +77,14 @@ export function PiRoutingConfig({args,cwd,invoke,onChange,onValidity,installedGa
     <button type="button" onClick={()=>openUrl(gateways.includes('magpie')?'https://usemagpie.ai/docs/start':'https://usemagpie.ai/').catch(()=>setError('Could not open the link. Try again from the current terminal.'))}>{t(gateways.includes('magpie')?'Magpie setup guide':'Get Magpie')}</button>
     {gateways.includes('cc-switch')&&<p className="settings-help">{t('CC Switch is installed. Configure Pi through your existing tool if supported, then scan again. YAM does not read CC Switch models directly.')}</p>}
     {gateways.includes('echobird')&&<p className="settings-help">{t('EchoBird is installed. Configure Pi through your existing tool if supported, then scan again. YAM does not read EchoBird models directly.')}</p>}
-    <p className="settings-help">{t('Prefer not to install another app? Run pi in a terminal and use /login, or configure a provider in Pi, then scan again.')}</p>
+    <p className="settings-help">{t('For ChatGPT subscriptions, sign in to the official Codex CLI with codex login. For other Pi providers, use pi /login or configure their credentials, then scan again.')}</p>
     <button type="button" onClick={()=>openUrl('https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/providers.md').catch(()=>setError('Could not open the link. Try again from the current terminal.'))}>{t('Pi provider setup guide')}</button>
    </div>}
   </details>
   {draft&&<><label><span>{t('Model connection')}</span><Select aria-label={t('Model connection')} value={gateway===null?'native':'gateway'} onChange={e=>change({gateway:e.target.value==='native'?null:'http://127.0.0.1:3425'})}><option value="native">{t('Pi native only')}</option><option value="gateway">{t('Pi native + Magpie')}</option></Select></label>
-   <p className="settings-help">{t('ChatGPT subscription models use Pi login directly. Magpie adds other services. Choose each routing role explicitly; classifier, preview and correction use their configured channels. Subscription failures never trigger a paid channel fallback.')}</p>
+   <p className="settings-help">{t('ChatGPT subscription tasks require the official Codex CLI login. Automatic setup detects routing tiers; you can override their models below. Classifier, preview and correction use their configured channels. Subscription failures never trigger a paid channel fallback.')}</p>
    {gateway!==null&&<label><span>{t('Gateway URL')}</span><input value={gateway} onChange={e=>change({gateway:e.target.value})} placeholder="http://127.0.0.1:3425" autoComplete="off" spellCheck={false}/></label>}
-   <div className="pi-routing-pair">{(['small','strong'] as const).map(role=><label key={role}><span>{t(role==='small'?'Lightweight model':'Strong model')}</span><Select aria-label={t(role==='small'?'Lightweight model':'Strong model')} value={draft![role]} onChange={e=>change({[role]:e.target.value})}><option value="">{t('Choose a model')}</option><ModelOptions models={models} value={draft![role]}/></Select></label>)}</div>
+   <div className="pi-routing-pair">{(['small','medium','strong'] as const).map(role=><label key={role}><span>{t(role==='small'?'Lightweight model':role==='medium'?'Standard model':'Strong model')}</span><Select aria-label={t(role==='small'?'Lightweight model':role==='medium'?'Standard model':'Strong model')} value={draft![role]??''} onChange={e=>change({[role]:e.target.value})}><option value="">{t('Choose a model')}</option><ModelOptions models={models} value={draft![role]??''}/></Select></label>)}</div>
    <details className="pi-routing-advanced"><summary>{t('Routing preferences')}</summary><div className="pi-routing-pair"><label><span>{t('Model selection')}</span><Select aria-label={t('Model selection')} value={draft.model} onChange={e=>change({model:e.target.value})}><option value="auto">{t('Automatic by task')}</option><ModelOptions models={models} value={draft.model==='auto'?'':draft.model}/></Select></label><label><span>{t('Reasoning selection')}</span><Select aria-label={t('Reasoning selection')} value={draft.effort} onChange={e=>change({effort:e.target.value})}><option value="auto">{t('Automatic by task')}</option>{['off','minimal',...piLevels].map(level=><option key={level} value={level}>{level==='off'?t('Reasoning off (fixed)'):level}</option>)}</Select></label></div><label><span>{t('Classifier model')}</span><Select aria-label={t('Classifier model')} value={draft.classifier} onChange={e=>change({classifier:e.target.value})}><option value="">{t('Same as lightweight model')}</option><ModelOptions models={models} value={draft.classifier}/></Select></label><p className="settings-help">{t('A fixed reasoning level is preserved exactly. Unsupported selections stop with an explanation.')}</p></details>
    {taskRules?<PiTaskRules rules={taskRules} disabled={busy} onApply={rules=>change({rules:JSON.stringify(rules)})}/>:<button type="button" onClick={()=>change({rules:JSON.stringify(defaultRules)})}>{t('Restore default task rules')}</button>}
    <p className="settings-help">{t('These defaults apply to new sessions. Existing sessions keep their saved task rules; use Adjust routing to edit and preview them.')}</p>
@@ -98,7 +98,9 @@ export function PiRoutingBar({sessionId,generation,active,available,invoke}:{ses
  const [error,setError]=useState<string|null>(null),[readError,setReadError]=useState<string|null>(null),[busy,setBusy]=useState(false);
  const [draft,setDraft]=useState<{model:string;effort:string;revision:number}|null>(null);
  const [expanded,setExpanded]=useState(false),[catalogError,setCatalogError]=useState<string|null>(null);
- const mounted=useRef(true),serial=useRef(false),readEpoch=useRef(0);
+ const [recoveryOpen,setRecoveryOpen]=useState(false),[recoveryConfirmation,setRecoveryConfirmation]=useState<{receiptId:string;revision:number;generation:string}|null>(null),[recoveryMessage,setRecoveryMessage]=useState(false);
+ const [controlFailure,setControlFailure]=useState<NativeFailure|null>(null),[stateRefreshed,setStateRefreshed]=useState(false);
+ const mounted=useRef(true),serial=useRef(false),readEpoch=useRef(0),controlScope=useRef('');controlScope.current=JSON.stringify([sessionId,generation]);
  useEffect(()=>{
   mounted.current=true;let stopped=false,needsRead=true;let timer:ReturnType<typeof setTimeout>;
   async function read(){
@@ -115,30 +117,52 @@ export function PiRoutingBar({sessionId,generation,active,available,invoke}:{ses
  },[sessionId,generation,active,available,invoke]);
  useEffect(()=>{
   if(!state||!active||!available||models.length)return;let stopped=false;
-  void invoke<{models:PiModel[]}>('pi_routing_control',{sessionId,generation,request:{action:'catalog',revision:state.revision}})
-   .then(result=>{if(!stopped){setModels(result.models??[]);setCatalogError(null);}}).catch(e=>{if(!stopped)setCatalogError(String(e));});
+  void invoke<{models:PiModel[];controlFailure?:NativeFailure}>('pi_routing_control',{sessionId,generation,request:{action:'catalog',revision:state.revision}})
+   .then(result=>{if(!stopped){if(result.controlFailure){setControlFailure(result.controlFailure);setStateRefreshed(false);return;}setModels(result.models??[]);setCatalogError(null);}})
+   .catch(e=>{if(!stopped){setCatalogError(String(e));setControlFailure({category:'unknown',stage:'control',code:'control-result-unknown',dispatch:'unknown',nextAction:'refresh-state'});setStateRefreshed(false);}});
   return()=>{stopped=true;};
  },[!!state,active,available,sessionId,generation,invoke]);
- async function control(action:string,data?:unknown,revision=state?.revision){
-  if(!state||serial.current)return;serial.current=true;readEpoch.current++;setBusy(true);setError(null);
+ useEffect(()=>{setRecoveryOpen(false);setRecoveryConfirmation(null);setRecoveryMessage(false);setControlFailure(null);setStateRefreshed(false);},[sessionId,generation]);
+ async function refreshState(){
+  if(serial.current)return;const scope=controlScope.current;serial.current=true;readEpoch.current++;setBusy(true);setStateRefreshed(false);
   try{
-   const result=await invoke<{state:PiRoutingState}>('pi_routing_control',{sessionId,generation,request:{action,revision,...(data?{data}:{})}});
-   if(mounted.current){
+   const next=await invoke<PiSnapshot>('get_pi_routing',{sessionId});
+   if(mounted.current&&scope===controlScope.current){
+    if(next.state&&next.state.generation!==generation)throw Error('Pi runtime changed');
+    setState(next.state);setReadError(null);setStateRefreshed(true);
+   }
+  }catch(e){if(mounted.current&&scope===controlScope.current)setReadError(String(e));}
+  finally{readEpoch.current++;serial.current=false;if(mounted.current&&scope===controlScope.current)setBusy(false);}
+ }
+ async function control(action:string,data?:unknown,revision=state?.revision){
+  if(!state||serial.current)return;const scope=controlScope.current;serial.current=true;readEpoch.current++;setBusy(true);setError(null);setControlFailure(null);setStateRefreshed(false);
+  try{
+   const result=await invoke<{state:PiRoutingState;controlFailure?:NativeFailure}>('pi_routing_control',{sessionId,generation,request:{action,revision,...(data?{data}:{})}});
+   if(mounted.current&&scope===controlScope.current){
+    if(result.controlFailure){setControlFailure(result.controlFailure);return null;}
     setReadError(null);setState(result.state);if(action==='set'||action==='reset')setDraft(null);
+    if(action==='native-reset'){setRecoveryConfirmation(null);setRecoveryMessage(true);}
     if(action==='retry'){
-     const next=await invoke<{models:PiModel[]}>('pi_routing_control',{sessionId,generation,request:{action:'catalog',revision:result.state.revision}});
-     if(mounted.current){setModels(next.models??[]);setCatalogError(null);}
+     const next=await invoke<{models:PiModel[];controlFailure?:NativeFailure}>('pi_routing_control',{sessionId,generation,request:{action:'catalog',revision:result.state.revision}});
+     if(mounted.current&&scope===controlScope.current){if(next.controlFailure)setControlFailure(next.controlFailure);else{setModels(next.models??[]);setCatalogError(null);}}
     }
     return result.state;
    }
-  }catch(e){if(mounted.current)setError(String(e));return null;}
+  }catch(e){if(mounted.current&&scope===controlScope.current){setError(String(e));setControlFailure({category:'unknown',stage:'control',code:'control-result-unknown',dispatch:'unknown',nextAction:'refresh-state'});}return null;}
   finally{readEpoch.current++;serial.current=false;if(mounted.current)setBusy(false);}
  }
- const working=state&&['starting','classifying','selected','working'].includes(state.phase),disabled=!state||!active||!available||busy||!!working;
+ const working=state&&['starting','classifying','selected','working'].includes(state.phase),disabled=!state||!active||!available||busy||!!working||!!controlFailure&&!stateRefreshed;
  const choice=draft??state?.preferences,dirty=!!(draft&&state&&(draft.model!==state.preferences.model||draft.effort!==state.preferences.effort));
  const stale=!!(draft&&state&&draft.revision!==state.revision);
  const live=active&&available&&!readError;
- const execution=state?.diagnostics?.execution;
+ const execution=state?.diagnostics?.execution,recovery=state?.nativeRecovery;
+ const failure=controlFailure??state?.failure??recovery?.failure;
+ const failureReasons={auth:'Native login required',quota:'Native quota unavailable',context:'Context budget unavailable or exceeded',capability:'Required capability unavailable',connection:'Control connection unavailable',cancelled:'Task interrupted',execution:'Native execution failed',unknown:'Failure cause unconfirmed'};
+ const budgetReasons:Record<string,string>={billing:'Billing path incompatible',capability:'Required capability unavailable',effort:'Reasoning level unsupported','context-unknown':'Context window unknown','context-limit':'Context budget unavailable or exceeded','estimate-unavailable':'Context estimate unavailable','reserve-unavailable':'Context reserve unavailable'};
+ const failureStages={discovery:'Checking native login…',preparation:'Preparing context…',dispatch:'Starting native CLI…',execution:'Native task running',verification:'Verifying native result',persistence:'Saving native receipt',control:'Applying routing control'};
+ const failureActions={'check-login':'Check official Codex login with codex login, then refresh connection.','check-quota':'Check the current subscription quota in Codex. No paid channel will be selected.','reduce-context':'Explicitly compact or split the task before submitting new work.','check-capability':'Check the configured model, tools and native CLI capabilities before submitting new work.','refresh-state':'Refresh current state before deciding on another action. The previous action will not be resent.','inspect-task':'Inspect the native task, file changes and external actions before deciding what to do next. No task is resent.'};
+ const recoveryStale=!!(recoveryConfirmation&&(recoveryConfirmation.revision!==state?.revision||recoveryConfirmation.generation!==generation||recoveryConfirmation.receiptId!==recovery?.receiptId));
+ const recoveryReasons={'execution-failed':'Execution failed',cancelled:'Task interrupted','cleanup-unconfirmed':'Cleanup unconfirmed',unknown:'Execution outcome unknown'};
  const executionStages={discovering:'Checking native login…',preparing:'Preparing context…',starting:'Starting native CLI…',executing:'Native task running',completed:'Native task completed',failed:'Execution failed',aborted:'Task interrupted'};
  const handoffReasons={'verified-prefix':'Verified context prefix','prefix-unverified':'Context checkpoint unavailable or changed','new-task':'New task requested','identity-changed':'Native identity changed','new-session':'New native session'};
  const selected=live&&state?.phase==='selected'?state.target:null;
@@ -150,8 +174,29 @@ export function PiRoutingBar({sessionId,generation,active,available,invoke}:{ses
    {execution&&<span role="status">{t(executionStages[execution.stage])}</span>}
    {state&&<span className="pi-routing-policy">{state.preferences.model==='auto'?t('Automatic model'):t('Fixed model: {{value0}}',{value0:state.preferences.model})}</span>}
    <button type="button" aria-expanded={expanded} aria-controls={`pi-routing-controls-${sessionId}`} onClick={()=>setExpanded(value=>!value)}>{t('Adjust routing')}</button>
+   {recovery&&<button type="button" disabled={!active||!available||busy} aria-expanded={recoveryOpen} onClick={()=>{setRecoveryOpen(true);void control('native-recovery');}}>{t('View recovery information')}</button>}
    {(error||readError||catalogError||state?.error||state?.gatewayError)&&<button type="button" disabled={disabled} onClick={()=>void control('retry')}>{busy?t('Applying…'):t('Refresh connection')}</button>}
   </div>
+  {recoveryMessage&&<p role="status">{t('Task block cleared. Describe the next work explicitly; no task was resent.')}</p>}
+  {failure&&<div className="settings-help" role="status">
+   <p>{t(failureReasons[failure.category]??failureReasons.unknown)} · {t(failureStages[failure.stage]??failureStages.execution)}</p>
+   <p>{t(failure.stage==='control'?(failure.dispatch==='not-started'?'Control request not sent':'Control result is unconfirmed. It may have been applied.'):(failure.dispatch==='not-started'?'Business task not dispatched':'Native work may have changed files or external state. Inspect before retrying.'))}</p>
+   <p>{t(failureActions[failure.nextAction]??failureActions['inspect-task'])}</p>
+   {controlFailure&&<><button type="button" disabled={!available||busy} onClick={()=>void refreshState()}>{t('Refresh current state')}</button>{stateRefreshed&&<p>{t('Current state refreshed. This does not confirm whether the previous action succeeded or failed.')}</p>}</>}
+  </div>}
+  {recoveryOpen&&recovery&&<div className="settings-help" aria-label={t('Native task recovery')}>
+   <p role="status">{t(recovery.inProgress?'Native task running':recoveryReasons[recovery.reason])}</p>
+   <p>{t('Inspect the old native task and its results before clearing the block. This does not undo actions or resend a task.')}</p>
+   {recovery.receiptId?<p>{t('Native receipt')}: <code>{recovery.receiptId}</code></p>:<p>{t('This legacy task has no stable receipt identifier. Inspect it with /yam-native status, then use /yam-native reset in Pi after checking the old task.')}</p>}
+   {recovery.sessionId?<><p>{t('Native Codex session')}: <code>{recovery.sessionId}</code></p><p>{t('Find this ID in Codex session history and read its saved transcript. Check file changes and external actions; stop the old task before clearing. Viewing does not require resuming or resending it.')}</p></>:<p>{t('Native session ID unavailable. Review the old terminal output, file changes and external actions before clearing; no native session has been inferred.')}</p>}
+   <button type="button" disabled={disabled||!!readError||!recovery.needsInspection||!recovery.receiptId} onClick={()=>{if(state&&recovery.receiptId)setRecoveryConfirmation({receiptId:recovery.receiptId,revision:state.revision,generation});}}>{t('Clear task block…')}</button>
+   {recoveryConfirmation&&<section aria-label={t('Confirm native recovery')}>
+    <p>{t('Confirm that you stopped the old Codex task and checked files and external actions. Clearing does not undo actions or resend a task.')}</p>
+    {recoveryStale&&<p role="status">{t('Native task changed. Cancel and inspect the current recovery information.')}</p>}
+    <button type="button" disabled={busy} onClick={()=>setRecoveryConfirmation(null)}>{t('Cancel recovery')}</button>
+    <button type="button" disabled={disabled||!!readError||recoveryStale||!recovery.needsInspection} onClick={()=>{if(!recoveryStale)void control('native-reset',{receiptId:recoveryConfirmation.receiptId,confirmed:true},recoveryConfirmation.revision);}}>{t('I checked the old task; clear the block')}</button>
+   </section>}
+  </div>}
   {state&&choice&&<><div id={`pi-routing-controls-${sessionId}`} className="pi-routing-controls" hidden={!expanded}>
    <label><span>{t('Model')}</span><Select aria-label={t('Pi model selection')} value={choice.model} disabled={disabled} onChange={e=>choose({model:e.target.value})}><option value="auto">{t('Automatic by task')}</option><ModelOptions models={models} value={choice.model==='auto'?'':choice.model}/></Select></label>
    <label><span>{t('Reasoning')}</span><Select aria-label={t('Pi reasoning selection')} value={choice.effort} disabled={disabled} onChange={e=>choose({effort:e.target.value})}><option value="auto">{t('Automatic by task')}</option>{['off','minimal',...piLevels].map(level=><option key={level} value={level}>{level==='off'?t('Reasoning off (fixed)'):level}</option>)}</Select></label>
@@ -159,8 +204,10 @@ export function PiRoutingBar({sessionId,generation,active,available,invoke}:{ses
    {draft&&<button type="button" disabled={busy} onClick={()=>setDraft(null)}>{t('Cancel selection')}</button>}
    <button type="button" disabled={disabled||(!dirty&&state.preferences.model==='auto'&&state.preferences.effort==='auto')} onClick={()=>void control('reset')}>{t('Reset both to automatic')}</button>
    <button type="button" disabled={disabled} onClick={()=>void control('retry')}>{busy?t('Applying…'):t('Refresh connection')}</button>
-   {state.rules&&<PiTaskRules rules={state.rules} disabled={disabled} onApply={async rules=>{if(!await control('rules',rules))throw Error(t('Task rules were not applied'));}} onPreview={async(text,rules)=>{const next=await control('preview',{text,rules}),p=next?.preview;if(!p)throw Error(t('Task rule preview failed'));return `${t('Matched task rule')}: ${t(p.rule)}\n${t(p.selection.model==='small'?'Lightweight model':'Strong model')} · ${p.selection.effort}\n${t('Classification time')}: ${p.latencyMs} ms\n${t('Model-reported cost')}: ${p.cost??t('Unknown cost')}\n${t('Policy preview only. Session locks, capacity and cache can change the final selection.')}`;}}/>}
+   {state.rules&&<PiTaskRules rules={state.rules} disabled={disabled} onApply={async rules=>{if(!await control('rules',rules))throw Error(t('Control result is unconfirmed. It may have been applied.'));}} onPreview={async(text,rules)=>{const next=await control('preview',{text,rules}),p=next?.preview;if(!p)throw Error(t('Task rule preview failed'));return `${t('Matched task rule')}: ${t(p.rule)}\n${t(p.selection.model==='small'?'Lightweight model':p.selection.model==='medium'?'Standard model':'Strong model')} · ${p.selection.effort}\n${t('Classification time')}: ${p.latencyMs} ms\n${t('Model-reported cost')}: ${p.cost??t('Unknown cost')}\n${t('Policy preview only. Session locks, capacity and cache can change the final selection.')}`;}}/>}
    {state.decision&&<p className="settings-help">{t('Matched task rule')}: {t(state.decision.rule)} · {state.decision.ruleVersion}<br/>{t('Classification time')}: {state.decision.classificationMs} ms · {t('Model-reported cost so far')}: {state.decision.totalCost??t(state.actual?.billing==='subscription'?'Subscription usage; API cost unavailable':'Unknown cost')}</p>}
+   {state.decision?.budget&&<p className="settings-help">{t('Local context estimate')}: {state.decision.budget.inputTokens??'—'} + {state.decision.budget.reserveTokens??'—'} {t('local reserve')} / {state.decision.budget.contextWindow??'—'} {t('context window')}<br/>{t('Local estimate only; native accumulated context is not measured.')}</p>}
+   {!!state.decision?.rejected?.length&&<ul className="settings-help">{state.decision.rejected.map((item,index)=><li key={index}>{item.model}: {t(budgetReasons[item.reason]??'Context estimate unavailable')}</li>)}</ul>}
    {state.actual?.usage&&<p className="settings-help">{t('Reply tokens')}: {state.actual.usage.input??'—'} {t('input')} / {state.actual.usage.output??'—'} {t('output')}</p>}
    {state.diagnostics&&<p className="settings-help">{t(state.diagnostics.configSource==='session'?'Saved session configuration':'Launch configuration')} · {t(state.diagnostics.billing==='subscription'?'Subscription only':'Configured channels')}</p>}
    {execution&&<div className="settings-help" aria-label={t('Execution diagnostics')}>
@@ -195,12 +242,12 @@ export function PiTaskRules({rules,disabled,onApply,onPreview}:{rules:TaskRules;
    <strong>{t(rule.task)}</strong>
    <label><span>{t('Task description')}</span><textarea aria-label={`Rule description: ${rule.task}`} maxLength={600} value={rule.description} onChange={e=>change(rule.task,{description:e.target.value})}/></label>
    <label><span>{t('Examples (one per line, up to four)')}</span><textarea aria-label={`Rule examples: ${rule.task}`} value={rule.examples.join('\n')} onChange={e=>change(rule.task,{examples:e.target.value.split('\n').filter(Boolean)})}/></label>
-   <label><span>{t('Model')}</span><Select aria-label={`Rule model: ${rule.task}`} value={rule.model} onChange={e=>change(rule.task,{model:e.target.value as TaskRule['model']})}><option value="strong">{t('Strong model')}</option>{['transform','answer'].includes(rule.task)&&<option value="small">{t('Lightweight model')}</option>}</Select></label>
+   <label><span>{t('Model')}</span><Select aria-label={`Rule model: ${rule.task}`} value={rule.model} onChange={e=>change(rule.task,{model:e.target.value as TaskRule['model']})}><option value="strong">{t('Strong model')}</option>{draft.rules.v===2&&<option value="medium">{t('Standard model')}</option>}{['transform','answer'].includes(rule.task)&&<option value="small">{t('Lightweight model')}</option>}</Select></label>
    <label><span>{t('Reasoning')}</span><Select aria-label={`Rule reasoning: ${rule.task}`} value={rule.effort} onChange={e=>change(rule.task,{effort:e.target.value as TaskRule['effort']})}>{(['transform','answer'].includes(rule.task)?['medium','high','xhigh','max']:['high','xhigh','max']).map(level=><option key={level} value={level}>{level}</option>)}</Select></label>
   </div>)}</fieldset>
-  <label><span>{t('Fallback reasoning')}</span><Select aria-label="Fallback reasoning" disabled={disabled||busy} value={draft.rules.fallback.effort} onChange={e=>{setDraft(old=>({...old,rules:{...old.rules,fallback:{model:'strong',effort:e.target.value as TaskRules['fallback']['effort']}}}));setResult('');}}>{['high','xhigh','max'].map(level=><option key={level} value={level}>{level}</option>)}</Select></label>
+  <label><span>{t('Fallback reasoning')}</span><Select aria-label="Fallback reasoning" disabled={disabled||busy} value={draft.rules.fallback.effort} onChange={e=>{setDraft(old=>({...old,rules:{...old.rules,fallback:{model:old.rules.fallback.model,effort:e.target.value as TaskRules['fallback']['effort']}}}));setResult('');}}>{['high','xhigh','max'].map(level=><option key={level} value={level}>{level}</option>)}</Select></label>
   <button type="button" disabled={disabled||busy||!dirty||stale||!!issue} onClick={apply}>{t('Apply task rules')}</button>
-  <button type="button" disabled={disabled||busy} onClick={()=>{setDraft(old=>({...old,rules:validateRules(defaultRules)}));setResult('');}}>{t('Restore default task rules')}</button>
+  <button type="button" disabled={disabled||busy} onClick={()=>{setDraft(old=>({...old,rules:validateRules(rules.v===2?defaultTierRules:defaultRules)}));setResult('');}}>{t('Restore default task rules')}</button>
   <button type="button" disabled={busy} onClick={()=>{setDraft({rules:validateRules(rules),base:saved});setResult('');setError('');}}>{t('Cancel rule changes')}</button>
   {stale&&dirty&&<p role="alert">{t('Task rules changed. Cancel edits and start from the current version.')}</p>}
   {onPreview&&<><label><span>{t('Preview request')}</span><textarea aria-label="Preview request" maxLength={4000} disabled={disabled||busy} value={text} onChange={e=>{setText(e.target.value);setResult('');}}/></label><p className="settings-help">{t('Preview classifies this text only. It does not execute or save the task. A classifier call may incur cost.')}</p><button type="button" disabled={disabled||busy||!!issue||!text.trim()} onClick={preview}>{t('Try task rules')}</button></>}

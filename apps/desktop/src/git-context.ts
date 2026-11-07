@@ -65,11 +65,12 @@ export type GitChange = {
     worktree: string;
     untracked: boolean;
     unsupported: boolean;
+    committed?: string;
 };
 
 export type GitPatch = {
     path: string;
-    side: "staged" | "worktree";
+    side: "staged" | "worktree" | "committed";
     kind: "text" | "binary" | "unsupported";
     text: string | null;
 };
@@ -80,6 +81,7 @@ export type GitChanges = {
     root: string | null;
     rows: GitChange[];
     patch: GitPatch | null;
+    comparison?: {reference:string;base:string;head:string};
 };
 
 export type GitChangesState = {
@@ -96,7 +98,8 @@ export type GitChangesRequest = {
     path: string;
     query_token: string;
     selected_path?: string;
-    side?: "staged" | "worktree";
+    side?: "staged" | "worktree" | "committed";
+    baseline?: string;
 };
 
 const queryToken = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -112,16 +115,19 @@ function relativePath(value: unknown): value is string {
 }
 
 export function isGitChanges(value: unknown): value is GitChanges {
-    if (!exactKeys(value, ["query_token", "path", "root", "rows", "patch"]) || typeof value.query_token !== "string" || !queryToken.test(value.query_token)
+    const compared=!!value&&typeof value==='object'&&Object.prototype.hasOwnProperty.call(value,'comparison');
+    if (!exactKeys(value, ["query_token", "path", "root", "rows", "patch",...(compared?["comparison"]:[])]) || typeof value.query_token !== "string" || !queryToken.test(value.query_token)
         || typeof value.path !== "string" || !value.path || byteSize(value.path) > 4096 || (value.root !== null && (typeof value.root !== "string" || !value.root || byteSize(value.root) > 4096))
         || !Array.isArray(value.rows) || value.rows.length > 4096)
         return false;
+    if(compared&&(!exactKeys(value.comparison,["reference","base","head"])||!validGitBaseline(value.comparison.reference)||![value.comparison.base,value.comparison.head].every(oid=>typeof oid==='string'&&/^[a-f0-9]{40}$/i.test(oid))||value.root===null))return false;
     let size = byteSize(value.path) + (typeof value.root === "string" ? byteSize(value.root) : 0);
     for (const row of value.rows) {
-        if (!exactKeys(row, ["path", "staged", "worktree", "untracked", "unsupported"]) || !relativePath(row.path)
+        if (!exactKeys(row, ["path", "staged", "worktree", "untracked", "unsupported",...(compared?["committed"]:[])]) || !relativePath(row.path)
             || typeof row.staged !== "string" || typeof row.worktree !== "string" || !/^[ MADRCUT?!]$/.test(row.staged) || !/^[ MADRCUT?!]$/.test(row.worktree)
             || typeof row.untracked !== "boolean" || typeof row.unsupported !== "boolean")
             return false;
+        if(compared&&(typeof row.committed!=='string'||!/^[ADMT]$/.test(row.committed)||row.staged!==" "||row.worktree!==" "||row.untracked))return false;
         // Raw field bytes are a lower bound, unlike invented per-row overhead.
         // The complete serialized DTO is checked exactly below.
         size += byteSize(row.path);
@@ -130,7 +136,7 @@ export function isGitChanges(value: unknown): value is GitChanges {
     }
     if (value.patch !== null) {
         const patch = value.patch;
-        if (!exactKeys(patch, ["path", "side", "kind", "text"]) || !relativePath(patch.path) || !["staged", "worktree"].includes(String(patch.side))
+        if (!exactKeys(patch, ["path", "side", "kind", "text"]) || !relativePath(patch.path) || !(compared?["committed"]:["staged", "worktree"]).includes(String(patch.side))
             || !["text", "binary", "unsupported"].includes(String(patch.kind)) || (patch.kind === "text" ? typeof patch.text !== "string" || byteSize(patch.text) > 262144 : patch.text !== null)
             || !value.rows.some(row => row.path === patch.path))
             return false;
@@ -139,13 +145,15 @@ export function isGitChanges(value: unknown): value is GitChanges {
     return size <= 1048576 && byteSize(JSON.stringify(value)) <= 1048576;
 }
 
+export function validGitBaseline(value:unknown):value is string{return typeof value==='string'&&byteSize(value)>0&&byteSize(value)<=256&&!value.startsWith('-')&&!/[\s\x00-\x1f\x7f]/u.test(value);}
+
 type ChangesLoad = {
     request: (args: GitChangesRequest) => Promise<unknown>;
     cancel: (token: string) => Promise<unknown>;
     changed: (state: GitChangesState) => void;
     selection?: {
         path: string;
-        side: "staged" | "worktree";
+        side: "staged" | "worktree" | "committed";
     };
     root?: string;
     generation: number;
@@ -154,6 +162,7 @@ type ChangesLoad = {
 export class GitChangesController {
     private path = "";
     private owner = "";
+    private baseline: string|undefined;
     private generation = 0;
     private active: {
         token: string;
@@ -163,12 +172,13 @@ export class GitChangesController {
     private pending: ChangesLoad | null = null;
     private token: () => string;
     constructor(token: () => string = () => crypto.randomUUID()) { this.token = token; }
-    select(path: string, owner: string): void {
-        if (path === this.path && owner === this.owner)
+    select(path: string, owner: string, baseline?:string): void {
+        if (path === this.path && owner === this.owner&&baseline===this.baseline)
             return;
         this.invalidate();
         this.path = path;
         this.owner = owner;
+        this.baseline=baseline;
     }
     private invalidate(): void {
         this.generation++;
@@ -199,6 +209,7 @@ export class GitChangesController {
         if (load.generation !== this.generation || !this.path)
             return;
         const args: GitChangesRequest = { path: this.path, query_token: this.token() };
+        if(this.baseline!==undefined)args.baseline=this.baseline;
         if (load.selection) {
             args.selected_path = load.selection.path;
             args.side = load.selection.side;
@@ -211,6 +222,7 @@ export class GitChangesController {
             if (load.generation !== this.generation)
                 return;
             if (!isGitChanges(value) || value.query_token !== args.query_token || value.path !== args.path || (load.root !== undefined && load.root !== value.root)
+                || value.comparison?.reference!==args.baseline
                 || (load.selection ? value.patch?.path !== load.selection.path || value.patch?.side !== load.selection.side : value.patch !== null)) {
                 load.changed({ kind: "unavailable", code: "git_context_changed" });
                 return;
@@ -219,7 +231,7 @@ export class GitChangesController {
         }
         catch (reason) {
             if (load.generation === this.generation) {
-                const codes = new Set([...errorCodes, "git_cancelled", "git_cancel_capacity", "git_invalid_request"]);
+                const codes = new Set([...errorCodes, "git_cancelled", "git_cancel_capacity", "git_invalid_request","git_baseline_unavailable"]);
                 load.changed({ kind: "unavailable", code: typeof reason === "string" && codes.has(reason) ? reason : "git_query_failed" });
             }
         }

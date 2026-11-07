@@ -25,6 +25,26 @@ const token = "12345678-1234-4234-8234-123456789abc";
 const row = {path:"file.txt",staged:"M",worktree:"M",untracked:false,unsupported:false};
 const result = (args, extra={}) => ({query_token:args.query_token,path:args.path,root:"/repo",rows:[row],patch:null,...extra});
 const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return {promise,resolve,reject};};
+const comparison={reference:'main',base:'a'.repeat(40),head:'b'.repeat(40)};
+const committedRow={...row,staged:' ',worktree:' ',committed:'M'};
+test('committed DTO binds both commits and cannot masquerade as uncommitted changes',()=>{
+ const value=result({path:'/repo',query_token:token},{comparison,rows:[committedRow],patch:{path:'file.txt',side:'committed',kind:'text',text:'@@ -1 +1 @@\n-old\n+committed\n'}});
+ assert.equal(git.isGitChanges(value),true);
+ for(const bad of [{...value,comparison:{...comparison,head:'HEAD'}},{...value,comparison:undefined},{...value,rows:[row]},{...value,patch:{...value.patch,side:'worktree'}}])assert.equal(git.isGitChanges(bad),false);
+});
+test('controller sends an explicit baseline and rejects mismatched comparison responses',async()=>{
+ for(const reference of ['main','other']){
+  const c=new git.GitChangesController(()=>token),updates=[],calls=[];c.select('/repo','owner','main');
+  await c.load(async args=>{calls.push(args);return result(args,{comparison:{...comparison,reference},rows:[committedRow]});},async()=>{},v=>updates.push(v));
+  assert.equal(calls[0].baseline,'main');assert.equal(updates.at(-1).kind,reference==='main'?'ready':'unavailable');
+ }
+});
+test('baseline switches cancel the old request even when directory and owner stay unchanged',async()=>{
+ const c=new git.GitChangesController(()=>token),old=deferred(),updates=[],calls=[];c.select('/repo','owner','main');const first=c.load(args=>{calls.push(args);return old.promise;},async()=>{},v=>updates.push(v));
+ c.select('/repo','owner','HEAD~1');await c.load(async args=>{calls.push(args);return result(args,{comparison:{...comparison,reference:'HEAD~1'},rows:[committedRow]});},async()=>{},v=>updates.push(v));
+ old.resolve(result(calls[0],{comparison,rows:[committedRow]}));await first;assert.deepEqual(calls.map(x=>x.baseline),['main','HEAD~1']);assert.deepEqual(updates.filter(x=>x.kind==='ready').map(x=>x.value.comparison.reference),['HEAD~1']);
+ for(const value of ['',null,'--all','main\n','main other','x'.repeat(257)])assert.equal(git.validGitBaseline(value),false);assert.equal(git.validGitBaseline('refs/heads/中文'),true);
+});
 test("F3 bounded DTO accepts separate roles and rejects unknown or excessive content",()=>{
   const value=result({path:"/repo",query_token:token});
   assert.equal(git.isGitChanges(value),true);
@@ -61,7 +81,7 @@ async function componentHarness() {
  const tree=ts.createSourceFile("GitChanges.tsx",source,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
  const fn=tree.statements.find(n=>ts.isFunctionDeclaration(n)&&n.name?.text==="GitChanges");assert.ok(fn);
  let refreshAction;const slots=[],refs=[],effects=[];let i=0,j=0,k=0;let props={path:"/repo",owner:1},nodes;
- const values={watchProjectRefresh:action=>{refreshAction=action;return()=>{refreshAction=null;};},GitChangesController:git.GitChangesController,GitPatchView:"GitPatchView",FilePreview:"FilePreview",invoke:null,React:{createElement:(tag,props,...children)=>({tag,props:props??{},children:children.flat(Infinity)})},useCallback:fn=>fn,
+ const values={validGitBaseline:git.validGitBaseline,watchProjectRefresh:action=>{refreshAction=action;return()=>{refreshAction=null;};},GitChangesController:git.GitChangesController,GitPatchView:"GitPatchView",FilePreview:"FilePreview",invoke:null,React:{createElement:(tag,props,...children)=>({tag,props:props??{},children:children.flat(Infinity)})},useCallback:fn=>fn,
  useState:initial=>{const n=i++;if(!(n in slots))slots[n]=initial;return [slots[n],v=>{slots[n]=typeof v==="function"?v(slots[n]):v;}];},
  useRef:initial=>{const n=j++;return refs[n]??(refs[n]={current:initial});},
  useEffect:(fn,deps)=>{const n=k++,key=JSON.stringify(deps);if(effects[n]?.key!==key){effects[n]={key,fn,pending:true,cleanup:effects[n]?.cleanup};}}};
@@ -72,8 +92,23 @@ async function componentHarness() {
  const render=(next,flush=true)=>{if(next)props=next;i=j=k=0;nodes=component(props);if(flush)for(const effect of effects)if(effect.pending){effect.pending=false;effect.cleanup?.();effect.cleanup=effect.fn();}return nodes;};
  const buttons=()=>{const all=[];const walk=n=>{if(!n||typeof n!=="object")return;if(n.tag==="button")all.push(n);for(const child of n.children??[])walk(child);};walk(nodes);return all;};
  const unmount=()=>effects.forEach(e=>e.cleanup?.());
- return {render,buttons,unmount,calls,pending,slots,refresh:()=>refreshAction?.()};
+ const all=()=>{const list=[];const walk=n=>{if(n&&typeof n==='object'){list.push(n);for(const child of n.children??[])walk(child);}};walk(nodes);return list;};
+ return {render,buttons,all,unmount,calls,pending,slots,refresh:()=>refreshAction?.()};
 }
+test('committed comparison requires an explicit baseline, is separate, and has no historical edit/feedback actions',async()=>{
+ const h=await componentHarness();h.render({path:'/repo',owner:1,sessionId:'s-one',onReview(){},onOpenFile(){}});h.buttons().find(b=>b.children.includes('Git changes')).props.onClick();h.render();h.pending[0].resolve(result(h.pending[0].args));await new Promise(r=>setImmediate(r));h.render();
+ const committed=h.buttons().find(b=>b.children.includes('Committed changes'));assert.ok(committed);committed.props.onClick();h.render();assert.ok(!JSON.stringify(h.render()).includes('Staged changes for file.txt'));
+ const input=h.all().find(n=>n.props['aria-label']==='Comparison baseline');assert.ok(input);input.props.onChange({target:{value:'main'}});h.render();h.buttons().find(b=>b.children.includes('Compare with HEAD')).props.onClick();h.render();
+ const list=h.pending.at(-1);assert.equal(list.args.baseline,'main');list.resolve(result(list.args,{comparison,rows:[committedRow]}));await new Promise(r=>setImmediate(r));h.render();
+ h.buttons().find(b=>b.props['aria-label']==='Committed changes for file.txt').props.onClick();const patch=h.pending.at(-1);assert.equal(patch.args.side,'committed');patch.resolve(result(patch.args,{comparison,rows:[committedRow],patch:{path:'file.txt',side:'committed',kind:'text',text:'@@ -1 +1 @@\n-old\n+committed\n'}}));await new Promise(r=>setImmediate(r));h.render();
+ const view=h.all().find(n=>n.tag==='GitPatchView');assert.ok(view);assert.equal(view.props.onEditLine,undefined);assert.equal(view.props.onReviewLine,undefined);assert.ok(JSON.stringify(h.render()).includes(comparison.head));assert.ok(!h.buttons().some(b=>b.children.includes('Review this file')));
+ const old=h.buttons().find(b=>b.props['aria-label']==='Committed changes for file.txt');h.buttons().find(b=>b.children.includes('Uncommitted changes')).props.onClick();assert.ok(!JSON.stringify(h.render(undefined,false)).includes('+committed'));old.props.onClick();h.unmount();
+});
+test('Compare with HEAD can explicitly refresh the same baseline again',async()=>{
+ const h=await componentHarness();h.render();h.buttons().find(b=>b.children.includes('Git changes')).props.onClick();h.render();h.pending[0].resolve(result(h.pending[0].args));await new Promise(r=>setImmediate(r));h.render();
+ h.buttons().find(b=>b.children.includes('Committed changes')).props.onClick();h.render();h.all().find(n=>n.props['aria-label']==='Comparison baseline').props.onChange({target:{value:'main'}});h.render();h.buttons().find(b=>b.children.includes('Compare with HEAD')).props.onClick();h.render();const first=h.pending.at(-1);first.resolve(result(first.args,{comparison,rows:[committedRow]}));await new Promise(r=>setImmediate(r));h.render();
+ const count=h.pending.length;h.buttons().find(b=>b.children.includes('Compare with HEAD')).props.onClick();h.render();assert.equal(h.pending.length,count+1);assert.equal(h.pending.at(-1).args.baseline,'main');h.unmount();
+});
 test("F3 actual component opens list and selected-side request then cancels on close",async()=>{
  const h=await componentHarness();h.render();assert.equal(h.calls.length,0);
  const open=h.buttons().find(b=>b.children.includes("Git changes"));assert.ok(open,"visible explicit entry");open.props.onClick();h.render();
@@ -121,6 +156,9 @@ test('R2A actual diff component exposes keyboard buttons, both line sides and bo
 test('R2A actual diff component keeps malformed text literal and labels working tree separately',async()=>{
  const h=await patchHarness({path:'<script>.txt',side:'worktree',kind:'text',text:'@@ malformed\n<script>literal</script>'});assert.match(h.text,/working tree/i);assert.match(h.text,/<script>literal<\/script>/);assert.equal(h.button('Next change'),undefined);assert.match(h.text,/Line navigation unavailable/);
  const empty=await patchHarness({path:'mode.txt',side:'staged',kind:'text',text:'old mode 100644\nnew mode 100755\n'});assert.match(empty.text,/No change blocks/);
+});
+test('committed patch default description never labels historical lines as working-tree lines',async()=>{
+ const h=await patchHarness({path:'file.txt',side:'committed',kind:'text',text:'@@ -1 +1 @@\n-before\n+after\n'});assert.match(h.text,/baseline commit/);assert.match(h.text,/HEAD commit/);assert.doesNotMatch(h.text,/Working tree changes/);
 });
 test("F3 actual component owner change and unmount fence late success and errors",async()=>{
  for(const failed of [false,true]){
