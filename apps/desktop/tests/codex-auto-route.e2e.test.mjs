@@ -37,7 +37,7 @@ else if(args.includes('--remote')){
   const socket=require('node:net').connect(args[args.indexOf('--remote')+1].slice(7));await new Promise(resolve=>socket.once('connect',resolve));
   socket.write('GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n');
   await new Promise(resolve=>socket.once('data',resolve));let seq=0;const waiters=new Map(),completions=[];
-  frames(socket,message=>{if(message.id!==undefined){const waiter=waiters.get(message.id);if(!waiter&&env.ROUTING_TEST_CASE==='mixed')record({method:'unexpected-internal-response'});if(message.error){console.log(message.error.message);waiter.reject(Error(message.error.message));}else waiter?.resolve(message.result);}if(message.method==='turn/completed')completions.shift()?.();if(message.params?.status?.type==='notLoaded')record({method:'unexpected-thread-unload'});});
+  frames(socket,message=>{if(message.id!==undefined){const waiter=waiters.get(message.id);if(!waiter&&env.ROUTING_TEST_CASE==='mixed')record({method:'unexpected-internal-response'});if(message.error){console.log(message.error.message);waiter.reject(Error(message.error.message));}else waiter?.resolve(message.result);}if(message.method==='turn/completed')completions.shift()?.();if(message.method==='thread/settings/updated')record({method:'client-settings',params:message.params});if(message.params?.status?.type==='notLoaded')record({method:'unexpected-thread-unload'});});
   const rpc=(method,params)=>new Promise((resolve,reject)=>{const id=++seq;waiters.set(id,{resolve,reject});socket.write(encode({id,method,params},true));});
   await rpc('initialize',{});const resume=args.includes('resume');await rpc(resume?'thread/resume':'thread/start',resume?{threadId}:{ephemeral:false});
   let input='';for await(const chunk of process.stdin)input+=chunk;
@@ -67,7 +67,9 @@ else if(args.includes('--remote')){
   if(method==='thread/start'||method==='thread/resume'){
    loaded=true;
    record({method,params});
-   send(id,{thread:{id:threadId},model:params.model,modelProvider:params.modelProvider,reasoningEffort:'high',cwd:env.ROUTING_TEST_PROJECT,approvalPolicy:'on-request',approvalsReviewer:'user',sandbox:{type:'readOnly',networkAccess:false}});
+   send(id,{thread:{id:threadId},model:params.model,modelProvider:params.modelProvider,reasoningEffort:'high',cwd:env.ROUTING_TEST_PROJECT,approvalPolicy:'on-request',approvalsReviewer:'user',sandbox:{type:'readOnly',networkAccess:false},
+    disabledPluginIds:[],activePermissionProfile:null,serviceTier:null,runtimeWorkspaceRoots:[env.ROUTING_TEST_PROJECT],
+    collaborationMode:{mode:'default',settings:{model:params.model,reasoning_effort:'high',developer_instructions:null}},multiAgentMode:'explicitRequestOnly'});
   }
   if(method==='thread/unsubscribe'){record({method,params});loaded=false;event('thread/status/changed',{threadId,status:{type:'notLoaded'}});send(id,{status:'unsubscribed'});}
   if(method==='thread/loaded/list'){record({method,params});send(id,{data:loaded?[threadId]:[],nextCursor:null});}
@@ -207,6 +209,10 @@ test('managed mixed Codex starts on a gateway then dispatches one turn per sourc
  const records=await events(),business=records.filter(row=>['thread/start','thread/resume','thread/unsubscribe','thread/loaded/list','turn/start'].includes(row.method));
  assert.deepEqual(business.map(row=>row.method),['thread/start','turn/start','thread/unsubscribe','thread/loaded/list','thread/resume','turn/start','thread/unsubscribe','thread/loaded/list','thread/resume','turn/start','thread/resume','turn/start']);
  assert.deepEqual(business.filter(row=>row.method==='turn/start').map(row=>[row.params.threadId,row.params.model]),[[threadId,model],[threadId,'fast'],[threadId,model],[threadId,model]]);
+ const settings=records.filter(row=>row.method==='client-settings').map(row=>row.params);
+ assert.deepEqual(settings.map(row=>[row.threadId,row.threadSettings.model,row.threadSettings.effort]),[[threadId,'fast','high'],[threadId,model,'high']]);
+ assert.ok(settings.every(row=>row.threadSettings.modelProvider==='yam_route'&&row.threadSettings.approvalPolicy==='on-request'&&row.threadSettings.approvalsReviewer==='user'));
+ assert.ok(settings.every(row=>row.threadSettings.sandboxPolicy.type==='readOnly'&&row.threadSettings.sandboxPolicy.networkAccess===false));
  assert.ok(records.filter(row=>row.method==='classify').every(row=>row.model==='fast'&&!row.paid));
  assert.ok(records.filter(row=>row.method==='server'&&row.overrides.includes('model_provider="yam_route"')).every(row=>row.routedGateway&&!row.paid&&row.overrides.includes('forced_login_method="chatgpt"')));
  assert.ok(!records.some(row=>row.method.startsWith('unexpected-')));
