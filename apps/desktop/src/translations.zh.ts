@@ -1,6 +1,10 @@
 // Author: Jeff.Liu. Application-owned translation resources.
 export const zh:Record<string,string>={
 "API":"API",
+"Codex native":"Codex 原生",
+"Local gateway":"本地网关",
+"Connection {{number}}":"连接 {{number}}",
+"Saved connection unavailable":"已保存的连接暂不可用",
 "Local gateway (Magpie or compatible)":"本地网关（Magpie 或兼容服务）",
 "Local gateway URL":"本地网关地址",
 "API key environment variable (optional)":"API 密钥环境变量（可选）",

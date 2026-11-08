@@ -1670,10 +1670,10 @@ function App() {
     const launchAdapter=quickCopy?.draft.adapter??formAdapter,launch=quickCopy?.draft??formLaunch;
     const routingArgs=launchAdapter==="pi"?(quickCopy?routingPolicyArgs("pi",launch.extra_args,initialRoutingPolicy("pi",launch.extra_args),[]):piLaunchArgs):undefined;
     if(routingArgs===null||route===null){setError("Choose a valid routing strategy or disable routing.");return;}
-    if(route&&(shellWindows||useProjectSettings||launch.provider||launch.extra_args.trim()||Object.keys(sessionCopy?.settings.envRefs??{}).length)){setError("A managed Codex strategy requires a direct launch with no additional CLI options or connection overrides.");return;}
-    const projectSettings=!quickCopy&&useProjectSettings,worktree=quickCopy?undefined:launchWorktreeAttempt;
+    const projectSettings=!quickCopy&&useProjectSettings,worktree=quickCopy?undefined:launchWorktreeAttempt,copy=quickCopy??sessionCopy;
+    if(route&&(shellWindows||projectSettings||launch.provider||launch.extra_args.trim()||Object.keys(copy?.settings.envRefs??{}).length)){setError("A managed Codex strategy requires a direct launch with no additional CLI options or connection overrides.");return;}
     const ordinaryTerminal=launchAdapter==="shell"&&!launch.command?.trim()&&!launch.provider&&!projectSettings&&!worktree;
-    const copy=quickCopy??sessionCopy,outputTerminal=route?"yam":quickCopy?.settings.terminal??sessionTerminal,name=quickCopy?"":copy?copyName.trim():"";
+    const outputTerminal=route?"yam":quickCopy?.settings.terminal??sessionTerminal,name=quickCopy?"":copy?copyName.trim():"";
     if(name)try{validateSessionTitle(name);}catch{setError("Use a session name of 1–200 characters.");return;}
     let next:SessionSummary|undefined,ordinarySnapshot:SessionLaunchSettings["ordinary"];
     if(copy&&!projectSettings&&!worktree){

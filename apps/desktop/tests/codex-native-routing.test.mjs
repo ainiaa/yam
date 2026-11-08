@@ -3,7 +3,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
 import {once} from 'node:events';
-import {mkdtemp,rm,symlink} from 'node:fs/promises';
+import {mkdir,mkdtemp,rm,symlink} from 'node:fs/promises';
 import {join} from 'node:path';
 import * as routes from '../../../scripts/codex-auto-route.mjs';
 
@@ -167,6 +167,29 @@ test('Codex catalog uses official model capabilities and reports inaccessible co
  const failed=await routes.codexCatalog({config:routingPolicy,codex:process.execPath,cwd:'/tmp'},{inspect:async()=>{throw Error('login missing');}});
  assert.equal(failed.models.length,0);assert.match(failed.warning,/login missing/);
 });
+test('independent Codex homes cannot overlap the canonical effective native home',async t=>{
+ const root=await mkdtemp('/tmp/yam-home-isolation-'),previous=process.env.CODEX_HOME;
+ t.after(async()=>{if(previous===undefined)delete process.env.CODEX_HOME;else process.env.CODEX_HOME=previous;await rm(root,{recursive:true,force:true});});
+ const native=join(root,'native'),child=join(native,'child'),alias=join(root,'alias'),independent=join(root,'independent');
+ await mkdir(native,{mode:0o700});await mkdir(child,{mode:0o700});await mkdir(independent,{mode:0o700});await symlink(native,alias);
+ process.env.CODEX_HOME=alias;
+ const available=[{model:'light',supportedReasoningEfforts:[{reasoningEffort:'high'}]}];
+ for(const home of [native,child,root]){
+  const config={...routingPolicy,connections:{...routingPolicy.connections,other:{billing:'subscription',home}},classifiers:['other/light']};
+  const opened=[],classified=[];
+  const listed=await routes.codexCatalog({config,codex:process.execPath,cwd:'/elsewhere'}, {inspect:async ({connection})=>{opened.push(connection.name);return available;}});
+  const result=await routes.classifyNativeTurn({policy:config,prompt:'Test',previousPrompt:''},process.execPath,'/elsewhere','/session',{
+   classify:async ({connection})=>{classified.push(connection.name);return JSON.stringify(newAnswer);},
+  });
+  assert.deepEqual(opened,['native']);assert.match(listed.warning,/separate CODEX_HOME/);
+  assert.deepEqual(classified,[]);assert.equal(result.source,'local');
+ }
+ process.env.CODEX_HOME=join(alias,'missing');
+ const config={...routingPolicy,connections:{...routingPolicy.connections,overlap:{billing:'paid',home:native,baseUrl:'https://example.com',apiKeyEnv:'YAM_ISOLATION_KEY'},other:{billing:'subscription',home:independent}}};
+ const listed=await routes.codexCatalog({config,codex:process.execPath,cwd:'/elsewhere'}, {inspect:async()=>available});
+ assert.deepEqual(listed.models.map(model=>model.key),['native/light','other/light']);
+ assert.match(listed.warning,/overlap: Codex connection must use a separate CODEX_HOME/);
+});
 
 const runtime=await import('../../../scripts/codex-native-routing.mjs').catch(error=>{
  if(error.code==='ERR_MODULE_NOT_FOUND')return {};
@@ -283,6 +306,20 @@ test('native relay closes its own connection on malformed input instead of forwa
  s.client.write(frame('{invalid'));
  await closed;
  assert.equal(s.incoming.length,0);
+});
+test('native relay reports a callback fault once without logging protocol contents',async t=>{
+ const diagnostics=[],s=await setup(t,{onError:reason=>diagnostics.push(reason),onEvent:()=>{throw Error('private-token-from-callback');}});
+ const closed=once(s.client,'close');
+ const message=frame(JSON.stringify({method:'thread/status/changed',params:{value:'private-payload'}}),{mask:false});
+ s.peer.write(Buffer.concat([message,message]));
+ await closed;
+ assert.equal(diagnostics.length,1);
+ assert.match(diagnostics[0],/Codex relay.*App Server event/);
+ assert.doesNotMatch(diagnostics[0],/private-token|private-payload/);
+ assert.equal(s.outgoing.length,0);
+ const normal=await setup(t,{onError:reason=>diagnostics.push(reason)}),disconnected=once(normal.client,'close');
+ normal.client.end();await disconnected;
+ assert.equal(diagnostics.length,1);
 });
 test('native relay accepts the official owned private socket redirect',async t=>{
  const s=await setup(t,{redirectBackend:true});

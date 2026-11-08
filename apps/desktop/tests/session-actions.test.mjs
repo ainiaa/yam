@@ -168,6 +168,20 @@ test('quick start uses captured directory, provider, shell and terminal despite 
  }
 });
 
+test('managed Codex quick copies validate the captured direct launch rather than the open form',async()=>{
+ const config=JSON.stringify({connections:{native:{billing:'subscription',native:true}},classifiers:[],executionGroups:[{small:'native/a',medium:'native/b',strong:'native/c'}]});
+ const route={name:'Native',config};
+ for(const valid of [true,false]){
+  const envRefs={TOOLS_TOKEN:'TOOLS_TOKEN_SOURCE'},calls=[],errors=[];
+  const copy=duplicateSessionDraft({cwd:'/captured',launch:{adapter:'codex',mode:'interactive',extra_args:'',codex:{image_mode:'native',route},...(valid?{}:{env_refs:envRefs})}});
+  const start=actual('startNewSession',{shellWindows:false,useProjectSettings:valid,sessionCopy:valid?{settings:{envRefs}}:null,
+   startSession:async options=>{calls.push(options);},setError:error=>errors.push(error)});
+  await start(copy);
+  if(valid){assert.equal(errors.length,0);assert.equal(calls.length,1);assert.equal(calls[0].cwd,'/captured');assert.deepEqual(calls[0].launch.codex.route,route);}
+  else{assert.equal(calls.length,0);assert.match(errors[0],/direct launch/);}
+ }
+});
+
 
 test('pending ordinary copy retains its captured launch settings when another draft clears the shared snapshot',async()=>{
  let resolve;const data=new Map(),original={shell:{program:'/bin/zsh',login:true},retainedLines:500,appearance:{fontFamily:'Menlo',fontSize:15,theme:'app'}},copy=duplicateSessionDraft({...source,launch:null},{terminal:'yam',ordinary:original}),snapshot={current:undefined};
@@ -191,7 +205,8 @@ test('Pi session copies keep the routing snapshot and discard other CLI argument
 test('duplicate action copies effective native strategy and respects routing off',async()=>{
  const config=JSON.stringify({connections:{native:{billing:'subscription',native:true}},classifiers:[],executionGroups:[{small:'native/a',medium:'native/b',strong:'native/c'}]});
  const record={...source,launch:{adapter:'codex',mode:'interactive',extra_args:'',codex:{image_mode:'native',route:{name:'old',config,state:'old-session'}}}};
- for(const effective of [{name:'changed',config},{name:'changed',config,enabled:false,connection:'native',nativeModel:{model:'deepseek/deepseek-v4-pro',effort:'high'}}]){
+ const pinned={name:'changed',config,connection:'native',nativeModel:{model:'deepseek/deepseek-v4-pro',effort:'high'}};
+ for(const effective of [{name:'changed',config},pinned,{...pinned,enabled:false}]){
   const calls=[];let copy;
   const bindings={terminalViews:{current:{get:()=>null}},titlesRef:{current:{}},t:s=>s,sessionCopyIntent:{current:0},starting:false,creatingSession:{current:false},terminalMounted:{current:true},invoke:async(name)=>{calls.push(name);return name==='get_session'?{summary:record}:effective;},duplicateSessionDraft,readSessionLaunchSettings,localStorage:{getItem:()=>null},startNewSession:async value=>{copy=value;},setError:assert.fail};
   await actual('duplicateSession',bindings)(source.session_id,true);

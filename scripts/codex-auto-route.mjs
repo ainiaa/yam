@@ -4,7 +4,7 @@ import {createHash,randomUUID} from 'node:crypto';
 import {access,lstat,mkdir,mkdtemp,stat,open as openFile,readFile,readdir,realpath,rm,writeFile} from 'node:fs/promises';
 import {constants,fsyncSync,renameSync} from 'node:fs';
 import {homedir} from 'node:os';
-import {isAbsolute,join,resolve,sep} from 'node:path';
+import {basename,dirname,isAbsolute,join,resolve,sep} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {parseArgs,isDeepStrictEqual} from 'node:util';
 import {spawn} from 'node:child_process';
@@ -224,10 +224,17 @@ export function nativeInitialModel({connection,selected,effort,snapshot,models})
  return {model:initial.model,effort:initial.effort};
 }
 
-const overlaps=(left,right)=>left===right||left.startsWith(right+sep)||right.startsWith(left+sep);
+const overlaps=(left,right)=>left===right||left===sep||right===sep||left.startsWith(right+sep)||right.startsWith(left+sep);
 async function canonicalOrResolved(path){
- try{return await realpath(path);}catch(error){if(error.code!=='ENOENT')throw error;return resolve(path);}
+ try{return await realpath(path);}catch(error){
+  const absolute=resolve(path),parent=dirname(absolute);
+  if(error.code!=='ENOENT'||absolute===parent)throw error;
+  return join(await canonicalOrResolved(parent),basename(absolute));
+ }
 }
+const defaultCodexHome=()=>join(homedir(),'.codex');
+const effectiveCodexHome=()=>process.env.CODEX_HOME??defaultCodexHome();
+const protectedCodexHomes=()=>Promise.all([...new Set([defaultCodexHome(),effectiveCodexHome()].filter(Boolean))].map(canonicalOrResolved));
 async function privateDirectory(path){
  const info=await lstat(path);
  if(!info.isDirectory()||(info.mode&0o077)||info.uid!==process.getuid?.())
@@ -238,12 +245,12 @@ async function profileEnvironment(connection,connections,protectedPaths=[],sessi
  const env={...process.env};
  for(const key of Object.keys(env))if(/^YAM_|^CODEX_|^OPENAI_(?:API_KEY|BASE_URL)$/.test(key))delete env[key];
  if(connection.native||connection.gateway){
-  env.CODEX_HOME=process.env.CODEX_HOME??join(homedir(),'.codex');
+  env.CODEX_HOME=effectiveCodexHome();
   if(connection.gateway){env.YAM_PROVIDER_API_KEY=connection.apiKeyEnv?process.env[connection.apiKeyEnv]:'yam-local-gateway';if(!env.YAM_PROVIDER_API_KEY)throw Error('Local gateway credential unavailable');}
   return env;
  }
  const home=await privateDirectory(connection.home);
- if([...protectedPaths,session].some(path=>overlaps(home,path)))
+ if([...await protectedCodexHomes(),...protectedPaths,session].some(path=>path&&overlaps(home,path)))
   throw Error('Codex connection must use a separate CODEX_HOME');
  for(const other of connections.values())if(other!==connection&&!other.native&&!other.gateway&&overlaps(home,await canonicalOrResolved(other.home)))
   throw Error('Codex connections must have separate homes');
@@ -271,10 +278,9 @@ async function localGatewayModels(connection,signal){
 
 export async function codexCatalog({config,codex,cwd,probeModel,signal},{inspect=openCodexThread,probe=executeAgent}={}){
  const {connections,candidate}=validateCodexPolicy(config),models=[],warnings=[];
- const protectedPaths=[await canonicalOrResolved(join(homedir(),'.codex'))];
  for(const connection of connections.values()){
   try{
-   const env=await profileEnvironment(connection,connections,protectedPaths,cwd);
+   const env=await profileEnvironment(connection,connections,[cwd]);
    const rows=connection.gateway?await localGatewayModels(connection,signal):await inspect({executable:codex,env,cwd,connection,signal,catalogOnly:true,respectSystemProxy:config.respectSystemProxy});
    for(const row of rows){
     if(typeof row.model!=='string'||!Array.isArray(row.supportedReasoningEfforts))continue;
@@ -287,7 +293,7 @@ export async function codexCatalog({config,codex,cwd,probeModel,signal},{inspect
  if(probeModel){
   const entry=candidate(probeModel),model=models.find(row=>row.key===probeModel);
   if(!model||!model.levels.includes('high'))throw Error('Codex model unavailable or high reasoning unsupported');
-  const env=await profileEnvironment(entry.connection,connections,protectedPaths,cwd);
+  const env=await profileEnvironment(entry.connection,connections,[cwd]);
   let result;
   if(entry.billing==='paid'){
    const thread=await inspect({executable:codex,env,cwd,model:entry.model,connection:entry.connection,signal,readOnly:true,respectSystemProxy:config.respectSystemProxy});
@@ -357,7 +363,7 @@ export async function routeCodex({config,cwd,session,prompt,signal},{classify=cl
  await access(executable,constants.X_OK);
  cwd=await realpath(cwd);
  if(!(await lstat(cwd)).isDirectory())throw Error('Invalid working directory');
- const protectedPaths=await Promise.all([join(homedir(),'.codex'),process.env.CODEX_HOME].filter(Boolean).map(canonicalOrResolved));
+ const protectedPaths=await protectedCodexHomes();
  // Resolve the parent before creating a directory, including when the parent is a symlink.
  session=join(await realpath(resolve(session,'..')),resolve(session).split(sep).at(-1));
  if([...protectedPaths,cwd].some(path=>overlaps(session,path)))throw Error('Use a private session directory outside Codex homes and the workspace');
@@ -376,7 +382,7 @@ export async function routeCodex({config,cwd,session,prompt,signal},{classify=cl
   if(info&&(!prior||prior.v!==1||!['completed','interrupted','failed'].includes(prior.status)||!isNativeSessionId(prior.threadId)||
    !tiers.includes(prior.tier)||!['medium','high','xhigh','max'].includes(prior.effort)||!Number.isInteger(prior.index)||prior.index<0||prior.index>7))
    throw Error('Routing session is pending or invalid; inspect its Codex thread before starting another task');
-  const envFor=connection=>profileEnvironment(connection,connections,[...protectedPaths,cwd],session);
+  const envFor=connection=>profileEnvironment(connection,connections,[cwd],session);
   const openCandidate=async(entry,resume,env)=>open({executable,env,cwd,model:entry.model,connection:entry.connection,resume,signal,
    respectSystemProxy:config.respectSystemProxy});
   const binding=(entry,env)=>createHash('sha256').update(JSON.stringify([executable,cwd,entry.identity,env.CODEX_HOME,

@@ -1255,6 +1255,7 @@ input::placeholder {
 .pi-model-picker{display:grid;align-content:start;gap:6px;min-width:0}
 .pi-model-picker>span:first-child{font-weight:600}
 .pi-model-picker .settings-help{overflow-wrap:anywhere}
+.pi-model-picker .unified-select-trigger>span,.unified-select-searchable .unified-select-group>button>span:first-child{white-space:normal;overflow-wrap:anywhere}
 .pi-execution-group{grid-template-columns:repeat(3,minmax(0,1fr))}
 .pi-routing-advanced{display:grid;gap:12px}
 .pi-routing-advanced[open]>:not(summary){margin-top:12px}

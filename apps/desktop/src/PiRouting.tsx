@@ -8,29 +8,72 @@ import {codexQuickSetupConfig,codexRoutingConfig,codexRoutingDraft,buildCodexRou
 import {defaultRules,defaultTierRules,validateRules,rulesVersion,type TaskRules,type TaskRule} from '../src-tauri/pi/task-rules.mjs';
 import {buildPiArgs,hasPiRoutingSelection,knownClassifierBilling,maxPiBackupModels,parsePiDraft,piExecutionTiers,piLevels,piModelCatalogSource,piSetupMapping,piSetupStorageKey,portablePiRoutingPolicy,piSubscriptionCatalog,piSubscriptionOnly,probePiSetupModel,restorePiSetup,selectPiSetupModel,validatePiDraft,verifyPiSetup,type NativeFailure,type PiDraft,type PiModel,type PiRoutingState,type PiSessionRoutingMode,type PiSnapshot} from './pi-routing';
 type Invoke=<T>(command:string,args?:Record<string,unknown>)=>Promise<T>;
-function RoutingModelPicker({label,models,value,connections,emptyValue='',emptyLabel='Choose a model',disabled,onChange,onBrowse}:{label:string;models:PiModel[];value:string;connections?:ReturnType<typeof codexRoutingConfig>['connections']|null;emptyValue?:string;emptyLabel?:string;disabled?:boolean;onChange:React.ChangeEventHandler<HTMLSelectElement>;onBrowse?:()=>void}){
+type CodexConnections=ReturnType<typeof codexRoutingConfig>['connections'];
+function routingModelPresentation(key:string,model:PiModel|undefined,connections?:CodexConnections|null){
+ const provider=key.split('/',1)[0],id=key.slice(key.indexOf('/')+1),catalog=piModelCatalogSource(key);
+ const connection=connections&&Object.prototype.hasOwnProperty.call(connections,provider)?connections[provider]:null;
+ const gateway=connection?'gateway' in connection:!connections&&catalog!=='pi';
+ const magpie=model?.source==='magpie'||!connections&&catalog==='magpie-pi';
+ const source=t(gateway?magpie?'Magpie':'Local gateway':connections?connection&&'native' in connection?'Codex native':'Codex':'Pi native');
+ let modelId=id,supplier='';
+ if(gateway){
+  const separator=id.indexOf('/');
+  if(separator>0){
+   const route=id.slice(0,separator);
+   supplier=route==='auto'?t('Automatic routing'):route==='codex'?'Codex':route;
+   modelId=id.slice(separator+1);
+  }
+ }else if(connection?.billing==='subscription'||!connections&&(model?.source==='chatgpt-subscription'||model?.legacy_alias||provider==='yam-codex'&&model?.billing!=='api')){
+  supplier=t('ChatGPT subscription');
+ }else if(connection?.billing==='paid'){
+  try{supplier=new URL(connection.baseUrl??'').hostname;}catch{supplier=t('API');}
+ }else if(!connections){
+  supplier=provider==='openai'?'OpenAI':['yam-codex','yam-gateway'].includes(provider)?model?.billing==='api'?t('API'):'':provider;
+ }
+ return {source,label:[source,supplier,modelId].filter(Boolean).join(' · ')};
+}
+function codexConnectionLabels(connections:CodexConnections,models:PiModel[]=[]){
+ const labels=Object.entries(connections).map(([key,connection])=>{
+  const gateway='gateway' in connection,native='native' in connection;
+  const source=native?`${t('Codex native')} · ${t('ChatGPT subscription')}`:gateway?
+   t(models.some(model=>model.key.startsWith(key+'/')&&model.source==='magpie')?'Magpie':'Local gateway'):
+   t(connection.billing==='subscription'?'Separate subscription connection':'Explicit paid Responses connection');
+  const alias=/^(?:yam-codex|connection-\d+|local-gateway(?:-\d+)?)$/.test(key)?'':key;
+  let endpoint='';
+  if(!native&&connection.baseUrl)try{endpoint=new URL(connection.baseUrl).host;}catch{}
+  const home=!native&&!gateway?connection.home.split('/').filter(Boolean).slice(-2).join('/'):'';
+  return [key,[source,alias||endpoint||home].filter(Boolean).join(' · ')] as const;
+ });
+ return new Map(labels.map(([key,label],index)=>{
+  const matches=labels.filter(([,name])=>name===label);
+  return [key,matches.length===1?label:`${label} · ${t('Connection {{number}}',{number:labels.slice(0,index+1).filter(([,name])=>name===label).length})}`];
+ }));
+}
+function RoutingModelPicker({label,models,value,connections,emptyValue='',emptyLabel='Choose a model',disabled,onChange,onBrowse}:{label:string;models:PiModel[];value:string;connections?:CodexConnections|null;emptyValue?:string;emptyLabel?:string;disabled?:boolean;onChange:React.ChangeEventHandler<HTMLSelectElement>;onBrowse?:()=>void}){
  const connectionOf=(key:string)=>key.split('/',1)[0];
- const modelId=(key:string)=>key.slice(key.indexOf('/')+1);
  const saved=value!==emptyValue?value:'';
  const savedConnection=saved?connectionOf(saved):'';
  const [browsing,setBrowsing]=useState<{saved:string;connection:string}|null>(null);
- const options=new Map<string,string>();
- for(const [key,item] of Object.entries(connections??{})){
-  const kind='native' in item?'Native Codex login':'gateway' in item?'Local gateway (Magpie or compatible)':item.billing==='subscription'?'Separate subscription connection':'Explicit paid Responses connection';
-  options.set(key,`${t(kind)} · ${key}`);
- }
+ const options=connections?codexConnectionLabels(connections,models):new Map<string,string>();
  if(!connections)for(const model of models){
   if(model.legacy_alias&&model.key!==saved)continue;
   const key=connectionOf(model.key),source=piModelCatalogSource(model.key);
-  const kind=source==='magpie-direct'?'Magpie direct':source==='magpie-pi'?'Magpie via Pi':key==='yam-codex'&&model.billing!=='api'?'Native Codex login':model.billing==='subscription'||model.source==='chatgpt-subscription'?'Pi native subscription':model.billing==='api'?'Pi native API':'Pi native';
-  if(!options.has(key))options.set(key,`${t(kind)} · ${key}`);
+  const kind=source==='magpie-direct'?model.source==='magpie'?'Magpie direct':'Local gateway':source==='magpie-pi'?'Magpie via Pi':key==='yam-codex'&&model.billing!=='api'?'Native Codex login':model.billing==='subscription'||model.source==='chatgpt-subscription'?'Pi native subscription':model.billing==='api'?'Pi native API':'Pi native';
+  const identity=['yam-codex','yam-gateway','magpie'].includes(key)?'':key;
+  if(!options.has(key))options.set(key,[t(kind),identity].filter(Boolean).join(' · '));
  }
- if(savedConnection&&!options.has(savedConnection))options.set(savedConnection,savedConnection);
+ if(savedConnection&&!options.has(savedConnection))options.set(savedConnection,t('Saved connection unavailable'));
  const connection=browsing?.saved===saved&&(!browsing.connection||options.has(browsing.connection))?browsing.connection:savedConnection;
  const configured=(key:string)=>!connections||Object.prototype.hasOwnProperty.call(connections,key);
  const available=configured(connection)?models.filter(model=>!model.legacy_alias&&connectionOf(model.key)===connection):[];
  const current=configured(savedConnection)&&models.some(model=>model.key===saved);
  const pending=!!saved&&connection!==savedConnection;
+ const savedLabel=saved?routingModelPresentation(saved,models.find(model=>model.key===saved),connections).label:'';
+ const groups=new Map<string,{model:PiModel;label:string}[]>();
+ for(const model of available){
+  const {source,label}=routingModelPresentation(model.key,model,connections),rows=groups.get(source)??[];
+  rows.push({model,label});groups.set(source,rows);
+ }
  return <div className="pi-model-picker" role="group" aria-label={label}>
   <span>{label}</span>
   <label><span>{t('Connection')}</span><Select aria-label={`${label} · ${t('Connection')}`} value={connection} disabled={disabled||!options.size} onChange={event=>{
@@ -41,14 +84,15 @@ function RoutingModelPicker({label,models,value,connections,emptyValue='',emptyL
   }}>
    {pending&&<option value="pending" disabled>{t('Choose a model')}</option>}
    <option value={emptyValue}>{t(emptyLabel)}</option>
-   {!pending&&saved&&!available.some(model=>model.key===saved)&&<option value={saved} disabled>{t(current?'Current selection':'Saved model unavailable')} · {modelId(saved)}</option>}
-   {available.map(model=><option key={model.key} value={model.key} data-search={model.name}>{modelId(model.key)}</option>)}
+   {!pending&&saved&&!available.some(model=>model.key===saved)&&<option value={saved} disabled>{t(current?'Current selection':'Saved model unavailable')} · {savedLabel}</option>}
+   {Array.from(groups,([source,rows])=><optgroup key={source} label={source}>{rows.map(({model,label})=><option key={model.key} value={model.key} data-search={`${model.name} ${model.key}`}>{label}</option>)}</optgroup>)}
   </Select></label>
-  {pending&&<span className="settings-help">{t(current?'Current selection':'Saved model unavailable')} · {saved}</span>}
+  {pending&&<span className="settings-help">{t(current?'Current selection':'Saved model unavailable')} · {savedLabel}</span>}
  </div>;
 }
 function CodexRoutingConnections({raw,onChange}:{raw:string;onChange:(raw:string)=>void}){
  const config=codexRoutingConfig(raw);
+ const labels=codexConnectionLabels(config.connections);
  const change=(connections:typeof config.connections)=>onChange(JSON.stringify({...config,connections}));
  function addConnection(gateway=false){
   const base=gateway?'local-gateway':'connection';let index=1,name=gateway?base:`${base}-${index}`;
@@ -59,7 +103,7 @@ function CodexRoutingConnections({raw,onChange}:{raw:string;onChange:(raw:string
   <p className="settings-help">{t('The native connection uses your existing Codex login and configuration. Add a local gateway as a separate connection to use both in one strategy.')}</p>
   {Object.entries(config.connections).map(([name,connection])=>{
    const native='native' in connection,gateway='gateway' in connection,kind=native?'native':gateway?'gateway':connection.billing;
-   return <fieldset key={name} className="pi-routing-config"><legend>{name}</legend>
+   return <fieldset key={name} className="pi-routing-config"><legend>{labels.get(name)}</legend>
     <label><span>{t('Connection type')}</span><Select value={kind} onChange={event=>change({...config.connections,[name]:event.target.value==='native'?{billing:'subscription',native:true}:event.target.value==='gateway'?{billing:'paid',gateway:true,baseUrl:'http://127.0.0.1:3425'}:{billing:event.target.value as 'subscription'|'paid',home:native?'':connection.home??'',...event.target.value==='paid'?{baseUrl:'',apiKeyEnv:''}:{}}})}>
      <option value="native">{t('Native Codex login')}</option><option value="gateway">{t('Local gateway (Magpie or compatible)')}</option><option value="subscription">{t('Separate subscription connection')}</option><option value="paid">{t('Explicit paid Responses connection')}</option>
     </Select></label>

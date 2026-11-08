@@ -35,10 +35,10 @@ export function duplicateSessionDraft(source:unknown,saved?:SessionLaunchSetting
    if(typeof name!=='string'||!name.trim()||name.length>80||typeof config!=='string')throw Error('Invalid saved routing policy');
    if(effectiveRoute!==null){
     readCodexPolicy(config);codexRoute={name,config};
-    if(route.enabled===false){
+    if(route.enabled===false||route.connection!==undefined||route.nativeModel!==undefined){
      const model=route.nativeModel;
      if(typeof route.connection!=='string'||!/^[A-Za-z0-9_.-]{1,128}$/.test(route.connection)||!object(model)||typeof model.model!=='string'||!model.model.length||model.model.length>450||!/^[A-Za-z0-9_.:/-]+$/.test(model.model)||typeof model.effort!=='string'||!['off','minimal','low','medium','high','xhigh','max','ultra'].includes(model.effort))throw Error('Current Codex native settings are unavailable; reopen the source session before copying.');
-     codexRoute={...codexRoute,enabled:false,connection:route.connection,nativeModel:{model:model.model,effort:model.effort}};
+     codexRoute={...codexRoute,...route.enabled===false?{enabled:false}:{},connection:route.connection,nativeModel:{model:model.model,effort:model.effort}};
     }
    }
   }

@@ -7,10 +7,11 @@ import {dirname,isAbsolute} from 'node:path';
 
 const maxMessage=8*1024*1024,maxHeader=32*1024;
 const utf8=new TextDecoder('utf-8',{fatal:true});
+class RelayProtocolError extends Error {}
 
 function encode(text,masked){
  const data=Buffer.from(text),size=data.length;
- if(size>maxMessage)throw Error('Codex protocol message exceeds relay limit');
+ if(size>maxMessage)throw new RelayProtocolError('Codex protocol message exceeds relay limit');
  const length=size<126?0:size<=65535?2:8;
  const header=Buffer.alloc(2+length+(masked?4:0));
  header[0]=0x81;header[1]=(masked?128:0)|(length===0?size:length===2?126:127);
@@ -27,22 +28,22 @@ function frames(masked,onMessage,onControl){
   while(buffer.length>=2){
    const first=buffer[0],opcode=first&15,fin=!!(first&128),mask=!!(buffer[1]&128);
    let length=buffer[1]&127,offset=2;
-   if(first&0x70||mask!==masked||![0,1,8,9,10].includes(opcode))throw Error('Unsupported Codex WebSocket frame');
+   if(first&0x70||mask!==masked||![0,1,8,9,10].includes(opcode))throw new RelayProtocolError('Unsupported Codex WebSocket frame');
    if(length===126){if(buffer.length<4)return;length=buffer.readUInt16BE(2);offset=4;}
-   else if(length===127){if(buffer.length<10)return;const value=buffer.readBigUInt64BE(2);if(value>BigInt(maxMessage))throw Error('Oversized Codex frame');length=Number(value);offset=10;}
-   if(length>maxMessage||opcode>=8&&(!fin||length>125))throw Error('Invalid Codex frame size');
+   else if(length===127){if(buffer.length<10)return;const value=buffer.readBigUInt64BE(2);if(value>BigInt(maxMessage))throw new RelayProtocolError('Oversized Codex frame');length=Number(value);offset=10;}
+   if(length>maxMessage||opcode>=8&&(!fin||length>125))throw new RelayProtocolError('Invalid Codex frame size');
    const end=offset+(mask?4:0)+length;
    if(buffer.length<end)return;
    const raw=buffer.subarray(0,end);buffer=buffer.subarray(end);
    if(opcode>=8){onControl(raw);continue;}
-   if(opcode===0&&!fragmented||opcode===1&&fragmented)throw Error('Invalid Codex message fragments');
+   if(opcode===0&&!fragmented||opcode===1&&fragmented)throw new RelayProtocolError('Invalid Codex message fragments');
    const key=raw.subarray(offset,offset+4),data=Buffer.from(raw.subarray(offset+(mask?4:0)));
    if(mask)for(let i=0;i<data.length;i++)data[i]^=key[i%4];
-   total+=data.length;if(total>maxMessage)throw Error('Oversized Codex message');
+   total+=data.length;if(total>maxMessage)throw new RelayProtocolError('Oversized Codex message');
    parts.push(data);original.push(raw);fragmented=!fin;
    if(fin){const text=utf8.decode(Buffer.concat(parts)),wire=Buffer.concat(original);parts=[];original=[];total=0;onMessage(text,wire);}
   }
-  if(buffer.length>maxMessage+14)throw Error('Codex frame buffer exceeded');
+  if(buffer.length>maxMessage+14)throw new RelayProtocolError('Codex frame buffer exceeded');
  };
 }
 
@@ -53,21 +54,21 @@ function upgrade(masked,write,onMessage){
   if(ready){readFrames(chunk);return;}
   header=Buffer.concat([header,chunk]);
   const index=header.indexOf('\r\n\r\n');
-  if(index<0){if(header.length>maxHeader)throw Error('Oversized Codex handshake');return;}
-  if(index>maxHeader)throw Error('Oversized Codex handshake');
+  if(index<0){if(header.length>maxHeader)throw new RelayProtocolError('Oversized Codex handshake');return;}
+  if(index>maxHeader)throw new RelayProtocolError('Oversized Codex handshake');
   const head=header.subarray(0,index+4).toString('latin1');
   // No compression is negotiated: routing inspects complete UTF-8 JSON messages.
   if(masked)write(Buffer.from(head.replace(/^Sec-WebSocket-Extensions:[^\r\n]*\r\n/gim,''),'latin1'));
   else{
    write(header.subarray(0,index+4));
-   if(!/^HTTP\/1\.[01] 101 /.test(head))throw Error('Codex rejected the WebSocket handshake');
-   if(/^Sec-WebSocket-Extensions:/im.test(head))throw Error('Unexpected Codex WebSocket extension');
+   if(!/^HTTP\/1\.[01] 101 /.test(head))throw new RelayProtocolError('Codex rejected the WebSocket handshake');
+   if(/^Sec-WebSocket-Extensions:/im.test(head))throw new RelayProtocolError('Unexpected Codex WebSocket extension');
   }
   ready=true;const tail=header.subarray(index+4);header=Buffer.alloc(0);if(tail.length)readFrames(tail);
  };
 }
 
-export async function createNativeRelay({socketPath,backendPath,onRequest=async message=>message,onEvent=()=>{},filterEvent=()=>true}){
+export async function createNativeRelay({socketPath,backendPath,onRequest=async message=>message,onEvent=()=>{},filterEvent=()=>true,onError=console.error}){
  if(!isAbsolute(socketPath??'')||!isAbsolute(backendPath??'')||socketPath===backendPath)
   throw Error('Native Codex relay requires separate absolute Unix socket paths');
  backendPath=await realpath(backendPath);
@@ -82,9 +83,15 @@ export async function createNativeRelay({socketPath,backendPath,onRequest=async 
   const peer=net.connect(backendPath),controller=new AbortController();
   sockets.add(client);sockets.add(peer);
   const close=()=>{controller.abort(Error('Native Codex relay disconnected'));client.destroy();peer.destroy();sockets.delete(client);sockets.delete(peer);};
+  const fail=(stage,error)=>{
+   if(controller.signal.aborted)return;
+   const reason=error instanceof RelayProtocolError?error.message:error instanceof SyntaxError?'invalid JSON':error instanceof TypeError?'unexpected data or callback type':'callback or transport error';
+   try{onError(`Native Codex relay ${stage}: ${reason}`);}catch{}
+   close();
+  };
   const write=(to,from)=>bytes=>{
    if(to.destroyed)return;
-   if(to.writableLength+bytes.length>maxMessage*2)throw Error('Codex relay output queue exceeded');
+   if(to.writableLength+bytes.length>maxMessage*2)throw new RelayProtocolError('Codex relay output queue exceeded');
    if(!to.write(bytes)){from.pause();to.once('drain',()=>from.resume());}
   };
   const upstream=write(peer,client),downstream=write(client,peer);
@@ -105,7 +112,7 @@ export async function createNativeRelay({socketPath,backendPath,onRequest=async 
   };
   const requests=upgrade(true,upstream,(text,wire)=>{
    const message=JSON.parse(text);queued+=wire.length;
-   if(queued>maxMessage*2)throw Error('Codex relay request queue exceeded');
+   if(queued>maxMessage*2)throw new RelayProtocolError('Codex relay request queue exceeded');
    void (async()=>{
     if(controller.signal.aborted)return;
     const next=await onRequest(message,{signal:controller.signal,respond,requestBackend});
@@ -113,21 +120,22 @@ export async function createNativeRelay({socketPath,backendPath,onRequest=async 
     if(next===null)return;
     upstream(next===message?wire:encode(JSON.stringify(next),true));
    })().catch(error=>{
-    if(message.id===undefined){close();return;}
+    if(message.id===undefined){fail('client notification',error);return;}
     respond({id:message.id,error:{code:-32000,message:String(error.message??'Routing unavailable').replace(/[\p{Cc}]/gu,' ').slice(0,1024)}});
-   }).finally(()=>{queued-=wire.length;}).catch(close);
+   }).finally(()=>{queued-=wire.length;}).catch(error=>fail('client reply',error));
   });
   const events=upgrade(false,downstream,(text,wire)=>{
    const message=JSON.parse(text);
    if(!message.method&&typeof message.id==='string'&&message.id.startsWith(internalPrefix)){internal.get(message.id)?.(message);return;}
    if(!filterEvent(message))return;
    eventBytes+=wire.length;
-   if(eventBytes>maxMessage*2)throw Error('Codex relay event queue exceeded');
-   eventsPending=eventsPending.then(async()=>{if(controller.signal.aborted)return;await onEvent(message);downstream(wire);}).finally(()=>{eventBytes-=wire.length;}).catch(close);
+   if(eventBytes>maxMessage*2)throw new RelayProtocolError('Codex relay event queue exceeded');
+   eventsPending=eventsPending.then(async()=>{if(controller.signal.aborted)return;await onEvent(message);downstream(wire);}).finally(()=>{eventBytes-=wire.length;}).catch(error=>fail('App Server event',error));
   });
-  client.on('data',chunk=>{try{requests(chunk);}catch{close();}});
-  peer.on('data',chunk=>{try{events(chunk);}catch{close();}});
-  for(const socket of [client,peer]){socket.on('error',close);socket.on('close',close);}
+  client.on('data',chunk=>{try{requests(chunk);}catch(error){fail('client message',error);}});
+  peer.on('data',chunk=>{try{events(chunk);}catch(error){fail('App Server message',error);}});
+  client.on('error',error=>fail('client socket',error));peer.on('error',error=>fail('App Server socket',error));
+  for(const socket of [client,peer])socket.on('close',close);
  });
  server.listen(socketPath);
  try{await once(server,'listening');await chmod(socketPath,0o600);}catch(error){server.close();throw error;}
