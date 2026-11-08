@@ -530,14 +530,14 @@ test('interrupts pass while a native turn is waiting for classification',async t
 test('native routing bar renders planned and dispatched models and switches Codex policies',async()=>{
  const {readFileSync}=await import('node:fs'),{createRequire}=await import('node:module');
  const {codexRoutingConfig,compatibleRoutingPolicies}=await import('../src/routing-policies.ts');
- const {piModelCatalogSource}=await import('../src/pi-routing.ts');
+ const {modelPresentation}=await import('../src-tauri/pi/model-label.mjs');
  const ts=createRequire(new URL('../package.json',import.meta.url))('typescript');
  const source=ts.createSourceFile('PiRouting.tsx',readFileSync(new URL('../src/PiRouting.tsx',import.meta.url),'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
  const declaration=source.statements.find(n=>n.name?.text==='NativeCodexRoutingBar');assert.ok(declaration);
  const state={generation:'g',revision:8,phase:'working',enabled:true,name:'Current',policyId:null,target:{model:'native/light',effort:'medium'},dispatched:{model:'native/light',effort:'medium'}};
  const slots=[state,null,false],React={createElement:(type,props,...children)=>({type,props:props??{},children:children.flat(Infinity)})};let at=0;const calls=[];
  const helper=source.statements.find(n=>ts.isFunctionDeclaration(n)&&n.name?.text==='routingModelPresentation');
- const component=new Function('React','useState','useEffect','useRef','Select','t','compatibleRoutingPolicies','codexRoutingConfig','piModelCatalogSource',ts.transpileModule(helper.getText(source)+'\n'+declaration.getText(source).replace(/^export /,''),{compilerOptions:{target:ts.ScriptTarget.ESNext,jsx:ts.JsxEmit.React}}).outputText+';return NativeCodexRoutingBar;')(React,initial=>{const i=at++;if(!(i in slots))slots[i]=initial;return [slots[i],value=>slots[i]=value];},()=>{},{},'select',(value,args)=>value.replace(/{{(.*?)}}/g,(_,key)=>args?.[key]??key),compatibleRoutingPolicies,codexRoutingConfig,piModelCatalogSource);
+ const component=new Function('React','useState','useEffect','useRef','Select','t','compatibleRoutingPolicies','codexRoutingConfig','modelPresentation',ts.transpileModule(helper.getText(source)+'\n'+declaration.getText(source).replace(/^export /,''),{compilerOptions:{target:ts.ScriptTarget.ESNext,jsx:ts.JsxEmit.React}}).outputText+';return NativeCodexRoutingBar;')(React,initial=>{const i=at++;if(!(i in slots))slots[i]=initial;return [slots[i],value=>slots[i]=value];},()=>{},{},'select',(value,args)=>value.replace(/{{(.*?)}}/g,(_,key)=>args?.[key]??key),compatibleRoutingPolicies,codexRoutingConfig,modelPresentation);
  const saved=JSON.stringify(routingPolicy);
  const render=(next=state,launchConfig)=>{at=0;slots[0]=next;return component({sessionId:'s',generation:'g',active:true,available:true,launchConfig,invoke:async(command,args)=>{calls.push({command,args});return {state};},policies:[{id:'c',name:'Codex policy',adapter:'codex',setup:saved},{id:'p',name:'Pi policy',adapter:'pi',setup:'{}'}]});};
  const tree=render();

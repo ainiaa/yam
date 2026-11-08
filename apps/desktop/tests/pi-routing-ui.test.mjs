@@ -3,6 +3,7 @@ import {hasPiRoutingSelection,maxPiBackupModels,piExecutionTiers,piModelCatalogS
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import * as routingPolicies from '../src/routing-policies.ts';
+import {modelPresentation} from '../src-tauri/pi/model-label.mjs';
 test('Codex uses the shared editable roles without losing sparse groups or connection data',()=>{
  assert.equal(typeof routingPolicies.codexRoutingDraft,'function');
  const original={connections:{sub:{billing:'subscription',home:'/private/old-home'}},classifiers:['sub/a','sub/b'],executionGroups:[{small:'sub/small',medium:'sub/medium',strong:'sub/strong'},{},{medium:'sub/backup'}]};
@@ -372,7 +373,7 @@ test('Pi status clears recovered polling errors while retaining a rejected contr
  const dependencies={useState:initial=>{const i=index++;if(!(i in slots))slots[i]=initial;return[slots[i],next=>slots[i]=typeof next==='function'?next(slots[i]):next];},useRef:initial=>{const i=refIndex++;return refs[i]??(refs[i]={current:initial});},useEffect:fn=>{if(first)effects.push(fn);},Select:()=>null,RoutingModelPicker:'routing-model-picker',hasPiRoutingSelection,probePiSetupModel,maxPiBackupModels,piExecutionTiers,piModelCatalogSource,piSubscriptionCatalog,piSubscriptionOnly,piLevels:['high','max'],t:(s)=>s,React:{createElement:(type,props,...children)=>({type,props:props??{},children})},document:{visibilityState:'visible'},setTimeout:fn=>{timers.push(fn);return timers.length;},clearTimeout(){}};
  const presentation=ast.statements.find(n=>ts.isFunctionDeclaration(n)&&n.name?.text==='routingModelPresentation');
  const code=ts.transpileModule(presentation.getText(ast)+'\n'+declaration.getText(ast).replace(/^export /,''),{compilerOptions:{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2020}}).outputText;
- const component=new Function(...Object.keys(dependencies),code+';return PiRoutingBar;')(...Object.values(dependencies));
+ const component=new Function('modelPresentation',...Object.keys(dependencies),code+';return PiRoutingBar;')(modelPresentation,...Object.values(dependencies));
  const render=()=>{index=refIndex=0;return component({sessionId:'s-pi',generation:'g',active,available:true,invoke});};
  function nodes(root){if(!root||typeof root!=='object')return[];return[root,...(root.children??[]).flat(Infinity).flatMap(nodes)];}
  const alerts=tree=>nodes(tree).filter(n=>n.props.role==='alert').flatMap(n=>n.children).join('');
@@ -392,14 +393,21 @@ async function routingBarFixture(invoke,options={}){
  const env={useState:initial=>{const i=index++;if(!(i in slots))slots[i]=initial;return[slots[i],next=>slots[i]=typeof next==='function'?next(slots[i]):next];},useRef:initial=>{const i=refIndex++;return refs[i]??(refs[i]={current:initial});},useEffect:(fn,deps)=>{const i=effectIndex++,old=dependencies[i];if(!old||deps.some((v,j)=>v!==old[j])){dependencies[i]=deps;pending.push(fn);}},Select:()=>null,RoutingModelPicker:'routing-model-picker',hasPiRoutingSelection,probePiSetupModel,maxPiBackupModels,piExecutionTiers,piModelCatalogSource,piSubscriptionCatalog,piSubscriptionOnly,PiTaskRules:'task-rules',piLevels:['high','max'],t:(s,values={})=>s.replace(/{{(\w+)}}/g,(_,key)=>values[key]??''),React:{createElement:(type,props,...children)=>({type,props:props??{},children})},document:{visibilityState:options.visibility??'visible'},setTimeout:fn=>{timers.push(fn);return timers.length;},clearTimeout(){}};
  const presentation=ast.statements.find(n=>ts.isFunctionDeclaration(n)&&n.name?.text==='routingModelPresentation');
  const code=ts.transpileModule(presentation.getText(ast)+'\n'+declaration.getText(ast).replace(/^export /,''),{compilerOptions:{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2020}}).outputText;
- const component=new Function(...Object.keys(env),code+';return PiRoutingBar;')(...Object.values(env));let tree;
- const render=()=>{index=refIndex=effectIndex=0;tree=component({sessionId:options.sessionId??'s-pi',generation:options.generation??'g',active:options.active??true,available:options.available??true,invoke});return tree;};
+ const component=new Function('modelPresentation',...Object.keys(env),code+';return PiRoutingBar;')(modelPresentation,...Object.values(env));let tree;
+ const render=()=>{index=refIndex=effectIndex=0;tree=component({sessionId:options.sessionId??'s-pi',generation:options.generation??'g',cliVersion:options.cliVersion,installedPiVersion:options.installedPiVersion,active:options.active??true,available:options.available??true,invoke});return tree;};
  const all=node=>!node||typeof node!=='object'?[]:[node,...(node.children??[]).flat(Infinity).flatMap(all)];
  const tick=()=>new Promise(r=>setImmediate(r));
  const flush=async()=>{for(let i=0;i<3;i++){render();for(const effect of pending.splice(0))effect();await tick();}render();};
  await flush();return {visible:value=>env.document.visibilityState=value,flush,poll:async()=>{timers.shift()?.();await flush();},select:label=>all(tree).find(n=>(n.props['aria-label']??n.props.label)===label),button:text=>all(tree).find(n=>n.type==='button'&&n.children.includes(text)),catalogModels:()=>all(tree).find(n=>n.type===env.RoutingModelPicker)?.props.models,rules:()=>all(tree).find(n=>n.type==='task-rules'),tree:()=>tree,text:()=>all(tree).flatMap(n=>n.children).filter(v=>typeof v==='string').join(' ')};
 }
 const barState=()=>({revision:1,generation:'g',phase:'idle',config:{small:'p/small',strong:'p/strong',classifier:'p/small',gateway:null},preferences:{model:'p/small',effort:'high'},target:null,actual:null,error:null,pendingInput:false});
+test('Pi routing separates installed and session launch versions',async()=>{
+ const stopped=async(cliVersion,installedPiVersion)=>routingBarFixture(async()=>({active:false,state:barState()}),{cliVersion,installedPiVersion,active:false});
+ const old=await stopped('1.4.0','1.5.0');
+ assert.match(old.text(),/Local Pi 1\.5\.0.*Session launched with Pi 1\.4\.0/);
+ assert.doesNotMatch((await stopped('1.5.0','1.5.0')).text(),/Session launched with Pi/);
+ assert.match((await stopped('1.4.0',null)).text(),/Local Pi version unknown.*Session launched with Pi 1\.4\.0/);
+});
 test('routing diagnostics show observed stages and missing timings without exposing connection secrets',async()=>{
  const state={...barState(),diagnostics:{configSource:'session',billing:'subscription',execution:{stage:'failed',failedStage:'starting',discoveryMs:23,startupMs:null,firstResponseMs:null,executionMs:45}}};
  const f=await routingBarFixture(async(name,args)=>name==='get_pi_routing'?{active:true,state}:{models:[]});
@@ -542,7 +550,7 @@ test('routing model picker separates connections, preserves model paths and wait
  const changes=[];
  let state;
  const react={createElement:(type,props,...children)=>({type,props:props??{},children})};
- const env={React:react,Select:'select',t:s=>s,useState:initial=>[state??initial,next=>state=next],piModelCatalogSource};
+ const env={React:react,Select:'select',t:s=>s,useState:initial=>[state??initial,next=>state=next],piModelCatalogSource,modelPresentation};
  const helpers=ast.statements.filter(node=>ts.isFunctionDeclaration(node)&&['routingModelPresentation','routingModelOptions','codexConnectionLabels'].includes(node.name?.text));
  const code=ts.transpileModule([...helpers,declaration].map(node=>node.getText(ast)).join('\n'),{compilerOptions:{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2020}}).outputText;
  const component=new Function(...Object.keys(env),code+';return RoutingModelPicker;')(...Object.values(env));
@@ -900,7 +908,7 @@ test('live route selector can enable a saved strategy from off and replace a pen
  const declaration=ast.statements.find(node=>ts.isFunctionDeclaration(node)&&node.name?.text==='LiveRoutingControls');
  const helpers=ast.statements.filter(node=>ts.isFunctionDeclaration(node)&&['routingModelPresentation','routingModelOptions'].includes(node.name?.text));
  const code=ts.transpileModule(helpers.map(node=>node.getText(ast)).join('\n')+'\n'+declaration.getText(ast).replace(/^export /,''),{compilerOptions:{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2020}}).outputText;
- const env={piModelCatalogSource,Select:'select',t:text=>text,useState:value=>[value,()=>{}],React:{createElement:(type,props,...children)=>({type,props:props??{},children})},...api};
+ const env={piModelCatalogSource,modelPresentation,Select:'select',t:text=>text,useState:value=>[value,()=>{}],React:{createElement:(type,props,...children)=>({type,props:props??{},children})},...api};
  const render=new Function(...Object.keys(env),code+';return LiveRoutingControls;')(...Object.values(env));
  const all=node=>node&&typeof node==='object'?[node,...(node.children??[]).flat(Infinity).flatMap(all)]:[];
  const policies=api.readRoutingPolicies(null,JSON.stringify({gateway:null,small:'p/a',strong:'p/b',classifier:'p/c'})),calls=[];

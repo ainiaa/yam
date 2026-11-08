@@ -13,6 +13,23 @@ import {sessionRuntimeInfo} from '../src/session-runtime-info.ts';
 const app=readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8');
 const source=ts.createSourceFile('App.tsx',app,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
 const React={createElement:(type,props,...children)=>({type,props:props??{},children})};
+test('Pi version refresh follows a new run and retries a focus that arrived during a probe',async()=>{
+ let effect;const visit=node=>{if(ts.isCallExpression(node)&&node.expression.getText(source)==='useEffect'&&node.getText(source).includes('pi_cli_version'))effect=node;ts.forEachChild(node,visit);};visit(source);assert.ok(effect);
+ const pending=[],published=[];let focus;
+ const code=ts.transpile(effect.getText(source),{target:ts.ScriptTarget.ES2022});
+ const mount=new Function('useEffect','window','piSessionId','piRunGeneration','invoke','setInstalledPiVersion',code);
+ let cleanup,deps;
+ mount((start,values)=>{deps=values;cleanup=start();},{addEventListener:(_key,fn)=>focus=fn,removeEventListener:()=>focus=null},'s-pi','run-2',()=>new Promise(resolve=>pending.push(resolve)),version=>published.push(version));
+ focus();pending.shift()('1.4.0');await new Promise(setImmediate);
+ assert.deepEqual(published,[]);
+ assert.equal(pending.length,1);
+ pending.shift()('1.5.0');await new Promise(setImmediate);
+ assert.deepEqual(published,['1.5.0']);
+ assert.deepEqual(deps,['s-pi','run-2']);
+ focus();cleanup();pending.shift()('1.6.0');await new Promise(setImmediate);
+ assert.deepEqual(published,['1.5.0']);
+ assert.equal(focus,null);
+});
 function nodes(tree){const all=[];const visit=node=>{if(node&&typeof node==='object'){all.push(node);for(const child of node.children??[])if(Array.isArray(child))child.forEach(visit);else visit(child);}};visit(tree);return all;}
 function text(node){return (node?.children??[]).map(child=>typeof child==='string'?child:Array.isArray(child)?child.map(text).join(''):text(child)).join('');}
 function renderConnection(launch,agent){
@@ -76,7 +93,7 @@ test('capability disclosure receives current session agent metadata',()=>{
  const agent=connection.attributes.properties.find(attr=>attr.name?.getText(source)==='agent');assert.ok(agent,'current session metadata is passed');assert.equal(agent.initializer.expression.getText(source),'currentAgent');
  const bindings=ts.transpile('return ('+connection.getText(source)+');',{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2022});
  const currentAgent={cli_version:'codex-cli 0.162.1',cli_platform:'macos',integration:'connected'};
- const rendered=new Function('React','SessionConnection','session','currentAgent',bindings)(React,()=>{}, {launch:{adapter:'codex',mode:'interactive'}},currentAgent);
+ const rendered=new Function('React','SessionConnection','session','currentAgent','installedPiVersion',bindings)(React,()=>{}, {launch:{adapter:'codex',mode:'interactive'}},currentAgent,null);
  assert.equal(rendered.props.agent,currentAgent);
 });
 test('Codex fallback eligibility follows connected platform capability, not exact CLI versions',()=>{

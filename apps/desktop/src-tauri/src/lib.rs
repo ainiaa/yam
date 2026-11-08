@@ -3482,6 +3482,18 @@ fn list_adapters() -> Vec<AgentAdapter> {
     agent_adapters()
 }
 
+#[tauri::command]
+async fn pi_cli_version() -> Option<String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        find_executable("pi")
+            .as_deref()
+            .and_then(agent_bridge::pi_version)
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 fn claim_resume_source(
     history: &HistoryStore,
     claims: Arc<Mutex<std::collections::HashSet<String>>>,
@@ -4636,6 +4648,7 @@ fn create_session_with_effects<R: tauri::Runtime>(
         shell_command(command.as_deref())
     };
     if let Some(native_id) = &pi_identity {
+        pi_router::set_display_locale(&mut builder, &app);
         builder.env(
             "YAM_PI_CONTROL_FILE",
             pi_router::control_file(&history.root, &id)?,
@@ -6597,6 +6610,7 @@ pub fn run() {
                     pi_routing_catalog,
                     codex_routing_catalog,
                     pi_packages,
+                    pi_cli_version,
                 ],
                 |invoke| invoke.resolver.reject("webview_command_forbidden"),
             )

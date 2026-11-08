@@ -7,6 +7,7 @@ import {serveControls} from './control.mjs';
 import {efforts,guardCapacity,measureContextBudget,preferCachedModel,weakReadOnlyReply,resolveEffort,splitModel,textOf,publicExcerpt,launchOption} from './policy.mjs';
 import {defaultRules,defaultTierRules,validateRules,rulesVersion,routeFacts,classifierPrompt,backupKeys,orderedExecutionCandidates,classifyCandidates} from './task-rules.mjs';
 import {nativeError,withFailure,failureOf,projectFailure} from './failure.mjs';
+import {modelPresentation,zhModelLabels} from './model-label.mjs';
 const configType='yam.routing.config.v1',preferencesType='yam.routing.preferences.v1',modeType='yam.routing.mode.v1';
 const executionTiers=['small','medium','strong'];
  const rulesType='yam.routing.rules.v1',rulesSchemaType='yam.routing.rules.default-high.v1';
@@ -93,10 +94,20 @@ export default async function install(pi,supportedLevels,Text,native,budgetDepen
  const replyType='yam.reply-model.v1';
  const clean=value=>typeof value==='string'?value.replace(/[\p{Cc}\p{Cf}]/gu,'').trim().slice(0,256):'';
  const replyEffort=value=>['off','minimal',...efforts].includes(value)?value:'unknown';
+ const chinese=process.env.YAM_PI_DISPLAY_LOCALE!=='en';
+ const translate=key=>chinese?zhModelLabels[key]??key:key;
+ const modelLabel=(key,{historical=false}={})=>{
+  const separator=key.indexOf('/');
+  if(separator<=0||separator===key.length-1)return translate('Model not recorded');
+  const provider=key.slice(0,separator),id=key.slice(separator+1);
+  // A saved reply records the actual provider, while the registry reflects current credentials.
+  const metadata=historical?(provider==='yam-gateway'?{source:'magpie'}:null):connection(context?.modelRegistry.find(provider,id)??{provider});
+  return modelPresentation(key,metadata,null,translate).label;
+ };
  pi.registerEntryRenderer(replyType,(entry,_options,theme)=>{
   const data=entry.data;if(!data||typeof data.messageId!=='string')return;
-  const model=clean(data.model)||'模型未记录',effort=replyEffort(data.effort);
-  return new Text(theme.fg('dim',`${model} · ${effort==='unknown'?'推理尚未确认':effort}`),0,0);
+  const model=modelLabel(clean(data.model),{historical:true}),effort=replyEffort(data.effort);
+  return new Text(theme.fg('dim',`${model} · ${effort==='unknown'?translate('Reasoning unconfirmed'):effort}`),0,0);
  });
  // Native turn boundaries place the label after the saved response; custom entries never enter model context.
  pi.on('turn_end',event=>{
@@ -637,7 +648,7 @@ export default async function install(pi,supportedLevels,Text,native,budgetDepen
   const last=ctx.sessionManager.getBranch().filter(e=>e.type==='message'&&e.message?.role==='assistant'&&e.message.provider&&e.message.model&&!['error','aborted','length'].includes(e.message.stopReason)).at(-1)?.message;
   if(last)actual={model:`${last.provider}/${last.model}`,effort:last.thinkingLevel??'unknown',at:last.timestamp??0};
   if(!selectionError)phase='idle';changed();
-  try{checkSelection(ctx);const p=currentPreferences();ctx.ui.setStatus('yam-route',`${p.model==='auto'?'自动模型':p.model} · ${p.effort==='auto'?'自动推理':p.effort} · /yam-route`);}
+  try{checkSelection(ctx);const p=currentPreferences();ctx.ui.setStatus('yam-route',`${p.model==='auto'?'自动模型':modelLabel(p.model)} · ${p.effort==='auto'?'自动推理':p.effort} · /yam-route`);}
   catch(e){ctx.ui.notify(String(e.message),'error');ctx.ui.setStatus('yam-route','路由配置不可用 · 请检查模型和连接');await stopSelection(ctx,e);}
   const inline=launchOption('--model')?.split(':').at(-1);
   const requested=launchOption('--thinking')??(['off','minimal',...efforts].includes(inline)?inline:undefined);
@@ -761,7 +772,7 @@ export default async function install(pi,supportedLevels,Text,native,budgetDepen
   if(fixed&&preferences.effort!=='auto'){
    const level=workingEffort(fixed,'high',request.thinkingLevel),reason='用户固定模型与推理档位',budget=checkBudget(fixed,request.messages);compatible(fixed);
    native?.setRoute?.({intent:newPolicy?'new':undefined,requires:[],roles:executionProfiles(ctx)});
-   ctx.ui.setStatus('yam-route',`${fixed.provider}/${fixed.id} · ${level} · 固定模型与推理`);target={model:`${fixed.provider}/${fixed.id}`,effort:level,reason};decision={rule:'fixed',ruleVersion:rulesVersion(taskRules),classificationMs:0,classifierCost:0,executionCost:0,correctionCost:0,totalCost:0,...budget?{budget}:{}};saveDecision();phase='selected';changed();
+   target={model:`${fixed.provider}/${fixed.id}`,effort:level,reason};ctx.ui.setStatus('yam-route',`${modelLabel(target.model)} · ${level} · 固定模型与推理`);decision={rule:'fixed',ruleVersion:rulesVersion(taskRules),classificationMs:0,classifierCost:0,executionCost:0,correctionCost:0,totalCost:0,...budget?{budget}:{}};saveDecision();phase='selected';changed();
    return {model:fixed,thinkingLevel:level,state:{v:1,...(epoch?{routingEpoch:epoch}:{}),model:fixed===small?'small':'strong',executionModel:executionKey(fixed),executionBilling:connection(fixed).billing,effort:level,task:textOf(request.messages.filter(m=>m.role==='user').at(-1)).slice(0,4000),reason}};
   }
   phase='classifying';target=null;changed();
@@ -865,7 +876,7 @@ export default async function install(pi,supportedLevels,Text,native,budgetDepen
   native?.setRoute?.({intent:phaseHandoff||newPolicy?'new':intent,mode,requires:needs,roles:executionProfiles(ctx,{tier:next.model,model})});
   const reason=capabilityAdjusted?'能力、推理与上下文预算匹配，选择同计费授权的兼容模型':phaseHandoff?'只读任务转入中档工具执行阶段':cached?'保留近期缓存，预计成本更低':policy.rule==='fallback'?(taskRules.v===2?'分类或上下文不足，选择中档主模型':'分类或上下文不足，保守选择强模型'):`任务规则：${policy.rule}`;
   Object.assign(decision,{selected:{model:next.model,effort:next.effort},...budget?{budget}:{}});saveDecision();
-  ctx.ui.setStatus('yam-route',`${model.provider}/${model.id} · ${next.effort} · ${preferences?.effort==='off'||request.thinkingLevel!=='off'?'固定推理':'自动推理'} · ${reason}`);
+  ctx.ui.setStatus('yam-route',`${modelLabel(`${model.provider}/${model.id}`)} · ${next.effort} · ${preferences?.effort==='off'||request.thinkingLevel!=='off'?'固定推理':'自动推理'} · ${reason}`);
   phase='selected';target={model:`${model.provider}/${model.id}`,effort:next.effort,reason};changed();
   const state={v:taskRules.v,...(epoch?{routingEpoch:epoch}:{}),...next,...taskRules.v===2?{mode}:{},executionModel:target.model,executionBilling:connection(model).billing,...(hasBackups||chainedContinuation)?{executionChained:true}:{},rule:policy.rule,ruleVersion:policy.version,task:intent==='continue'&&request.state?.task?request.state.task:text.slice(0,4000),reason};
   const correctionMustMatchBilling=!primaryRegular||state.executionBilling==='subscription';
@@ -904,7 +915,7 @@ export default async function install(pi,supportedLevels,Text,native,budgetDepen
     }
     const messages=request.messages.map(message=>message.role==='system'?{...message,toolsAdded:[],toolsRemoved:[]}:message);
     const level=workingEffort(strong,'high',request.thinkingLevel),reason='只读回答质量不足，升档一次',budget=checkBudget(strong,messages,state.executionChained);
-    target={model:`${strong.provider}/${strong.id}`,effort:level,reason};phase='selected';changed();ctx.ui.setStatus('yam-route',`${target.model} · ${level} · ${reason}`);
+    target={model:`${strong.provider}/${strong.id}`,effort:level,reason};phase='selected';changed();ctx.ui.setStatus('yam-route',`${modelLabel(target.model)} · ${level} · ${reason}`);
     // Native message_end replacement is persisted before turn_end; this call never declares or executes tools.
     const signal=request.signal?AbortSignal.any([request.signal,AbortSignal.timeout(60000)]):AbortSignal.timeout(60000);
     const result=await (isChatGPT(ctx,strong)?native.stream.bind(native):ctx.modelRegistry.streamSimple.bind(ctx.modelRegistry))(strong,{messages},{signal,reasoning:level,toolChoice:'none'}).result();
