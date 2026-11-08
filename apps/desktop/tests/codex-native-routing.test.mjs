@@ -75,9 +75,12 @@ test('native connection switches hide their internal close while forwarding norm
  try{
   assert.equal(router.filterEvent(closed('main')),false);
   assert.equal(router.filterEvent(closed('other')),true);
+  const confirmedSettings={method:'thread/settings/updated',params:{threadId:'main',threadSettings:{model:'light',effort:'medium',sandboxPolicy:{type:'readOnly',networkAccess:false}}}};
+  assert.equal(router.filterEvent(confirmedSettings),true);
+  await router.event(confirmedSettings);
   assert.equal(router.filterEvent({id:'internal-resume',result:{thread:{id:'main'}}}),true);
   assert.equal(router.filterEvent({method:'turn/completed',params:{threadId:'main',turn:{id:'previous',status:'completed'}}}),true);
- }finally{release();await pending;}
+ }finally{release();const next=await pending;assert.deepEqual(next.params.sandboxPolicy,workspaceSandbox);}
  assert.equal(router.filterEvent(closed('main')),true);
 });
 

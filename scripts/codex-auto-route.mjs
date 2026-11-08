@@ -74,7 +74,7 @@ export function createCodexTurnRouter({config,connectionName,models,classify,swi
   filterEvent(message){
    const params=message.params;
    return !state.connectionSwitch||params?.threadId!==state.threadId||
-    !(message.method==='thread/closed'||message.method==='thread/settings/updated'||message.method==='thread/status/changed'&&['idle','notLoaded'].includes(params.status?.type));
+    !(message.method==='thread/closed'||message.method==='thread/status/changed'&&['idle','notLoaded'].includes(params.status?.type));
   },
   setPolicy(next){const checked=readCodexPolicy(JSON.stringify(next));if(!isDeepStrictEqual(policy,checked))state={...state,previous:null,previousPrompt:''};policy=checked;},
   async queuePolicy(next){checkPending(next);await publish({pendingPolicy:next});await settle();},
