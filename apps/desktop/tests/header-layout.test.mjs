@@ -20,6 +20,8 @@ import {agentLabel} from '../src/agent-events.ts';
 import * as layoutOperations from '../src/terminal-layout.ts';
 import {gitContextLabel} from '../src/git-context.ts';
 import {connectionDetails} from '../src/provider-config.ts';
+import {installActionMenus} from '../src/action-menus.ts';
+import {zh} from '../src/translations.zh.ts';
 const transpile=cachedCompilation(text=>ts.transpileModule(text,{compilerOptions:{target:ts.ScriptTarget.ES2022,jsx:ts.JsxEmit.React}}).outputText);
 
 const chrome = process.env.CHROME_BIN ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
@@ -42,7 +44,7 @@ const code = transpile('return (' + header.getText(source) + ');');
 const connectionDeclaration=source.statements.find(node=>ts.isFunctionDeclaration(node)&&node.name?.text==='SessionConnection');
 assert.ok(connectionDeclaration,'actual connection disclosure');
 const connectionCode=transpile(connectionDeclaration.getText(source));
-const SessionConnection=componentFunction('React','connectionDetails','ChevronDown','sessionRuntimeInfo',connectionCode+';return SessionConnection;')(React,connectionDetails,icons.ChevronDown,sessionRuntimeInfo);
+const SessionConnection=componentFunction('React','connectionDetails','sessionRuntimeInfo',connectionCode+';return SessionConnection;')(React,connectionDetails,sessionRuntimeInfo);
 const css = readFileSync(new URL('../src/App.css', import.meta.url), 'utf8');
 
 const layoutSource=ts.createSourceFile('TerminalLayout.tsx',readFileSync(new URL('../src/TerminalLayout.tsx',import.meta.url),'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
@@ -53,14 +55,15 @@ function layoutElement() {
  const component=componentFunction(...Object.keys(bindings),layoutCode+';return TerminalLayout;')(...Object.values(bindings));
  return component({layout:{mode:'single',panes:['fixture'],focused:0,revision:0},labels:['Terminal'],splitPercent:50,swapDisabled:false,canReopen:true,onHost(){},onMode(){},onFocus(){},onClose(){}});
 }
-function markup(interactive, collapsed, longPath, stopped=false) {
-  const bindings = {React, SessionConnection, ...Object.fromEntries(Object.entries(icons).filter(([name]) => /^[A-Z]/.test(name))), gitProjectPath:'/work',sidebarOpen: !collapsed, currentProject: {name: 'YAM'},
+const piConnection={integration:'connected',cli_path:'/Users/example-user/.npm-global/bin/pi',agent_session_id:'c349ad0b-9961-410c-aba5-61d4bea0458e',cli_version:'1.4.0'};
+function markup(interactive, collapsed, longPath, stopped=false, pi=false) {
+  const bindings = {React, SessionConnection, installedPiVersion:pi?'1.5.0':null, ...Object.fromEntries(Object.entries(icons).filter(([name]) => /^[A-Z]/.test(name))), gitProjectPath:'/work',sidebarOpen: !collapsed, currentProject: {name: 'YAM'},
     sidebarSessions,searchInput:{current:null},historyQuery:'',statusFilter:'all',unreadTotal:0,inboxOpen:false,shortcutError:null,history:[],historyCursor:null,historyLoading:false,capacityOpen:false,capacity:null,capacityError:null,capacityBusy:false,scanCapacity(){},jumpToAttention(){},addProject(){},endProjectDrag(){},
     visibleProjects:[{path:'/work',name:'Project',sessions:[{summary:{session_id:'fixture',mode:'command'},status:'stopped',started_at:0}]}],projectKey:path=>path,collapsedProjects:new Set(),normalizedQuery:'',projectColor:()=>'',canRenameProject:()=>true,canMoveProject:()=>false,pinnedSessions:[],
-    session: {session_id: 'fixture', cwd:'/work', launch: interactive ? {mode: 'interactive',adapter:'codex'} : null},
+    session: {session_id: 'fixture', cwd:'/work', launch: pi ? {mode:'interactive',adapter:'pi'} : interactive ? {mode: 'interactive',adapter:'codex'} : null},
     setLayoutMenuHost(){},conversationOpen:false,showConversation(){},openTerminalFind(){},
     starting:false, titleFor: () => 'Codex interactive session', visibleGitContext: longPath ? {kind: 'repository', branch: 'feature/' + 'long-branch-'.repeat(30), dirty: true, root: '/work/' + 'long-directory/'.repeat(30), common_dir: '/repo/.git'} : {kind: 'unavailable'},
-    gitContextLabel, isRunning: !stopped, currentAgent: {integration: 'connecting'}, agentLabel,
+    gitContextLabel, isRunning: !stopped, currentAgent: pi ? piConnection : {integration: 'connecting'}, agentLabel,
     agentPhase:"idle",sessionStatus: stopped?'stopped':'running', statusLabels: {running:'Running',stopped:'Stopped'}, notificationsPaused: false,
     historyOverview: {failed_receipts: 1,attention_sessions:0,total:1,active:1}, canNavigateReportedPrompt: () => false,
     shortcutMac: true, fileBusy: false, filePreview: null, canMoveTerminalTab: () => false,
@@ -87,18 +90,49 @@ test('production workspace chrome renders shell, Agent, ended and collapsed stat
  }
 });
 
+test('expanding session connection keeps its parent menu open and exposes the launch version',()=>{
+ const element=SessionConnection({launch:{adapter:'pi',mode:'interactive'},agent:{cli_version:'1.4.0'},installedPiVersion:'1.5.0'});
+ const parent={open:true},listeners=new Map();
+ const connection={open:true,matches:selector=>selector==='details.toolbar-more'&&element.props.className.split(' ').includes('toolbar-more')};
+ const cleanup=installActionMenus({
+  querySelectorAll:()=>[parent,...(connection.matches('details.toolbar-more')?[connection]:[])].filter(details=>details.open),
+  addEventListener:(name,listener)=>listeners.set(name,listener),
+  removeEventListener:name=>listeners.delete(name),
+ });
+ listeners.get('toggle')({target:connection});
+ assert.equal(parent.open,true);
+ const markup=renderToStaticMarkup(element);
+ assert.match(markup,/<dt>Local Pi version<\/dt><dd>1\.5\.0<\/dd>/);
+ assert.match(markup,/<dt>CLI version at launch<\/dt><dd>1\.4\.0<\/dd>/);
+ assert.ok(markup.indexOf('CLI version at launch')<markup.indexOf('CLI executable at launch'),'version is visible before long fields');
+ let handled=0,focused=0;
+ const currentTarget={open:true,querySelector:()=>({focus:()=>focused++})};
+ const escape={key:'Escape',currentTarget,preventDefault(){},stopPropagation:()=>handled++};
+ element.props.onKeyDown(escape);
+ assert.equal(currentTarget.open,false);
+ assert.equal(focused,1);
+ element.props.onKeyDown(escape);
+ assert.equal(handled,1,'Escape bubbles to the parent once the connection is closed');
+ cleanup();
+});
+
 test('actual header keeps Git readable, terminal space, and actions reachable', {skip: chromeSkip}, async () => {
   const cases = [
     {name: 'normal shell', width: 1000, interactive: false},
     {name: 'awaiting trusted hook', width: 1180, interactive: true},
     {name: 'narrow agent', width: 800, interactive: true},
     {name: 'stopped session', width: 1000, stopped:true},
+    {name: 'stopped Pi session in Chinese', width: 800, stopped:true, pi:true},
     {name: 'narrow sidebar agent', width: 540, interactive: true},
     {name: 'collapsed narrow agent with long Git paths', width: 400, interactive: true, collapsed: true, longPath: true},
   ];
   const directory = mkdtempSync(join(tmpdir(), 'yam-header-layout-'));
   try {
-    const fixtures = cases.map(item => ({...item, html: `<style>${css}</style>${markup(item.interactive, item.collapsed, item.longPath,item.stopped)}`}));
+    const fixtures = cases.map(item => {
+      let html=markup(item.interactive,item.collapsed,item.longPath,item.stopped,item.pi);
+      if(item.pi)html=html.replace(/<dt>([^<]+)<\/dt>/g,(_match,label)=>'<dt>'+(zh[label]??label)+'</dt>');
+      return {...item,html:`<style>${css}</style>${html}`};
+    });
     const script = `Promise.all(${JSON.stringify(fixtures)}.map(item => new Promise(resolve => {
       const frame = document.createElement('iframe'); frame.style.cssText = 'border:0;width:' + item.width + 'px;height:760px';
       frame.onload = () => { const doc = frame.contentDocument, header = doc.querySelector('.topbar'), box = header.getBoundingClientRect();
@@ -121,7 +155,15 @@ test('actual header keeps Git readable, terminal space, and actions reachable', 
               }
               if(['Copy terminal output','Clear terminal display'].includes(label))textButtons.push({label,width:box.width,height:box.height});
             }
-            menu.open=false;return {accessible,textFailures:[...new Set(textFailures)],textButtons,width:rect.width,height:rect.height,left:rect.left,right:rect.right};})}); };
+            const connection=panel.querySelector('.session-connection dl');
+            const connectionSummary=panel.querySelector('.session-connection > summary');
+            const diagnosticsSummary=panel.querySelector('.session-diagnostics > summary');
+            const nativeConnectionMarker=!connectionSummary||(!connectionSummary.querySelector('svg')&&
+              doc.defaultView.getComputedStyle(connectionSummary).display===doc.defaultView.getComputedStyle(diagnosticsSummary).display);
+            const connectionLines=item.pi&&connection?[...connection.querySelectorAll('dd')].filter(node=>node.textContent.startsWith('/Users/')||node.textContent==='${piConnection.agent_session_id}').map(node=>{
+              const range=doc.createRange();range.selectNodeContents(node);return range.getClientRects().length;
+            }):[];
+            menu.open=false;return {accessible,textFailures:[...new Set(textFailures)],textButtons,nativeConnectionMarker,connectionLines,width:rect.width,height:rect.height,left:rect.left,right:rect.right};})}); };
       frame.srcdoc = item.html; document.body.append(frame);
     }))).then(results => { document.getElementById('result').textContent = JSON.stringify(results); });`;
     const file = join(directory, 'header.html');
@@ -152,6 +194,12 @@ test('actual header keeps Git readable, terminal space, and actions reachable', 
       assert.equal(value.defaultLayoutButtons,0,`${value.name}: no default layout button strip`);
       assert.ok(value.layoutHeight<=36,`${value.name}: compact layout summary`);
       assert.ok(value.menus.every(menu=>menu.accessible && menu.height<=560 && menu.left>=0 && menu.right<=cases.find(item=>item.name===value.name).width+1),`${value.name}: bounded menus ${JSON.stringify(value.menus)}`);
+      if(cases.find(item=>item.name===value.name).pi){
+        const lines=value.menus.flatMap(menu=>menu.connectionLines);
+        assert.equal(lines.length,2,'both long Pi fields are present');
+        assert.ok(lines.every(count=>count>=1&&count<=4),`Pi path and ID should wrap to at most four lines, got ${lines}`);
+        assert.ok(value.menus.every(menu=>menu.nativeConnectionMarker),'connection and diagnostics use the same native disclosure marker');
+      }
       assert.deepEqual(value.menus.flatMap(menu=>menu.textFailures),[],`${value.name}: menu text stays inside its button and clear of the next item`);
       const textButtons=value.menus.flatMap(menu=>menu.textButtons);
       assert.equal(textButtons.length,2,`${value.name}: both formerly small icon controls rendered`);

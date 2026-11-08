@@ -1,5 +1,7 @@
 // Author: Jeff.Liu. These fields belong to Pi only; official CLI arguments never pass through this form.
 import {defaultRules,defaultTierRules,validateRules,type TaskRules} from '../src-tauri/pi/task-rules.mjs';
+import {piModelCatalogSource} from '../src-tauri/pi/model-label.mjs';
+export {piModelCatalogSource,type PiCatalogSource} from '../src-tauri/pi/model-label.mjs';
 export const piExecutionTiers=['small','medium','strong'] as const;
 export type PiExecutionTier=typeof piExecutionTiers[number];
 type PiExecutionFallbacks=Partial<Record<PiExecutionTier,string[]>>;
@@ -11,10 +13,6 @@ export const defaultPiArgs='';
 export type PiConnection={source?:'chatgpt-subscription'|'magpie'|'pi-native';billing?:'subscription'|'gateway'|'api'|'unknown'};
 type PiClassifierBilling=Exclude<PiConnection['billing'],'unknown'|undefined>;
 export type PiModel=PiConnection&{cli?:'codex';key:string;name:string;levels:string[];context_window:number;legacy_alias?:boolean};
-export type PiCatalogSource='magpie-pi'|'magpie-direct'|'pi';
-export function piModelCatalogSource(key:string):PiCatalogSource {
- return key.startsWith('magpie/')?'magpie-pi':key.startsWith('yam-gateway/')?'magpie-direct':'pi';
-}
 export type NativeFailure={category:'auth'|'quota'|'context'|'capability'|'connection'|'cancelled'|'execution'|'unknown';stage:'discovery'|'preparation'|'dispatch'|'execution'|'verification'|'persistence'|'control';code:string;dispatch:'not-started'|'started'|'unknown';nextAction:'check-login'|'check-quota'|'reduce-context'|'check-capability'|'refresh-state'|'inspect-task'};
 export type PiContextBudget={kind:'local-estimate';inputTokens:number|null;reserveTokens:number|null;contextWindow:number|null;maxOutputTokens:number|null;fits:boolean;reason:string|null};
 export type PiExecutionDiagnostics={stage:'discovering'|'preparing'|'starting'|'executing'|'completed'|'failed'|'aborted';failedStage?:string;failure?:'context-budget';handoff?:{mode:'incremental'|'full';reason:'verified-prefix'|'prefix-unverified'|'new-task'|'identity-changed'|'new-session';messages:number;characters:number;budget:number};discoveryMs:number|null;startupMs:number|null;firstResponseMs:number|null;executionMs:number|null};

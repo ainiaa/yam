@@ -216,18 +216,19 @@ function ProviderPortCheck({endpoint}:{endpoint:string}) {
  return <div><button type="button" disabled={pending.current} onClick={check}>{t("Check local port")}</button><small>{t("TCP port check only; authentication and model are not verified. No model request is sent.")}</small>{result?.endpoint===endpoint&&<p className={`connection-result ${result.status==="checking"?"pending":result.status==="reachable"?"success":"error"}`} role={result.status==="checking"||result.status==="reachable"?"status":"alert"}>{result.status==="checking"?"":result.status==="reachable"?"✓ ":"✕ "}{t(messages[result.status])}</p>}</div>;
 }
 
-function SessionConnection({launch,agent}:{launch:AgentLaunch|null|undefined;agent?:AgentState}) {
+function SessionConnection({launch,agent,installedPiVersion}:{launch:AgentLaunch|null|undefined;agent?:AgentState;installedPiVersion?:string|null}) {
   const connection=connectionDetails(launch),runtime=sessionRuntimeInfo(launch,agent);
-  return <details className="toolbar-more session-connection" onKeyDown={event=>{if(event.key==="Escape"&&!event.nativeEvent?.isComposing&&event.keyCode!==229){event.preventDefault();event.stopPropagation();event.currentTarget.open=false;event.currentTarget.querySelector("summary")?.focus();}}}>
-    <summary aria-label={t("Connection details")}>{t("Connection")+" "}<ChevronDown size={12} aria-hidden="true"/></summary>
+  return <details className="session-connection" onKeyDown={event=>{if(event.key==="Escape"&&event.currentTarget.open&&!event.nativeEvent?.isComposing&&event.keyCode!==229){event.preventDefault();event.stopPropagation();event.currentTarget.open=false;event.currentTarget.querySelector("summary")?.focus();}}}>
+    <summary aria-label={t("Connection details")}>{t("Connection")}</summary>
     <div className="toolbar-more-actions">
       <strong>{t("Launch connection")}</strong>
       <dl>
         <dt>{t("CLI")}</dt><dd>{connection.cli}</dd>
+        {launch?.adapter==="pi"&&<><dt>{t("Local Pi version")}</dt><dd>{installedPiVersion??t("Unknown")}</dd></>}
+        <dt>{t("CLI version at launch")}</dt><dd>{agent?.cli_version??t("Unknown")}</dd>
         <dt>{t("CLI executable at launch")}</dt><dd>{runtime.executable}</dd>
         <dt>{t("Native session ID")}</dt><dd>{runtime.nativeSession}</dd>
         <dt>{t("Trusted hooks")}</dt><dd>{t(runtime.hooks)}</dd>
-        <dt>{t("CLI version at launch")}</dt><dd>{agent?.cli_version??t("Unknown")}</dd>
         <dt>{t("Launch platform")}</dt><dd>{agent?.cli_platform??t("Unknown")}</dd>
         {launch?.mode==='interactive'&&launch.adapter==='codex'&&<><dt>{t("Failure fallback")}</dt><dd>{agent?.integration!=="connected"&&agent?.cli_version?t("Not connected; trusted hooks required"):agent?.integration==="connected"&&agent.cli_platform==="macos"?t("Event validation enabled; trusted hooks and readable native transcript required"):t("Unverified platform or connection")}</dd></>}
         <dt>{t("Configuration")}</dt><dd>{t(connection.source)}</dd>
@@ -238,7 +239,7 @@ function SessionConnection({launch,agent}:{launch:AgentLaunch|null|undefined;age
         <dt>{t("Configured endpoint")}</dt><dd>{connection.endpoint}</dd>
         {launch?.adapter==="codex"&&launch.codex&&<><dt>{t("Image generation")}</dt><dd>{launch.codex.image_mode==="gateway_api"?t("Gateway image API (imagegen skill)"):t("Codex default")}</dd><dt>{t("Inherited configuration")}</dt><dd>{launch.provider?t("Private snapshot of original Codex configuration; session connection override"):t("Existing Codex configuration")}</dd></>}
       </dl>
-      <p>{t("Current model, authentication, billing and final upstream are not verified. Values above are the saved launch settings. Launch-time compatibility does not prove a receipt was delivered.")}</p>
+      <p>{t("Current model, authentication, billing and final upstream are not verified. Session launch values come from saved settings. Launch-time compatibility does not prove a receipt was delivered.")}</p>
       {launch?.mode==='interactive'&&launch.adapter==='claude'&&<p>{t("Esc interrupts Claude in the native terminal. An external interruption receipt is not guaranteed; check the terminal before submitting again.")}</p>}
       {launch?.mode==='interactive'&&launch.adapter==='codex'&&<p>{t("Compatibility follows native event structure, not a CLI version whitelist. Codex 0.162.1 and 0.163.0 were measured on macOS; each receipt still requires matching session, directory, turn and terminal event. Unknown structures do not synthesize failure.")}</p>}
     </div>
@@ -885,6 +886,27 @@ function App() {
   async function saveLaunchDefaults(){if(!isMainWindow){openMainSettings();return;}try{const defaults=projectLaunchFields(formLaunch);await invoke("set_launch_defaults",{defaults});setGlobalLaunchDefaults(defaults);try{localStorage.setItem("yam.lastSessionCli",JSON.stringify(defaults.adapter==="custom"?"shell":defaults.adapter));setLaunchDefaultsNotice("Defaults saved for new sessions.");}catch{setLaunchDefaultsNotice("Defaults saved, but the last CLI choice could not be updated.");}}catch(reason){setLaunchDefaultsNotice(String(reason));}}
 
   const [session, setSession] = useState<SessionSummary | null>(null);
+  const [selectedAgent,setSelectedAgent]=useState<AgentState|undefined>();
+  const [installedPiVersion,setInstalledPiVersion]=useState<string|null>(null);
+  const piSessionId=session?.launch?.adapter==="pi"?session.session_id:null;
+  const piRunGeneration=piSessionId?selectedAgent?.generation:null;
+  useEffect(()=>{
+    if(!piSessionId)return;
+    let disposed=false,pending=false,refreshAgain=false;
+    async function refreshPiVersion(){
+      if(pending){refreshAgain=true;return;}
+      pending=true;
+      do{
+        refreshAgain=false;
+        const version=await invoke<string|null>("pi_cli_version").catch(()=>null);
+        if(!disposed&&!refreshAgain)setInstalledPiVersion(version);
+      }while(!disposed&&refreshAgain);
+      pending=false;
+    }
+    void refreshPiVersion();
+    window.addEventListener("focus",refreshPiVersion);
+    return()=>{disposed=true;window.removeEventListener("focus",refreshPiVersion);};
+  },[piSessionId,piRunGeneration]);
   useEffect(()=>{if(session?.session_id)void refreshSessionFinish(session.session_id);},[session?.session_id]);
   const [sessionStatus, setSessionStatus] = useState("idle");
   const [agentPhase, setAgentPhase] = useState<AgentPhase>("idle");
@@ -900,7 +922,6 @@ function App() {
   const inboxVersion=useRef(0);
   const inboxLoading=useRef(false);
   const pendingLoading=useRef(false);
-  const [selectedAgent,setSelectedAgent]=useState<AgentState|undefined>();
   const detailVersion=useRef(0);
   const capacityVersion=useRef(0);
   const [archiveOpen,setArchiveOpen]=useState(false);
@@ -3599,7 +3620,7 @@ function App() {
                 <button type="button" aria-label={t("Search session logs")} onClick={event=>{const menu=event.currentTarget.closest("details");if(menu)menu.open=false;setLogSearchOpen(true);}}>{t("Search session logs")}</button>
                 <button type="button" aria-label={t("Command palette")} title={shortcutHint(shortcuts.palette,shortcutMac)||undefined} onClick={event=>{const menu=event.currentTarget.closest("details");if(menu)menu.open=false;openCommandPalette();}}>{t("Command palette")}</button>
                 <strong>{t("Session details")}</strong>
-                {session&&<><SessionConnection launch={session.launch} agent={currentAgent}/><span className="session-directory" title={session.cwd}>{t("Directory")+": "}{session.cwd}</span><span>{t("Terminal")+": "}{t(statusLabels[sessionStatus]??sessionStatus)}</span>{session.launch?.mode==="interactive"&&<span>{t("Last event: ")}{t(agentLabel(currentAgent,sessionStatus))}</span>}</>}
+                {session&&<><SessionConnection launch={session.launch} agent={currentAgent} installedPiVersion={installedPiVersion}/><span className="session-directory" title={session.cwd}>{t("Directory")+": "}{session.cwd}</span><span>{t("Terminal")+": "}{t(statusLabels[sessionStatus]??sessionStatus)}</span>{session.launch?.mode==="interactive"&&<span>{t("Last event: ")}{t(agentLabel(currentAgent,sessionStatus))}</span>}</>}
           {visibleGitContext && <div className="git-context" role="status">
             <span title={gitContextLabel(visibleGitContext,t)}>{gitContextLabel(visibleGitContext,t)}</span>
             {visibleGitContext.root && <span title={visibleGitContext.root}>{t("Worktree:")+" "}{visibleGitContext.root}</span>}
@@ -3674,7 +3695,7 @@ function App() {
         </footer>
 
         {session?.launch?.adapter==="codex"&&session.launch.codex?.route&&currentAgent?.phase!=="shell"&&<NativeCodexRoutingBar key={`${session.session_id}:${currentAgent?.generation??''}`} sessionId={session.session_id} generation={currentAgent?.generation??''} active={isRunning} available={ownerConnectionAvailable.current.available} invoke={invoke} policies={routingPolicyLibrary.rows} launchConfig={session.launch.codex.route.config}/>}
-        {session?.launch?.adapter==="pi"&&currentAgent?.phase!=="shell"&&<PiRoutingBar key={`${session.session_id}:${currentAgent?.generation??''}`} sessionId={session.session_id} generation={currentAgent?.generation??''} active={isRunning} available={ownerConnectionAvailable.current.available} invoke={invoke} policies={routingPolicyLibrary.rows}/>}
+        {session?.launch?.adapter==="pi"&&currentAgent?.phase!=="shell"&&<PiRoutingBar key={`${session.session_id}:${currentAgent?.generation??''}`} sessionId={session.session_id} generation={currentAgent?.generation??''} cliVersion={currentAgent?.cli_version} installedPiVersion={installedPiVersion} active={isRunning} available={ownerConnectionAvailable.current.available} invoke={invoke} policies={routingPolicyLibrary.rows}/>}
         <section
           className={`terminal-area ${terminalLayout.panes.some(Boolean) ? "" : "terminal-empty"} ${terminalLayout.mode==="single"&&!terminalLayout.panes.some(Boolean)?"terminal-whole-empty":""}`}
           aria-label={t("Terminal")}

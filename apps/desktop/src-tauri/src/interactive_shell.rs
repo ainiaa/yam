@@ -1627,6 +1627,9 @@ pub(super) fn start(
         base.env(k, v);
     }
     environment.apply_pty(&mut base);
+    if adapter == "pi" {
+        super::pi_router::set_display_locale(&mut base, app);
+    }
     base.env(
         "YAM_PI_CONTROL_FILE",
         super::pi_router::control_file(&history.root, session)?,

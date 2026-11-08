@@ -902,10 +902,10 @@ input::placeholder {
 .terminal-layout-toolbar:has(details[open]) { z-index:5; }
 .engine-details,.diagnostics-details { display:grid; gap:5px; padding:5px 8px; font-size:11px; overflow-wrap:anywhere; }
 .toolbar-more-actions .round-status { white-space:normal; }
-.session-connection > summary { display:flex; align-items:center; gap:4px; }
 .session-connection > .toolbar-more-actions { position:fixed; right:16px; top:auto; width:340px; }
-.session-connection dl { display:grid; grid-template-columns:auto minmax(0,1fr); gap:6px 12px; margin:6px 8px; font-size:11px; }
+.session-connection dl { display:grid; grid-template-columns:minmax(0,1fr); gap:2px; margin:6px 8px; font-size:11px; }
 .session-connection dt { color:var(--muted); }
+.session-connection dd + dt { margin-top:4px; }
 .session-connection dd { margin:0; overflow-wrap:anywhere; }
 
 .terminal-find-button { display:inline-flex; align-items:center; gap:6px; }

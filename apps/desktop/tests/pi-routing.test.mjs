@@ -992,7 +992,43 @@ test('Pi reply model labels bind each native response to a display-only saved en
  assert.equal(f.calls,0);assert.equal(f.entries.length,0,'native boundary owns persistence, not message_end');
  const renderer=f.renderers['yam.reply-model.v1'];assert.ok(renderer);
  const reopened=fixture();await reopened.ready;
- for(const result of saved){const entry=JSON.parse(JSON.stringify(result.entries[0]));assert.equal(reopened.renderers[entry.customType](entry,{}, {fg:(_color,text)=>text}).text,`${entry.data.model} · ${entry.data.effort}`);}
+ for(const result of saved){const entry=JSON.parse(JSON.stringify(result.entries[0]));assert.equal(reopened.renderers[entry.customType](entry,{}, {fg:(_color,text)=>text}).text,`Pi 原生 · p · ${entry.data.model.split('/')[1]} · ${entry.data.effort}`);}
+});
+
+test('Pi reply labels render saved subscription and gateway keys like the model picker',async t=>{
+ const previous=process.env.YAM_PI_DISPLAY_LOCALE;
+ t.after(()=>{if(previous===undefined)delete process.env.YAM_PI_DISPLAY_LOCALE;else process.env.YAM_PI_DISPLAY_LOCALE=previous;});
+ const cases=[
+  ['yam-codex/gpt-6.1-sol','Pi 原生 · ChatGPT 订阅 · gpt-6.1-sol','Pi native · ChatGPT subscription · gpt-6.1-sol'],
+  ['openai-codex/gpt-legacy','Pi 原生 · ChatGPT 订阅 · gpt-legacy','Pi native · ChatGPT subscription · gpt-legacy'],
+  ['yam-gateway/auto/team/deepseek','Magpie · 自动路由 · team/deepseek','Magpie · Automatic routing · team/deepseek'],
+  ['openai/gpt-test','Pi 原生 · OpenAI · gpt-test','Pi native · OpenAI · gpt-test'],
+ ];
+ for(const [locale,index] of [['zh-CN',1],['en',2]]){
+  process.env.YAM_PI_DISPLAY_LOCALE=locale;
+  const f=fixture();await f.ready;
+  const render=f.renderers['yam.reply-model.v1'],theme={fg:(_color,text)=>text};
+  for(const row of cases){
+   const entry={data:{messageId:'saved',model:row[0],effort:'high'}};
+   assert.equal(render(entry,{},theme).text,`${row[index]} · high`);
+   assert.equal(entry.data.model,row[0]);
+  }
+ }
+});
+test('Pi saved reply labels use the actual reply provider across login changes',async()=>{
+ const f=fixture();await f.ready;
+ f.models.test={...f.models.small,provider:'openai',id:'test'};
+ let subscription=false;
+ f.ctx.modelRegistry.isUsingOAuth=model=>model.provider==='openai'&&subscription;
+ await f.handlers.session_start({},f.ctx);
+ const message={role:'assistant',provider:'openai',model:'test',thinkingLevel:'high',content:[{type:'text',text:'answer'}]};
+ const save=(id,provider)=>f.handlers.turn_end({message:{...message,provider},messageEntryId:id},f.ctx).entries[0];
+ const api=save('api','openai');subscription=true;
+ const paid=save('subscription','yam-codex');
+ const render=entry=>f.renderers[entry.customType](entry,{}, {fg:(_color,text)=>text}).text;
+ assert.match(render(api),/OpenAI/);
+ subscription=false;
+ assert.match(render(paid),/ChatGPT/);
 });
 test('Pi reply labels do not invent metadata for old, incomplete or failed responses',async()=>{
  const f=fixture();await f.ready;

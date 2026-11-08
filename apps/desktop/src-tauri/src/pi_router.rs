@@ -8,6 +8,18 @@ use std::{
 
 pub(super) const DEFAULT_ARGS: &str = "";
 
+pub(super) fn set_display_locale<R: tauri::Runtime>(
+    builder: &mut CommandBuilder,
+    app: &tauri::AppHandle<R>,
+) {
+    let locale = if super::system_entry::notification_chinese(app) {
+        "zh-CN"
+    } else {
+        "en"
+    };
+    builder.env("YAM_PI_DISPLAY_LOCALE", locale);
+}
+
 pub(super) fn command(
     exe: &Path,
     launch: &crate::AgentLaunch,
@@ -154,6 +166,7 @@ pub(super) fn stage(root: &Path) -> Result<PathBuf, String> {
     let sources = [
         ("entry.ts", include_str!("../pi/entry.ts")),
         ("router.mjs", include_str!("../pi/router.mjs")),
+        ("model-label.mjs", include_str!("../pi/model-label.mjs")),
         ("policy.mjs", include_str!("../pi/policy.mjs")),
         ("task-rules.mjs", include_str!("../pi/task-rules.mjs")),
         ("control.mjs", include_str!("../pi/control.mjs")),
@@ -428,6 +441,7 @@ mod tests {
         let entry = super::stage(&root).unwrap();
         assert!(entry.parent().unwrap().join("task-rules.mjs").is_file());
         assert!(entry.parent().unwrap().join("failure.mjs").is_file());
+        assert!(entry.parent().unwrap().join("model-label.mjs").is_file());
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]

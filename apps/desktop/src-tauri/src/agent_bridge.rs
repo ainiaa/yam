@@ -1369,6 +1369,13 @@ pub(super) struct Prepared {
     original: Vec<String>,
     opencode: Option<String>,
 }
+pub(super) fn pi_version(executable: &std::path::Path) -> Option<String> {
+    measured_version_checked(executable.as_os_str(), &[], |value| {
+        !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
+    })
+    .ok()
+}
+
 pub(super) fn prepare(
     executable: &std::path::Path,
     launch: &super::AgentLaunch,
@@ -1378,14 +1385,10 @@ pub(super) fn prepare(
 ) -> Result<Prepared, String> {
     if launch.adapter == "pi" && launch.mode == "interactive" {
         super::pi_router::validate_runtime(executable, assets, _cwd)?;
-        let version = measured_version_checked(executable.as_os_str(), &[], |value| {
-            !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
-        })
-        .ok();
         return Ok(Prepared {
             token: credential()?,
             generation: credential()?,
-            cli_version: version,
+            cli_version: pi_version(executable),
             args: vec![],
             original: vec![],
             opencode: None,
@@ -1588,6 +1591,8 @@ mod tests {
             }
             std::fs::write(&executable, format!("#!/bin/sh\nif [ \"$1\" = --version ]; then printf '%s\\n' '{version}'; exit {version_code}; fi\nprintf '%s\\n' '{receipt}'\n")).unwrap();
             std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let expected = (version_code == 0 && !version.is_empty()).then_some(version);
+            assert_eq!(pi_version(&executable).as_deref(), expected);
             let result = prepare(&executable, &launch, &root, &root, None);
             assert_eq!(
                 result.is_ok(),
@@ -1595,7 +1600,6 @@ mod tests {
                 "{version}: {version_code}, {receipt}"
             );
             if allowed {
-                let expected = (version_code == 0 && !version.is_empty()).then_some(version);
                 assert_eq!(result.unwrap().cli_version.as_deref(), expected);
             }
         }

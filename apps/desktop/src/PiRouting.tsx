@@ -6,32 +6,13 @@ import type {SettingsNavigationRenderer} from './SettingsNavigation';
 import {t} from './i18n';
 import {codexQuickSetupConfig,codexRoutingConfig,codexRoutingDraft,buildCodexRoutingConfig,validateCodexDraft,compatibleRoutingPolicies,launchRoutingPolicy,routingPolicyPayload,supportsDesktopRouting,type LiveRoutingPolicy,type RoutingPolicy} from './routing-policies';
 import {defaultRules,defaultTierRules,validateRules,rulesVersion,type TaskRules,type TaskRule} from '../src-tauri/pi/task-rules.mjs';
+import {modelPresentation} from '../src-tauri/pi/model-label.mjs';
 import {buildPiArgs,hasPiRoutingSelection,knownClassifierBilling,maxPiBackupModels,parsePiDraft,piExecutionTiers,piLevels,piModelCatalogSource,piSetupMapping,piSetupStorageKey,portablePiRoutingPolicy,piSubscriptionCatalog,piSubscriptionOnly,probePiSetupModel,restorePiSetup,selectPiSetupModel,validatePiDraft,verifyPiSetup,type NativeFailure,type PiDraft,type PiModel,type PiRoutingState,type PiSessionRoutingMode,type PiSnapshot} from './pi-routing';
 type Invoke=<T>(command:string,args?:Record<string,unknown>)=>Promise<T>;
 type CodexConnections=ReturnType<typeof codexRoutingConfig>['connections'];
 type RoutingModelMetadata=Pick<PiModel,'source'|'billing'|'legacy_alias'>;
 function routingModelPresentation(key:string,model:RoutingModelMetadata|undefined,connections?:CodexConnections|null){
- const provider=key.split('/',1)[0],id=key.slice(key.indexOf('/')+1),catalog=piModelCatalogSource(key);
- const connection=connections&&Object.prototype.hasOwnProperty.call(connections,provider)?connections[provider]:null;
- const gateway=connection?'gateway' in connection:!connections&&catalog!=='pi';
- const magpie=model?.source==='magpie'||!connections&&catalog==='magpie-pi';
- const source=t(gateway?magpie?'Magpie':'Local gateway':connections?connection&&'native' in connection?'Codex native':'Codex':'Pi native');
- let modelId=id,supplier='';
- if(gateway){
-  const separator=id.indexOf('/');
-  if(separator>0){
-   const route=id.slice(0,separator);
-   supplier=route==='auto'?t('Automatic routing'):route==='codex'?'Codex':route;
-   modelId=id.slice(separator+1);
-  }
- }else if(connection?.billing==='subscription'||!connections&&(model?.source==='chatgpt-subscription'||model?.legacy_alias||provider==='yam-codex'&&model?.billing!=='api')){
-  supplier=t('ChatGPT subscription');
- }else if(connection?.billing==='paid'){
-  try{supplier=new URL(connection.baseUrl??'').hostname;}catch{supplier=t('API');}
- }else if(!connections){
-  supplier=provider==='openai'?'OpenAI':['yam-codex','yam-gateway'].includes(provider)?model?.billing==='api'?t('API'):'':provider;
- }
- return {source,label:[source,supplier,modelId].filter(Boolean).join(' · ')};
+ return modelPresentation(key,model,connections,t);
 }
 function routingModelOptions(models:PiModel[],connections?:CodexConnections|null){
  const groups=new Map<string,{model:PiModel;label:string}[]>();
@@ -403,7 +384,7 @@ export function LiveRoutingControls({mode,policies,models,disabled,onSwitch}:{mo
  </div>;
 }
 
-export function PiRoutingBar({sessionId,generation,active,available,invoke,policies=[]}:{sessionId:string;generation:string;active:boolean;available:boolean;invoke:Invoke;policies?:RoutingPolicy[]}){
+export function PiRoutingBar({sessionId,generation,cliVersion,installedPiVersion,active,available,invoke,policies=[]}:{sessionId:string;generation:string;cliVersion?:string|null;installedPiVersion?:string|null;active:boolean;available:boolean;invoke:Invoke;policies?:RoutingPolicy[]}){
  const [state,setState]=useState<PiRoutingState|null>(null),[models,setModels]=useState<PiModel[]>([]);
  const [error,setError]=useState<string|null>(null),[readError,setReadError]=useState<string|null>(null),[busy,setBusy]=useState(false);
  const [draft,setDraft]=useState<{model:string;effort:string;revision:number}|null>(null);
@@ -487,7 +468,10 @@ export function PiRoutingBar({sessionId,generation,active,available,invoke,polic
  const actualModel=state?.actual?modelLabel(state.actual.model):'';
  function choose(fields:Partial<{model:string;effort:string}>){if(state&&choice)setDraft({...choice,revision:draft?.revision??state.revision,...fields});}
  return <section className="pi-routing-bar" aria-label={t('Pi automatic routing')}>
-  <div className="pi-routing-status"><strong>{t('Pi routing')}</strong>{routingOff&&<span>{t('Routing is off')}</span>}{(!available||!state||!active||state.phase==='error'||state.phase==='classifying')&&<span role="status">{!available?t('Background unavailable'):!state?t(active?'Waiting for Pi routing state…':'Routing state unavailable'):!active?t('Session ended'):t(state.phase==='classifying'?'Choosing a model…':'Routing needs attention')}</span>}
+  <div className="pi-routing-status"><strong>{t('Pi routing')}</strong>
+   <span>{installedPiVersion?t('Local Pi {{version}}',{version:installedPiVersion}):t('Local Pi version unknown')}</span>
+   {cliVersion&&cliVersion!==installedPiVersion&&<span>{t('Session launched with Pi {{version}}',{version:cliVersion})}</span>}
+   {routingOff&&<span>{t('Routing is off')}</span>}{(!available||!state||!active||state.phase==='error'||state.phase==='classifying')&&<span role="status">{!available?t('Background unavailable'):!state?t(active?'Waiting for Pi routing state…':'Routing state unavailable'):!active?t('Session ended'):t(state.phase==='classifying'?'Choosing a model…':'Routing needs attention')}</span>}
    {state&&<span className="pi-routing-model" role="status" title={selected?t('Selected for this turn; waiting for a native model response'):t('Recorded by the native Pi assistant message')}>{selected?t('Selected for this turn: {{value0}} · {{value1}}',{value0:modelLabel(selected.model),value1:selected.effort}):state.actual?t(live&&state.phase==='working'?'Actual model: {{value0}} · {{value1}}':'Latest reply used: {{value0}} · {{value1}}',{value0:actualModel,value1:state.actual.effort==='unknown'?t('Reasoning not confirmed'):state.actual.effort}):t('No native model response recorded yet')}</span>}
    {!selected&&state?.actual?.source==='pi-native'&&<span>{t(state.actual.billing==='subscription'?'Pi native subscription':'Pi native API')}</span>}
    {execution&&<span role="status">{t(executionStages[execution.stage])}</span>}
