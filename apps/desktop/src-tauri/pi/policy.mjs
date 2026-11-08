@@ -69,7 +69,7 @@ export function splitModel(value) {
  return [value.slice(0,i),value.slice(i+1)];
 }
 export function launchOption(name,argv=process.argv) {
- const valued=new Set(['--extension','-e','--session','--session-dir','--model','--thinking','--provider','--yam-small','--yam-medium','--yam-strong','--yam-classifier','--yam-gateway','--yam-fixed-model','--yam-effort','--yam-rules','--tools','--skill','--append-system-prompt','--system-prompt','--prompt-template','--theme']);
+ const valued=new Set(['--extension','-e','--session','--session-dir','--model','--thinking','--provider','--yam-small','--yam-medium','--yam-strong','--yam-classifier','--yam-classifier-fallbacks','--yam-classifier-billing','--yam-gateway','--yam-fixed-model','--yam-effort','--yam-rules','--tools','--skill','--append-system-prompt','--system-prompt','--prompt-template','--theme']);
  let result;
  for(let i=0;i<argv.length;i++) {
   const arg=argv[i];if(arg==='--')break;

@@ -80,11 +80,14 @@ impl AgentState {
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
         }
-        if event
-            .source
-            .as_deref()
-            .is_some_and(|source| !matches!(source, "claude" | "opencode"))
-        {
+        if event.source.as_deref().is_some_and(|source| match source {
+            "claude" | "opencode" => false,
+            "codex-resume" => !matches!(
+                event.kind.as_str(),
+                "TurnComplete" | "TurnFailed" | "Interrupt"
+            ),
+            _ => true,
+        }) {
             return Err("Unsupported agent event source".into());
         }
         if !valid(&self.generation)
@@ -496,6 +499,23 @@ impl super::HistoryStore {
         {
             return Err("Expired agent launch".into());
         }
+        let managed_state = record
+            .summary
+            .launch
+            .as_ref()
+            .filter(|launch| launch.adapter == "codex")
+            .and_then(crate::codex_routing::route)
+            .and_then(|route| route.state.as_deref());
+        let resume_outcome = event.source.as_deref() == Some("codex-resume");
+        if resume_outcome
+            && (managed_state.is_none()
+                || !matches!(
+                    event.kind.as_str(),
+                    "TurnComplete" | "TurnFailed" | "Interrupt"
+                ))
+        {
+            return Err("Unsupported agent event source".into());
+        }
         if event.kind == "ProcessStart" {
             if run.is_none() || run != event.turn_id.as_deref() {
                 return Err("Missing Agent process identity".into());
@@ -506,7 +526,37 @@ impl super::HistoryStore {
         {
             return Ok(None);
         }
-        let result = record.agent.apply(event)?;
+        let prior_receipt = matches!(
+            event.kind.as_str(),
+            "TurnComplete" | "TurnFailed" | "Interrupt"
+        ) && managed_state.is_some_and(|state| {
+            records.iter().any(|prior| {
+                prior.summary.session_id != id
+                    && prior.agent.agent_session_id.as_deref()
+                        == Some(event.agent_session_id.as_str())
+                    && prior
+                        .summary
+                        .launch
+                        .as_ref()
+                        .filter(|launch| launch.adapter == "codex")
+                        .and_then(crate::codex_routing::route)
+                        .and_then(|route| route.state.as_deref())
+                        == Some(state)
+                    && event.turn_id.as_deref().is_some_and(|turn| {
+                        prior.agent.seen.contains(&format!(
+                            "{}:{}:{}",
+                            prior.agent.generation, turn, event.kind
+                        ))
+                    })
+            })
+        });
+        let mut result = record.agent.apply(event)?;
+        if prior_receipt || resume_outcome {
+            if let Some(receipt) = result.take() {
+                // Acknowledged resumes restore status without producing another notification.
+                record.agent.inbox.retain(|entry| entry.id != receipt);
+            }
+        }
         if next != *records {
             self.save_locked(&next)?;
             *records = next;
@@ -1013,6 +1063,346 @@ mod tests {
         state.apply(&event("SessionStart", None)).unwrap();
         state
     }
+    #[test]
+    fn managed_codex_completion_recovery_deduplicates_across_launches() {
+        let root =
+            std::env::temp_dir().join(format!("yam-codex-receipt-{}", crate::next_session_id()));
+        let history = crate::HistoryStore::open(root.clone()).unwrap();
+        let launch: crate::AgentLaunch = serde_json::from_value(serde_json::json!({
+            "adapter":"codex","mode":"interactive","extra_args":"","prompt":null,
+            "codex":{"image_mode":"native","route":{"name":"Native","config":"{}",
+                "state":"11111111-1111-1111-1111-111111111111"}}
+        }))
+        .unwrap();
+        let start =
+            |store: &crate::HistoryStore, id: &str, launch: crate::AgentLaunch, thread: &str| {
+                store
+                    .start(&crate::SessionSummary {
+                        ssh: None,
+                        session_id: id.into(),
+                        cwd: "/tmp".into(),
+                        command: None,
+                        status: "running".into(),
+                        launch: Some(launch),
+                    })
+                    .unwrap();
+                store.configure_agent(id, id).unwrap();
+                let mut start = event("SessionStart", None);
+                start.agent_session_id = thread.into();
+                store.ingest_agent(id, id, &start).unwrap();
+                let mut submit = event("UserPromptSubmit", Some("one"));
+                submit.agent_session_id = thread.into();
+                store.ingest_agent(id, id, &submit).unwrap();
+            };
+        start(&history, "old", launch.clone(), "main-thread");
+        let completion = event("TurnComplete", Some("one"));
+        assert!(history
+            .ingest_agent("old", "old", &completion)
+            .unwrap()
+            .is_some());
+        let original = history.get("old").unwrap().agent.inbox[0].clone();
+        let reopened = crate::HistoryStore::open(root.clone()).unwrap();
+        start(&reopened, "continued", launch.clone(), "main-thread");
+        assert_eq!(
+            reopened
+                .ingest_agent("continued", "continued", &completion)
+                .unwrap(),
+            None
+        );
+        let current = reopened.get("continued").unwrap();
+        assert_eq!(current.agent.phase, "response_finished");
+        assert!(current.agent.inbox.is_empty());
+        assert!(current
+            .agent
+            .seen
+            .contains(&"continued:one:TurnComplete".into()));
+        assert_eq!(reopened.get("old").unwrap().agent.inbox, vec![original]);
+        assert_eq!(
+            reopened
+                .ingest_agent("continued", "continued", &completion)
+                .unwrap(),
+            None
+        );
+        // The persisted seen identity, not the prunable inbox, owns duplicate suppression.
+        {
+            let mut records = reopened.records.lock().unwrap();
+            for record in records.iter_mut() {
+                record.agent.inbox.clear();
+            }
+        }
+        start(&reopened, "continued-again", launch.clone(), "main-thread");
+        assert_eq!(
+            reopened
+                .ingest_agent("continued-again", "continued-again", &completion)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            reopened.get("continued-again").unwrap().agent.phase,
+            "response_finished"
+        );
+        let mut copied = launch.clone();
+        copied.codex.as_mut().unwrap().route.as_mut().unwrap().state =
+            Some("22222222-2222-2222-2222-222222222222".into());
+        start(&reopened, "copy", copied, "main-thread");
+        assert!(reopened
+            .ingest_agent("copy", "copy", &completion)
+            .unwrap()
+            .is_some());
+        start(
+            &reopened,
+            "different-thread",
+            launch.clone(),
+            "other-thread",
+        );
+        let mut other = completion.clone();
+        other.agent_session_id = "other-thread".into();
+        assert!(reopened
+            .ingest_agent("different-thread", "different-thread", &other)
+            .unwrap()
+            .is_some());
+        start(&reopened, "different-kind", launch.clone(), "main-thread");
+        assert!(reopened
+            .ingest_agent(
+                "different-kind",
+                "different-kind",
+                &event("TurnFailed", Some("one"))
+            )
+            .unwrap()
+            .is_some());
+        start(&reopened, "interrupt", launch.clone(), "main-thread");
+        assert!(reopened
+            .ingest_agent("interrupt", "interrupt", &event("Interrupt", Some("one")))
+            .unwrap()
+            .is_some());
+        for (id, kind) in [
+            ("failure-retry", "TurnFailed"),
+            ("interrupt-retry", "Interrupt"),
+        ] {
+            start(&reopened, id, launch.clone(), "main-thread");
+            assert_eq!(
+                reopened
+                    .ingest_agent(id, id, &event(kind, Some("one")))
+                    .unwrap(),
+                None
+            );
+            assert!(reopened.get(id).unwrap().agent.inbox.is_empty());
+        }
+        let mut unmanaged = launch;
+        unmanaged.codex = None;
+        start(&reopened, "unmanaged", unmanaged, "main-thread");
+        assert!(reopened
+            .ingest_agent("unmanaged", "unmanaged", &completion)
+            .unwrap()
+            .is_some());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn codex_resume_outcomes_restore_archived_phase_without_new_receipts() {
+        let launch: crate::AgentLaunch = serde_json::from_value(serde_json::json!({
+            "adapter":"codex","mode":"interactive","extra_args":"","prompt":null,
+            "codex":{"image_mode":"native","route":{"name":"Native","config":"{}",
+                "state":"11111111-1111-1111-1111-111111111111"}}
+        }))
+        .unwrap();
+        for (kind, phase) in [
+            ("TurnComplete", "response_finished"),
+            ("TurnFailed", "failed"),
+            ("Interrupt", "interrupted"),
+        ] {
+            let root =
+                std::env::temp_dir().join(format!("yam-codex-resume-{}", crate::next_session_id()));
+            let history = crate::HistoryStore::open(root.clone()).unwrap();
+            let start = |id: &str| {
+                history
+                    .start(&crate::SessionSummary {
+                        ssh: None,
+                        session_id: id.into(),
+                        cwd: "/tmp".into(),
+                        command: None,
+                        status: "running".into(),
+                        launch: Some(launch.clone()),
+                    })
+                    .unwrap();
+                history.configure_agent(id, id).unwrap();
+                history
+                    .ingest_agent(id, id, &event("SessionStart", None))
+                    .unwrap();
+            };
+            start("s-old");
+            history
+                .ingest_agent("s-old", "s-old", &event("UserPromptSubmit", Some("one")))
+                .unwrap();
+            history
+                .ingest_agent("s-old", "s-old", &event(kind, Some("one")))
+                .unwrap();
+            let old = history.get("s-old").unwrap().agent.inbox[0].clone();
+            let mut acknowledged = event(kind, Some("one"));
+            acknowledged.source = Some("codex-resume".into());
+            assert_eq!(
+                history
+                    .ingest_agent("s-old", "s-old", &acknowledged)
+                    .unwrap(),
+                None
+            );
+            assert_eq!(
+                history.get("s-old").unwrap().agent.inbox,
+                vec![old.clone()],
+                "the same turn's pending notification must remain pending"
+            );
+            history
+                .read_agent_receipt("s-old", &old.id, old.revision)
+                .unwrap();
+            history
+                .update(
+                    "s-old",
+                    "stopped",
+                    None,
+                    Some("Stopped by user".into()),
+                    None,
+                )
+                .unwrap();
+            history
+                .archive("s-old", &Default::default(), &Default::default())
+                .unwrap();
+            assert!(
+                history.list().unwrap().is_empty(),
+                "old outcome must exist only in archive"
+            );
+            start("s-resumed");
+            history
+                .ingest_agent(
+                    "s-resumed",
+                    "s-resumed",
+                    &event("UserPromptSubmit", Some("other")),
+                )
+                .unwrap();
+            history
+                .ingest_agent(
+                    "s-resumed",
+                    "s-resumed",
+                    &event("TurnComplete", Some("other")),
+                )
+                .unwrap();
+            let pending = history.get("s-resumed").unwrap().agent.inbox.clone();
+            assert_eq!(pending[0].delivery, "pending");
+            history
+                .ingest_agent(
+                    "s-resumed",
+                    "s-resumed",
+                    &event("UserPromptSubmit", Some("one")),
+                )
+                .unwrap();
+            let mut restored = event(kind, Some("one"));
+            restored.source = Some("codex-resume".into());
+            assert_eq!(
+                history
+                    .ingest_agent("s-resumed", "s-resumed", &restored)
+                    .unwrap(),
+                None
+            );
+            let record = history.get("s-resumed").unwrap();
+            assert_eq!(record.agent.phase, phase);
+            assert_eq!(record.agent.turn_id.as_deref(), Some("one"));
+            assert!(record.agent.seen.contains(&format!("s-resumed:one:{kind}")));
+            assert_eq!(
+                record.agent.inbox, pending,
+                "existing pending receipts must not be removed"
+            );
+            assert_eq!(
+                history
+                    .ingest_agent("s-resumed", "s-resumed", &restored)
+                    .unwrap(),
+                None
+            );
+            let reopened = crate::HistoryStore::open(root.clone()).unwrap();
+            assert_eq!(reopened.get("s-resumed").unwrap().agent, record.agent);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn codex_resume_source_rejects_nonterminal_and_unmanaged_events_atomically() {
+        let root = std::env::temp_dir().join(format!(
+            "yam-codex-resume-validation-{}",
+            crate::next_session_id()
+        ));
+        let history = crate::HistoryStore::open(root.clone()).unwrap();
+        let launch: crate::AgentLaunch = serde_json::from_value(serde_json::json!({
+            "adapter":"codex","mode":"interactive","extra_args":"","prompt":null,
+            "codex":{"image_mode":"native","route":{"name":"Native","config":"{}",
+                "state":"11111111-1111-1111-1111-111111111111"}}
+        }))
+        .unwrap();
+        for variant in ["managed", "unmanaged", "missing-state", "other-cli"] {
+            let mut configured = launch.clone();
+            if variant == "unmanaged" {
+                configured.codex = None;
+            }
+            if variant == "missing-state" {
+                configured
+                    .codex
+                    .as_mut()
+                    .unwrap()
+                    .route
+                    .as_mut()
+                    .unwrap()
+                    .state = None;
+            }
+            if variant == "other-cli" {
+                configured.adapter = "claude".into();
+            }
+            history
+                .start(&crate::SessionSummary {
+                    ssh: None,
+                    session_id: variant.into(),
+                    cwd: "/tmp".into(),
+                    command: None,
+                    status: "running".into(),
+                    launch: Some(configured),
+                })
+                .unwrap();
+            history.configure_agent(variant, variant).unwrap();
+            history
+                .ingest_agent(variant, variant, &event("SessionStart", None))
+                .unwrap();
+            history
+                .ingest_agent(variant, variant, &event("UserPromptSubmit", Some("one")))
+                .unwrap();
+            let before = history.get(variant).unwrap().agent;
+            let kinds = if variant == "managed" {
+                vec![
+                    "SessionStart",
+                    "UserPromptSubmit",
+                    "PermissionRequest",
+                    "ToolProgress",
+                    "Stop",
+                    "ResponseReady",
+                    "ProcessStart",
+                    "ProcessExit",
+                    "IntegrationUnavailable",
+                ]
+            } else {
+                vec!["TurnComplete", "TurnFailed", "Interrupt"]
+            };
+            for kind in kinds {
+                let mut invalid = event(kind, Some("one"));
+                invalid.source = Some("codex-resume".into());
+                assert!(
+                    history.ingest_agent(variant, variant, &invalid).is_err(),
+                    "{variant}/{kind}"
+                );
+                assert_eq!(history.get(variant).unwrap().agent, before);
+            }
+            let mut invalid = event("TurnComplete", Some("one"));
+            invalid.source = Some("codex_resume".into());
+            assert!(history.ingest_agent(variant, variant, &invalid).is_err());
+            assert_eq!(history.get(variant).unwrap().agent, before);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn native_delivery_retries_only_the_receipt_after_send_and_never_reads_the_inbox() {
         let root = std::env::temp_dir().join(format!(

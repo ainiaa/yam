@@ -33,6 +33,29 @@ test('another selected session cannot display or confirm the previous baseline',
  f.props.sessionId='different';f.render(false);assert.equal(f.button('Confirm new baseline'),undefined);assert.doesNotMatch(f.text(),/base-one/);
  f.props.active=false;f.render();f.props.sessionId=null;f.props.active=true;const before=f.calls.length;f.render();await f.settle();assert.equal(f.calls.length,before);f.cleanup();
 });
+test('creating, replacing and clearing a baseline fence review before IPC until settlement',async()=>{
+ const f=fixture(),events=[],invoke=f.props.invoke;
+ f.props.onBaselineMutation=()=>{events.push('start');return()=>events.push('finish');};
+ f.props.invoke=async(name,args)=>{
+  if(name==='capture_run_baseline'||name==='clear_run_baseline'){
+   assert.equal(events.at(-1),'start');
+   events.push(name);
+  }
+  return invoke(name,args);
+ };
+ f.render();await f.settle();
+ f.button('Record baseline').props.onClick();await f.settle();
+ f.button('Replace baseline').props.onClick();f.render();
+ assert.deepEqual(events,['start','capture_run_baseline','finish']);
+ f.button('Confirm new baseline').props.onClick();await f.settle();
+ f.button('Clear baseline').props.onClick();await f.settle();
+ assert.deepEqual(events,[
+  'start','capture_run_baseline','finish',
+  'start','capture_run_baseline','finish',
+  'start','clear_run_baseline','finish',
+ ]);
+ f.cleanup();
+});
 test('baseline IPC commands and UI are reachable through existing project tools',()=>{
  const app=readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8'),native=readFileSync(new URL('../src-tauri/src/lib.rs',import.meta.url),'utf8');assert.match(app,/<RunChanges\s/);
  for(const name of ['get_run_baseline_info','capture_run_baseline','compare_run_baseline','clear_run_baseline'])assert.match(native,new RegExp(`run_changes::${name}`));

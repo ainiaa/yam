@@ -199,3 +199,34 @@ test('the advertised delegation goal boundary is accepted and its successor reje
  const accepted=await tool.execute('goal-max',{executor:'codex',goal:'a'.repeat(max),requires:['text']},null,null,f.ctx);assert.equal(accepted.details.error,null);assert.equal(f.dispatched.length,1);
  const rejected=await tool.execute('goal-too-long',{executor:'codex',goal:'a'.repeat(max+1),requires:['text']},null,null,f.ctx);assert.ok(rejected.details.error);assert.equal(f.dispatched.length,1);
 });
+
+test('plain Pi sends no delegation prompt or provider discovery and can restore its tool after enabling',async()=>{
+ const handlers={},tools={};let active=['read','bash','edit','write','yam_delegate'],enabled=false,observer,discoveries=0;
+ const pi={getFlag:()=>false,on:(name,callback)=>handlers[name]=callback,registerCommand(){},registerTool:tool=>tools[tool.name]=tool,appendEntry(){},getActiveTools:()=>active,setActiveTools:next=>{active=next;}};
+ const routing={isEnabled:()=>enabled,observeMode:callback=>{observer=callback;},agentRoutingContext:()=>({fixedModel:null,profiles:[]})};
+ api.installAgents(pi,routing,{discover:async()=>{discoveries++;return [];}});
+ const ctx={sessionManager:{getBranch:()=>[]},ui:{setStatus(){}}};
+ observer?.(false);
+ assert.equal(active.includes('yam_delegate'),false);
+ assert.equal(await handlers.before_agent_start({messageType:'user',prompt:'Plain task',systemPrompt:'Original'},ctx),undefined);
+ const denied=await tools.yam_delegate.execute('call',{},undefined,undefined,ctx);
+ assert.match(denied.details.error,/routing.*off/i);
+ assert.equal(discoveries,0);
+ enabled=true;observer(true);
+ assert.ok(active.includes('yam_delegate'));
+ const resumed=await handlers.before_agent_start({messageType:'user',prompt:'Routed task',systemPrompt:'Original'},ctx);
+ assert.match(resumed.systemPrompt,/Native delegation catalog/);
+ assert.equal(discoveries,1);
+});
+
+test('orchestrator mode guard exposes unfinished child receipts without clearing them',()=>{
+ const handlers={};let guard;
+ const pi={getFlag:()=>false,on:(name,callback)=>handlers[name]=callback,registerCommand(){},registerTool(){}};
+ const routing={guardModeChange:callback=>{guard=callback;}};
+ api.installAgents(pi,routing);
+ const data={planId:'plan',taskId:'task',status:'running'};
+ const entries=[{type:'custom',customType:'yam.agent-task.v1',data}];
+ handlers.session_start({}, {sessionManager:{getBranch:()=>entries}});
+ assert.equal(guard(),true);
+ assert.equal(data.status,'running');
+});

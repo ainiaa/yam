@@ -5,7 +5,7 @@ import {useEffect,useRef,useState} from "react";
 import {ConversationController,type ConversationState,type ConversationInvoke} from "./conversation-view";
 import {FilePreview} from "./FilePreview";
 type ConversationTarget={sessionId:string;threadId:string;generation:string};
-export function ConversationView({scope,visible,available,target,invoke,onTerminal,roundRevision=null}:{scope:string;visible:boolean;available:boolean;target:ConversationTarget|null;invoke:ConversationInvoke;onTerminal:()=>void;roundRevision?:number|null}){
+export function ConversationView({scope,visible,available,target,invoke,onTerminal,roundRevision=null,awaitingCodexHooks=false}:{scope:string;visible:boolean;available:boolean;target:ConversationTarget|null;invoke:ConversationInvoke;onTerminal:()=>void;roundRevision?:number|null;awaitingCodexHooks?:boolean}){
  const controller=useRef(new ConversationController()),mounted=useRef(false),current=useRef({scope,visible,available}),panel=useRef<HTMLElement|null>(null);
  current.current={scope,visible,available};
  const [snapshot,setSnapshot]=useState<{scope:string;state:ConversationState}|null>(null),[file,setFile]=useState<{id:number;target:{sessionId:string;path:string}}|undefined>(undefined);
@@ -30,7 +30,7 @@ export function ConversationView({scope,visible,available,target,invoke,onTermin
  function preview(path:string){if(current.current.scope===scope&&current.current.visible&&target)setFile({id:Date.now(),target:{sessionId:target.sessionId,path}});}
  return <section className="conversation-view" aria-label={t("Conversation")} tabIndex={-1} ref={panel} hidden={!visible} onFocusCapture={event=>{if(event.target!==event.currentTarget)focus.current=event.target as HTMLElement;}}>
   <h2>{t("Conversation")}</h2><button type="button" onClick={onTerminal}>{t("Open Terminal")}</button><p>{t("Read-only history. Use Terminal for input, approvals and stopping tasks. Saved messages are not a live token stream.")}</p>
-  {!available?<p role="alert">{t("Background connection unavailable. Reconnect using the existing recovery controls.")}</p>:!target?<p role="status">{t("History requires a verified local Codex conversation. Continue using Terminal.")}</p>:<>
+  {!available?<p role="alert">{t("Background connection unavailable. Reconnect using the existing recovery controls.")}</p>:!target?<p role="status">{awaitingCodexHooks?t("In the terminal, run /hooks to review and trust the YAM hooks, then restart Codex to connect conversation history."):t("History requires a verified local Codex conversation. Continue using Terminal.")}</p>:<>
    <button type="button" disabled={state?.kind==="loading"||!!value&&value.items.length>=500} onClick={()=>load()}>{t("Refresh conversation")}</button>
    <p role="status" style={{visibility:!state||state.kind==="loading"?"visible":"hidden"}}>{t("Loading conversation…")}</p>
    {state?.kind==="unavailable"&&<div role="alert"><p>{t("Conversation unavailable (")}{state.code}{t("). Continue using Terminal.")}</p>{state.code==="conversation_view_limit"?<p>{t("500 record limit reached. Loaded history is preserved.")}</p>:state.code==="conversation_history_gap"?<p>{t("The latest page no longer overlaps this view. Select another session and return to read a fresh page.")}</p>:<button type="button" onClick={()=>load()}>{t("Retry conversation")}</button>}</div>}

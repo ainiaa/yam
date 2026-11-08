@@ -23,6 +23,7 @@ export async function readNativeModels(path=join(process.env.CODEX_HOME??join(ho
 }
 export function createNativeCodex(pi,{createStream,getTools,getSystemPrompt,normalizeContext,loadModels=readNativeModels,discover=(executables,options)=>discoverAgents(executables,undefined,options),execute=executeAgent,validateImage,executable=process.env.YAM_CODEX_EXECUTABLE,now=()=>performance.now()}={}){
  let ctx=null,route=null,attempted=false,executionEpoch=0,execution=null,executionController=null,observeExecution=()=>{},runtimeCapabilities=[],activeReceipt=null,discoveryIssue=null;const models=new Map();
+ let listedIds=new Set();
  const publishExecution=()=>{try{observeExecution(execution?structuredClone(execution):null);}catch{}};
  const recordEntries=(context=ctx)=>{const branch=context?.sessionManager.getBranch()??[],start=branch.findLastIndex(e=>e.type==='custom'&&e.customType===resetType);return branch.slice(start+1).filter(e=>e.type==='custom'&&e.customType===receiptType);};
  const records=()=>recordEntries().map(e=>e.data);
@@ -53,6 +54,7 @@ export function createNativeCodex(pi,{createStream,getTools,getSystemPrompt,norm
  function registerCatalog(){pi.registerProvider(provider,{name:'Codex CLI / ChatGPT',api,baseUrl:'http://127.0.0.1',apiKey:'native-cli-local-only',models:[...models.values()],streamSimple:stream});}
  async function initialize(context){
   ctx=context;
+  listedIds=new Set();
   discoveryIssue=null;
   const agent=(await discover({codex:executable},{onFailure:(kind,value)=>{if(kind==='codex')discoveryIssue=projectFailure(value);}})).find(a=>a.kind==='codex'&&a.auth==='subscription');
   runtimeCapabilities=agent?.capabilities??[];if(!agent){discoveryIssue??=projectFailure({code:'native-unavailable',stage:'discovery',dispatch:'not-started'});return;}discoveryIssue=null;
@@ -60,6 +62,7 @@ export function createNativeCodex(pi,{createStream,getTools,getSystemPrompt,norm
   const before=JSON.stringify([...models.values()]);
   for(const m of cached.length?cached:dedicated.length?dedicated:all.filter(m=>m.provider!==provider&&isChatGPT(ctx,m)))register(m,true,true);
   if(JSON.stringify([...models.values()])!==before)registerCatalog();
+  listedIds=new Set(cached.map(m=>m.id));
  }
  function resolveModel(context,m){ctx=context;return isChatGPT(ctx,m)?register(m):m;}
  function stream(model,transcript,options={}){
@@ -177,5 +180,5 @@ export function createNativeCodex(pi,{createStream,getTools,getSystemPrompt,norm
    reset(context,{receiptId:recovery?.receiptId??null,confirmed:true},proof);
   }else if(!action||action==='status')context.ui.notify(JSON.stringify(getRecovery(context)),'info');else throw Error('Use /yam-native status | reset');
  }});
- return {initialize,resolveModel,stream,getRecovery,reset,discoveryFailure:()=>discoveryIssue&&projectFailure(discoveryIssue),capabilities:()=>[...runtimeCapabilities],observeExecution(listener){observeExecution=listener;},beginTurn(context){executionController?.abort();executionController=null;ctx=context;route=null;attempted=false;executionEpoch++;execution=null;publishExecution();},setRoute(value){route=value;}};
+ return {initialize,resolveModel,catalogModels:()=>Array.from(listedIds,id=>models.get(id)),stream,getRecovery,reset,discoveryFailure:()=>discoveryIssue&&projectFailure(discoveryIssue),capabilities:()=>[...runtimeCapabilities],observeExecution(listener){observeExecution=listener;},beginTurn(context){executionController?.abort();executionController=null;ctx=context;route=null;attempted=false;executionEpoch++;execution=null;publishExecution();},setRoute(value){route=value;}};
 }

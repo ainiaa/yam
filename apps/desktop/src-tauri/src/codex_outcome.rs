@@ -301,10 +301,7 @@ pub(crate) fn start(
     value: &Value,
     event: &crate::agent_events::AgentEvent,
 ) -> Result<(), &'static str> {
-    use std::{
-        path::PathBuf,
-        process::{Command, Stdio},
-    };
+    use std::path::PathBuf;
     if event.kind != "UserPromptSubmit" {
         return Ok(());
     }
@@ -332,22 +329,12 @@ pub(crate) fn start(
     if bytes.len() > 64 * 1024 {
         return Err("Observer request too large");
     }
-    let mut child = Command::new(std::env::current_exe().map_err(|_| "Helper unavailable")?)
-        .arg("--yam-codex-outcome")
-        .env_clear()
-        .env(
-            "YAM_AGENT_ADDRESS",
-            std::env::var_os("YAM_AGENT_ADDRESS").ok_or("Missing agent address")?,
-        )
-        .env(
-            "YAM_AGENT_TOKEN",
-            std::env::var_os("YAM_AGENT_TOKEN").ok_or("Missing agent credential")?,
-        )
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|_| "Outcome observer could not start")?;
+    let mut child = observer_command(
+        std::env::current_exe().map_err(|_| "Helper unavailable")?,
+        |key| std::env::var_os(key),
+    )?
+    .spawn()
+    .map_err(|_| "Outcome observer could not start")?;
     let result = initialize(
         child.stdin.take().ok_or("Observer input unavailable")?,
         &bytes,
@@ -359,6 +346,33 @@ pub(crate) fn start(
         let _ = child.wait();
     });
     result
+}
+
+#[cfg(target_os = "macos")]
+fn observer_command(
+    executable: std::path::PathBuf,
+    env: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Result<std::process::Command, &'static str> {
+    use std::process::{Command, Stdio};
+    let mut command = Command::new(executable);
+    command
+        .arg("--yam-codex-outcome")
+        .env_clear()
+        .env(
+            "YAM_AGENT_ADDRESS",
+            env("YAM_AGENT_ADDRESS").ok_or("Missing agent address")?,
+        )
+        .env(
+            "YAM_AGENT_TOKEN",
+            env("YAM_AGENT_TOKEN").ok_or("Missing agent credential")?,
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if let Some(run) = env("YAM_AGENT_RUN") {
+        command.env("YAM_AGENT_RUN", run);
+    }
+    Ok(command)
 }
 
 #[cfg(target_os = "macos")]
@@ -441,6 +455,33 @@ mod tests {
         assert_eq!(feed(&mut d, event("task_started", "turn-1")).unwrap(), None);
         d
     }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn outcome_observer_keeps_the_managed_run_identity_without_inheriting_other_environment() {
+        use std::collections::BTreeMap;
+        for run in [Some("run-one"), None] {
+            let command = observer_command(PathBuf::from("yam-background"), |key| match key {
+                "YAM_AGENT_ADDRESS" => Some("127.0.0.1:7777".into()),
+                "YAM_AGENT_TOKEN" => Some("credential".into()),
+                "YAM_AGENT_RUN" => run.map(Into::into),
+                _ => panic!("unexpected observer environment lookup: {key}"),
+            })
+            .unwrap();
+            let actual: BTreeMap<_, _> = command.get_envs().collect();
+            let mut expected = BTreeMap::from([
+                (
+                    "YAM_AGENT_ADDRESS".as_ref(),
+                    Some("127.0.0.1:7777".as_ref()),
+                ),
+                ("YAM_AGENT_TOKEN".as_ref(), Some("credential".as_ref())),
+            ]);
+            if let Some(run) = run {
+                expected.insert("YAM_AGENT_RUN".as_ref(), Some(run.as_ref()));
+            }
+            assert_eq!(actual, expected);
+        }
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn single_start_observer_reports_success_failure_and_abort_without_notify_override() {

@@ -1,3 +1,4 @@
+import {sessionActionBindings} from './fixtures/session-action-bindings.mjs';
 import {englishUiRead} from './fixtures/english-ui-source.mjs';
 const readFileSync=(...args)=>englishUiRead(rawReadFileSync,...args);
 import './fixtures/i18n-test-init.mjs';
@@ -16,7 +17,7 @@ import {zshCommandReportingEligible} from '../src/zsh-command-reporting.ts';
 
 const source=ts.createSourceFile('App.tsx',readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
 function nodes(predicate,root=source){const found=[];function visit(n){if(predicate(n))found.push(n);ts.forEachChild(n,visit);}visit(root);return found;}
-function actual(name,bindings){bindings={launchWorkspace:null,setLaunchWorkspace(){},terminalSettingsRef:{current:{fontFamily:"Menlo",fontSize:13,theme:"app"}},sessionCopy:null,copyName:"",sessionCopyIntent:{current:0},setSessionCopy(){},setCopyName(){},ordinaryLaunchSnapshot:{current:undefined},saveSessionLaunchSettings(){},sessionTerminal:"yam",setLaunchWorktreeAttempt(){},...bindings};const fn=nodes(n=>ts.isFunctionDeclaration(n)&&n.name?.text===name)[0];assert.ok(fn,name);return new Function(...Object.keys(bindings),ts.transpile(fn.getText(source),{target:ts.ScriptTarget.ES2022})+`;return ${name};`)(...Object.values(bindings));}
+function actual(name,bindings){bindings={...sessionActionBindings(),launchWorkspace:null,setLaunchWorkspace(){},terminalSettingsRef:{current:{fontFamily:"Menlo",fontSize:13,theme:"app"}},sessionCopy:null,copyName:"",sessionCopyIntent:{current:0},setSessionCopy(){},setCopyName(){},ordinaryLaunchSnapshot:{current:undefined},saveSessionLaunchSettings(){},sessionTerminal:"yam",setLaunchWorktreeAttempt(){},...bindings};const fn=nodes(n=>ts.isFunctionDeclaration(n)&&n.name?.text===name)[0];assert.ok(fn,name);return new Function(...Object.keys(bindings),ts.transpile(fn.getText(source),{target:ts.ScriptTarget.ES2022})+`;return ${name};`)(...Object.values(bindings));}
 
 test('the primary new-session button opens the same session dialog',()=>{
  const buttons=nodes(n=>ts.isJsxElement(n)&&n.openingElement.tagName.getText(source)==='button');
@@ -115,3 +116,20 @@ test('successful worktree launch releases its draft reservation so later drafts 
 });
 
 test('auxiliary ordinary Terminal retains its existing no-hidden-command launch behavior',()=>{const shell=preparation({secondary:true,preferred:'shell',defaults:{command:'echo hidden command'}});assert.equal(shell.draft.adapter,'shell');assert.equal(shell.draft.command,null);const cli=preparation({secondary:true,preferred:'codex',defaults:{extra_args:'--existing-cli-arg',prompt:'existing initial message'}});assert.equal(cli.draft.extra_args,'--existing-cli-arg');assert.equal(cli.draft.prompt,'existing initial message');});
+
+
+test('Pi session creation forwards the chosen routing args for ordinary and worktree starts',async()=>{
+ for(const worktree of [undefined,'reserved']){
+  const calls=[];
+  await actual('startNewSession',{isMainWindow:true,formAdapter:'pi',formLaunch:{command:null,provider:null},piLaunchArgs:'--yam-routing-off',useProjectSettings:false,launchWorktreeAttempt:worktree,startSession:async(...args)=>{calls.push(args);},setError:assert.fail})();
+  assert.deepEqual(calls,[[undefined,worktree,'--yam-routing-off']]);
+ }
+});
+
+test('Codex session creation forwards the selected strategy exactly once',async()=>{
+ const calls=[],route={name:'Local Codex',config:'{}'};
+ const start=actual('startNewSession',{formAdapter:'codex',formLaunch:{command:null,provider:null,extra_args:''},shellWindows:false,
+  useProjectSettings:false,launchWorktreeAttempt:undefined,startSession:async(...args)=>{calls.push(args);},setError:assert.fail});
+ await start(undefined,route);
+ assert.deepEqual(calls,[[undefined,undefined,undefined,route]]);
+});

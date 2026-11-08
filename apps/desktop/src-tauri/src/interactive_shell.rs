@@ -677,6 +677,20 @@ fn cleanup_run(root: u32, owned: &mut BTreeMap<u32, u64>) -> Result<(), String> 
         Err("Agent children did not stop".into())
     }
 }
+fn native_argument_identity(adapter: &str, builder: &CommandBuilder) -> Option<String> {
+    builder.get_argv().windows(2).find_map(|args| {
+        if adapter == "pi" && args[0] == "--session" {
+            Path::new(&args[1])
+                .file_stem()?
+                .to_str()
+                .map(str::to_string)
+        } else if adapter == "gemini" && args[0] == "--session-id" {
+            args[1].to_str().map(str::to_string)
+        } else {
+            None
+        }
+    })
+}
 #[cfg(unix)]
 fn run(manifest: Manifest, mode: &str, extra: &[String]) -> Result<i32, String> {
     use std::os::unix::process::CommandExt;
@@ -693,15 +707,7 @@ fn run(manifest: Manifest, mode: &str, extra: &[String]) -> Result<i32, String> 
         .ok_or("Missing Agent connection")?
         .parse()
         .map_err(|_| "Invalid Agent connection")?;
-    let known = builder.get_argv().windows(2).find_map(|a| {
-        if a[0] == "--session" {
-            Path::new(&a[1]).file_stem()?.to_str().map(str::to_string)
-        } else if a[0] == "--session-id" {
-            a[1].to_str().map(str::to_string)
-        } else {
-            None
-        }
-    });
+    let known = native_argument_identity(&manifest.launch.adapter, &builder);
     let event = |kind: &str| super::agent_events::AgentEvent {
         kind: kind.into(),
         agent_session_id: known
@@ -885,6 +891,23 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::time::{Duration, Instant};
 
+    #[test]
+    fn codex_route_directory_is_not_a_native_conversation_identity() {
+        let mut builder = CommandBuilder::new("node");
+        builder.args(["route.mjs", "--session", "/tmp/routes/route-id"]);
+        assert_eq!(native_argument_identity("codex", &builder), None);
+        assert_eq!(
+            native_argument_identity("pi", &builder).as_deref(),
+            Some("route-id")
+        );
+        let mut gemini = CommandBuilder::new("gemini");
+        gemini.args(["--session-id", "native-id"]);
+        assert_eq!(
+            native_argument_identity("gemini", &gemini).as_deref(),
+            Some("native-id")
+        );
+        assert_eq!(native_argument_identity("claude", &builder), None);
+    }
     #[test]
     fn interactive_shell_survives_cli_failure_and_restarts_in_same_shell() {
         for (program, login) in [
@@ -1661,18 +1684,7 @@ pub(super) fn start(
         .iter_extra_env_as_str()
         .map(|(k, v)| (k.into(), v.into()))
         .collect();
-    let known = builder
-        .get_argv()
-        .windows(2)
-        .find_map(|a| {
-            if a[0] == "--session" {
-                Path::new(&a[1]).file_stem()?.to_str().map(str::to_string)
-            } else if a[0] == "--session-id" {
-                a[1].to_str().map(str::to_string)
-            } else {
-                None
-            }
-        })
+    let known = native_argument_identity(&manifest.launch.adapter, &builder)
         .or_else(|| native.map(str::to_string));
     history.ingest_agent_run(
         session,

@@ -22,9 +22,15 @@ pub(super) fn command(
         &launch.extra_args
     })?;
     let mut retained = Vec::new();
+    let mut routing_off = false;
+    let mut routing_options = false;
     let (mut native_model, mut native_thinking, mut controlled_effort) = (false, false, false);
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
+        if arg == "--yam-routing-off" {
+            routing_off = true;
+            continue;
+        }
         let key = arg.split('=').next().unwrap_or("");
         if matches!(
             key,
@@ -60,6 +66,9 @@ pub(super) fn command(
                 | "--yam-medium"
                 | "--yam-strong"
                 | "--yam-classifier"
+                | "--yam-classifier-fallbacks"
+                | "--yam-classifier-billing"
+                | "--yam-execution-fallbacks"
                 | "--yam-gateway"
                 | "--yam-fixed-model"
                 | "--yam-effort"
@@ -85,6 +94,12 @@ pub(super) fn command(
         } else {
             None
         };
+        let option = value
+            .map(String::as_str)
+            .or_else(|| arg.split_once('=').map(|(_, value)| value));
+        routing_options |= key.starts_with("--yam-")
+            || key == "--model"
+                && option.is_some_and(|model| model.split(':').next() == Some("yam/auto"));
         if resuming && matches!(key, "--model" | "--thinking" | "--provider") {
             continue;
         }
@@ -96,7 +111,11 @@ pub(super) fn command(
             retained.push(v.clone());
         }
     }
+    if routing_off && routing_options {
+        return Err("Pi routing is disabled; remove routing options from the launch".into());
+    }
     let mut b = CommandBuilder::new(exe);
+    b.env("YAM_PI_ROUTING_OFF", if routing_off { "1" } else { "0" });
     b.env("PATH", crate::agent_path());
     b.env("YAM_PI_EXECUTABLE", exe);
     for name in ["codex", "claude", "gemini"] {
@@ -108,7 +127,7 @@ pub(super) fn command(
         "YAM_PI_EXPLICIT_THINKING",
         if native_thinking { "1" } else { "0" },
     );
-    if !resuming {
+    if !resuming && !routing_off {
         if !native_model {
             b.args(["--model", "yam/auto"]);
         }
@@ -128,6 +147,10 @@ pub(super) fn command(
     Ok(b)
 }
 pub(super) fn stage(root: &Path) -> Result<PathBuf, String> {
+    static STAGE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _stage = STAGE
+        .lock()
+        .map_err(|_| "Cannot lock Pi extension staging")?;
     let sources = [
         ("entry.ts", include_str!("../pi/entry.ts")),
         ("router.mjs", include_str!("../pi/router.mjs")),
@@ -256,6 +279,31 @@ mod tests {
         serde_json::from_value(serde_json::json!({"adapter":"pi","mode":"interactive","extra_args":"--yam-small native/small --yam-strong native/strong","prompt":null})).unwrap()
     }
     #[test]
+    fn plain_pi_does_not_inject_routing_and_keeps_native_options() {
+        let mut launch = launch();
+        launch.extra_args = "--yam-routing-off --model native/small --thinking high".into();
+        let start = super::command(Path::new("pi"), &launch, false).unwrap();
+        assert_eq!(
+            start.get_argv(),
+            &["pi", "--model", "native/small", "--thinking", "high"]
+        );
+        assert_eq!(
+            start.get_env("YAM_PI_ROUTING_OFF"),
+            Some(std::ffi::OsStr::new("1"))
+        );
+        let resume = super::command(Path::new("pi"), &launch, true).unwrap();
+        assert_eq!(resume.get_argv(), &["pi"]);
+        assert_eq!(
+            resume.get_env("YAM_PI_ROUTING_OFF"),
+            Some(std::ffi::OsStr::new("1"))
+        );
+        launch.extra_args = "--yam-routing-off --yam-small native/small".into();
+        assert!(super::command(Path::new("pi"), &launch, false).is_err());
+        launch.extra_args = "--yam-routing-off --model yam/auto:high".into();
+        assert!(super::command(Path::new("pi"), &launch, false).is_err());
+    }
+
+    #[test]
     fn pi_router_new_defaults_do_not_pin_magpie_subscription_models() {
         let mut l = launch();
         l.extra_args.clear();
@@ -284,6 +332,87 @@ mod tests {
         official.extra_args = "--model chosen -c model_reasoning_effort=high".into();
         let before = agent_command(Path::new("codex"), &official).unwrap();
         assert!(!before.get_argv().iter().any(|v| v == "yam/auto"));
+    }
+    #[test]
+    fn pi_router_classifier_chain_is_preserved_at_launch_and_resume() {
+        let mut launch = launch();
+        let fallbacks = r#"["native/backup","native/last"]"#;
+        launch.extra_args = format!(
+            "--yam-classifier native/primary --yam-classifier-fallbacks '{fallbacks}' --yam-classifier-billing api"
+        );
+        for resuming in [false, true] {
+            let builder = super::command(Path::new("pi"), &launch, resuming).unwrap();
+            assert!(builder
+                .get_argv()
+                .windows(2)
+                .any(|args| args == ["--yam-classifier-fallbacks", fallbacks]));
+            assert!(builder
+                .get_argv()
+                .windows(2)
+                .any(|args| args == ["--yam-classifier-billing", "api"]));
+        }
+    }
+    #[test]
+    fn pi_router_execution_backups_are_preserved_at_launch_and_resume() {
+        let mut launch = launch();
+        let fallbacks = r#"{"strong":["native/backup","native/last"]}"#;
+        launch.extra_args =
+            format!("--yam-strong native/primary --yam-execution-fallbacks '{fallbacks}'");
+        for resuming in [false, true] {
+            let builder = super::command(Path::new("pi"), &launch, resuming).unwrap();
+            assert!(builder
+                .get_argv()
+                .windows(2)
+                .any(|args| args == ["--yam-execution-fallbacks", fallbacks]));
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn pi_runtime_probe_runs_while_catalog_lock_is_held() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("yam-pi-runtime-{}", next_session_id()));
+        std::fs::create_dir(&root).unwrap();
+        let executable = root.join("fake-pi");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nfor arg in \"$@\"; do\nif [ \"$arg\" = --yam-runtime-probe ]; then\nprintf '%s\\n' '{\"type\":\"yam_catalog\",\"runtime\":1}'\nexit 0\nfi\ndone\nexit 1\n",
+        ).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let catalog = super::CATALOG_PROBE.lock().unwrap();
+        let result = super::validate_runtime(&executable, &root, &root);
+        drop(catalog);
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(result, Ok(()));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn pi_catalog_falls_back_for_metadata_only_without_blocking_on_verification() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("yam-pi-catalog-{}", next_session_id()));
+        std::fs::create_dir(&root).unwrap();
+        let executable = root.join("fake-pi");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nprintf '%s\\n' '{\"type\":\"yam_catalog\",\"runtime\":1,\"probe\":{\"ok\":true},\"models\":[{\"key\":\"magpie/vendor/model\",\"levels\":[\"high\"]}]}'\n",
+        ).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let missing = root.join("missing-project");
+        let lock = super::CATALOG_PROBE.lock().unwrap();
+        let result = super::probe_catalog(&executable, &root, None, &missing, None, false);
+        drop(lock);
+        let runtime = super::validate_runtime(&executable, &root, &missing);
+        let verification = super::probe_catalog(
+            &executable,
+            &root,
+            None,
+            &missing,
+            Some("magpie/vendor/model"),
+            false,
+        );
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(result.unwrap()["models"][0]["key"], "magpie/vendor/model");
+        assert!(runtime.is_err());
+        assert!(verification.unwrap_err().contains("Working directory"));
     }
     #[test]
     fn pi_router_rules_flag_is_literal_and_rules_module_is_staged() {
@@ -443,7 +572,7 @@ fn require_pi(record: &crate::SessionRecord) -> Result<(), String> {
         .summary
         .launch
         .as_ref()
-        .is_some_and(|l| l.adapter == "pi")
+        .is_some_and(|l| l.adapter == "pi" || crate::codex_routing::route(l).is_some())
     {
         return Err("Session is not a Pi runtime".into());
     }
@@ -484,6 +613,7 @@ pub(super) fn control_request(
             "preview",
             "native-recovery",
             "native-reset",
+            "mode",
         ]
         .contains(&request["action"].as_str().unwrap_or(""))
         || request.to_string().len() > 32768
@@ -571,10 +701,10 @@ pub(super) fn catalog(
     probe_model: Option<&str>,
 ) -> Result<serde_json::Value, String> {
     let exe = crate::find_executable("pi").ok_or("Pi executable unavailable")?;
-    probe_catalog(&exe, root, gateway, cwd, probe_model)
+    probe_catalog(&exe, root, gateway, cwd, probe_model, false)
 }
 pub(super) fn validate_runtime(executable: &Path, root: &Path, cwd: &Path) -> Result<(), String> {
-    let value = probe_catalog(executable, root, None, cwd, None)?;
+    let value = probe_catalog(executable, root, None, cwd, None, true)?;
     if value["runtime"] != 1 {
         return Err(
             "Pi did not confirm the required YAM routing APIs; update or configure Pi and retry"
@@ -589,6 +719,7 @@ fn probe_catalog(
     gateway: Option<&str>,
     cwd: &Path,
     probe_model: Option<&str>,
+    runtime_only: bool,
 ) -> Result<serde_json::Value, String> {
     use std::{
         io::{BufRead, BufReader},
@@ -596,14 +727,22 @@ fn probe_catalog(
         sync::mpsc,
         time::Duration,
     };
-    let _probe = CATALOG_PROBE
-        .try_lock()
-        .map_err(|_| "A Pi catalog check is already running; retry shortly")?;
     if gateway.is_some_and(|s| s.len() > 2048 || s.chars().any(char::is_control)) {
         return Err("Invalid Pi gateway".into());
     }
     validate_probe_model(probe_model)?;
+    let use_default_directory = !runtime_only && probe_model.is_none() && !cwd.is_dir();
+    let cwd = if use_default_directory { root } else { cwd };
     crate::validate_working_directory(&cwd.to_string_lossy())?;
+    let _probe = if probe_model.is_some() {
+        Some(
+            CATALOG_PROBE
+                .try_lock()
+                .map_err(|_| "A Pi catalog check is already running; retry shortly")?,
+        )
+    } else {
+        None
+    };
     let entry = stage(root)?;
     let mut command = Command::new(exe);
     command
@@ -619,7 +758,11 @@ fn probe_catalog(
             "--extension",
         ])
         .arg(entry)
-        .arg("--yam-catalog-probe")
+        .arg(if runtime_only {
+            "--yam-runtime-probe"
+        } else {
+            "--yam-catalog-probe"
+        })
         .current_dir(cwd)
         .env("PATH", crate::agent_path())
         .stdin(Stdio::null())
@@ -630,7 +773,9 @@ fn probe_catalog(
             command.env_remove(key);
         }
     }
-    set_probe_codex(&mut command, crate::find_executable("codex").as_deref());
+    if !runtime_only {
+        set_probe_codex(&mut command, crate::find_executable("codex").as_deref());
+    }
     if let Some(gateway) = gateway {
         command.args(["--yam-gateway", gateway]);
     }
@@ -692,11 +837,17 @@ fn probe_catalog(
     if let Some(error) = value["error"].as_str() {
         return Err(error.to_string());
     }
+    if runtime_only {
+        return Ok(value);
+    }
     let models = value["models"].as_array().ok_or("Invalid Pi catalog")?;
     if models.len() > 4096
-        || models
-            .iter()
-            .any(|m| m["key"].as_str().is_none_or(|k| k.len() > 512) || !m["levels"].is_array())
+        || models.iter().any(|m| {
+            m["key"]
+                .as_str()
+                .is_none_or(|k| k.encode_utf16().count() > 512)
+                || !m["levels"].is_array()
+        })
     {
         return Err("Invalid Pi catalog".into());
     }
@@ -704,7 +855,7 @@ fn probe_catalog(
         return Err("Pi model verification returned an invalid result".into());
     }
     Ok(
-        serde_json::json!({"models":models,"preferred":value["preferred"].as_str(),"warning":value["warning"].as_str(),"probe":value.get("probe"),"runtime":value["runtime"]}),
+        serde_json::json!({"models":models,"preferred":value["preferred"].as_str(),"warning":value["warning"].as_str(),"probe":value.get("probe"),"runtime":value["runtime"],"used_default_directory":use_default_directory}),
     )
 }
 

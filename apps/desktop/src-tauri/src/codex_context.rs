@@ -22,6 +22,8 @@ pub struct Options {
     pub image_mode: ImageMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) route: Option<crate::codex_routing::Route>,
 }
 
 pub(crate) fn validate(launch: &crate::AgentLaunch) -> Result<(), String> {
@@ -37,6 +39,9 @@ pub(crate) fn validate(launch: &crate::AgentLaunch) -> Result<(), String> {
         return Err("Invalid Claude configuration snapshot".into());
     }
     if let Some(options) = &launch.codex {
+        if let Some(route) = &options.route {
+            route.validate(launch, options)?;
+        }
         if launch.adapter != "codex"
             || options.image_mode == ImageMode::GatewayApi && launch.provider.is_none()
         {
