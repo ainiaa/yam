@@ -58,7 +58,7 @@ function codexConnectionLabels(connections:CodexConnections,models:PiModel[]=[])
   return [key,matches.length===1?label:`${label} · ${t('Connection {{number}}',{number:labels.slice(0,index+1).filter(([,name])=>name===label).length})}`];
  }));
 }
-function RoutingModelPicker({label,models,value,connections,emptyValue='',emptyLabel='Choose a model',disabled,onChange,onBrowse}:{label:string;models:PiModel[];value:string;connections?:CodexConnections|null;emptyValue?:string;emptyLabel?:string;disabled?:boolean;onChange:React.ChangeEventHandler<HTMLSelectElement>;onBrowse?:()=>void}){
+function RoutingModelPicker({label,models,value,connections,catalogChecked=true,emptyValue='',emptyLabel='Choose a model',disabled,onChange,onBrowse}:{label:string;models:PiModel[];value:string;connections?:CodexConnections|null;catalogChecked?:boolean;emptyValue?:string;emptyLabel?:string;disabled?:boolean;onChange:React.ChangeEventHandler<HTMLSelectElement>;onBrowse?:()=>void}){
  const connectionOf=(key:string)=>key.split('/',1)[0];
  const saved=value!==emptyValue?value:'';
  const savedConnection=saved?connectionOf(saved):'';
@@ -71,13 +71,13 @@ function RoutingModelPicker({label,models,value,connections,emptyValue='',emptyL
   const identity=['yam-codex','yam-gateway','magpie'].includes(key)?'':key;
   if(!options.has(key))options.set(key,[t(kind),identity].filter(Boolean).join(' · '));
  }
- if(savedConnection&&!options.has(savedConnection))options.set(savedConnection,t('Saved connection unavailable'));
- const connection=browsing?.saved===saved&&(!browsing.connection||options.has(browsing.connection))?browsing.connection:savedConnection;
  const configured=(key:string)=>!connections||Object.prototype.hasOwnProperty.call(connections,key);
+ if(savedConnection&&!options.has(savedConnection))options.set(savedConnection,t(!catalogChecked&&configured(savedConnection)?'Current selection':'Saved connection unavailable'));
+ const connection=browsing?.saved===saved&&(!browsing.connection||options.has(browsing.connection))?browsing.connection:savedConnection;
  const available=configured(connection)?models.filter(model=>!model.legacy_alias&&connectionOf(model.key)===connection):[];
- const current=configured(savedConnection)&&models.some(model=>model.key===saved);
+ const savedModel=models.find(model=>model.key===saved),current=configured(savedConnection)&&(!catalogChecked||!!savedModel);
  const pending=!!saved&&connection!==savedConnection;
- const savedLabel=saved?routingModelPresentation(saved,models.find(model=>model.key===saved),connections).label:'';
+ const savedLabel=saved?routingModelPresentation(saved,savedModel,connections).label:'';
  return <div className="pi-model-picker" role="group" aria-label={label}>
   <span>{label}</span>
   <label><span>{t('Connection')}</span><Select aria-label={`${label} · ${t('Connection')}`} value={connection} disabled={disabled||!options.size} onChange={event=>{
@@ -131,6 +131,7 @@ export function PiRoutingConfig({args,cwd,invoke,onChange,onValidity,onSaved,ins
  let taskRules=null;try{taskRules=validateRules(draft?.rules?JSON.parse(draft.rules):draft?.medium?defaultTierRules:defaultRules);}catch{}
  const gateway=draft?.gateway??null,connections=adapter==='codex'&&draft?codexRoutingConfig(args).connections:null,scope=JSON.stringify([cwd,gateway,adapter,connections]);
  const [verified,setVerified]=useState('');
+ const catalogChecked=verified===scope;
  const [setupModels,setSetupModels]=useState<PiModel[]>([]),[setupModel,setSetupModel]=useState(''),[setupStatus,setSetupStatus]=useState(''),[setupGateway,setSetupGateway]=useState<string|null>(null);
  const [setupScope,setSetupScope]=useState(''),scopeRef=useRef(scope);scopeRef.current=scope;
  const [setupStatusScope,setSetupStatusScope]=useState(scope);
@@ -256,7 +257,7 @@ export function PiRoutingConfig({args,cwd,invoke,onChange,onValidity,onSaved,ins
       const label=t(role==='small'?'Lightweight model':role==='medium'?'Standard model':'Strong model');
       const primary=draft[role]??'',backups=draft.executionFallbacks?.[role]??[];
       const value=group===0?primary:backups[group-1]??'';
-      return <RoutingModelPicker key={role} label={group===0?label:`${groupLabel} · ${label}`} models={roleModels} value={value} connections={connections} emptyLabel={group===0?'Choose a model':'No execution backup'} disabled={group>0&&!primary} onChange={event=>{
+      return <RoutingModelPicker key={role} label={group===0?label:`${groupLabel} · ${label}`} models={roleModels} value={value} connections={connections} catalogChecked={catalogChecked} emptyLabel={group===0?'Choose a model':'No execution backup'} disabled={group>0&&!primary} onChange={event=>{
        const selected=event.target.value;
        if(group===0){
         change({[role]:selected,executionFallbacks:{...draft.executionFallbacks,[role]:selected?backups.map(key=>key===selected?'':key):[]}});
@@ -271,10 +272,10 @@ export function PiRoutingConfig({args,cwd,invoke,onChange,onValidity,onSaved,ins
    {visibleExecutionGroups<=maxPiBackupModels&&<button type="button" onClick={()=>setExecutionGroupCount(visibleExecutionGroups+1)}>{t('Add execution group')}</button>}
    </fieldset>
    <fieldset className="pi-routing-config" aria-label={t('Classification models')}><legend>{t('Classification models')}</legend>
-   <RoutingModelPicker label={t('Primary classifier A')} models={roleModels} value={draft.classifier} connections={connections} emptyLabel="Same as lightweight model" onChange={e=>change({classifier:e.target.value})}/>
+   <RoutingModelPicker label={t('Primary classifier A')} models={roleModels} value={draft.classifier} connections={connections} catalogChecked={catalogChecked} emptyLabel="Same as lightweight model" onChange={e=>change({classifier:e.target.value})}/>
    {Array.from({length:classifierSlotCount},(_,index)=>{
     const label=t('Backup classifier {{value0}}',{value0:String.fromCharCode(66+index)});
-    return <RoutingModelPicker key={index} label={label} models={roleModels} value={classifierFallbacks[index]??''} connections={connections} emptyLabel="No backup classifier" disabled={index>classifierFallbacks.length} onChange={event=>{
+    return <RoutingModelPicker key={index} label={label} models={roleModels} value={classifierFallbacks[index]??''} connections={connections} catalogChecked={catalogChecked} emptyLabel="No backup classifier" disabled={index>classifierFallbacks.length} onChange={event=>{
      const next=[...classifierFallbacks];next[index]=event.target.value;change({classifierFallbacks:next.filter(Boolean)});
     }}/>;
    })}
@@ -289,7 +290,7 @@ export function PiRoutingConfig({args,cwd,invoke,onChange,onValidity,onSaved,ins
    </fieldset>
    {onSaved&&<><button type="button" disabled={busy||!!issue||adapter==='codex'&&(!!catalogIssue||verified!==scope)} onClick={saveSetup}>{t('Save routing roles on this device')}</button>
    {setupStatusScope===scope&&setupStatus==='Routing roles saved on this device.'&&<p role="status">{t(setupStatus)}</p>}</>}
-   <details className="pi-routing-advanced"><summary>{t('Routing preferences')}</summary><div className="pi-routing-pair"><RoutingModelPicker label={t('Model selection')} models={roleModels} value={draft.model} connections={connections} emptyValue="auto" emptyLabel="Automatic by task" onChange={e=>change({model:e.target.value})}/><label><span>{t('Reasoning selection')}</span><Select aria-label={t('Reasoning selection')} value={draft.effort} onChange={e=>change({effort:e.target.value})}><option value="auto">{t('Automatic by task')}</option>{['off','minimal',...piLevels].map(level=><option key={level} value={level}>{level==='off'?t('Reasoning off (fixed)'):level}</option>)}</Select></label></div>
+   <details className="pi-routing-advanced"><summary>{t('Routing preferences')}</summary><div className="pi-routing-pair"><RoutingModelPicker label={t('Model selection')} models={roleModels} value={draft.model} connections={connections} catalogChecked={catalogChecked} emptyValue="auto" emptyLabel="Automatic by task" onChange={e=>change({model:e.target.value})}/><label><span>{t('Reasoning selection')}</span><Select aria-label={t('Reasoning selection')} value={draft.effort} onChange={e=>change({effort:e.target.value})}><option value="auto">{t('Automatic by task')}</option>{['off','minimal',...piLevels].map(level=><option key={level} value={level}>{level==='off'?t('Reasoning off (fixed)'):level}</option>)}</Select></label></div>
    <p className="settings-help">{t('A fixed reasoning level is preserved exactly. Unsupported selections stop with an explanation.')}</p></details>
    {taskRules?<PiTaskRules rules={taskRules} disabled={busy} onApply={rules=>change({rules:JSON.stringify(rules)})}/>:<button type="button" onClick={()=>change({rules:JSON.stringify(defaultRules)})}>{t('Restore default task rules')}</button>}
    <p className="settings-help">{t(adapter==='codex'?'Saved rules apply to new sessions. Select a saved strategy in the session to apply it at the next safe turn boundary.':'These defaults apply to new sessions. Existing sessions keep their saved task rules; use Adjust routing to edit and preview them.')}</p>

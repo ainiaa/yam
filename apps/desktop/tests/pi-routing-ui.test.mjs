@@ -187,6 +187,7 @@ test('Pi setup reports installed tools separately from discovered models and pro
  const render=gateways=>{index=refIndex=0;return component({args,cwd,invoke,onChange:value=>args=value,onValidity:()=>{},installedGateways:gateways});};
  const all=n=>!n||typeof n!=='object'?[]:[n,...(n.children??[]).flat(Infinity).flatMap(all)];
  const scan=async gateways=>{all(render(gateways)).find(n=>n.type==='button'&&n.children.includes('Find available models')).props.onClick();await new Promise(r=>setImmediate(r));return render(gateways);};
+ assert.equal(all(render([])).find(n=>n.props.label==='Lightweight model').props.catalogChecked,false);
  const quick=all(render([])).find(n=>n.type==='details'&&n.props.className==='pi-routing-advanced');assert.equal(quick.props.open,false);quick.props.onToggle({currentTarget:{open:true}});
  assert.doesNotMatch(JSON.stringify(render([])),/Get Magpie/);
  let tree=await scan([]);assert.equal(all(tree).find(n=>n.type==='details'&&n.props.className==='pi-routing-advanced').props.open,true);assert.match(JSON.stringify(tree),/Get Magpie/);assert.match(JSON.stringify(tree),/\/login/);
@@ -208,6 +209,7 @@ test('Pi setup reports installed tools separately from discovered models and pro
  assert.equal(scannedGateways.at(-1),null);
  assert.ok(all(tree).filter(n=>n.type===env.RoutingModelPicker).every(n=>!n.props.models.some(m=>m.key==='yam-gateway/stray')));
  assert.ok(all(tree).find(n=>n.type===env.RoutingModelPicker&&n.props.models.some(m=>m.key==='cc-custom/model')));
+ assert.equal(all(tree).find(n=>n.props.label==='Lightweight model').props.catalogChecked,true);
  detected=['magpie','cc-switch'];tree=await scan([]);
  assert.equal(scannedGateways.at(-1),'http://127.0.0.1:3425');
  gatewayWarning=true;tree=await scan([]);assert.match(JSON.stringify(tree),/Magpie gateway model catalog unavailable/);assert.match(JSON.stringify(tree),/Verify model/);gatewayWarning=false;
@@ -528,8 +530,8 @@ test('routing model picker separates connections, preserves model paths and wait
  const code=ts.transpileModule([...helpers,declaration].map(node=>node.getText(ast)).join('\n'),{compilerOptions:{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2020}}).outputText;
  const component=new Function(...Object.keys(env),code+';return RoutingModelPicker;')(...Object.values(env));
  const all=node=>node&&typeof node==='object'?[node,...(node.children??[]).flat(Infinity).flatMap(all)]:[];
- const render=(value=subscription,available=catalog,connections=config.connections)=>{
-  const tree=all(component({label:'Strong model',models:available,value,connections,onChange:event=>changes.push(event.target.value)}));
+ const render=(value=subscription,available=catalog,connections=config.connections,catalogChecked=true)=>{
+  const tree=all(component({label:'Strong model',models:available,value,connections,catalogChecked,onChange:event=>changes.push(event.target.value)}));
   const [source,model]=tree.filter(node=>node.type==='select');
   return {source,model,text:JSON.stringify(tree)};
  };
@@ -555,7 +557,11 @@ test('routing model picker separates connections, preserves model paths and wait
  pending.model.props.onChange({target:{value:gateway}});
  assert.deepEqual(changes,[gateway]);
  assert.equal(render(gateway).model.props.value,gateway);
+ const unchecked=render(gateway,[],config.connections,false);
+ assert.match(unchecked.text,/Current selection.*Local gateway · Automatic routing · deepseek-v4-flash/);
+ assert.doesNotMatch(unchecked.text,/Saved model unavailable/);
  assert.match(render(gateway,[]).text,/Saved model unavailable.*Local gateway · Automatic routing · deepseek-v4-flash/);
+ assert.match(render(gateway,[],{native:config.connections.native},false).text,/Saved connection unavailable.*Saved model unavailable/);
  assert.match(render(gateway,catalog,{native:config.connections.native}).text,/Saved model unavailable.*auto\/deepseek-v4-flash/);
  const pi=render('magpie/auto/deepseek-v4-flash',[{...models[0],key:'magpie/auto/deepseek-v4-flash'},{...models[0],key:'p/deepseek-v4-flash',billing:'api'}],null);
  assert.match(pi.text,/Magpie via Pi.*Pi native API/);
