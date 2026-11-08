@@ -58,7 +58,7 @@ function codexConnectionLabels(connections:CodexConnections,models:PiModel[]=[])
   return [key,matches.length===1?label:`${label} · ${t('Connection {{number}}',{number:labels.slice(0,index+1).filter(([,name])=>name===label).length})}`];
  }));
 }
-function RoutingModelPicker({label,models,value,connections,catalogChecked=true,emptyValue='',emptyLabel='Choose a model',disabled,onChange,onBrowse}:{label:string;models:PiModel[];value:string;connections?:CodexConnections|null;catalogChecked?:boolean;emptyValue?:string;emptyLabel?:string;disabled?:boolean;onChange:React.ChangeEventHandler<HTMLSelectElement>;onBrowse?:()=>void}){
+function RoutingModelPicker({label,models,value,connections,catalogChecked=true,checkedConnections,emptyValue='',emptyLabel='Choose a model',disabled,onChange,onBrowse}:{label:string;models:PiModel[];value:string;connections?:CodexConnections|null;catalogChecked?:boolean;checkedConnections?:readonly string[];emptyValue?:string;emptyLabel?:string;disabled?:boolean;onChange:React.ChangeEventHandler<HTMLSelectElement>;onBrowse?:()=>void}){
  const connectionOf=(key:string)=>key.split('/',1)[0];
  const saved=value!==emptyValue?value:'';
  const savedConnection=saved?connectionOf(saved):'';
@@ -72,10 +72,13 @@ function RoutingModelPicker({label,models,value,connections,catalogChecked=true,
   if(!options.has(key))options.set(key,[t(kind),identity].filter(Boolean).join(' · '));
  }
  const configured=(key:string)=>!connections||Object.prototype.hasOwnProperty.call(connections,key);
- if(savedConnection&&!options.has(savedConnection))options.set(savedConnection,t(!catalogChecked&&configured(savedConnection)?'Current selection':'Saved connection unavailable'));
+ const catalogFailed=catalogChecked&&checkedConnections!==undefined&&!checkedConnections.includes(savedConnection);
+ const checked=catalogChecked&&!catalogFailed;
+ if(savedConnection&&!options.has(savedConnection))options.set(savedConnection,t(!checked&&configured(savedConnection)?'Current selection':'Saved connection unavailable'));
  const connection=browsing?.saved===saved&&(!browsing.connection||options.has(browsing.connection))?browsing.connection:savedConnection;
  const available=configured(connection)?models.filter(model=>!model.legacy_alias&&connectionOf(model.key)===connection):[];
- const savedModel=models.find(model=>model.key===saved),current=configured(savedConnection)&&(!catalogChecked||!!savedModel);
+ const savedModel=models.find(model=>model.key===saved),current=configured(savedConnection)&&(!checked||!!savedModel);
+ const savedStatus=t(!current?'Saved model unavailable':catalogFailed?'Model catalog unavailable':'Current selection');
  const pending=!!saved&&connection!==savedConnection;
  const savedLabel=saved?routingModelPresentation(saved,savedModel,connections).label:'';
  return <div className="pi-model-picker" role="group" aria-label={label}>
@@ -88,10 +91,10 @@ function RoutingModelPicker({label,models,value,connections,catalogChecked=true,
   }}>
    {pending&&<option value="pending" disabled>{t('Choose a model')}</option>}
    <option value={emptyValue}>{t(emptyLabel)}</option>
-   {!pending&&saved&&!available.some(model=>model.key===saved)&&<option value={saved} disabled>{t(current?'Current selection':'Saved model unavailable')} · {savedLabel}</option>}
+   {!pending&&saved&&!available.some(model=>model.key===saved)&&<option value={saved} disabled>{savedStatus} · {savedLabel}</option>}
    {routingModelOptions(available,connections)}
   </Select></label>
-  {pending&&<span className="settings-help">{t(current?'Current selection':'Saved model unavailable')} · {savedLabel}</span>}
+  {pending&&<span className="settings-help">{savedStatus} · {savedLabel}</span>}
  </div>;
 }
 function CodexRoutingConnections({raw,onChange}:{raw:string;onChange:(raw:string)=>void}){
@@ -132,6 +135,8 @@ export function PiRoutingConfig({args,cwd,invoke,onChange,onValidity,onSaved,ins
  const gateway=draft?.gateway??null,connections=adapter==='codex'&&draft?codexRoutingConfig(args).connections:null,scope=JSON.stringify([cwd,gateway,adapter,connections]);
  const [verified,setVerified]=useState('');
  const catalogChecked=verified===scope;
+ const [checkedConnections,setCheckedConnections]=useState<string[]|undefined>();
+ const modelCatalog={connections,catalogChecked,checkedConnections};
  const [setupModels,setSetupModels]=useState<PiModel[]>([]),[setupModel,setSetupModel]=useState(''),[setupStatus,setSetupStatus]=useState(''),[setupGateway,setSetupGateway]=useState<string|null>(null);
  const [setupScope,setSetupScope]=useState(''),scopeRef=useRef(scope);scopeRef.current=scope;
  const [setupStatusScope,setSetupStatusScope]=useState(scope);
@@ -153,12 +158,17 @@ export function PiRoutingConfig({args,cwd,invoke,onChange,onValidity,onSaved,ins
  const argsRef=useRef(args);argsRef.current=args;
  useEffect(()=>{if(!visible||onSaved)return;try{const restored=restorePiSetup(args,localStorage.getItem(piSetupStorageKey));if(restored)onChange(restored);}catch{}},[visible]);
  useEffect(()=>{const dialog=root.current?.closest('dialog');if(!dialog){setVisible(true);return;}const read=()=>setVisible(dialog.open);read();const observer=new MutationObserver(read);observer.observe(dialog,{attributes:true,attributeFilter:['open']});return()=>observer.disconnect();},[]);
- const invokeCatalog=(params:Record<string,unknown>)=>invoke<{models:PiModel[];preferred?:string|null;used_default_directory?:boolean;warning?:string|null;probe?:{ok:boolean}}>(adapter==='codex'?'codex_routing_catalog':'pi_routing_catalog',adapter==='codex'?{cwd,config:JSON.stringify(codexRoutingConfig(args)),probeModel:params.probeModel??null}:params);
- async function check(){const current=++version.current;setBusy(true);setError(null);setWarning(null);setVerified('');setSetupScope('');setSetupModel('');if(scanned)setSetupStatus('');try{const result=await invokeCatalog({cwd,gateway});if(current===version.current){setModels(result.models);setWarning(result.warning??null);setVerified(scope);}}catch(e){if(current===version.current)setError(String(e));}finally{if(current===version.current)setBusy(false);}}
+ type CatalogReply={models:PiModel[];preferred?:string|null;used_default_directory?:boolean;warning?:string|null;checkedConnections?:string[];probe?:{ok:boolean}};
+ const invokeCatalog=(params:Record<string,unknown>)=>invoke<CatalogReply>(adapter==='codex'?'codex_routing_catalog':'pi_routing_catalog',adapter==='codex'?{cwd,config:JSON.stringify(codexRoutingConfig(args)),probeModel:params.probeModel??null}:params);
+ function recordCatalog(result:CatalogReply,rows=result.models){
+  setModels(rows);setVerified(scope);
+  setCheckedConnections(adapter==='codex'?result.checkedConnections??(result.warning?[]:undefined):undefined);
+ }
+ async function check(){const current=++version.current;setBusy(true);setError(null);setWarning(null);setVerified('');setSetupScope('');setSetupModel('');if(scanned)setSetupStatus('');try{const result=await invokeCatalog({cwd,gateway});if(current===version.current&&scopeRef.current===scope){recordCatalog(result);setWarning(result.warning??null);}}catch(e){if(current===version.current)setError(String(e));}finally{if(current===version.current)setBusy(false);}}
  useEffect(()=>{setModels([]);setVerified('');setSetupScope('');if(!visible){version.current++;setBusy(false);return;}const scheduledVersion=version.current;const timer=setTimeout(()=>{if(version.current===scheduledVersion)void check();},300);return()=>{clearTimeout(timer);version.current++;};},[scope,visible]);
  useEffect(()=>{if(setupStatusScope!==scope)setSetupStatus('');},[scope]);
  const issue=parseError??(adapter==='codex'?validateCodexDraft(args||JSON.stringify(codexRoutingConfig(''))):draft?validatePiDraft(draft,undefined,args):null);
- const catalogIssue=verified===scope&&draft?(adapter==='codex'?validateCodexDraft(args,models):validatePiDraft(draft,models,args)):null;
+ const catalogIssue=catalogChecked&&draft?(adapter==='codex'?validateCodexDraft(args,models,checkedConnections):validatePiDraft(draft,models,args)):null;
  useEffect(()=>{onValidity?.({valid:!issue&&visible,scope:JSON.stringify([cwd,args])});},[issue,visible,args,cwd,onValidity]);
  function change(fields:Partial<PiDraft>){
   if(!draft)return;
@@ -181,7 +191,7 @@ export function PiRoutingConfig({args,cwd,invoke,onChange,onValidity,onSaved,ins
    if(current!==version.current||scopeRef.current!==scope)return;
    const piModels=adapter==='codex'?result.models:result.models.filter(model=>piModelCatalogSource(model.key)!=='magpie-direct');
    const all=scanGateway===null?piModels:result.models;
-   setModels(gateway===null?piModels:all);setVerified(scope);setError(null);setWarning(null);
+   recordCatalog(result,gateway===null?piModels:all);setError(null);setWarning(adapter==='codex'?result.warning??null:null);
    setSetupDefaultDirectory(result.used_default_directory===true);
    setSetupGatewayWarning(!!result.warning);setSetupGateway(scanGateway);setSetupModels(all);
    const eligible=subscriptionOnly?piSubscriptionCatalog(all):all;
@@ -257,7 +267,7 @@ export function PiRoutingConfig({args,cwd,invoke,onChange,onValidity,onSaved,ins
       const label=t(role==='small'?'Lightweight model':role==='medium'?'Standard model':'Strong model');
       const primary=draft[role]??'',backups=draft.executionFallbacks?.[role]??[];
       const value=group===0?primary:backups[group-1]??'';
-      return <RoutingModelPicker key={role} label={group===0?label:`${groupLabel} · ${label}`} models={roleModels} value={value} connections={connections} catalogChecked={catalogChecked} emptyLabel={group===0?'Choose a model':'No execution backup'} disabled={group>0&&!primary} onChange={event=>{
+      return <RoutingModelPicker key={role} label={group===0?label:`${groupLabel} · ${label}`} models={roleModels} value={value} {...modelCatalog} emptyLabel={group===0?'Choose a model':'No execution backup'} disabled={group>0&&!primary} onChange={event=>{
        const selected=event.target.value;
        if(group===0){
         change({[role]:selected,executionFallbacks:{...draft.executionFallbacks,[role]:selected?backups.map(key=>key===selected?'':key):[]}});
@@ -272,10 +282,10 @@ export function PiRoutingConfig({args,cwd,invoke,onChange,onValidity,onSaved,ins
    {visibleExecutionGroups<=maxPiBackupModels&&<button type="button" onClick={()=>setExecutionGroupCount(visibleExecutionGroups+1)}>{t('Add execution group')}</button>}
    </fieldset>
    <fieldset className="pi-routing-config" aria-label={t('Classification models')}><legend>{t('Classification models')}</legend>
-   <RoutingModelPicker label={t('Primary classifier A')} models={roleModels} value={draft.classifier} connections={connections} catalogChecked={catalogChecked} emptyLabel="Same as lightweight model" onChange={e=>change({classifier:e.target.value})}/>
+   <RoutingModelPicker label={t('Primary classifier A')} models={roleModels} value={draft.classifier} {...modelCatalog} emptyLabel="Same as lightweight model" onChange={e=>change({classifier:e.target.value})}/>
    {Array.from({length:classifierSlotCount},(_,index)=>{
     const label=t('Backup classifier {{value0}}',{value0:String.fromCharCode(66+index)});
-    return <RoutingModelPicker key={index} label={label} models={roleModels} value={classifierFallbacks[index]??''} connections={connections} catalogChecked={catalogChecked} emptyLabel="No backup classifier" disabled={index>classifierFallbacks.length} onChange={event=>{
+    return <RoutingModelPicker key={index} label={label} models={roleModels} value={classifierFallbacks[index]??''} {...modelCatalog} emptyLabel="No backup classifier" disabled={index>classifierFallbacks.length} onChange={event=>{
      const next=[...classifierFallbacks];next[index]=event.target.value;change({classifierFallbacks:next.filter(Boolean)});
     }}/>;
    })}
@@ -290,7 +300,7 @@ export function PiRoutingConfig({args,cwd,invoke,onChange,onValidity,onSaved,ins
    </fieldset>
    {onSaved&&<><button type="button" disabled={busy||!!issue||adapter==='codex'&&(!!catalogIssue||verified!==scope)} onClick={saveSetup}>{t('Save routing roles on this device')}</button>
    {setupStatusScope===scope&&setupStatus==='Routing roles saved on this device.'&&<p role="status">{t(setupStatus)}</p>}</>}
-   <details className="pi-routing-advanced"><summary>{t('Routing preferences')}</summary><div className="pi-routing-pair"><RoutingModelPicker label={t('Model selection')} models={roleModels} value={draft.model} connections={connections} catalogChecked={catalogChecked} emptyValue="auto" emptyLabel="Automatic by task" onChange={e=>change({model:e.target.value})}/><label><span>{t('Reasoning selection')}</span><Select aria-label={t('Reasoning selection')} value={draft.effort} onChange={e=>change({effort:e.target.value})}><option value="auto">{t('Automatic by task')}</option>{['off','minimal',...piLevels].map(level=><option key={level} value={level}>{level==='off'?t('Reasoning off (fixed)'):level}</option>)}</Select></label></div>
+   <details className="pi-routing-advanced"><summary>{t('Routing preferences')}</summary><div className="pi-routing-pair"><RoutingModelPicker label={t('Model selection')} models={roleModels} value={draft.model} {...modelCatalog} emptyValue="auto" emptyLabel="Automatic by task" onChange={e=>change({model:e.target.value})}/><label><span>{t('Reasoning selection')}</span><Select aria-label={t('Reasoning selection')} value={draft.effort} onChange={e=>change({effort:e.target.value})}><option value="auto">{t('Automatic by task')}</option>{['off','minimal',...piLevels].map(level=><option key={level} value={level}>{level==='off'?t('Reasoning off (fixed)'):level}</option>)}</Select></label></div>
    <p className="settings-help">{t('A fixed reasoning level is preserved exactly. Unsupported selections stop with an explanation.')}</p></details>
    {taskRules?<PiTaskRules rules={taskRules} disabled={busy} onApply={rules=>change({rules:JSON.stringify(rules)})}/>:<button type="button" onClick={()=>change({rules:JSON.stringify(defaultRules)})}>{t('Restore default task rules')}</button>}
    <p className="settings-help">{t(adapter==='codex'?'Saved rules apply to new sessions. Select a saved strategy in the session to apply it at the next safe turn boundary.':'These defaults apply to new sessions. Existing sessions keep their saved task rules; use Adjust routing to edit and preview them.')}</p>

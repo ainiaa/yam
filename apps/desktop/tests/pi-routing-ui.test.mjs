@@ -27,6 +27,14 @@ test('Pi launch eligibility can be checked without any model catalog',()=>{
  assert.match(validatePiDraft({...configured,gateway:'https://user@example.com'},undefined),/Gateway/);
  assert.match(validatePiDraft(configured,undefined,'--yam-billing subscription'),/Subscription/);
 });
+test('Codex catalog validation distinguishes failed and successfully empty connections',()=>{
+ const config={connections:{native:{billing:'subscription',native:true},local:{billing:'paid',gateway:true,baseUrl:'http://127.0.0.1:3425'}},classifiers:[],executionGroups:[{}],model:'local/flash',effort:'high'};
+ assert.match(routingPolicies.validateCodexDraft(JSON.stringify(config),[],['native']),/Codex model catalog unavailable: local/);
+ assert.match(routingPolicies.validateCodexDraft(JSON.stringify(config),[],['native','local']),/Codex model unavailable: local\/flash/);
+ const available=[{...models[0],key:'native/ready'}];
+ assert.equal(routingPolicies.validateCodexDraft(JSON.stringify({...config,model:'native/ready'}),available,['native']),null);
+ assert.equal(routingPolicies.validateCodexDraft(JSON.stringify({...config,model:'native/ready'}),available,[]),null);
+});
 test('Pi legacy classifier remains A and ordered B/C survive settings and launch args',()=>{
  const saved=JSON.stringify({gateway:null,small:'p/small',strong:'p/strong',classifier:'p/a'});
  const original=parsePiDraft(restorePiSetup('',saved));
@@ -530,8 +538,8 @@ test('routing model picker separates connections, preserves model paths and wait
  const code=ts.transpileModule([...helpers,declaration].map(node=>node.getText(ast)).join('\n'),{compilerOptions:{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2020}}).outputText;
  const component=new Function(...Object.keys(env),code+';return RoutingModelPicker;')(...Object.values(env));
  const all=node=>node&&typeof node==='object'?[node,...(node.children??[]).flat(Infinity).flatMap(all)]:[];
- const render=(value=subscription,available=catalog,connections=config.connections,catalogChecked=true)=>{
-  const tree=all(component({label:'Strong model',models:available,value,connections,catalogChecked,onChange:event=>changes.push(event.target.value)}));
+ const render=(value=subscription,available=catalog,connections=config.connections,catalogChecked=true,checkedConnections)=>{
+  const tree=all(component({label:'Strong model',models:available,value,connections,catalogChecked,checkedConnections,onChange:event=>changes.push(event.target.value)}));
   const [source,model]=tree.filter(node=>node.type==='select');
   return {source,model,text:JSON.stringify(tree)};
  };
@@ -560,6 +568,10 @@ test('routing model picker separates connections, preserves model paths and wait
  const unchecked=render(gateway,[],config.connections,false);
  assert.match(unchecked.text,/Current selection.*Local gateway · Automatic routing · deepseek-v4-flash/);
  assert.doesNotMatch(unchecked.text,/Saved model unavailable/);
+ const unavailable=render(gateway,[catalog[0]],config.connections,true,['native']);
+ assert.match(unavailable.text,/Model catalog unavailable.*Local gateway · Automatic routing · deepseek-v4-flash/);
+ assert.doesNotMatch(unavailable.text,/Saved model unavailable/);
+ assert.match(render(subscription,[],config.connections,true,['native']).text,/Saved model unavailable/);
  assert.match(render(gateway,[]).text,/Saved model unavailable.*Local gateway · Automatic routing · deepseek-v4-flash/);
  assert.match(render(gateway,[],{native:config.connections.native},false).text,/Saved connection unavailable.*Saved model unavailable/);
  assert.match(render(gateway,catalog,{native:config.connections.native}).text,/Saved model unavailable.*auto\/deepseek-v4-flash/);

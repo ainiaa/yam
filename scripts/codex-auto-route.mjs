@@ -18,7 +18,7 @@ import {
  backupKeys,classifierPrompt,classifyCandidates,defaultTierRules,orderedExecutionCandidates,routeFacts,
 } from '../apps/desktop/src-tauri/pi/task-rules.mjs';
 import {openCodexThread,codexConnectionArgs,mixedCodexProvider,resumeCodexConnection} from './codex-route-app-server.mjs';
-import {readCodexPolicy,validateCodexPolicy} from '../apps/desktop/src-tauri/pi/codex-route-config.mjs';
+import {codexModelRequirements,readCodexPolicy,validateCodexModelCatalog,validateCodexPolicy} from '../apps/desktop/src-tauri/pi/codex-route-config.mjs';
 
 const tiers=['small','medium','strong'];
 const enumerated=values=>({type:'string',enum:values});
@@ -36,8 +36,9 @@ const stickyFields=['cwd','runtimeWorkspaceRoots','approvalPolicy','approvalsRev
 const canShareNativeHome=connection=>connection?.native||connection?.gateway;
 
 // The same facts and continuation rule used by Pi; native Codex retains the thread.
-export function createCodexTurnRouter({config,connectionName,models,classify,switchConnection,initial={},save=async()=>{},onSettled=async()=>{}}){
- let policy=readCodexPolicy(JSON.stringify(config)),state={v:2,status:'idle',...initial,connectionName},classifying=null,enabled=true;
+export function createCodexTurnRouter({config,connectionName,models,classify,switchConnection,loadCatalog,initial={},save=async()=>{},onSaved=()=>{}}){
+ let state={v:2,status:'idle',requestId:null,enabled:true,name:'',policyId:null,...initial,connectionName,config:readCodexPolicy(JSON.stringify(config))};
+ let classifying=null,submitting=false,applying=null;
  let recoveringSwitch=!!initial.connectionSwitch,pendingSettings=null;
  const settings={};
  function rememberSettings(source,patch=false){
@@ -55,12 +56,53 @@ export function createCodexTurnRouter({config,connectionName,models,classify,swi
   if(Object.keys(next).length===0)return;
   if(typeof next.config!=='string'||typeof next.name!=='string'||!next.name.trim()||next.name.length>80||typeof next.id!=='string'||Object.keys(next).some(key=>!['config','name','id'].includes(key)))throw Error('Invalid routing strategy');
   const checked=readCodexPolicy(next.config);
-  if(!sameNativeConnection(policy,checked,connectionName)||switchConnection&&
-   (!isDeepStrictEqual(policy.connections,checked.connections)||policy.respectSystemProxy!==checked.respectSystemProxy))throw Error('The strategy changes a prepared Codex connection; start a new session');
+  const policy=state.config;
+  if(!sameNativeConnection(policy,checked,connectionName)||policy.respectSystemProxy!==checked.respectSystemProxy||switchConnection&&
+   !isDeepStrictEqual(policy.connections,checked.connections))throw Error('The strategy changes a prepared Codex connection; start a new session');
  };
  checkPending(state.pendingPolicy);
- const publish=async changes=>{state={...state,...changes};const snapshot=structuredClone(state);writes=writes.then(()=>save(snapshot));await writes;};
- const settle=async()=>{if(!['pending','working','classifying','unknown'].includes(state.status))await onSettled();};
+ const enqueue=operation=>{
+  const write=writes.then(operation);
+  writes=write.catch(()=>{});
+  return write;
+ };
+ const persist=async changes=>{
+  const snapshot={...state,...changes};
+  await save(structuredClone(snapshot));state=snapshot;
+ };
+ const publish=changes=>enqueue(async()=>{await persist(typeof changes==='function'?changes(state):changes);onSaved();});
+ const busy=()=>submitting||!!state.connectionSwitch||['pending','working','unknown'].includes(state.status);
+ function settle(){
+  if(busy()||!state.pendingPolicy)return;
+  if(!applying)applying=(async()=>{
+   while(!busy()&&state.pendingPolicy){
+    const requested=state.pendingPolicy;
+    let config,catalog,error=null;
+    try{
+     if(requested.config){
+      config=readCodexPolicy(requested.config);
+      catalog=await loadCatalog(config);
+      validateCodexModelCatalog(config,catalog.models,catalog.checkedConnections);
+     }
+    }catch(reason){error=reason.message;}
+    await enqueue(async()=>{
+     if(busy()||state.pendingPolicy!==requested)return;
+     const changes={pendingPolicy:null,error};
+     if(!error){
+      changes.enabled=!!config;
+      if(config){
+       Object.assign(changes,{config,name:requested.name,policyId:requested.id});
+       if(!isDeepStrictEqual(state.config,config))Object.assign(changes,{previous:null,previousPrompt:''});
+      }
+     }
+     await persist(changes);
+     if(!error&&catalog)models=[...catalog.models,...models.filter(model=>!catalog.checkedConnections.includes(model.key.split('/',1)[0]))];
+     onSaved();
+    });
+   }
+  })().finally(()=>{applying=null;});
+  return applying;
+ }
  const recover=async turn=>{
   if(!turn||!['completed','interrupted','failed','inProgress'].includes(turn.status))return false;
   if(state.turnId&&turn.id===state.turnId){await publish({status:turn.status==='inProgress'?'working':turn.status});return true;}
@@ -71,15 +113,19 @@ export function createCodexTurnRouter({config,connectionName,models,classify,swi
  };
  return {
   get state(){return structuredClone(state);},
+  get models(){return models;},
+  settlePolicy:settle,
   filterEvent(message){
    const params=message.params;
    return !state.connectionSwitch||params?.threadId!==state.threadId||
     !(message.method==='thread/closed'||message.method==='thread/status/changed'&&['idle','notLoaded'].includes(params.status?.type));
   },
-  setPolicy(next){const checked=readCodexPolicy(JSON.stringify(next));if(!isDeepStrictEqual(policy,checked))state={...state,previous:null,previousPrompt:''};policy=checked;},
-  async queuePolicy(next){checkPending(next);await publish({pendingPolicy:next});await settle();},
+  setPolicy(next){const checked=readCodexPolicy(JSON.stringify(next));if(!isDeepStrictEqual(state.config,checked))state={...state,config:checked,previous:null,previousPrompt:''};},
+  queuePolicy(next,checkRevision=()=>{}){return enqueue(async()=>{
+   checkRevision();checkPending(next);await persist({pendingPolicy:next});onSaved();
+  });},
   async acknowledgeLifecycle(marker){await publish({lifecycleAcknowledged:marker});},
-  setEnabled(value){enabled=value===true;},
+  setEnabled(value){state={...state,enabled:value===true};},
   async request(message,{signal,respond,requestBackend}={}){
    const params=message.params??{};
    if(['thread/start','thread/resume','thread/fork'].includes(message.method)&&params.ephemeral!==true){
@@ -93,18 +139,21 @@ export function createCodexTurnRouter({config,connectionName,models,classify,swi
     respond?.({id:message.id,result:{}});return null;
    }
    if(message.method!=='turn/start'||params.threadId!==state.threadId)return message;
-   if(state.connectionSwitch||classifying||['pending','working','unknown'].includes(state.status))throw Error('Inspect the current Codex turn before starting another task');
+   if(!busy()&&state.pendingPolicy)await settle();
+   if(busy())throw Error('Inspect the current Codex turn before starting another task');
+   submitting=true;
    activeRequestId=message.id;recoveryHistory=null;
    const nativeModel={model:params.collaborationMode?.settings?.model??params.model??state.nativeModel?.model,effort:params.collaborationMode?.settings?.reasoning_effort??params.effort??state.nativeModel?.effort??null};
    if(nativeModel.effort==='none')nativeModel.effort='off';
-   if(!enabled){await publish({status:'pending',requestId:message.id,pendingAfterTurnId:state.turnId??state.pendingAfterTurnId,turnId:null,decision:null,dispatched:null,pendingRoute:{previous:null,previousPrompt:'',nativeModel},error:null});pendingSettings=params;return message;}
-   const current=structuredClone(policy),{candidate,connections,rules}=validateCodexPolicy(current),controller=new AbortController();
-   classifying=controller;
-   const requestSignal=signal?AbortSignal.any([signal,controller.signal]):controller.signal;
-   const prompt=(params.input??[]).filter(item=>item.type==='text').map(item=>item.text??'').join('\n');
    const before=structuredClone(state),previous=state.previous;
-   let changing=false,switched=false;
+   const controller=state.enabled?new AbortController():null;
+   if(controller)classifying=controller;
+   let changing=false,confirmedConnection=null;
    try{
+    if(!controller){await publish({status:'pending',requestId:message.id,pendingAfterTurnId:state.turnId??state.pendingAfterTurnId,turnId:null,decision:null,dispatched:null,pendingRoute:{previous:null,previousPrompt:'',nativeModel},error:null});pendingSettings=params;return message;}
+    const current=structuredClone(state.config),{candidate,connections,rules}=validateCodexPolicy(current);
+    const requestSignal=signal?AbortSignal.any([signal,controller.signal]):controller.signal;
+    const prompt=(params.input??[]).filter(item=>item.type==='text').map(item=>item.text??'').join('\n');
     requestSignal.throwIfAborted();
     await publish({status:'classifying'});
     const fixed=current.model&&current.model!=='auto'?current.model:null;
@@ -142,8 +191,9 @@ export function createCodexTurnRouter({config,connectionName,models,classify,swi
      requestSignal.throwIfAborted();
      changing=true;
      await switchConnection({threadId:state.threadId,connection:selected.connection,model:selected.model,effort,settings:sticky,requestBackend,respond,signal:requestSignal});
-     connectionName=selected.connection.name;switched=true;
-     await publish({connectionName,connectionSwitch:null,nativeModel:{model:selected.model,effort}});
+     connectionName=selected.connection.name;
+     confirmedConnection={connectionName,nativeModel:{model:selected.model,effort}};
+     await publish({...confirmedConnection,connectionSwitch:null});
     }
     if(next.collaborationMode?.settings)next.collaborationMode={...next.collaborationMode,settings:{...next.collaborationMode.settings,model:selected.model,reasoning_effort:next.effort}};
     await publish({status:'pending',requestId:message.id,pendingAfterTurnId:state.turnId??state.pendingAfterTurnId,turnId:null,dispatched:null,error:null,pendingRoute:{nativeModel:{model:selected.model,effort},previousPrompt:prompt.slice(-4000),
@@ -152,10 +202,11 @@ export function createCodexTurnRouter({config,connectionName,models,classify,swi
     pendingSettings=next;
     return {...message,params:next};
    }catch(error){
-    if(changing&&!switched)await publish({status:'unknown',requestId:null,error:'Codex connection change could not be confirmed. Reopen this session before sending another task.'});
-    else if(state.status==='classifying'||state.status==='pending'&&state.requestId===message.id)await publish({...before,...switched?{connectionName,nativeModel:state.nativeModel}:{},connectionSwitch:null,pendingPolicy:state.pendingPolicy,requestId:null,error:error.message});
+    if(changing&&!confirmedConnection)await publish({status:'unknown',requestId:null,error:'Codex connection change could not be confirmed. Reopen this session before sending another task.'});
+    else if(state.status==='classifying'||state.status==='pending'&&state.requestId===message.id)await publish(current=>({...before,...confirmedConnection,
+     connectionSwitch:null,pendingPolicy:current.pendingPolicy,lifecycleAcknowledged:current.lifecycleAcknowledged,requestId:null,error:error.message}));
     throw error;
-   }finally{classifying=null;}
+   }finally{submitting=false;classifying=null;}
   },
   async event(message){
    const start=starts.get(message.id);
@@ -188,13 +239,12 @@ export function createCodexTurnRouter({config,connectionName,models,classify,swi
     const turn=message.result.turn;await publish({...state.pendingRoute,pendingRoute:null,turnId:turn.id,status:['completed','interrupted','failed'].includes(turn.status)?turn.status:'working',dispatched:state.decision?{model:state.decision.model,effort:state.decision.effort}:null});
    }
    const params=message.params;
-   if(params?.threadId!==state.threadId){await settle();return;}
+   if(params?.threadId!==state.threadId)return;
    if(message.method==='thread/settings/updated'&&params.threadSettings&&!state.connectionSwitch)rememberSettings(params.threadSettings);
    if(message.method==='turn/started'){acceptSettings();await publish({...state.pendingRoute,pendingRoute:null,turnId:params.turn.id,status:'working',dispatched:state.decision?{model:state.decision.model,effort:state.decision.effort}:null});}
    if(message.method==='model/rerouted'&&params.turnId===state.turnId&&typeof params.toModel==='string')await publish({nativeModel:{model:params.toModel,effort:null},dispatched:{model:connectionName+'/'+params.toModel,effort:'unknown',rerouted:true}});
    if(message.method==='turn/completed'&&(!state.turnId||params.turn.id===state.turnId)){acceptSettings();await publish({...state.pendingRoute,...state.status==='pending'&&state.decision?{dispatched:{model:state.decision.model,effort:state.decision.effort}}:{},pendingRoute:null,turnId:params.turn.id,status:params.turn.status});}
    if(message.method==='thread/status/changed'&&params.status?.type==='idle'&&!state.turnId&&!state.connectionSwitch&&['pending','unknown'].includes(state.status))await publish({status:'failed',requestId:null,pendingRoute:null,error:'Codex is idle; check native history for the previous submission before sending again'});
-   await settle();
   },
  };
 }
@@ -281,17 +331,20 @@ async function localGatewayModels(connection,signal){
   supportedReasoningEfforts:(Array.isArray(row.reasoning_levels)?row.reasoning_levels:row.reasoning===false?['off']:[]).filter(level=>['none','off','minimal','low','medium','high','xhigh','max','ultra'].includes(level)).map(reasoningEffort=>({reasoningEffort})),inputModalities:row.modalities?.input??['text']}));
 }
 
-export async function codexCatalog({config,codex,cwd,probeModel,signal},{inspect=openCodexThread,probe=executeAgent}={}){
- const {connections,candidate}=validateCodexPolicy(config),models=[],warnings=[];
+export async function codexCatalog({config,codex,cwd,probeModel,signal,onlyConnections},{inspect=openCodexThread,probe=executeAgent}={}){
+ const {connections,candidate}=validateCodexPolicy(config),models=[],warnings=[],checkedConnections=[];
  for(const connection of connections.values()){
+  if(onlyConnections&&!onlyConnections.has(connection.name))continue;
   try{
    const env=await profileEnvironment(connection,connections,[cwd]);
    const rows=connection.gateway?await localGatewayModels(connection,signal):await inspect({executable:codex,env,cwd,connection,signal,catalogOnly:true,respectSystemProxy:config.respectSystemProxy});
+   const connectionModels=[];
    for(const row of rows){
     if(typeof row.model!=='string'||!Array.isArray(row.supportedReasoningEfforts))continue;
     const key=connection.name+'/'+row.model;candidate(key);
-    models.push({key,cli:'codex',name:row.displayName??row.model,levels:row.supportedReasoningEfforts.map(item=>item.reasoningEffort==='none'?'off':item.reasoningEffort),input:row.inputModalities??['text'],context_window:0,billing:connection.billing==='subscription'?'subscription':'api',source:connection.billing==='subscription'?'chatgpt-subscription':undefined});
+    connectionModels.push({key,cli:'codex',name:row.displayName??row.model,levels:row.supportedReasoningEfforts.map(item=>item.reasoningEffort==='none'?'off':item.reasoningEffort),input:row.inputModalities??['text'],context_window:0,billing:connection.billing==='subscription'?'subscription':'api',source:connection.billing==='subscription'?'chatgpt-subscription':undefined});
    }
+   models.push(...connectionModels);checkedConnections.push(connection.name);
   }catch(error){if(signal?.aborted)throw error;warnings.push(connection.name+': '+error.message);}
  }
  let verified;
@@ -307,7 +360,7 @@ export async function codexCatalog({config,codex,cwd,probeModel,signal},{inspect
    {prompt:'Reply exactly YAM_MODEL_OK. Do not use tools.',mode:'readonly',signal},(file,args,options)=>runProcess(file,[...args.slice(0,-1),...codexConnectionArgs(entry.connection,config.respectSystemProxy),args.at(-1)],{...options,env}));
   verified={ok:result.finalText.trim()==='YAM_MODEL_OK'};
  }
- return {models,preferred:models.find(model=>model.key.endsWith('/gpt-6.1-sol'))?.key??models[0]?.key??null,warning:warnings.length?warnings.join('; '):null,...verified?{probe:verified}:{}};
+ return {models,checkedConnections,preferred:models.find(model=>model.key.endsWith('/gpt-6.1-sol'))?.key??models[0]?.key??null,warning:warnings.length?warnings.join('; '):null,...verified?{probe:verified}:{}};
 }
 
 export async function classifyNativeTurn({policy,prompt,previousPrompt,previous,signal},codex,cwd,session,{classify=classifyCodex,timeout}={}){
@@ -509,7 +562,7 @@ export async function runNativeCodex({codex,cwd,session,config,prompt}){
   await privateDirectory(lock);await rm(lock,{recursive:true});await mkdir(lock,{mode:0o700});
  }
  await writeFile(join(lock,'owner.json'),JSON.stringify({pid:process.pid}),{mode:0o600,flag:'wx'});
- let runtime,server,ui,relay,controls,serverClosed,uiClosed,router,revision=0,enabled=true,name=process.env.YAM_CODEX_ROUTE_NAME??'',policyId=null,bridgeError=null;
+ let runtime,server,ui,relay,controls,serverClosed,uiClosed,router,revision=0,bridgeError=null;
  const controller=new AbortController(),stop=()=>{controller.abort();ui?.kill('SIGTERM');server?.kill('SIGTERM');};
  const ignoreInterrupt=()=>{};process.on('SIGINT',ignoreInterrupt);process.on('SIGTERM',stop);process.on('SIGHUP',stop);
  const killServer=()=>{if(server?.pid)try{process.kill(-server.pid,'SIGKILL');}catch{}};
@@ -551,7 +604,6 @@ export async function runNativeCodex({codex,cwd,session,config,prompt}){
    const legacy=createHash('sha256').update(JSON.stringify([codex,cwd,selected.identity,env.CODEX_HOME,selected.billing,connection.baseUrl,connection.apiKeyEnv])).digest('hex');
    if(prior.binding!==legacy)throw Error('The previous Codex connection changed; its original thread is preserved');
   }
-  enabled=prior?.enabled??(process.env.YAM_CODEX_ROUTE_ENABLED!=='false');name=prior?.name??name;policyId=prior?.policyId??null;
   runtime=await mkdtemp('/tmp/yam-codex-');
   const socketPath=join(runtime,'server.sock');
   server=spawn(codex,['app-server','--listen','unix://'+socketPath,...codexConnectionArgs(connection,config.respectSystemProxy,initialModel,mixed?{gatewayKey:gatewayKeys.get(connection.name)}:undefined)],{cwd,env:serverEnv,detached:true,stdio:['ignore','ignore','ignore']});
@@ -562,30 +614,37 @@ export async function runNativeCodex({codex,cwd,session,config,prompt}){
    if(await stat(socketPath).then(value=>value.isSocket(),()=>false))break;
    await new Promise(resolve=>setTimeout(resolve,50));
   }
-  const snapshot=()=>({generation:process.env.YAM_PI_GENERATION,revision,phase:router?.state.status??'starting',enabled,name,policyId,
-   pending:router?.state.pendingPolicy==null?null:{name:router.state.pendingPolicy.name??'Routing off',id:router.state.pendingPolicy.id??null},target:router?.state.decision??null,dispatched:router?.state.dispatched??null,error:bridgeError??router?.state.error,threadId:router?.state.threadId??null});
-  const save=async state=>{const current=connections.get(state.connectionName);await writeState(session,{...state,config,binding:nativeConnectionBinding(codex,cwd,current,env.CODEX_HOME),enabled,name,policyId,connectionHome:env.CODEX_HOME,provider});revision++;controls?.publish();};
+  const snapshot=()=>{
+   const {status:phase,enabled,name,policyId,pendingPolicy,decision,dispatched,error,threadId}=router.state;
+   return {generation:process.env.YAM_PI_GENERATION,revision,phase,enabled,name,policyId,
+    pending:pendingPolicy==null?null:{name:pendingPolicy.name??'Routing off',id:pendingPolicy.id??null},target:decision??null,dispatched:dispatched??null,error:bridgeError??error,threadId:threadId??null};
+  };
+  const save=state=>writeState(session,{...state,binding:nativeConnectionBinding(codex,cwd,connections.get(state.connectionName),env.CODEX_HOME),connectionHome:env.CODEX_HOME,provider},controller.signal);
+  const priorState=prior?.v===1?{threadId:prior.threadId,status:prior.status,turnId:prior.turnId,previous:{v:rules.v,model:prior.tier,effort:prior.effort,identity:prior.model}}:prior??{};
   router=createCodexTurnRouter({config,connectionName:connection.name,models:catalog.models,
    switchConnection:mixed?change=>resumeCodexConnection({...change,gatewayKey:gatewayKeys.get(change.connection.name)}):undefined,
-   initial:prior?.v===1?{threadId:prior.threadId,status:prior.status,turnId:prior.turnId,previous:{v:rules.v,model:prior.tier,effort:prior.effort,identity:prior.model}}:prior??{},
-   classify:request=>classifyNativeTurn(request,codex,cwd,session),save,onSettled:()=>applyPending()});
-  const applyPending=async()=>{
-   const pendingPolicy=router.state.pendingPolicy;
-   if(!pendingPolicy||['pending','working','classifying','unknown'].includes(router.state.status))return;
-   if(pendingPolicy.config){config=readCodexPolicy(pendingPolicy.config);router.setPolicy(config);enabled=true;name=pendingPolicy.name;policyId=pendingPolicy.id;}
-   else enabled=false;
-   await router.queuePolicy(null);
+   initial:{...priorState,enabled:prior?.enabled??(process.env.YAM_CODEX_ROUTE_ENABLED!=='false'),name:prior?.name??process.env.YAM_CODEX_ROUTE_NAME??''},
+   loadCatalog:config=>codexCatalog({config,codex,cwd,onlyConnections:new Set([...codexModelRequirements(config).keys()].map(key=>key.split('/',1)[0])),signal:AbortSignal.any([controller.signal,AbortSignal.timeout(12000)])}),
+   classify:request=>classifyNativeTurn(request,codex,cwd,session),save,onSaved:()=>{revision++;controls?.publish();}});
+  const settlePolicy=()=>{
+   if(controller.signal.aborted)return;
+   void router.settlePolicy()?.catch(error=>{
+    if(controller.signal.aborted)return;
+    bridgeError=error.message;
+    try{controls.publish();}catch{}
+   });
   };
   controls=await serveControls(process.env.YAM_PI_CONTROL_FILE,process.env.YAM_PI_GENERATION,snapshot,async request=>{
-   if(request.revision!==revision)throw Error('Routing changed; refresh before applying');
+   const checkRevision=()=>{if(request.revision!==revision)throw Error('Routing changed; refresh before applying');};
    if(request.action!=='mode')throw Error('Unsupported native routing control');
-   if(request.data?.cancel===true){await router.queuePolicy(null);return;}
+   if(request.data?.cancel===true){await router.queuePolicy(null,checkRevision);return;}
    const next=request.data?.policy;
    if(next!==null){
     if(!next||typeof next.config!=='string'||typeof next.name!=='string'||!next.name.trim()||next.name.length>80||typeof next.id!=='string')throw Error('Invalid routing strategy');
    }
-   await router.queuePolicy(next===null?{}:{id:next.id,name:next.name,config:next.config});
-  },()=>catalog.models);
+   await router.queuePolicy(next===null?{}:{id:next.id,name:next.name,config:next.config},checkRevision);
+   settlePolicy();
+  },()=>router.models);
   const permissions=new Map(),lifecycle=createNativeLifecycleBridge({initial:prior?.lifecycleAcknowledged,acknowledge:marker=>router.acknowledgeLifecycle(marker)});
   const syncLifecycle=async()=>{try{await lifecycle.sync(router.state);bridgeError=null;}catch(error){bridgeError=error.message;throw error;}finally{controls.publish();}};
   let starting=true;
@@ -594,7 +653,7 @@ export async function runNativeCodex({codex,cwd,session,config,prompt}){
    onRequest:async(message,context)=>{
     if(message.method==='turn/start'&&message.params?.threadId===router.state.threadId){
      if(mixed&&permissions.size)throw Error('Resolve the pending Codex approval before starting another turn');
-     await syncLifecycle();await applyPending();router.setEnabled(enabled);
+     await syncLifecycle();
     }
     if(mixed&&starting&&['thread/start','thread/resume'].includes(message.method)&&message.params?.ephemeral!==true){
      starting=false;
@@ -604,7 +663,7 @@ export async function runNativeCodex({codex,cwd,session,config,prompt}){
      const permission=permissions.get(message.id);permissions.delete(message.id);
      try{await deliverNative('ToolProgress',router.state.threadId,permission.turnId,permission.key);}catch(error){bridgeError=error.message;controls.publish();}
     }
-    try{return await router.request(message,context);}finally{await applyPending();}
+    try{return await router.request(message,context);}finally{settlePolicy();}
    },
    onEvent:async message=>{
     await router.event(message);const state=router.state,params=message.params;
@@ -616,7 +675,7 @@ export async function runNativeCodex({codex,cwd,session,config,prompt}){
       const key='approval-'+String(message.id).replace(/[^A-Za-z0-9_-]/g,'').slice(0,100),turnId=params.turnId??state.turnId;
       permissions.set(message.id,{key,turnId});await deliverNative('PermissionRequest',state.threadId,turnId,key);
      }
-    }catch(error){bridgeError=error.message;controls.publish();}
+    }catch(error){bridgeError=error.message;controls.publish();}finally{settlePolicy();}
    }});
   const args=['--remote','unix://'+relay.socketPath,'--no-alt-screen','-C',cwd];
   if(prior?.threadId)args.push('resume',prior.threadId);

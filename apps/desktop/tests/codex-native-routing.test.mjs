@@ -17,6 +17,25 @@ const coding={...newAnswer,task:'coding',action:'write',readOnly:false};
 const workspaceSandbox={type:'workspaceWrite',writableRoots:['/tmp/approved'],networkAccess:false,excludeTmpdirEnvVar:true,excludeSlashTmp:true};
 const nativeSettings={cwd:'/tmp/native',approvalPolicy:'on-request',approvalsReviewer:'user',sandbox:workspaceSandbox,runtimeWorkspaceRoots:['/tmp/native'],disabledPluginIds:['plugin-a']};
 
+for(const enabled of [true,false])test(`a transient pending write failure blocks only that turn (routing ${enabled?'on':'off'})`,async()=>{
+ const saved=[];let failPending=true;
+ const router=routes.createCodexTurnRouter({config:{...routingPolicy,model:'native/light',effort:'high'},connectionName:'native',models:catalog,
+  initial:{threadId:'main'},save:async state=>{
+   if(state.status==='pending'&&failPending){failPending=false;throw Error('state write unavailable');}
+   saved.push(state);
+  }});
+ router.setEnabled(enabled);
+ const turn=id=>({id,method:'turn/start',params:{threadId:'main',input:[]}});
+ await assert.rejects(router.request(turn(1)),/state write unavailable/);
+ assert.equal(router.state.status,'idle');
+ assert.equal(router.state.requestId,null);
+ assert.equal(saved.some(state=>state.requestId===1),false);
+ assert.equal((await router.request(turn(2))).id,2);
+ assert.equal(saved.at(-1).status,'pending');
+ assert.equal(saved.at(-1).requestId,2);
+ await assert.rejects(router.request(turn(3)),/Inspect the current Codex turn/);
+});
+
 test('native null turn overrides preserve confirmed permissions before switching connections',async()=>{
  for(const permissions of [null,'restricted-project']){
   let answer=coding,switched;
@@ -61,6 +80,23 @@ test('native routing still refuses switching without confirmed permission settin
  await router.event({id:1,result:{thread:{id:'main'},modelProvider:'yam_route',cwd:'/tmp/native'}});
  await assert.rejects(router.request({id:2,method:'turn/start',params:{threadId:'main',input:[],sandboxPolicy:null}}),/permissions are unavailable/);
  assert.equal(switched,false);assert.equal(router.state.connectionSwitch,null);
+});
+
+test('a state write failure after a confirmed connection switch keeps the confirmed native model',async()=>{
+ let switches=0,fail=true;
+ const router=routes.createCodexTurnRouter({config:mixedPolicy,connectionName:'local',models:mixedCatalog,
+  classify:async()=>({answer:newAnswer,source:'A'}),switchConnection:async()=>{switches++;},save:async state=>{
+   if(state.connectionName==='native'&&fail){fail=false;throw Error('state write unavailable');}
+  }});
+ await router.request({id:1,method:'thread/start',params:{}});
+ await router.event({id:1,result:{thread:{id:'main'},modelProvider:'yam_route',model:'auto/deepseek-v4-flash',reasoningEffort:'high',...nativeSettings}});
+ const turn=id=>({id,method:'turn/start',params:{threadId:'main',input:[]}});
+ await assert.rejects(router.request(turn(2)),/state write unavailable/);
+ assert.equal(router.state.connectionName,'native');
+ assert.deepEqual(router.state.nativeModel,{model:'light',effort:'medium'});
+ assert.equal(router.state.connectionSwitch,null);
+ assert.equal((await router.request(turn(3))).params.model,'light');
+ assert.equal(switches,1);
 });
 
 test('native connection switches hide their internal close while forwarding normal thread closure',async()=>{
@@ -253,7 +289,9 @@ test('Codex catalog uses official model capabilities and reports inaccessible co
  const result=await routes.codexCatalog({config:routingPolicy,codex:process.execPath,cwd:'/tmp'},
   {inspect:async options=>{assert.equal(options.catalogOnly,true);assert.equal(options.env.YAM_AGENT_TOKEN,undefined);return [{model:'regular',displayName:'Regular',inputModalities:['text','image'],supportedReasoningEfforts:[{reasoningEffort:'medium'},{reasoningEffort:'high'}]}];}});
  assert.deepEqual(result.models[0].levels,['medium','high']);assert.equal(result.models[0].key,'native/regular');
+ assert.deepEqual(result.checkedConnections,['native']);
  const failed=await routes.codexCatalog({config:routingPolicy,codex:process.execPath,cwd:'/tmp'},{inspect:async()=>{throw Error('login missing');}});
+ assert.deepEqual(failed.checkedConnections,[]);
  assert.equal(failed.models.length,0);assert.match(failed.warning,/login missing/);
 });
 test('independent Codex homes cannot overlap the canonical effective native home',async t=>{
@@ -277,6 +315,7 @@ test('independent Codex homes cannot overlap the canonical effective native home
  const config={...routingPolicy,connections:{...routingPolicy.connections,overlap:{billing:'paid',home:native,baseUrl:'https://example.com',apiKeyEnv:'YAM_ISOLATION_KEY'},other:{billing:'subscription',home:independent}}};
  const listed=await routes.codexCatalog({config,codex:process.execPath,cwd:'/elsewhere'}, {inspect:async()=>available});
  assert.deepEqual(listed.models.map(model=>model.key),['native/light','other/light']);
+ assert.deepEqual(listed.checkedConnections,['native','other']);
  assert.match(listed.warning,/overlap: Codex connection must use a separate CODEX_HOME/);
 });
 
@@ -516,6 +555,7 @@ test('local Codex gateway reads DeepSeek capabilities instead of the OpenAI cata
  const config={...routingPolicy,connections:{...routingPolicy.connections,local:{billing:'paid',gateway:true,baseUrl:'http://127.0.0.1:'+server.address().port}}};
  const result=await routes.codexCatalog({config,codex:process.execPath,cwd:'/tmp'}, {inspect:async()=>[]});
  assert.equal(requests,1);assert.equal(result.models[0].key,'local/deepseek/deepseek-v4-pro');assert.deepEqual(result.models[0].levels,['off','low','high','max']);assert.equal(result.models[0].cli,'codex');
+ assert.deepEqual(result.checkedConnections,['native','local']);
  const {readCodexPolicy}=await import('../src-tauri/pi/codex-route-config.mjs');
  for(const baseUrl of ['http://192.168.1.1:3425','http://127.0.0.1:3425/?token=bad','http://user:secret@localhost:3425'])assert.throws(()=>readCodexPolicy(JSON.stringify({...config,connections:{...config.connections,local:{billing:'paid',gateway:true,baseUrl}}})),/gateway/i);
 });
@@ -715,11 +755,71 @@ test('acknowledged failed and interrupted outcomes restore once per runtime and 
 
 test('queued native policy persists and settles when a turn ends, including terminal history recovery',async()=>{
  for(const status of ['completed','interrupted','failed']){
-  let settled=0;const saved=[];let router;
-  router=routes.createCodexTurnRouter({config:routingPolicy,connectionName:'native',models:catalog,initial:{threadId:'main',status:'working',turnId:'one'},save:async s=>saved.push(s),onSettled:async()=>{if(router.state.pendingPolicy){settled++;await router.queuePolicy(null);}}});
-  await router.queuePolicy({});assert.deepEqual(saved.at(-1).pendingPolicy,{});assert.equal(settled,0);
-  await router.event({method:'turn/completed',params:{threadId:'main',turn:{id:'one',status}}});assert.equal(settled,1);assert.equal(router.state.pendingPolicy,null);
+  const saved=[];
+  const router=routes.createCodexTurnRouter({config:routingPolicy,connectionName:'native',models:catalog,initial:{threadId:'main',status:'working',turnId:'one'},save:async s=>saved.push(s)});
+  await router.queuePolicy({});await router.settlePolicy();assert.deepEqual(saved.at(-1).pendingPolicy,{});assert.equal(router.state.enabled,true);
+  await router.event({method:'turn/completed',params:{threadId:'main',turn:{id:'one',status}}});await router.settlePolicy();assert.equal(router.state.enabled,false);assert.equal(router.state.pendingPolicy,null);
  }
+});
+
+test('live policy checks the fresh catalog and retains the previous policy when rejected',async()=>{
+ const old={...routingPolicy,classifiers:[],model:'native/light',effort:'high'};
+ const requested={...old,model:'native/new'};
+ const policy={id:'new',name:'New model',config:JSON.stringify(requested)};
+ const newModel={key:'native/new',levels:['high']};
+ for(const [checkedConnections,rows,reason] of [
+  [[],[],/catalog unavailable/],
+  [['native'],catalog,/model unavailable/],
+  [['native'],[...catalog,{...newModel,levels:['medium']}],/unsupported reasoning/],
+  [['native'],[...catalog,newModel],null],
+ ]){
+  let scans=0;const saved=[];
+  const router=routes.createCodexTurnRouter({config:old,connectionName:'native',models:catalog,initial:{threadId:'main'},save:async state=>saved.push(state),
+   loadCatalog:async next=>{scans++;assert.deepEqual(next,requested);return {models:rows,checkedConnections};}});
+  await router.queuePolicy(policy);await router.settlePolicy();
+  assert.equal(scans,1);
+  assert.equal(router.state.pendingPolicy,null);
+  assert.equal(router.state.policyId,reason?null:'new');
+  if(reason)assert.match(router.state.error,reason);
+  assert.equal(saved.at(-1).config.model,reason?'native/light':'native/new');
+  const turn=await router.request({id:1,method:'turn/start',params:{threadId:'main',input:[]}});
+  assert.equal(turn.params.model,reason?'light':'new');
+ }
+});
+
+test('cancelling a live policy while its catalog is loading discards the late result',async()=>{
+ let entered,release;
+ const started=new Promise(resolve=>entered=resolve),result=new Promise(resolve=>release=resolve);
+ const old={...routingPolicy,classifiers:[],model:'native/light',effort:'high'};
+ const router=routes.createCodexTurnRouter({config:old,connectionName:'native',models:catalog,initial:{threadId:'main'},
+  loadCatalog:()=>{entered();return result;}});
+ await router.queuePolicy({id:'new',name:'New model',config:JSON.stringify({...old,model:'native/deep'})});
+ const applying=router.settlePolicy();
+ assert.equal(await Promise.race([started.then(()=>true),applying.then(()=>false)]),true);
+ await router.queuePolicy(null);
+ release({models:catalog,checkedConnections:['native']});await applying;
+ assert.equal(router.state.pendingPolicy,null);
+ assert.equal(router.state.policyId,null);
+ assert.equal((await router.request({id:1,method:'turn/start',params:{threadId:'main',input:[]}})).params.model,'light');
+});
+
+test('a failed strategy write keeps the current policy and its catalog until the change is saved',async()=>{
+ const old={...routingPolicy,classifiers:[],model:'native/light',effort:'high'};
+ const next={...old,model:'native/new'},fresh={key:'native/new',levels:['high']};
+ let fail=true;
+ const router=routes.createCodexTurnRouter({config:old,connectionName:'native',models:catalog,initial:{threadId:'main'},
+  loadCatalog:async()=>({models:[...catalog,fresh],checkedConnections:['native']}),
+  save:async state=>{if(state.policyId==='new'&&fail)throw Error('strategy state unavailable');}});
+ await router.queuePolicy({id:'new',name:'New model',config:JSON.stringify(next)});
+ await assert.rejects(router.settlePolicy(),/strategy state unavailable/);
+ assert.equal(router.state.config.model,'native/light');
+ assert.equal(router.state.pendingPolicy.id,'new');
+ assert.equal(router.models.includes(fresh),false);
+ fail=false;
+ await router.settlePolicy();
+ assert.equal(router.state.config.model,'native/new');
+ assert.equal(router.state.pendingPolicy,null);
+ assert.equal(router.models.includes(fresh),true);
 });
 
 test('persisted native pending policy validates the original connection and survives cancelled classification',async()=>{

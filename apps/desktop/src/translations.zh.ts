@@ -354,6 +354,7 @@ export const zh:Record<string,string>={
  "Magpie via Pi":"Pi 中的 Magpie",
  "Automatic routing":"自动路由",
  "Saved model unavailable":"已保存的模型暂不可用",
+ "Model catalog unavailable":"暂时无法查询模型目录",
  "Current selection":"当前已选",
  "Other Pi connections":"Pi 其他连接",
  "Model catalog source":"模型目录来源",
