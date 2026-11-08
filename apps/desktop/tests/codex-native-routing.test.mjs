@@ -17,6 +17,70 @@ const coding={...newAnswer,task:'coding',action:'write',readOnly:false};
 const workspaceSandbox={type:'workspaceWrite',writableRoots:['/tmp/approved'],networkAccess:false,excludeTmpdirEnvVar:true,excludeSlashTmp:true};
 const nativeSettings={cwd:'/tmp/native',approvalPolicy:'on-request',approvalsReviewer:'user',sandbox:workspaceSandbox,runtimeWorkspaceRoots:['/tmp/native'],disabledPluginIds:['plugin-a']};
 
+test('native null turn overrides preserve confirmed permissions before switching connections',async()=>{
+ for(const permissions of [null,'restricted-project']){
+  let answer=coding,switched;
+  const collaborationMode={mode:'plan',settings:{model:'old',reasoning_effort:'high',developer_instructions:'keep plan'}};
+  const router=routes.createCodexTurnRouter({config:mixedPolicy,connectionName:'local',models:mixedCatalog,
+   classify:async()=>({answer,source:'A'}),switchConnection:async change=>{switched=change;}});
+  await router.request({id:1,method:'thread/start',params:{}});
+  await router.event({id:1,result:{thread:{id:'main'},modelProvider:'yam_route',...nativeSettings,
+   activePermissionProfile:permissions?{id:permissions,extends:null}:null,collaborationMode,serviceTier:'fast'}});
+  const inherited={cwd:null,runtimeWorkspaceRoots:null,approvalPolicy:null,approvalsReviewer:null,
+   sandboxPolicy:null,permissions:null,disabledPluginIds:null,collaborationMode:null,serviceTier:null};
+  const turn=id=>({id,method:'turn/start',params:{threadId:'main',input:[{type:'text',text:'independent task'}],...inherited}});
+  await router.request(turn(2));
+  await router.event({method:'turn/started',params:{threadId:'main',turn:{id:'first'}}});
+  await router.event({method:'turn/completed',params:{threadId:'main',turn:{id:'first',status:'completed'}}});
+  answer=newAnswer;
+  const next=await router.request(turn(3));
+  assert.equal(switched.connection.name,'native');
+  assert.equal(switched.settings.cwd,nativeSettings.cwd);
+  assert.equal(switched.settings.approvalPolicy,'on-request');
+  assert.equal(switched.settings.approvalsReviewer,'user');
+  assert.deepEqual(switched.settings.sandboxPolicy,workspaceSandbox);
+  assert.equal(switched.settings.permissions,permissions);
+  assert.deepEqual(next.params.runtimeWorkspaceRoots,nativeSettings.runtimeWorkspaceRoots);
+  assert.deepEqual(next.params.disabledPluginIds,nativeSettings.disabledPluginIds);
+  assert.equal(next.params.collaborationMode.mode,'plan');
+  assert.equal(next.params.collaborationMode.settings.developer_instructions,'keep plan');
+  assert.equal(next.params.collaborationMode.settings.model,'light');
+  assert.equal(next.params.serviceTier,null);
+  if(permissions)assert.equal(next.params.permissions,permissions);
+  else assert.deepEqual(next.params.sandboxPolicy,workspaceSandbox);
+ }
+});
+
+test('native routing still refuses switching without confirmed permission settings',async()=>{
+ let switched=false;
+ const router=routes.createCodexTurnRouter({config:mixedPolicy,connectionName:'local',models:mixedCatalog,
+  classify:async()=>({answer:newAnswer,source:'A'}),switchConnection:async()=>{switched=true;}});
+ await router.request({id:1,method:'thread/start',params:{}});
+ await router.event({id:1,result:{thread:{id:'main'},modelProvider:'yam_route',cwd:'/tmp/native'}});
+ await assert.rejects(router.request({id:2,method:'turn/start',params:{threadId:'main',input:[],sandboxPolicy:null}}),/permissions are unavailable/);
+ assert.equal(switched,false);assert.equal(router.state.connectionSwitch,null);
+});
+
+test('native connection switches hide their internal close while forwarding normal thread closure',async()=>{
+ let entered,release;
+ const switching=new Promise(resolve=>entered=resolve),resume=new Promise(resolve=>release=resolve);
+ const router=routes.createCodexTurnRouter({config:mixedPolicy,connectionName:'local',models:mixedCatalog,
+  classify:async()=>({answer:newAnswer,source:'A'}),switchConnection:async()=>{entered();await resume;}});
+ const closed=threadId=>({method:'thread/closed',params:{threadId}});
+ await router.request({id:1,method:'thread/start',params:{}});
+ await router.event({id:1,result:{thread:{id:'main'},modelProvider:'yam_route',...nativeSettings}});
+ assert.equal(router.filterEvent(closed('main')),true);
+ const pending=router.request({id:2,method:'turn/start',params:{threadId:'main',input:[]}});
+ await switching;
+ try{
+  assert.equal(router.filterEvent(closed('main')),false);
+  assert.equal(router.filterEvent(closed('other')),true);
+  assert.equal(router.filterEvent({id:'internal-resume',result:{thread:{id:'main'}}}),true);
+  assert.equal(router.filterEvent({method:'turn/completed',params:{threadId:'main',turn:{id:'previous',status:'completed'}}}),true);
+ }finally{release();await pending;}
+ assert.equal(router.filterEvent(closed('main')),true);
+});
+
 test('native routing switches subscription to gateway and back on one thread after independent classification',async()=>{
  const selected=[],states=[],requests=[];
  let answer=newAnswer;
@@ -397,17 +461,28 @@ test('interrupts pass while a native turn is waiting for classification',async t
 });
 test('native routing bar renders planned and dispatched models and switches Codex policies',async()=>{
  const {readFileSync}=await import('node:fs'),{createRequire}=await import('node:module');
+ const {codexRoutingConfig,compatibleRoutingPolicies}=await import('../src/routing-policies.ts');
+ const {piModelCatalogSource}=await import('../src/pi-routing.ts');
  const ts=createRequire(new URL('../package.json',import.meta.url))('typescript');
  const source=ts.createSourceFile('PiRouting.tsx',readFileSync(new URL('../src/PiRouting.tsx',import.meta.url),'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
  const declaration=source.statements.find(n=>n.name?.text==='NativeCodexRoutingBar');assert.ok(declaration);
  const state={generation:'g',revision:8,phase:'working',enabled:true,name:'Current',policyId:null,target:{model:'native/light',effort:'medium'},dispatched:{model:'native/light',effort:'medium'}};
  const slots=[state,null,false],React={createElement:(type,props,...children)=>({type,props:props??{},children:children.flat(Infinity)})};let at=0;const calls=[];
- const component=new Function('React','useState','useEffect','useRef','Select','t','compatibleRoutingPolicies',ts.transpileModule(declaration.getText(source).replace(/^export /,''),{compilerOptions:{target:ts.ScriptTarget.ESNext,jsx:ts.JsxEmit.React}}).outputText+';return NativeCodexRoutingBar;')(React,initial=>{const i=at++;if(!(i in slots))slots[i]=initial;return [slots[i],value=>slots[i]=value];},()=>{},{},'select',(value,args)=>value.replace(/{{(.*?)}}/g,(_,key)=>args?.[key]??key),(rows,adapter)=>rows.filter(row=>row.adapter===adapter));
- const tree=component({sessionId:'s',generation:'g',active:true,available:true,invoke:async(command,args)=>{calls.push({command,args});return {state};},policies:[{id:'c',name:'Codex policy',adapter:'codex',setup:'{}'},{id:'p',name:'Pi policy',adapter:'pi',setup:'{}'}]});
+ const helper=source.statements.find(n=>ts.isFunctionDeclaration(n)&&n.name?.text==='routingModelPresentation');
+ const component=new Function('React','useState','useEffect','useRef','Select','t','compatibleRoutingPolicies','codexRoutingConfig','piModelCatalogSource',ts.transpileModule(helper.getText(source)+'\n'+declaration.getText(source).replace(/^export /,''),{compilerOptions:{target:ts.ScriptTarget.ESNext,jsx:ts.JsxEmit.React}}).outputText+';return NativeCodexRoutingBar;')(React,initial=>{const i=at++;if(!(i in slots))slots[i]=initial;return [slots[i],value=>slots[i]=value];},()=>{},{},'select',(value,args)=>value.replace(/{{(.*?)}}/g,(_,key)=>args?.[key]??key),compatibleRoutingPolicies,codexRoutingConfig,piModelCatalogSource);
+ const saved=JSON.stringify(routingPolicy);
+ const render=(next=state,launchConfig)=>{at=0;slots[0]=next;return component({sessionId:'s',generation:'g',active:true,available:true,launchConfig,invoke:async(command,args)=>{calls.push({command,args});return {state};},policies:[{id:'c',name:'Codex policy',adapter:'codex',setup:saved},{id:'p',name:'Pi policy',adapter:'pi',setup:'{}'}]});};
+ const tree=render();
  const all=n=>[n,...(n?.children??[]).filter(x=>x&&typeof x==='object').flatMap(all)];
  assert.match(JSON.stringify(tree),/Dispatched model: native\/light/);assert.doesNotMatch(JSON.stringify(tree),/Pi policy/);
+ const gateway='yam-codex/auto/deepseek-v4-flash',launchConfig=JSON.stringify({...mixedPolicy,connections:{native:routingPolicy.connections.native,'yam-codex':mixedPolicy.connections.local},executionGroups:[{small:gateway,medium:gateway,strong:'native/deep'}]});
+ const dispatched=JSON.stringify(render({...state,dispatched:{model:gateway,effort:'high'}},launchConfig));
+ assert.match(dispatched,/Dispatched model: Local gateway · Automatic routing · deepseek-v4-flash · high/);
+ assert.doesNotMatch(dispatched,/yam-codex/);
+ const planned=JSON.stringify(render({...state,policyId:'c',dispatched:null}));
+ assert.match(planned,/Selected for this turn: Codex native · ChatGPT subscription · light · medium/);
  await all(tree).find(n=>n.type==='select').props.onChange({target:{value:'c'}});
- assert.equal(calls[0].args.request.revision,8);assert.deepEqual(calls[0].args.request.data,{policy:{id:'c',name:'Codex policy',config:'{}'}});
+ assert.equal(calls[0].args.request.revision,8);assert.deepEqual(calls[0].args.request.data,{policy:{id:'c',name:'Codex policy',config:saved}});
 });
 test('local Codex gateway reads DeepSeek capabilities instead of the OpenAI catalog',async t=>{
  const {createServer}=await import('node:http');let requests=0;

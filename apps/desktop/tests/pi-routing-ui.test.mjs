@@ -819,6 +819,7 @@ test('new session strategy selector offers saved Pi and Codex strategies and gat
  const pi=all(render({...props,adapter:'pi'})),selector=pi.find(node=>node.type==='select');
  assert.equal(selector.props.disabled,false);
  assert.deepEqual(pi.filter(node=>node.type==='option').map(node=>node.props.value),['',policies[0].id]);
+ assert.match(JSON.stringify(pi),/Choose a saved strategy to enable automatic routing/);
  selector.props.onChange({target:{value:policies[0].id}});
  assert.equal(changed,policies[0].id);
  pi.find(node=>node.type==='button').props.onClick();
@@ -826,6 +827,10 @@ test('new session strategy selector offers saved Pi and Codex strategies and gat
  const codex=all(render({...props,adapter:'codex'})),codexSelector=codex.find(node=>node.type==='select');
  assert.equal(codexSelector.props.disabled,false);
  assert.deepEqual(codex.filter(node=>node.type==='option').map(node=>node.props.value),['','codex-local']);
+ assert.match(JSON.stringify(codex),/Choose a saved strategy to enable automatic routing/);
+ assert.doesNotMatch(JSON.stringify(codex),/Save a Codex strategy/);
+ assert.match(JSON.stringify(render({...props,adapter:'codex',policies:legacy})),/Save a Codex strategy/);
+ assert.match(JSON.stringify(render({...props,adapter:'codex',policies:legacy,choice:api.launchRoutingPolicy,launchPolicy:true})),/This strategy starts a YAM-managed Codex terminal/);
  codexSelector.props.onChange({target:{value:'codex-local'}});
  assert.equal(changed,'codex-local');
  const opencode=all(render({...props,adapter:'opencode'}));

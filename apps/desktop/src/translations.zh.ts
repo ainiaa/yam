@@ -468,6 +468,7 @@ export const zh:Record<string,string>={
  "Paste a standalone Codex routing configuration with isolated connection directories. Use environment variable names for API keys.":"粘贴独立 Codex 路由配置，并为每条连接指定隔离目录。API 密钥只填写环境变量名。",
  "This strategy starts a YAM-managed Codex terminal.":"此策略会启动 YAM 托管的 Codex 终端。",
  "Save a Codex strategy in settings to use it here.":"请先在设置里保存一套 Codex 策略，再在这里选择。",
+ "Choose a saved strategy to enable automatic routing.":"选择已保存策略以启用自动路由。",
  "A managed Codex strategy requires a direct launch with no additional CLI options or connection overrides.":"使用 Codex 路由策略时，请直接启动会话，并清除额外的 CLI 参数或连接覆盖。",
  "Paste a single line of plain text into a managed Codex terminal, then press Enter.":"请在托管 Codex 终端粘贴一行纯文本，然后按回车提交。",
  "Saved routing strategy":"已保存的路由策略",

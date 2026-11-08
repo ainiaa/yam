@@ -306,7 +306,8 @@ export function RoutingPolicyChoice({adapter,policies,choice,launchPolicy,invali
   </Select></label>
   {!supported&&<p className="settings-help">{t('Automatic routing is not yet available for this CLI in the desktop app.')}</p>}
   {policy&&<p className="settings-help">{t('{{count}} classifier candidates · {{tiers}} execution tiers',{count:1+(policy.classifierFallbacks?.length??0),tiers:policy.medium?3:2})}</p>}
-  {supported&&adapter==='codex'&&<p className="settings-help">{t(selected?'This strategy starts a YAM-managed Codex terminal.':'Save a Codex strategy in settings to use it here.')}</p>}
+  {available.length>0&&!choice&&<p className="settings-help">{t('Choose a saved strategy to enable automatic routing.')}</p>}
+  {supported&&adapter==='codex'&&(selected||choice===launchRoutingPolicy?<p className="settings-help">{t('This strategy starts a YAM-managed Codex terminal.')}</p>:!available.length&&<p className="settings-help">{t('Save a Codex strategy in settings to use it here.')}</p>)}
   {invalid&&<p role="alert">{t('Choose a valid routing strategy or disable routing.')}</p>}
   <button type="button" onClick={onManage}>{t('Manage routing strategies')}</button>
  </div>;
@@ -554,7 +555,7 @@ export function PiTaskRules({rules,disabled,onApply,onPreview}:{rules:TaskRules;
 }
 
 type NativeCodexRoutingState={generation:string;revision:number;phase:string;enabled:boolean;name:string;policyId:string|null;pending?:{id:string|null;name:string}|null;target?:{model:string;effort:string}|null;dispatched?:{model:string;effort:string;rerouted?:boolean}|null;error?:string|null};
-export function NativeCodexRoutingBar({sessionId,generation,active,available,invoke,policies=[]}:{sessionId:string;generation:string;active:boolean;available:boolean;invoke:Invoke;policies?:RoutingPolicy[]}){
+export function NativeCodexRoutingBar({sessionId,generation,active,available,invoke,policies=[],launchConfig}:{sessionId:string;generation:string;active:boolean;available:boolean;invoke:Invoke;policies?:RoutingPolicy[];launchConfig?:string}){
  const [state,setState]=useState<NativeCodexRoutingState|null>(null),[error,setError]=useState<string|null>(null),[busy,setBusy]=useState(false);
  useEffect(()=>{
   let stopped=false;let timer:ReturnType<typeof setTimeout>;
@@ -566,6 +567,10 @@ export function NativeCodexRoutingBar({sessionId,generation,active,available,inv
   void read();return()=>{stopped=true;clearTimeout(timer);};
  },[sessionId,generation,active,available,invoke]);
  const choices=compatibleRoutingPolicies(policies,'codex'),current=state?.pending?(state.pending.id??''):state?.enabled?(state.policyId??'launch-config'):'';
+ const setup=launchConfig??choices.find(row=>row.id===state?.policyId)?.setup;
+ let connections:CodexConnections|undefined;
+ try{if(setup)connections=codexRoutingConfig(setup).connections;}catch{}
+ const modelLabel=(key:string)=>connections&&Object.prototype.hasOwnProperty.call(connections,key.split('/',1)[0])?routingModelPresentation(key,undefined,connections).label:key;
  async function control(data:unknown){
   if(!state||busy)return;setBusy(true);setError(null);
   try{const result=await invoke<{state:NativeCodexRoutingState;controlFailure?:unknown}>('pi_routing_control',{sessionId,generation,request:{action:'mode',revision:state.revision,data}});if(result.controlFailure)throw Error('Routing result unknown; refresh state before retrying');setState(result.state);}
@@ -574,7 +579,7 @@ export function NativeCodexRoutingBar({sessionId,generation,active,available,inv
  return <section className="pi-routing-bar" aria-label={t('Codex automatic routing')}>
   <div className="pi-routing-status"><strong>{t('Codex routing')}</strong>
    <span role="status">{t(!available?'Background unavailable':!active?'Session ended':!state?'Waiting for routing state…':!state.enabled?'Routing is off':state.phase==='classifying'?'Choosing a model…':'Native Codex session')}</span>
-   {state?.dispatched?<span>{t('Dispatched model: {{value0}} · {{value1}}',{value0:state.dispatched.model,value1:state.dispatched.effort==='unknown'?t('Reasoning not confirmed'):state.dispatched.effort})}{state.dispatched.rerouted&&` · ${t('Changed by the model service')}`}</span>:state?.target&&<span>{t('Selected for this turn: {{value0}} · {{value1}}',{value0:state.target.model,value1:state.target.effort})}</span>}
+   {state?.dispatched?<span>{t('Dispatched model: {{value0}} · {{value1}}',{value0:modelLabel(state.dispatched.model),value1:state.dispatched.effort==='unknown'?t('Reasoning not confirmed'):state.dispatched.effort})}{state.dispatched.rerouted&&` · ${t('Changed by the model service')}`}</span>:state?.target&&<span>{t('Selected for this turn: {{value0}} · {{value1}}',{value0:modelLabel(state.target.model),value1:state.target.effort})}</span>}
   </div>
   <label><span>{t('Session routing strategy')}</span><Select aria-label={t('Session routing strategy')} value={current} disabled={!state||!active||!available||busy||!!error} onChange={event=>{const policy=choices.find(row=>row.id===event.target.value);return control({policy:policy?{id:policy.id,name:policy.name,config:policy.setup}:null});}}>
    <option value="">{t('Do not enable routing')}</option>

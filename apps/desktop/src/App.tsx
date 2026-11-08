@@ -3673,7 +3673,7 @@ function App() {
                     : t("Memory sampling unavailable or incomplete. Refreshes every 5 seconds while visible.")}>{memoryLabel(memory,Date.now(),t)}</span>
         </footer>
 
-        {session?.launch?.adapter==="codex"&&session.launch.codex?.route&&currentAgent?.phase!=="shell"&&<NativeCodexRoutingBar key={`${session.session_id}:${currentAgent?.generation??''}`} sessionId={session.session_id} generation={currentAgent?.generation??''} active={isRunning} available={ownerConnectionAvailable.current.available} invoke={invoke} policies={routingPolicyLibrary.rows}/>}
+        {session?.launch?.adapter==="codex"&&session.launch.codex?.route&&currentAgent?.phase!=="shell"&&<NativeCodexRoutingBar key={`${session.session_id}:${currentAgent?.generation??''}`} sessionId={session.session_id} generation={currentAgent?.generation??''} active={isRunning} available={ownerConnectionAvailable.current.available} invoke={invoke} policies={routingPolicyLibrary.rows} launchConfig={session.launch.codex.route.config}/>}
         {session?.launch?.adapter==="pi"&&currentAgent?.phase!=="shell"&&<PiRoutingBar key={`${session.session_id}:${currentAgent?.generation??''}`} sessionId={session.session_id} generation={currentAgent?.generation??''} active={isRunning} available={ownerConnectionAvailable.current.available} invoke={invoke} policies={routingPolicyLibrary.rows}/>}
         <section
           className={`terminal-area ${terminalLayout.panes.some(Boolean) ? "" : "terminal-empty"} ${terminalLayout.mode==="single"&&!terminalLayout.panes.some(Boolean)?"terminal-whole-empty":""}`}

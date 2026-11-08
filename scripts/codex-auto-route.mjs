@@ -40,13 +40,14 @@ export function createCodexTurnRouter({config,connectionName,models,classify,swi
  let policy=readCodexPolicy(JSON.stringify(config)),state={v:2,status:'idle',...initial,connectionName},classifying=null,enabled=true;
  let recoveringSwitch=!!initial.connectionSwitch,pendingSettings=null;
  const settings={};
- function rememberSettings(source){
-  for(const key of stickyFields)if(Object.prototype.hasOwnProperty.call(source,key))settings[key]=source[key];
-  if(source.sandbox!==undefined&&typeof source.sandbox==='object')settings.sandboxPolicy=source.sandbox;
+ function rememberSettings(source,patch=false){
+  // Native turn requests use null to inherit; only serviceTier supports an explicit null reset.
+  for(const key of stickyFields)if(Object.prototype.hasOwnProperty.call(source,key)&&(!patch||source[key]!=null||key==='serviceTier'&&source[key]===null))settings[key]=source[key];
+  if(source.sandbox&&typeof source.sandbox==='object')settings.sandboxPolicy=source.sandbox;
   if(source.activePermissionProfile!==undefined)settings.permissions=source.activePermissionProfile?.id?.startsWith(':')?null:source.activePermissionProfile?.id??null;
   else if(source.sandboxPolicy&&!source.permissions)settings.permissions=null;
  }
- const acceptSettings=()=>{if(pendingSettings)rememberSettings(pendingSettings);pendingSettings=null;};
+ const acceptSettings=()=>{if(pendingSettings)rememberSettings(pendingSettings,true);pendingSettings=null;};
  const starts=new Map();let writes=Promise.resolve(),activeRequestId=null,recoveryHistory=null;
  const checkPending=next=>{
   if(next===null||next===undefined)return;
@@ -70,7 +71,11 @@ export function createCodexTurnRouter({config,connectionName,models,classify,swi
  };
  return {
   get state(){return structuredClone(state);},
-  get switchingThreadId(){return state.connectionSwitch?state.threadId:null;},
+  filterEvent(message){
+   const params=message.params;
+   return !state.connectionSwitch||params?.threadId!==state.threadId||
+    !(message.method==='thread/closed'||message.method==='thread/settings/updated'||message.method==='thread/status/changed'&&['idle','notLoaded'].includes(params.status?.type));
+  },
   setPolicy(next){const checked=readCodexPolicy(JSON.stringify(next));if(!isDeepStrictEqual(policy,checked))state={...state,previous:null,previousPrompt:''};policy=checked;},
   async queuePolicy(next){checkPending(next);await publish({pendingPolicy:next});await settle();},
   async acknowledgeLifecycle(marker){await publish({lifecycleAcknowledged:marker});},
@@ -128,7 +133,7 @@ export function createCodexTurnRouter({config,connectionName,models,classify,swi
     if(selected.connection.name!==connectionName){
      const sticky=structuredClone(settings);
      if(!sticky.cwd||sticky.approvalPolicy==null||!sticky.approvalsReviewer||!sticky.sandboxPolicy)throw Error('Codex thread permissions are unavailable; connection was not changed');
-     for(const key of stickyFields)if(!['sandboxPolicy','permissions'].includes(key)&&next[key]===undefined&&sticky[key]!==undefined)next[key]=sticky[key];
+     for(const key of stickyFields)if(!['sandboxPolicy','permissions'].includes(key)&&next[key]==null&&(key!=='serviceTier'||next[key]===undefined)&&sticky[key]!==undefined)next[key]=sticky[key];
      if(params.permissions==null&&params.sandboxPolicy==null){
       if(sticky.permissions)next.permissions=sticky.permissions;
       else next.sandboxPolicy=sticky.sandboxPolicy;
@@ -164,7 +169,7 @@ export function createCodexTurnRouter({config,connectionName,models,classify,swi
     if(thread?.id){
      if(switchConnection&&message.result.modelProvider!==mixedCodexProvider)throw Error('Codex did not load the prepared mixed connection');
      const same=thread.id===state.threadId;
-     rememberSettings(start.params);rememberSettings(message.result);
+     rememberSettings(start.params,true);rememberSettings(message.result);
      await publish({threadId:thread.id,...typeof message.result.model==='string'?{nativeModel:{model:message.result.model,effort:message.result.reasoningEffort==='none'?'off':message.result.reasoningEffort??null}}:{},...same?{}:{previous:null,previousPrompt:'',status:'idle',turnId:null,pendingAfterTurnId:thread.turns?.at(-1)?.id??(start.method==='thread/start'?null:undefined)}});
      const last=thread.turns?.at(-1);
      if(same&&recoveringSwitch&&message.result.modelProvider===mixedCodexProvider){
@@ -585,11 +590,7 @@ export async function runNativeCodex({codex,cwd,session,config,prompt}){
   const syncLifecycle=async()=>{try{await lifecycle.sync(router.state);bridgeError=null;}catch(error){bridgeError=error.message;throw error;}finally{controls.publish();}};
   let starting=true;
   relay=await createNativeRelay({socketPath:join(runtime,'relay.sock'),backendPath:socketPath,
-   filterEvent:message=>{
-    const threadId=router.switchingThreadId,params=message.params;
-    return !threadId||params?.threadId!==threadId||
-     !(message.method==='thread/settings/updated'||message.method==='thread/status/changed'&&['idle','notLoaded'].includes(params.status?.type));
-   },
+   filterEvent:message=>router.filterEvent(message),
    onRequest:async(message,context)=>{
     if(message.method==='turn/start'&&message.params?.threadId===router.state.threadId){
      if(mixed&&permissions.size)throw Error('Resolve the pending Codex approval before starting another turn');
