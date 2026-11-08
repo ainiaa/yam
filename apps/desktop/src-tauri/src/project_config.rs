@@ -103,7 +103,7 @@ fn validate_settings(value: &Value, template: bool) -> Result<(), String> {
             }
             let options: crate::codex_context::Options = serde_json::from_value(value.clone())
                 .map_err(|_| code("project_config_invalid"))?;
-            if options.context.is_some() {
+            if options.context.is_some() || options.route.is_some() {
                 return Err(code("project_config_invalid"));
             }
         } else if key == "provider" {

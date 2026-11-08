@@ -35,6 +35,17 @@ test('R3B load more preserves content and scroll anchor, toggle keeps position, 
 test('R3B empty, unavailable, disconnected and unsupported histories preserve terminal guidance',async()=>{
  const f=fixture();f.props.visible=true;f.refresh();f.resolve([],{next_cursor:null});await tick();f.refresh();assert.match(f.text,/No saved messages/);f.props.scope='unsupported';f.refresh();f.pending.at(-1).reject('conversation_unsupported');await tick();f.refresh();assert.match(f.text,/conversation_unsupported/);assert.match(f.text,/Terminal/);assert.ok(f.button('Retry conversation'));f.props.available=false;f.refresh();assert.match(f.text,/Background connection unavailable/);f.props.available=true;f.props.target=null;f.refresh();assert.match(f.text,/verified local Codex/);f.cleanup();
 });
+test('a Codex conversation awaiting trusted hooks explains how to reconnect without reading an unverified history',()=>{
+ const f=fixture();
+ Object.assign(f.props,{visible:true,target:null,awaitingCodexHooks:true});
+ f.refresh();f.refresh();
+ assert.match(f.text,/\/hooks.*review.*YAM.*restart Codex/i);
+ assert.ok(f.button('Open Terminal'));
+ assert.deepEqual(f.calls,[]);
+ f.props.available=false;f.refresh();assert.doesNotMatch(f.text,/\/hooks/);
+ f.props.available=true;f.props.awaitingCodexHooks=false;f.refresh();assert.match(f.text,/verified local Codex/);
+ f.cleanup();
+});
 test('R3B close and unmount cancel reading and fence late component updates',async()=>{
  const f=fixture();f.props.visible=true;f.refresh();f.props.visible=false;f.refresh();assert.ok(f.calls.some(c=>c[0]==='cancel_codex_conversation'));f.resolve([item('late')]);await tick();f.refresh();assert.doesNotMatch(f.text,/text-late/);f.props.visible=true;f.refresh();f.cleanup();const before=f.updates;f.resolve();await tick();assert.equal(f.updates,before);
 });

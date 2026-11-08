@@ -1,12 +1,25 @@
 // Author: Jeff.Liu. Headless native persistence acceptance; no provider traffic or personal profile.
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
+import {spawnSync} from 'node:child_process';
 import {existsSync,mkdtempSync,rmSync} from 'node:fs';
 import {homedir,tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {pathToFileURL} from 'node:url';
+import {fileURLToPath,pathToFileURL} from 'node:url';
 import install from '../src-tauri/pi/router.mjs';
 const sdk=process.env.YAM_PI_SDK_DIR??join(homedir(),'.npm-global/lib/node_modules/@earendil-works/pi-coding-agent');
+const piCli=join(sdk,'dist/bundle/cli.js');
+test('Pi CLI loads the routing extension and confirms its local runtime without credentials',{skip:!existsSync(piCli)},()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'yam-pi-runtime-'));
+ try{
+  const entry=fileURLToPath(new URL('../src-tauri/pi/entry.ts',import.meta.url));
+  const args=[piCli,'--mode','rpc','--no-extensions','--no-skills','--no-context-files','--no-prompt-templates','--offline','--no-session','--extension',entry,'--yam-runtime-probe'];
+  const result=spawnSync(process.execPath,args,{cwd,env:{PATH:process.env.PATH,PI_CODING_AGENT_DIR:join(cwd,'agent')},stdio:['ignore','pipe','pipe'],encoding:'utf8',timeout:8000});
+  assert.equal(result.status,0,result.error?.message??result.stderr);
+  const response=result.stdout.trim().split('\n').map(line=>JSON.parse(line)).find(item=>item.type==='extension_ui_request'&&item.method==='notify');
+  assert.deepEqual(JSON.parse(response?.message??'{}'),{type:'yam_catalog',runtime:1});
+ }finally{rmSync(cwd,{recursive:true,force:true});}
+});
 test('Pi native replacement persists the upgraded answer, physical model, label and continuation floor together', {skip:!existsSync(join(sdk,'dist/index.js'))},async()=>{
  const {createAgentSession,DefaultResourceLoader,SessionManager,SettingsManager}=await import(pathToFileURL(join(sdk,'dist/index.js')));
  const cwd=mkdtempSync(join(tmpdir(),'yam-feedback-native-')),agentDir=join(cwd,'agent');
@@ -26,7 +39,7 @@ test('Pi native replacement persists the upgraded answer, physical model, label 
   await session.bindExtensions({});assert.ok(ctx);assert.ok(route);
   ctx.modelRegistry.complete=async(model,context)=>{
    calls++;requests.push(context);
-   return {role:'assistant',provider:'fixture',api:'openai-responses',model:model.id,content:[{type:'text',text:model.id==='small'?JSON.stringify({intent:'new',task:'answer',context:'independent',action:'none',depth:'normal',uncertain:false,readOnly:true}):'HTTP 404 means the requested resource was not found.'}],stopReason:'stop',timestamp:Date.now(),usage:{input:12,output:15,cacheRead:0,cacheWrite:0,totalTokens:27,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}}};
+   return {role:'assistant',provider:'fixture',api:'openai-responses',model:model.id,content:[{type:'text',text:model.id==='small'?JSON.stringify({intent:'new',task:'answer',context:'independent',action:'none',depth:'normal',uncertain:false,readOnly:true,requires:['text']}):'HTTP 404 means the requested resource was not found.'}],stopReason:'stop',timestamp:Date.now(),usage:{input:12,output:15,cacheRead:0,cacheWrite:0,totalTokens:27,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}}};
   };
   ctx.modelRegistry.streamSimple=(...args)=>({result:()=>ctx.modelRegistry.complete(...args)});
   const user={role:'user',content:'What does HTTP 404 mean?',timestamp:Date.now()};await session._handleAgentEvent({type:'message_end',message:user});

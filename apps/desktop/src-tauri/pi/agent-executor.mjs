@@ -95,7 +95,7 @@ export function validateAgentPrompt(prompt){
  if(typeof prompt!=='string'||!prompt.trim()||prompt.includes('\0'))throw nativeError('protocol-invalid','Invalid agent prompt');
  if(prompt.length>maxAgentPromptCharacters)throw nativeError('context-budget','Native handoff context exceeds the 128000 character budget; compact or split the task explicitly');
 }
-export function invocation(profile,{prompt,resume=null,sessionDirectory,imagePaths=[],imageSchema,images=[],mode='task',allowCollaboration=false}={}){
+export function invocation(profile,{prompt,resume=null,sessionDirectory,imagePaths=[],imageSchema,outputSchema,images=[],mode='task',allowCollaboration=false}={}){
  validateAgentPrompt(prompt);
  if(!isAbsolute(profile.executable??''))throw Error('Agent executable must be an absolute installed path');
  if(resume!==null&&!isNativeSessionId(resume))throw nativeError('protocol-invalid','Invalid child session ID');
@@ -125,7 +125,7 @@ export function invocation(profile,{prompt,resume=null,sessionDirectory,imagePat
   }
   if(resume)args.push('resume',resume);
   for(const path of imagePaths)args.push('--image',path);
-  if(imageSchema)args.push('--output-schema',imageSchema);
+  if(imageSchema||outputSchema)args.push('--output-schema',imageSchema??outputSchema);
   args.push('-');
  }else if(profile.kind==='claude'){
   args=['-p','--output-format','stream-json','--verbose','--permission-mode','default'];
@@ -243,6 +243,10 @@ export async function executeAgent(profile,options,runner=runProcess){
  if(options.mode==='readonly'){
   if(profile.kind!=='codex'||options.requires?.includes('image_generation'))throw nativeError('capability-unavailable','Read-only mode requires isolated native Codex inference');
   temporary=await mkdtemp(join(tmpdir(),'yam-codex-read-'));extra.cwd=temporary;
+  if(options.readonlySchema){
+   extra.outputSchema=join(temporary,'output-schema.json');
+   await writeFile(extra.outputSchema,JSON.stringify(options.readonlySchema),{mode:0o600});
+  }
  }
  if(images.length||options.requires?.includes('image_generation')){
   if(!isAbsolute(options.sessionDirectory??''))throw Error('Images require an owned session directory');

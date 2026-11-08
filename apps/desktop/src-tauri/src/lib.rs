@@ -10,6 +10,7 @@ mod codex_context;
 mod codex_conversation;
 #[cfg(any(target_os = "macos", test))]
 mod codex_outcome;
+mod codex_routing;
 mod desktop_windows;
 mod diagnostics;
 mod external_terminal;
@@ -219,6 +220,9 @@ fn parse_agent_args(input: &str) -> Result<Vec<String>, String> {
 
 fn agent_command(executable: &Path, launch: &AgentLaunch) -> Result<CommandBuilder, String> {
     codex_context::validate(launch)?;
+    if codex_routing::route(launch).is_some() {
+        return Err("Managed Codex routing requires a YAM terminal session".into());
+    }
     if launch.adapter == "pi" {
         return pi_router::command(executable, launch, false);
     }
@@ -425,6 +429,20 @@ fn terminal_reopen_launch(
         return Err("This terminal is already running".into());
     }
     validate_working_directory(&record.summary.cwd)?;
+    if let Some(mut launch) = record.summary.launch.clone() {
+        if let Some(route) = codex_routing::route(&launch) {
+            codex_context::validate(&launch)?;
+            if record.summary.command.is_some() {
+                return Err("Invalid managed Codex terminal history".into());
+            }
+            let id = route
+                .state
+                .clone()
+                .ok_or("Codex routing state is missing")?;
+            launch.prompt = None;
+            return Ok((Some(launch), Some(id)));
+        }
+    }
     if record.summary.command.is_none() && record.agent.agent_session_id.is_none() {
         if let Some(mut launch) = record.summary.launch.clone().filter(|launch| {
             matches!(launch.adapter.as_str(), "codex" | "claude") && launch.mode == "interactive"
@@ -4373,6 +4391,16 @@ fn create_session_with_effects<R: tauri::Runtime>(
     }
     if let Some(launch) = &mut launch {
         codex_context::assign_context(launch)?;
+        if let Some(route) = launch
+            .codex
+            .as_mut()
+            .and_then(|options| options.route.as_mut())
+        {
+            if route.state.is_some() || command.is_some() || project_source.is_some() {
+                return Err("Managed Codex routing state is assigned by YAM".into());
+            }
+            route.state = Some(gemini_resume::new_id()?);
+        }
     }
     if let Some(launch) = &launch {
         provider_launch::validate_project(launch, &initial_cwd)?;
@@ -4447,7 +4475,15 @@ fn create_session_with_effects<R: tauri::Runtime>(
                 return Err("Terminal is finishing; open it again after it has stopped".into());
             }
             let (launch, id) = terminal_reopen_launch(&record)?;
-            let claim = if id.is_some() {
+            let claim = if let Some(route) = launch.as_ref().and_then(codex_routing::route) {
+                Some(ResumeClaim::acquire(
+                    manager.resume_claims.clone(),
+                    route
+                        .state
+                        .as_deref()
+                        .ok_or("Codex routing state is missing")?,
+                )?)
+            } else if id.is_some() {
                 Some(
                     claim_resume_source(
                         &history,
@@ -4562,7 +4598,9 @@ fn create_session_with_effects<R: tauri::Runtime>(
             )
         })?;
         launch_executable = Some(executable.clone());
-        if let Some(id) = resume_id.as_deref() {
+        if codex_routing::route(launch).is_some() {
+            codex_routing::command(&executable, launch, &history.root)?
+        } else if let Some(id) = resume_id.as_deref() {
             let directory = Path::new(cwd.as_deref().ok_or("Resume directory is missing")?);
             if matches!(launch.adapter.as_str(), "claude" | "gemini") {
                 let default_home = app.path().home_dir().map_err(|error| error.to_string())?;
@@ -4645,6 +4683,9 @@ fn create_session_with_effects<R: tauri::Runtime>(
         .as_ref()
         .filter(|launch| launch.mode == "interactive")
         .map(|launch| {
+            if codex_routing::route(launch).is_some() {
+                return agent_bridge::Prepared::lifecycle();
+            }
             launch_executable
                 .as_deref()
                 .ok_or_else(|| "Agent executable unavailable".to_string())
@@ -4715,9 +4756,14 @@ fn create_session_with_effects<R: tauri::Runtime>(
             })
         })
         .transpose()?;
+    let managed_codex = summary
+        .launch
+        .as_ref()
+        .and_then(codex_routing::route)
+        .is_some();
     let restored = if let Some(record) = reopened
         .as_ref()
-        .filter(|_| resume_id.is_none() && !resume_picker)
+        .filter(|_| !managed_codex && resume_id.is_none() && !resume_picker)
     {
         let runtime = &terminal
             .as_ref()
@@ -4779,8 +4825,12 @@ fn create_session_with_effects<R: tauri::Runtime>(
         if let Some(integration) = integration {
             match integration {
                 Ok(prepared) => {
-                    if pi_identity.is_some() {
+                    if pi_identity.is_some() || managed_codex {
                         builder.env("YAM_PI_GENERATION", &prepared.generation);
+                        builder.env(
+                            "YAM_PI_CONTROL_FILE",
+                            pi_router::control_file(&history.root, &summary.session_id)?,
+                        );
                     }
                     if let Err(reason) = connect_agent(
                         &app,
@@ -4836,6 +4886,7 @@ fn create_session_with_effects<R: tauri::Runtime>(
         }
         if let Some(native_id) = resume_id
             .as_deref()
+            .filter(|_| !managed_codex)
             .or(gemini_identity.as_deref())
             .or(pi_identity.as_deref())
         {
@@ -5593,6 +5644,27 @@ fn list_session_summaries<R: tauri::Runtime>(
     manager.history(&app)?.page(request)
 }
 #[tauri::command]
+fn copy_codex_routing(
+    app: AppHandle,
+    manager: State<'_, SessionManager>,
+    session_id: String,
+) -> Result<Option<codex_routing::Route>, String> {
+    proxy!(
+        manager,
+        "copy_codex_routing",
+        serde_json::json!({"session_id":session_id})
+    );
+    let history = manager.history(&app)?;
+    let record = history.get(&session_id)?;
+    let route = record
+        .summary
+        .launch
+        .as_ref()
+        .and_then(codex_routing::route)
+        .ok_or("This session has no managed Codex routing")?;
+    codex_routing::copy_route(&history.root, route)
+}
+#[tauri::command]
 fn get_pi_routing(
     app: AppHandle,
     manager: State<'_, SessionManager>,
@@ -5651,6 +5723,26 @@ async fn pi_routing_catalog(
     })
     .await
     .map_err(|_| "Pi catalog worker failed")?
+}
+#[tauri::command]
+async fn codex_routing_catalog(
+    app: AppHandle,
+    manager: State<'_, SessionManager>,
+    cwd: String,
+    config: String,
+    probe_model: Option<String>,
+) -> Result<serde_json::Value, String> {
+    proxy!(
+        manager,
+        "codex_routing_catalog",
+        serde_json::json!({"cwd":cwd,"config":config,"probe_model":probe_model})
+    );
+    let root = manager.history(&app)?.root.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        codex_routing::catalog(&root, Path::new(&cwd), &config, probe_model.as_deref())
+    })
+    .await
+    .map_err(|_| "Codex catalog worker failed")?
 }
 #[tauri::command]
 async fn pi_packages(
@@ -6500,8 +6592,10 @@ pub fn run() {
                     project_files::read_project_text,
                     project_files::save_project_text,
                     get_pi_routing,
+                    copy_codex_routing,
                     pi_routing_control,
                     pi_routing_catalog,
+                    codex_routing_catalog,
                     pi_packages,
                 ],
                 |invoke| invoke.resolver.reject("webview_command_forbidden"),
@@ -8396,6 +8490,35 @@ mod tests {
         assert!(super::ResumeClaim::acquire(claims.clone(), "native-other").is_err());
         drop(other);
         assert!(claims.lock().unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_codex_reopen_keeps_the_owner_state_without_replaying_the_initial_prompt() {
+        let root = std::env::temp_dir().join(next_session_id());
+        let store = HistoryStore::open(root.clone()).unwrap();
+        let id = "01a0f6ec-5463-78c3-a404-5a7ad3b933fe";
+        let launch = serde_json::from_value(serde_json::json!({
+            "adapter":"codex","mode":"interactive","extra_args":"","prompt":"do not replay",
+            "codex":{"image_mode":"native","route":{"name":"Local", "state":id,
+                "config":"{\"connections\":{},\"classifiers\":[],\"executionGroups\":[{}]}"}}
+        }))
+        .unwrap();
+        let summary = SessionSummary {
+            ssh: None,
+            session_id: "managed-codex".into(),
+            cwd: root.to_string_lossy().into(),
+            command: None,
+            status: "stopped".into(),
+            launch: Some(launch),
+        };
+        store.start(&summary).unwrap();
+        let mut record = store.get(&summary.session_id).unwrap();
+        record.status = "stopped".into();
+        let (launch, resume) = super::terminal_reopen_launch(&record).unwrap();
+        assert_eq!(resume.as_deref(), Some(id));
+        assert!(launch.unwrap().prompt.is_none());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

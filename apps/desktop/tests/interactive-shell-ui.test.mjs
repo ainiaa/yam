@@ -19,6 +19,7 @@ test('actual Pi controls disappear in Shell and return when a new Pi run starts'
  const session={launch:{adapter:'pi'}},shell={phase:'shell'};
  assert.equal(Boolean(visible(session,shell)),false);
  assert.equal(Boolean(visible(session,{phase:'idle'})),true);
+ assert.equal(Boolean(visible({launch:{adapter:'pi',extra_args:'--yam-routing-off'}},{phase:'idle'})),true);
  assert.equal(Boolean(visible({launch:{adapter:'codex'}},{phase:'idle'})),false);
 });
 test('workspace CLI badge shows Shell after Pi exits',()=>{

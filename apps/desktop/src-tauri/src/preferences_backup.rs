@@ -56,13 +56,65 @@ fn portable_policy(value: &Value) -> bool {
         "rules",
     ];
     let mut roles = vec!["small", "strong", "classifier"];
+    let valid_backups = |backups: &[Value], primary: &Value, allow_empty: bool| {
+        backups.len() <= 7
+            && backups.iter().enumerate().all(|(index, key)| {
+                (allow_empty && key == "")
+                    || (model(primary)
+                        && model(key)
+                        && key != primary
+                        && !backups[..index].contains(key))
+            })
+    };
+    if let Some(channel) = value.get("classifierBilling") {
+        keys.push("classifierBilling");
+        if !channel.as_str().is_some_and(|channel| {
+            ["subscription", "api", "gateway"].contains(&channel)
+                && (value["billing"] != "subscription" || channel == "subscription")
+        }) {
+            return false;
+        }
+    }
     if tiered {
         keys.push("medium");
         roles.push("medium");
     }
+    let fallbacks = match value.get("classifierFallbacks") {
+        None => &[][..],
+        Some(fallbacks) => {
+            keys.push("classifierFallbacks");
+            let Some(fallbacks) = fallbacks.as_array() else {
+                return false;
+            };
+            if !valid_backups(fallbacks, &value["classifier"], false) {
+                return false;
+            }
+            fallbacks.as_slice()
+        }
+    };
+    let mut execution_fallbacks = Vec::new();
+    if let Some(execution) = value.get("executionFallbacks") {
+        keys.push("executionFallbacks");
+        let Some(execution) = execution.as_object() else {
+            return false;
+        };
+        for (tier, backups) in execution {
+            let Some(backups) = backups.as_array() else {
+                return false;
+            };
+            if !["small", "medium", "strong"].contains(&tier.as_str())
+                || !valid_backups(backups, &value[tier], true)
+            {
+                return false;
+            }
+            execution_fallbacks.extend(backups);
+        }
+    }
     if !fields(value, &keys)
         || !(value["v"] == 1 || tiered)
-        || !roles.iter().all(|key| model(&value[key]))
+        || !roles.iter().all(|key| {
+            model(&value[key]) || *key != "medium" && value["model"] != "auto" && value[key] == ""
+        })
         || !(value["model"] == "auto" || model(&value["model"]))
         || !value["effort"].as_str().is_some_and(|v| {
             [
@@ -81,9 +133,16 @@ fn portable_policy(value: &Value) -> bool {
             .iter()
             .copied()
             .chain(std::iter::once("model"))
+            .map(|key| &value[key])
+            .chain(fallbacks)
+            .chain(execution_fallbacks)
             .any(|key| {
-                let key = value[key].as_str().unwrap_or("");
-                key != "auto" && !key.starts_with("yam-codex/") && !key.starts_with("openai-codex/")
+                let key = key.as_str().unwrap_or("");
+                !key.is_empty()
+                    && key != "auto"
+                    && !key.starts_with("yam-codex/")
+                    && !key.starts_with("openai-codex/")
+                    && !key.starts_with("openai/")
             })
     {
         return false;
@@ -223,6 +282,66 @@ mod tests {
         assert_eq!(serde_json::from_slice::<Value>(&result).unwrap(), value);
         assert!(encode(r#"{"version":2,"settings":{},"connections":[],"piRouting":null}"#).is_ok());
         assert!(encode(r#"{"version":1,"settings":{},"connections":[]}"#).is_ok());
+    }
+    #[test]
+    fn portable_pi_policy_retains_classifier_order_and_rejects_invalid_fallbacks() {
+        let mut value = portable_backup();
+        value["piRouting"]["classifierBilling"] = "subscription".into();
+        value["piRouting"]["classifierFallbacks"] =
+            serde_json::json!(["openai/backup", "openai-codex/next", "yam-codex/last"]);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&encode(&value.to_string()).unwrap()).unwrap(),
+            value
+        );
+        value["piRouting"]["classifierBilling"] = "api".into();
+        assert!(encode(&value.to_string()).is_err());
+        value["piRouting"]["classifierBilling"] = "subscription".into();
+        for invalid in [
+            serde_json::json!(null),
+            serde_json::json!(["yam-codex/sol"]),
+            serde_json::json!(["yam-codex/backup", "yam-codex/backup"]),
+            serde_json::json!([
+                "yam-codex/a",
+                "yam-codex/b",
+                "yam-codex/c",
+                "yam-codex/d",
+                "yam-codex/e",
+                "yam-codex/f",
+                "yam-codex/g",
+                "yam-codex/h"
+            ]),
+            serde_json::json!(["yam-gateway/paid"]),
+        ] {
+            value["piRouting"]["classifierFallbacks"] = invalid;
+            assert!(encode(&value.to_string()).is_err());
+        }
+        let mut fixed = portable_backup();
+        for role in ["small", "strong", "classifier"] {
+            fixed["piRouting"][role] = "".into();
+        }
+        fixed["piRouting"]["model"] = "yam-codex/sol".into();
+        assert!(encode(&fixed.to_string()).is_ok());
+        fixed["piRouting"]["classifierFallbacks"] = serde_json::json!(["yam-codex/backup"]);
+        assert!(encode(&fixed.to_string()).is_err());
+    }
+    #[test]
+    fn portable_pi_policy_keeps_ordered_execution_backups_and_billing() {
+        let mut value = portable_backup();
+        value["piRouting"]["executionFallbacks"] =
+            serde_json::json!({"strong":["yam-codex/a","","openai-codex/c"]});
+        assert_eq!(
+            serde_json::from_slice::<Value>(&encode(&value.to_string()).unwrap()).unwrap(),
+            value
+        );
+        for invalid in [
+            serde_json::json!({"strong":["yam-codex/a","p/paid"]}),
+            serde_json::json!({"strong":["yam-codex/sol"]}),
+            serde_json::json!({"strong":["yam-codex/a","yam-codex/a"]}),
+            serde_json::json!({"medium":["yam-codex/a"]}),
+        ] {
+            value["piRouting"]["executionFallbacks"] = invalid;
+            assert!(encode(&value.to_string()).is_err());
+        }
     }
     #[test]
     fn portable_pi_policy_export_accepts_catalog_names_and_utf16_boundary() {

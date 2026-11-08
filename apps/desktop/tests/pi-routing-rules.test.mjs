@@ -41,3 +41,31 @@ test('edited rule versions are stable and the classifier contract treats descrip
  assert.doesNotMatch(prompt,/"reason":/);
  for(const field of ['intent','task','context','action','depth','uncertain','readOnly','requires'])assert.ok(prompt.includes(`"${field}":`),field);
 });
+
+test('shared execution candidates preserve sparse group indices and block billing changes',async()=>{
+ const {backupKeys,orderedExecutionCandidates}=await import('../src-tauri/pi/task-rules.mjs');
+ const backups=backupKeys('a/one',['','b/two','c/three'],true);
+ const models={'b/two':{billing:'paid'},'c/three':{billing:'subscription'}};
+ const candidates=[...orderedExecutionCandidates('a/one',backups,key=>models[key],model=>model.billing,'subscription')];
+ assert.deepEqual(candidates.map(({index,key,reason})=>[index,key,reason]),[
+  [0,'a/one','unavailable'],[2,'b/two','billing'],[3,'c/three',null],
+ ]);
+ assert.deepEqual(backupKeys('a/one',['b/two','b/two']),[]);
+});
+
+test('shared classification fails over within a channel and cancellation stops the chain',async()=>{
+ const {classifyCandidates}=await import('../src-tauri/pi/task-rules.mjs');
+ const facts={intent:'new',task:'answer',context:'independent',action:'none',depth:'normal',uncertain:false,readOnly:true,requires:['text']};
+ const seen=[],options={
+  keys:['a','b','c','d'],channel:'subscription',rules:defaultRules,
+  resolve:key=>({identity:key,billing:key==='b'?'paid':'subscription'}),
+  run:async candidate=>{seen.push(candidate.identity);return candidate.identity==='a'?'{}':JSON.stringify(facts);},
+  readResult:text=>({text}),
+ };
+ const result=await classifyCandidates(options);
+ assert.deepEqual(result.attempts.map(({slot,result})=>[slot,result]),[['A','invalid'],['B','billing'],['C','selected']]);
+ assert.deepEqual(result.answer,facts);
+ assert.deepEqual(seen,['a','c']);
+ const cancel=new AbortController();
+ await assert.rejects(classifyCandidates({...options,requestSignal:cancel.signal,run:async()=>{cancel.abort();return '{}';}}),/Routing aborted/);
+});

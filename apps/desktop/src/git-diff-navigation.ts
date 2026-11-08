@@ -51,4 +51,5 @@ export function findDiffLine(document: DiffDocument, side: "old" | "new", line: 
   return Number.isSafeInteger(line) && line > 0 ? document.rows.findIndex(row => (side === "old" ? row.oldLine : row.newLine) === line) : -1;
 }
 
-export type DiffTarget={sessionId:string;absolutePath:string;line:number|null;side:"old"|"new";basis:"staged"|"worktree"|"round"};
+export type ReviewPatch = {root: string; baselineId: string | null; text: string};
+export type DiffTarget={sessionId:string;absolutePath:string;line:number|null;side:"old"|"new";basis:"staged"|"worktree"|"round";reviewPatch?:ReviewPatch};

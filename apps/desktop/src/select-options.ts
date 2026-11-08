@@ -1,5 +1,5 @@
 // Author: Jeff.Liu.
-export type SelectOption={value:string;label:string;disabled:boolean};
+export type SelectOption={value:string;label:string;disabled:boolean;group?:string;detail?:string;search?:string};
 export function nextSelectIndex(options:SelectOption[],current:number,direction:"next"|"previous"|"first"|"last"):number {
  const enabled=options.flatMap((option,index)=>option.disabled?[]:[index]);
  if(!enabled.length)return -1;
@@ -14,10 +14,10 @@ export function typeaheadSelectIndex(options:SelectOption[],current:number,query
  }
  return options.length?current:-1;
 }
-export function selectMenuGeometry(rect:{left:number;right:number;top:number;bottom:number;width:number},viewportWidth:number,viewportHeight:number) {
- const width=Math.min(Math.max(180,rect.width),Math.max(0,viewportWidth-24));
+export function selectMenuGeometry(rect:{left:number;right:number;top:number;bottom:number;width:number},viewportWidth:number,viewportHeight:number,minWidth=180) {
+ const width=Math.min(Math.max(minWidth,Math.round(rect.width)),Math.max(0,viewportWidth-24));
  const below=Math.max(0,viewportHeight-rect.bottom-18),above=Math.max(0,rect.top-18);
  const up=below<Math.min(220,above);
- return {position:"fixed" as const,left:Math.max(12,Math.min(rect.left,viewportWidth-width-12)),width,
-  top:up?undefined:rect.bottom+6,bottom:up?viewportHeight-rect.top+6:undefined,maxHeight:Math.min(280,up?above:below)};
+ return {position:"fixed" as const,left:Math.max(12,Math.min(Math.round(rect.left),viewportWidth-width-12)),width,
+  top:up?undefined:Math.round(rect.bottom)+6,bottom:up?viewportHeight-Math.round(rect.top)+6:undefined,maxHeight:Math.floor(Math.min(280,up?above:below))};
 }

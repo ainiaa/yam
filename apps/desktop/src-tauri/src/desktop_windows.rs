@@ -2192,6 +2192,7 @@ fn settings_target(target: Option<&str>) -> Result<&str, String> {
         | "directory-reporting"
         | "command-reporting"
         | "launch-settings"
+        | "pi-routing"
         | "pi-plugins"
         | "support") => Ok(value),
         _ => Err("invalid_settings_target".into()),
@@ -2211,6 +2212,7 @@ fn settings_targets_preserve_pages_and_reject_unknown_values() {
         "system-entry",
         "directory-reporting",
         "command-reporting",
+        "pi-routing",
         "pi-plugins",
         "support",
     ] {

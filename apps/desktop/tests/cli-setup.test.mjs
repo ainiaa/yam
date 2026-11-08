@@ -51,8 +51,9 @@ test('missing CLI submission opens installation, while normal submission still s
  };visit(ast);assert.ok(form);
  const submit=form.openingElement.attributes.properties.find(a=>a.name?.getText(ast)==='onSubmit').initializer.expression.getText(ast);
  for(const missing of [true,false]){
-  const calls=[];const handler=new Function('launchWorkspace','launchWorktreeAttempt','selectedCliMissing','installSelectedCli','startNewSession',ts.transpile(`return (${submit});`,{target:ts.ScriptTarget.ES2022}))(null,undefined,missing,()=>calls.push('install'),()=>calls.push('session'));
-  handler({preventDefault:()=>calls.push('prevent')});assert.deepEqual(calls,['prevent',missing?'install':'session']);
+  const calls=[],route={name:'Example',config:'{}'};
+  const handler=new Function('launchWorkspace','launchWorktreeAttempt','selectedCliMissing','installSelectedCli','startNewSession','codexRoute',ts.transpile(`return (${submit});`,{target:ts.ScriptTarget.ES2022}))(null,undefined,missing,()=>calls.push('install'),(_copy,selected)=>calls.push(selected),route);
+  handler({preventDefault:()=>calls.push('prevent')});assert.deepEqual(calls,['prevent',missing?'install':route]);
  }
  const buttons=n=>{if(ts.isJsxElement(n)&&n.openingElement.tagName.getText(ast)==='button'&&n.openingElement.attributes.properties.some(a=>a.name?.getText(ast)==='type'&&a.initializer?.text==='submit'))primary=n;ts.forEachChild(n,buttons);};buttons(form);assert.ok(primary);
  const disabled=primary.openingElement.attributes.properties.find(a=>a.name?.getText(ast)==='disabled').initializer.expression.getText(ast);

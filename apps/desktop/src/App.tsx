@@ -1,6 +1,7 @@
 import {ProjectWorkspace} from './ProjectWorkspace';
-import {PiRoutingConfig,PiRoutingBar} from './PiRouting';
-import {defaultPiArgs} from './pi-routing';
+import {RoutingPolicyChoice,PiRoutingBar,NativeCodexRoutingBar,PiRoutingSettings} from './PiRouting';
+import {defaultPiArgs,piSetupStorageKey} from './pi-routing';
+import {codexRoutingLaunch,importPreviousPiPolicy,initialRoutingPolicy,launchRoutingPolicy,readRoutingPolicies,routingPolicyArgs,routingPolicyStorageKey,upsertRoutingPolicy,type CodexRoutingLaunch,type RoutingPolicy} from './routing-policies';
 import {PiPlugins} from "./PiPlugins";
 import DataSettings from './DataSettings';
 import {createPreferencesBackup,preferencesImportWrites,applyPreferencesImport,type PreferencesBackup} from './preferences-backup';
@@ -50,7 +51,7 @@ import {GitChanges} from "./GitChanges";
 import {ProjectFiles} from "./ProjectFiles";
 import {RunChanges} from "./RunChanges";
 import {ReviewFeedback} from "./ReviewFeedback";
-import {reviewOrigin,reviewReady,deliverReviewFeedback,type ReviewOrigin,type ReviewLocation} from "./review-feedback";
+import {reviewOrigin,reviewReady,sameReviewOrigin,deliverReviewFeedback,createReviewAnchor,checkReviewLocations,type ReviewOrigin,type ReviewLocation,type ReviewRecord} from "./review-feedback";
 import {relativeProjectFile,type ProjectFileRequest} from "./project-files";
 import type {DiffTarget} from "./git-diff-navigation";
 import {ProviderCatalog} from "./ProviderCatalog";
@@ -70,6 +71,9 @@ import { open as openDirectoryDialog } from "@tauri-apps/plugin-dialog";
 import { invoke as nativeInvoke } from "@tauri-apps/api/core";
 import {getWindowContext,terminalWindowClaim,terminalMoveReply,type TerminalMoveReceipt,createWindowStorage,publishWindowPreference,acceptWindowPreferenceCommit,type WindowPreferenceCommit,desktopInvoke,windowPreferenceKey as slotPreferenceKey,readWindowPreference} from "./window-context";
 function invoke<T=unknown>(name:string,args?:Record<string,unknown>):Promise<T>{return desktopInvoke(nativeInvoke,getWindowContext(),name,args);}
+function checkOriginalReviewLocations(origin:ReviewOrigin,locations:ReviewLocation[],stillCurrent:()=>boolean){
+  return checkReviewLocations(origin,locations,invoke,stillCurrent);
+}
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
@@ -147,7 +151,7 @@ type HealthReport = {
   status: string;
 };
 
-type AgentLaunch = {codex?:{image_mode:"native"|"gateway_api";context?:string}; adapter: string; mode: "task" | "interactive"; extra_args: string; prompt: string | null; provider?:ProviderConfig|null; env_refs?:Record<string,string> };
+type AgentLaunch = {codex?:{image_mode:"native"|"gateway_api";context?:string;route?:CodexRoutingLaunch}; adapter: string; mode: "task" | "interactive"; extra_args: string; prompt: string | null; provider?:ProviderConfig|null; env_refs?:Record<string,string> };
 
 type SessionSummary = {
   ssh?:SshLaunch;
@@ -306,6 +310,7 @@ function App() {
   const [updaterOpen,setUpdaterOpen]=useState(false);
   const [dataSettingsOpen,setDataSettingsOpen]=useState(false);
   const [piPluginsOpen,setPiPluginsOpen]=useState(false),[piPluginsBusy,setPiPluginsBusy]=useState(false);
+  const [piRoutingOpen,setPiRoutingOpen]=useState(false);
   const [updaterSnapshot,setUpdaterSnapshot]=useState<UpdaterSnapshot|null>(null);
   const [updaterAutomatic,setUpdaterAutomatic]=useState(updaterPreferenceLoad.automatic);
   const updaterAutomaticRef=useRef(updaterAutomatic);updaterAutomaticRef.current=updaterAutomatic;
@@ -527,17 +532,37 @@ function App() {
   function terminalPasteTarget(id:string,view:TerminalView):TerminalPasteTarget<TerminalView,Terminal>{const layout=terminalLayoutRef.current;return{sessionId:id,view,instance:view.instance,frameInstance:view.frameInstance,attachVersion:view.attachVersion,lifecycleRevision:view.lifecycleRevision,connectionVersion:ownerConnectionAvailable.current.version,paneId:terminalPaneId(layout,layout.focused),selectionVersion:selectionVersion.current,layoutRevision:layout.revision};}
   function terminalPasteCurrent(pending:PendingTerminalPaste<TerminalView,Terminal>){const target=pending.target,view=terminalViews.current.get(target.sessionId),layout=terminalLayoutRef.current;return view===target.view&&sessionId.current===target.sessionId&&layout.panes[layout.focused]===target.sessionId&&terminalPaneVisible(target.sessionId)&&(terminalPasteInputEligible(target.view,ownerConnectionAvailable.current.available)||canContinueTerminalInput(target.sessionId,target.view))&&sameTerminalPasteTarget(target,terminalPasteTarget(target.sessionId,target.view));}
   function cancelTerminalPaste(restoreFocus=true){const pending=pastePending.current;pastePending.current=null;pasteDialog.current?.close();setPastePreview(null);if(restoreFocus&&pending&&terminalPasteCurrent(pending))pending.target.instance.focus();}
-  async function fillReviewInOriginalTerminal(origin:ReviewOrigin,location:ReviewLocation,text:string){
+  async function fillReviewInOriginalTerminal(origin:ReviewOrigin,location:ReviewLocation,text:string,locations:ReviewLocation[]){
     const view=terminalViews.current.get(origin.sessionId);
     if(!isMainWindow||!terminalMounted.current||!view||sessionId.current!==origin.sessionId)throw "review_target_unavailable";
     const target=terminalPasteTarget(origin.sessionId,view);
+    const agentVersion=reviewAgentVersion.current;
+    const usesRound=locations.some(point=>point.basis==="round"), baselineVersion=reviewBaselineFence.current.version;
+    const baselineCurrent=()=>!usesRound||(reviewBaselineFence.current.pending===0&&reviewBaselineFence.current.version===baselineVersion);
     try{
+      const current=()=>terminalMounted.current&&sessionId.current===origin.sessionId&&terminalViews.current.get(origin.sessionId)===view
+        &&sameTerminalPasteTarget(target,terminalPasteTarget(origin.sessionId,view))&&ownerConnectionAvailable.current.available
+        &&reviewAgentVersion.current===agentVersion&&reviewReady(reviewRecordRef.current,origin);
+      if(!baselineCurrent())throw "review_location_stale";
       await deliverReviewFeedback(origin,location,text,()=>invoke<SessionRecord>("get_session",{sessionId:origin.sessionId}),async formatted=>{
+        if(!current())throw "review_target_unavailable";
+        if(!baselineCurrent())throw "review_location_stale";
+        const valid=()=>current()&&baselineCurrent();
+        let checked=await checkOriginalReviewLocations(origin,locations,valid);
+        // Git allows one read at a time. Recheck the earliest samples last when a batch spans multiple comparisons.
+        const comparisons=new Set(locations.filter(point=>point.line!==null).map(point=>JSON.stringify([point.path,point.basis,point.anchor?.baselineId])));
+        if(valid()&&comparisons.size>1&&checked.every(status=>status==="current")){
+          checked=await checkOriginalReviewLocations(origin,[...locations].reverse(),valid);
+        }
+        if(!current())throw "review_target_unavailable";
+        if(!baselineCurrent()||checked.includes("stale"))throw "review_location_stale";
+        if(checked.includes("unavailable"))throw "review_location_unavailable";
         const pending={target,content:inspectTerminalPaste(formatted)};
         const eligible=()=>terminalMounted.current&&terminalPasteCurrent(pending)&&view.ready&&!view.moving&&!view.persisted&&!view.attaching&&!view.parsing&&!view.projecting&&!view.resizing&&!view.clearPending&&view.instance.modes.bracketedPasteMode;
         if(!eligible()||view.inputQueue?.write||view.inputQueue?.count||view.inputQueue?.length||pastePending.current||fileDropPending.current)throw "review_target_unavailable";
         setProjectToolsOpen(false);view.instance.focus();
         if(!eligible()||!terminalHasInputFocus(origin.sessionId))throw "review_target_unavailable";
+        if(!baselineCurrent())throw "review_location_stale";
         const version=view.inputQueue?.version??0;
         view.instance.paste(pending.content.text);
         const write=view.inputQueue?.write;if(!write)throw "review_delivery_unknown";
@@ -545,7 +570,10 @@ function App() {
         if(!terminalPasteCurrent(pending)||view.inputQueue?.version!==version||!view.writable)throw "review_delivery_unknown";
         setTerminalNotice("Feedback was filled into the original CLI. Check the input and press Enter there to submit.");
       });
-    }catch(reason){setError(reason==="review_target_unavailable"?"The original CLI cannot receive this feedback now. Nothing was filled.":reason==="review_invalid_feedback"?"Choose a diff location and use up to 16 KiB of text without terminal controls.":"Delivery could not be confirmed. Check the original terminal before retrying.");throw reason;}
+    }catch(reason){
+      if(reason!=="review_location_stale"&&reason!=="review_location_unavailable")setError(reason==="review_target_unavailable"?"The original CLI cannot receive this feedback now. Nothing was filled.":reason==="review_invalid_feedback"?"Choose a diff location and use up to 16 KiB of text without terminal controls.":"Delivery could not be confirmed. Check the original terminal before retrying.");
+      throw reason;
+    }
   }
   function confirmTerminalPaste(){const pending=pastePending.current;pastePending.current=null;if(!pending)return;pasteDialog.current?.close();setPastePreview(null);if(!terminalPasteCurrent(pending)){setError("Paste target changed or is unavailable. Nothing was sent.");return;}pending.target.instance.focus();if(!terminalPasteCurrent(pending)||!terminalHasInputFocus(pending.target.sessionId)){setError("The original terminal could not receive focus. Nothing was sent.");return;}if(canContinueTerminalInput(pending.target.sessionId,pending.target.view))continueTerminalInput(pending.target.sessionId,pending.target.view,pending.content.text,true);else pending.target.instance.paste(pending.content.text);}
   function validatePendingTerminalPaste(){const pending=pastePending.current;if(pending&&!terminalPasteCurrent(pending))cancelTerminalPaste(false);}
@@ -557,6 +585,7 @@ function App() {
     let text:string;try{text=event.clipboardData.getData("text/plain");}catch{stop();setError("Pasted text is invalid. Nothing was sent.");return;}
     let content:TerminalPasteText;try{content=inspectTerminalPaste(text);}catch(reason){stop();setError(reason instanceof Error?reason.message:"Pasted text is invalid. Nothing was sent.");return;}
     if(content.text===""){stop();return;}
+    if(view.record?.summary.launch?.codex?.route&&content.risky){stop();setError("Paste a single line of plain text into a managed Codex terminal, then press Enter.");return;}
     if(pasteModeRef.current==="never"||(pasteModeRef.current==="risky"&&!content.risky)){if(canContinueTerminalInput(id,view)){stop();continueTerminalInput(id,view,content.text,true);}return;}
     stop();pastePending.current={target:terminalPasteTarget(id,view),content};setPastePreview(content);
   }
@@ -696,7 +725,24 @@ function App() {
   }
   const projectFileSequence=useRef(0);
   const [projectFileRequest,setProjectFileRequest]=useState<ProjectFileRequest|null>(null);
-  const [reviewLocation,setReviewLocation]=useState<ReviewLocation|null>(null);
+  const [reviewSelection,setReviewSelection]=useState<{origin:ReviewOrigin;location:ReviewLocation}|null>(null);
+  const reviewSelectionIntent=useRef(0);
+  const reviewOriginRef=useRef<ReviewOrigin|null>(null);
+  const reviewRecordRef=useRef<ReviewRecord|null>(null);
+  const reviewAgentVersion=useRef(0);
+  const reviewBaselineFence=useRef({version:0,pending:0});
+  const [reviewBaseline,setReviewBaseline]=useState(reviewBaselineFence.current);
+  function startReviewBaselineMutation() {
+    // Invalidate pending comparisons before issuing a baseline write, including replies from an older render.
+    function update(delta:number) {
+      const {version,pending}=reviewBaselineFence.current;
+      const next={version:version+1,pending:pending+delta};
+      reviewBaselineFence.current=next;
+      setReviewBaseline(next);
+    }
+    update(1);
+    return ()=>update(-1);
+  }
   function diffProjectPath(target:DiffTarget):string|null{
     if(!session||session.ssh||sessionId.current!==target.sessionId||session.session_id!==target.sessionId)return null;
     const path=relativeProjectFile(session.cwd,target.absolutePath);
@@ -704,7 +750,21 @@ function App() {
     return path;
   }
   function openDiffFile(target:DiffTarget){const path=diffProjectPath(target);if(path){setProjectToolsTab("files");setProjectFileRequest({id:++projectFileSequence.current,sessionId:target.sessionId,path,line:target.side==="new"&&target.basis!=="staged"?target.line:null});}}
-  function reviewDiffFile(target:DiffTarget){const path=diffProjectPath(target);if(path){setProjectToolsTab("changes");setReviewLocation({sessionId:target.sessionId,path,line:target.line,side:target.side,basis:target.basis});}}
+  async function reviewDiffFile(target:DiffTarget){
+    const path=diffProjectPath(target),origin=reviewOriginRef.current;
+    if(!path||!origin||origin.sessionId!==target.sessionId)return;
+    const intent=++reviewSelectionIntent.current,selection=selectionVersion.current,owner=ownerConnectionAvailable.current.version;
+    const location:ReviewLocation={sessionId:target.sessionId,path,line:target.line,side:target.side,basis:target.basis};
+    const current=()=>terminalMounted.current&&projectToolsOpenRef.current&&intent===reviewSelectionIntent.current
+      &&selection===selectionVersion.current&&owner===ownerConnectionAvailable.current.version&&sameReviewOrigin(origin,reviewOriginRef.current);
+    try{
+      if(location.line!==null){
+        if(!target.reviewPatch)throw "review_location_unavailable";
+        location.anchor=await createReviewAnchor(location,target.reviewPatch);
+      }
+      if(current()){setProjectToolsTab("changes");setReviewSelection({origin,location});}
+    }catch{if(current())setError("Could not capture this diff location. Reload the diff and try again.");}
+  }
 
   const [launchDefaultsNotice,setLaunchDefaultsNotice]=useState<string|null>(null);
   const projectSelection=useRef(new ProjectConfigSelection());
@@ -719,12 +779,22 @@ function App() {
   useEffect(()=>{projectConfigVersion.current++;projectSelection.current.cancel();setProjectPreview(null);setUseProjectSettings(false);setProjectTemplate("");setProjectConfigBusy(false);},[cwd]);
   const projectDefaults=projectPreview?.config?{...projectPreview.config.defaults,...projectPreview.config.templates?.find(item=>item.name===projectTemplate)}:null;
   const formLaunch={...(useProjectSettings&&projectPreview?.trusted?resolveLaunchDefaults(globalLaunchDefaults,projectDefaults,projectLaunchEdits):launchDraft),mode:"interactive"};
-  const [piValidation,setPiValidation]=useState({valid:false,scope:""});
-  const piFormValid=piValidation.valid&&piValidation.scope===JSON.stringify([cwd,formLaunch.extra_args]);
   const formAdapter=formLaunch.adapter==="custom"?"shell":formLaunch.adapter;
+  function loadRoutingPolicyLibrary():{rows:RoutingPolicy[];error:string|null}{
+    try{return {rows:readRoutingPolicies(localStorage.getItem(routingPolicyStorageKey),localStorage.getItem(piSetupStorageKey)),error:null};}
+    catch{return {rows:[],error:"Invalid saved routing policies."};}
+  }
+  const [routingPolicyLibrary,setRoutingPolicyLibrary]=useState(loadRoutingPolicyLibrary);
+  const [routingPolicySelection,setRoutingPolicySelection]=useState<string|null>(null);
+  const launchPolicy=formAdapter==="codex"&&sessionCopy?.codexRoute?launchRoutingPolicy:initialRoutingPolicy(formAdapter,formLaunch.extra_args,routingPolicyLibrary.rows);
+  const routingChoice=["pi","codex"].includes(formAdapter)?routingPolicySelection??launchPolicy:"";
+  const piLaunchArgs=formAdapter==="pi"?routingPolicyArgs(formAdapter,formLaunch.extra_args,routingChoice,routingPolicyLibrary.rows):undefined;
+  const codexRoute=formAdapter==="codex"?(routingChoice===launchRoutingPolicy?sessionCopy?.codexRoute??null:codexRoutingLaunch(routingChoice,routingPolicyLibrary.rows)):undefined;
+  const piFormValid=piLaunchArgs!==null;
   const selectedCliMissing=formAdapter!=="shell"&&adapters.some(a=>a.id===formAdapter&&!a.available);
   const selectedCliInstaller=cliInstaller(formAdapter);
   const selectedAdapter=formAdapter,command=formLaunch.command??"",prompt=formLaunch.prompt??"",adapterArgs=formLaunch.extra_args,providerConfig=formLaunch.provider??null;
+  useEffect(()=>{setRoutingPolicySelection(null);},[formAdapter]);
   function editLaunch(fields:Partial<LaunchDefaults>){
     if(fields.adapter&&fields.adapter!=="codex"&&formLaunch.codex)fields={...fields,codex:undefined};
     setLaunchDraft(()=>({...formLaunch,...fields}));
@@ -1255,7 +1325,10 @@ function App() {
       for (const event of retryNotifications.current.values()) void notifySession(event);
     }, 15000):null;
     for (const [name, callback] of [
-      ["agent-state", (_payload: { session_id: string; data: string }) => {void refreshHistory();}],
+      ["agent-state", (payload: { session_id: string; data: string }) => {
+        if(payload?.session_id===sessionId.current)reviewAgentVersion.current++;
+        void refreshHistory();
+      }],
       ["session-error", (payload: { session_id: string; data: string }) => {
         if(payload.session_id)void refreshSessionFinish(payload.session_id);
         if(payload.session_id==="") {
@@ -1591,21 +1664,26 @@ function App() {
     cancelProjectPreview();setProjectTemplate("");setSelectedWorktree(record);
     setCwd(record.target);setLaunchDirectoryOverride(record.target);setLaunchWorktreeAttempt(record.attempt);setError(null);
   }
-  async function startNewSession(quickCopy?:ReturnType<typeof duplicateSessionDraft>){
+  async function startNewSession(quickCopy?:ReturnType<typeof duplicateSessionDraft>,route?:CodexRoutingLaunch|null){
+    if(quickCopy?.codexRoute&&route===undefined)route=quickCopy.codexRoute;
     if(!quickCopy&&launchWorkspace&&!launchWorktreeAttempt){setError("Create the isolated worktree before starting the session.");return;}
     const launchAdapter=quickCopy?.draft.adapter??formAdapter,launch=quickCopy?.draft??formLaunch;
-    if(launchAdapter==="pi"&&!quickCopy&&!piFormValid){setError("Check the connection and available Pi models.");return;}
+    const routingArgs=launchAdapter==="pi"?(quickCopy?routingPolicyArgs("pi",launch.extra_args,initialRoutingPolicy("pi",launch.extra_args),[]):piLaunchArgs):undefined;
+    if(routingArgs===null||route===null){setError("Choose a valid routing strategy or disable routing.");return;}
+    if(route&&(shellWindows||useProjectSettings||launch.provider||launch.extra_args.trim()||Object.keys(sessionCopy?.settings.envRefs??{}).length)){setError("A managed Codex strategy requires a direct launch with no additional CLI options or connection overrides.");return;}
     const projectSettings=!quickCopy&&useProjectSettings,worktree=quickCopy?undefined:launchWorktreeAttempt;
     const ordinaryTerminal=launchAdapter==="shell"&&!launch.command?.trim()&&!launch.provider&&!projectSettings&&!worktree;
-    const copy=quickCopy??sessionCopy,outputTerminal=quickCopy?.settings.terminal??sessionTerminal,name=quickCopy?"":copy?copyName.trim():"";
+    const copy=quickCopy??sessionCopy,outputTerminal=route?"yam":quickCopy?.settings.terminal??sessionTerminal,name=quickCopy?"":copy?copyName.trim():"";
     if(name)try{validateSessionTitle(name);}catch{setError("Use a session name of 1–200 characters.");return;}
     let next:SessionSummary|undefined,ordinarySnapshot:SessionLaunchSettings["ordinary"];
     if(copy&&!projectSettings&&!worktree){
       const directory=quickCopy?.cwd??cwd;
       if(ordinaryTerminal&&copy.settings.ordinary){const ordinary={...copy.settings.ordinary,...(copy.settings.appearance?{appearance:copy.settings.appearance}:{})};ordinarySnapshot=ordinary;ordinaryLaunchSnapshot.current=ordinary;next=await startSession({cwd:directory,...ordinary,command:"",launch:null});}
       else if(ordinaryTerminal){const pending=newTerminal(directory,launchTerminalProfile,copy.settings.appearance);ordinarySnapshot=ordinaryLaunchSnapshot.current;next=await pending;}
-      else next=await startSession({cwd:directory,...(copy.settings.appearance?{viewAppearance:copy.settings.appearance}:{}),command:launch.command??"",launch:launchAdapter!=="shell"&&launchAdapter!=="custom"?{adapter:launchAdapter,mode:"interactive",extra_args:launch.extra_args,prompt:launch.prompt,provider:launch.provider??null,...(launchAdapter==="codex"?{codex:launch.codex??{image_mode:"native" as const}}:{}),...(copy.settings.envRefs?{env_refs:copy.settings.envRefs}:{})}:null});
+      else next=await startSession({cwd:directory,...(copy.settings.appearance?{viewAppearance:copy.settings.appearance}:{}),command:launch.command??"",launch:launchAdapter!=="shell"&&launchAdapter!=="custom"?{adapter:launchAdapter,mode:"interactive",extra_args:routingArgs??launch.extra_args,prompt:launch.prompt,provider:launch.provider??null,...(launchAdapter==="codex"?{codex:{...(launch.codex??{image_mode:"native" as const}),...(route?{route}:{})}}:{}),...(copy.settings.envRefs?{env_refs:copy.settings.envRefs}:{})}:null});
     }else if(ordinaryTerminal){const pending=newTerminal(launchDirectoryOverride,launchTerminalProfile);ordinarySnapshot=ordinaryLaunchSnapshot.current;next=await pending;}
+    else if(route)next=await startSession(undefined,worktree,undefined,route);
+    else if(routingArgs!==undefined)next=await startSession(undefined,worktree,routingArgs);
     else next=worktree?await startSession(undefined,worktree):await startSession();
     if(next)try{
       const appearance=copy?.settings.appearance??(ordinaryTerminal?ordinarySnapshot?.appearance:undefined)??terminalSettingsRef.current;
@@ -1616,7 +1694,7 @@ function App() {
     if(next&&outputTerminal!=="yam")try{await invoke("open_external_terminal",{sessionId:next.session_id,terminal:outputTerminal});}catch{setError("The session was created in YAM, but the external terminal could not be opened. Check macOS Automation permission; use this existing session instead of starting it again.");}
     if(next&&isMainWindow)try{localStorage.setItem("yam.lastSessionCli",JSON.stringify(next.launch?.adapter??"shell"));}catch{setError("Session started, but the last CLI choice could not be saved.");}
   }
-  async function startSession(overrides?: { cwd?: string; command?: string; launch?: AgentLaunch | null; resumeFrom?: string; shell?: ShellLaunch; envRefs?: Record<string,string>; appearance?:TerminalSettings; viewAppearance?:TerminalSettings; directoryReporting?:boolean; commandReporting?:boolean; retainedLines?:number;ssh?:SshLaunch }, worktreeAttempt?: string) {
+  async function startSession(overrides?: { cwd?: string; command?: string; launch?: AgentLaunch | null; resumeFrom?: string; shell?: ShellLaunch; envRefs?: Record<string,string>; appearance?:TerminalSettings; viewAppearance?:TerminalSettings; directoryReporting?:boolean; commandReporting?:boolean; retainedLines?:number;ssh?:SshLaunch }, worktreeAttempt?: string, routingArgs?:string, codexRouting?:CodexRoutingLaunch) {
     if(overrides?.ssh&&(!isSshLaunch(overrides.ssh)||overrides.command!==undefined||overrides.launch!==undefined||overrides.resumeFrom||worktreeAttempt||overrides.shell||overrides.envRefs&&Object.keys(overrides.envRefs).length||overrides.directoryReporting||overrides.commandReporting)){setError("Invalid SSH launch.");return;}
     if(!isMainWindow&&(overrides?.ssh||overrides?.resumeFrom||worktreeAttempt)){openMainSettings();return;}
     if(overrides?.retainedLines!==undefined&&(!Number.isSafeInteger(overrides.retainedLines)||overrides.retainedLines<200||overrides.retainedLines>2000||(overrides.retainedLines!==2000&&!overrides.ssh&&((overrides.command??command).trim()||overrides.launch||overrides.resumeFrom||worktreeAttempt)))){setError("Invalid terminal retention.");return;}
@@ -1633,7 +1711,7 @@ function App() {
     const launchPrompt =
       !overrides && selectedAdapter !== "shell" ? prompt.trim() : "";
     const launchArgs =
-      !overrides && selectedAdapter !== "shell" ? adapterArgs.trim() : "";
+      !overrides && selectedAdapter !== "shell" ? (routingArgs??adapterArgs).trim() : "";
     if(!projectStart&&!overrides&&providerConfig&&(!isProviderConfig(providerConfig)||!supportsProvider(selectedAdapter,providerConfig)||customCommand)){setError("Choose a compatible CLI and valid provider settings, or use native login.");return;}
     if (!projectStart && !overrides && !customCommand && adapter && !adapter.available) {
       setError(`${adapter.label} was not found on PATH`);
@@ -1650,7 +1728,7 @@ function App() {
     const reveal=()=>{if(!revealed){revealed=true;dialog?.close();}};
     if(dialog?.open)reveal();
     try {
-      const argumentsForStart = overrides?.ssh ? {cwd:workingDirectory||null,command:null,launch:null,ssh:{...overrides.ssh},...(overrides.retainedLines!==undefined&&overrides.retainedLines!==2000?{retainedLines:overrides.retainedLines}:{})} : overrides?.resumeFrom ? {resumeFrom:overrides.resumeFrom,cwd:null,command:null,launch:null} : projectStart ? {cwd:null,command:null,launch:null,projectConfig:{root:projectPreview!.root,template:projectTemplate||null,overrides:{...projectLaunchEdits,mode:"interactive"}}} : {
+      const argumentsForStart = overrides?.ssh ? {cwd:workingDirectory||null,command:null,launch:null,ssh:{...overrides.ssh},...(overrides.retainedLines!==undefined&&overrides.retainedLines!==2000?{retainedLines:overrides.retainedLines}:{})} : overrides?.resumeFrom ? {resumeFrom:overrides.resumeFrom,cwd:null,command:null,launch:null} : projectStart ? {cwd:null,command:null,launch:null,projectConfig:{root:projectPreview!.root,template:projectTemplate||null,overrides:{...projectLaunchEdits,...(routingArgs!==undefined?{extra_args:routingArgs}:{}),mode:"interactive"}}} : {
         cwd: workingDirectory || null,
         command: customCommand || null,
         ...(overrides?.shell?{shell:overrides.shell}:{}),
@@ -1660,7 +1738,7 @@ function App() {
         ...(!customCommand&&!overrides?.launch&&!worktreeAttempt&&overrides?.envRefs&&Object.keys(overrides.envRefs).length?{envRefs:Object.fromEntries(Object.entries(overrides.envRefs))}:{}),
         launch: overrides ? overrides.launch ?? null :
           !customCommand && selectedAdapter !== "shell" ? {
-            adapter:selectedAdapter, mode:"interactive", extra_args:launchArgs, prompt:launchPrompt || null,...(selectedAdapter==="codex"?{codex:{image_mode:providerConfig?(formLaunch.codex?.image_mode??"native"):"native"}}:{}),...(providerConfig?{provider:{...providerConfig}}:{}),
+            adapter:selectedAdapter, mode:"interactive", extra_args:launchArgs, prompt:launchPrompt || null,...(selectedAdapter==="codex"?{codex:{image_mode:providerConfig?(formLaunch.codex?.image_mode??"native"):"native",...(codexRouting?{route:codexRouting}:{})}}:{}),...(providerConfig?{provider:{...providerConfig}}:{}),
           } : null,
       };
       const endedView=terminalViews.current.all?.find(releasable);
@@ -1710,6 +1788,10 @@ function App() {
       if(failure==="terminal_view_limit"){setError("The 16-view limit is shared by both windows. Close an ended session in either window and wait for its output to finish saving.");return;}
       const unknownStart=failure==="terminal_start_outcome_unknown";
       if(launchWasOpen&&!unknownStart&&!dialog?.open&&(document.activeElement===focusOrigin||document.activeElement===document.body)&&!document.querySelector?.('dialog[open]'))dialog?.showModal();
+      if(failure==="worktree_invalid_target"&&workingDirectory&&!worktreeAttempt&&!projectStart&&!overrides?.resumeFrom&&!overrides?.ssh){
+        setError("The project directory is unavailable. Choose an existing directory and start the session again.");
+        return;
+      }
       const message=unknownStart?"Start outcome unknown. New starts in the current window are paused. Check existing sessions; do not retry automatically.":overrides?.ssh?"SSH start unavailable. Check the terminal owner and macOS OpenSSH. The start outcome may be unknown; do not retry automatically.":overrides?.commandReporting?"Command status reporting could not be started. Update the terminal owner before trying again.":overrides?.directoryReporting?"Zsh directory reporting could not be started. Check terminal owner compatibility.":overrides?.envRefs&&Object.keys(overrides.envRefs).length?"Terminal environment references could not be applied. Check the profile and terminal owner compatibility.":overrides?.shell?shellStartError(reason):reason instanceof Error?reason.message:String(reason);
       setError(message);
     } finally {
@@ -2761,13 +2843,14 @@ function App() {
     sessionCopyIntent.current++;setSessionCopy(null);setCopyName("");ordinaryLaunchSnapshot.current=undefined;
     cancelLayoutRestore();
     setError(null);
+    setRoutingPolicySelection(null);setRoutingPolicyLibrary(loadRoutingPolicyLibrary());
     setLaunchDirectoryOverride(path);setLaunchTerminalProfile(profileId);setLaunchWorktreeAttempt(worktreeAttempt);setLaunchWorkspace(null);
     cancelProjectPreview();setProjectLaunchEdits({});
     const defaults=globalLaunchDefaults.mode==="task"?{adapter:globalLaunchDefaults.adapter,mode:"interactive",extra_args:"",prompt:null,command:null,provider:null}:globalLaunchDefaults;
     const available=adapters.filter(item=>item.available||item.id==="shell");
     const preferred=readPreference("yam.lastSessionCli",defaults.adapter==="custom"?"shell":defaults.adapter,(value):value is string=>typeof value==="string"&&available.some(item=>item.id===value));
     const adapter=profileId!==undefined?"shell":available.some(item=>item.id===preferred)?preferred:available.find(item=>item.id!=="shell")?.id??"shell";
-    setLaunchDraft({...defaults,adapter,mode:"interactive",...(adapter==="pi"&&defaults.adapter!=="pi"?{extra_args:defaultPiArgs}:{}),...(defaults.provider&&!supportsProvider(adapter,defaults.provider)?{provider:null}:{}),...(adapter!=="shell"||!isMainWindow?{command:null}:{}),...(profileId!==undefined?{command:null,provider:null,prompt:null,extra_args:""}:{})});
+    setLaunchDraft({...defaults,adapter,mode:"interactive",...(adapter!==defaults.adapter&&(adapter==="pi"||defaults.adapter==="pi")?{extra_args:adapter==="pi"?defaultPiArgs:""}:{}),...(defaults.provider&&!supportsProvider(adapter,defaults.provider)?{provider:null}:{}),...(adapter!=="shell"||!isMainWindow?{command:null}:{}),...(profileId!==undefined?{command:null,provider:null,prompt:null,extra_args:""}:{})});
     let directory=path??currentProject?.path??session?.cwd??activeProject??"";
     if(adapter==="shell"&&!worktreeAttempt)try{directory=terminalDirectory(path,profileId);}catch(reason){setError(reason instanceof Error?reason.message:"Terminal profile is unavailable.");}
     setCwd(directory);
@@ -2776,7 +2859,10 @@ function App() {
   }
   const currentAgent=selectedAgent;
   const reviewRecord=session?{summary:session,status:sessionStatus,agent:currentAgent}:null;
+  reviewRecordRef.current=reviewRecord;
   const currentReviewOrigin=reviewOrigin(reviewRecord);
+  reviewOriginRef.current=currentReviewOrigin;
+  const reviewLocation=reviewSelection&&sameReviewOrigin(reviewSelection.origin,currentReviewOrigin)?reviewSelection.location:null;
   const unreadTotal=historyOverview.unread_receipts;
   async function markReceiptRead(record:HistoryItem,entry:AgentReceipt){
     const owner=ownerConnectionAvailable.current.version;
@@ -2844,6 +2930,7 @@ function App() {
   nativeMenuHandler.current=action=>{
     const blocked=!!document.querySelector('dialog[open],[role="dialog"][aria-modal="true"],.modal-backdrop');
     if(action==="support"){if(!blocked)openSettingsSection("support");return;}
+    if(action==="pi-routing"){if(!blocked)openSettingsSection("pi-routing");return;}
     const fileWorkspace=document.activeElement?.closest('.project-workspace');
     if((action==="hide"||action==="close")&&!blocked&&fileWorkspace){const closeFile=fileWorkspace.querySelector<HTMLButtonElement>('.project-tools-panel:not([hidden]) [data-close-active-file="true"]');if(closeFile)closeFile.click();else closeProjectTools();return;}
     dispatchNativeMenu(action,{
@@ -3050,7 +3137,9 @@ function App() {
     try{
       const record=await invoke<SessionRecord>("get_session",{sessionId:id});
       if(!terminalMounted.current||sessionCopyIntent.current!==intent)return;
-      const copy=duplicateSessionDraft(record.summary,readSessionLaunchSettings(localStorage,id));
+      const effectiveRoute=record.summary.launch?.codex?.route?await invoke<CodexRoutingLaunch|null>("copy_codex_routing",{sessionId:id}):undefined;
+      if(!terminalMounted.current||sessionCopyIntent.current!==intent)return;
+      const copy=duplicateSessionDraft(record.summary,readSessionLaunchSettings(localStorage,id),effectiveRoute);
       const sourceView=terminalViews.current.get(id);if(sourceView?.appearance)copy.settings.appearance={...sourceView.appearance};
       if(quick&&!copy.reviewCommand&&!copy.warning){await startNewSession(copy);return;}
       newSession(copy.cwd);setLaunchDraft(copy.draft);setCwd(copy.cwd);setSessionCopy(copy);setSessionTerminal(copy.settings.terminal);
@@ -3107,13 +3196,20 @@ function App() {
     if(!isMainWindow){openMainSettings(page);return;}
     if(starting||systemEntryBusy||piPluginsBusy)return;
     if(terminalProfilesOpen){if(terminalProfileCollection.selectedId)selectTerminalProfile(terminalProfileCollection.selectedId);else newTerminalProfile();}
-    setPiPluginsOpen(false);setDataSettingsOpen(false);setAppearanceOpen(false);setTerminalSettingsOpen(false);setTerminalProfilesOpen(false);setKeyboardShortcutsOpen(false);setPasteSettingsOpen(false);setUpdaterOpen(false);setSystemEntryOpen(false);setDirectoryReportingOpen(false);setCommandReportingOpen(false);launchSettingsDialog.current?.close();
-    const pages:Record<SettingsPage,()=>void>={"pi-plugins":()=>setPiPluginsOpen(true),support:()=>setDataSettingsOpen(true),appearance:()=>setAppearanceOpen(true),settings:()=>setTerminalSettingsOpen(true),profiles:()=>setTerminalProfilesOpen(true),"keyboard-shortcuts":()=>setKeyboardShortcutsOpen(true),"paste-settings":()=>setPasteSettingsOpen(true),updates:()=>setUpdaterOpen(true),"system-entry":()=>{setSystemEntryOpen(true);void refreshSystemEntry();},"directory-reporting":()=>setDirectoryReportingOpen(true),"command-reporting":()=>setCommandReportingOpen(true),"launch-settings":()=>{setLaunchDefaultsNotice(null);requestAnimationFrame(()=>launchSettingsDialog.current?.showModal());}};
+    setPiRoutingOpen(false);setPiPluginsOpen(false);setDataSettingsOpen(false);setAppearanceOpen(false);setTerminalSettingsOpen(false);setTerminalProfilesOpen(false);setKeyboardShortcutsOpen(false);setPasteSettingsOpen(false);setUpdaterOpen(false);setSystemEntryOpen(false);setDirectoryReportingOpen(false);setCommandReportingOpen(false);launchSettingsDialog.current?.close();
+    const pages:Record<SettingsPage,()=>void>={"pi-routing":()=>{setRoutingPolicyLibrary(loadRoutingPolicyLibrary());setPiRoutingOpen(true);},"pi-plugins":()=>setPiPluginsOpen(true),support:()=>setDataSettingsOpen(true),appearance:()=>setAppearanceOpen(true),settings:()=>setTerminalSettingsOpen(true),profiles:()=>setTerminalProfilesOpen(true),"keyboard-shortcuts":()=>setKeyboardShortcutsOpen(true),"paste-settings":()=>setPasteSettingsOpen(true),updates:()=>setUpdaterOpen(true),"system-entry":()=>{setSystemEntryOpen(true);void refreshSystemEntry();},"directory-reporting":()=>setDirectoryReportingOpen(true),"command-reporting":()=>setCommandReportingOpen(true),"launch-settings":()=>{setLaunchDefaultsNotice(null);requestAnimationFrame(()=>launchSettingsDialog.current?.showModal());}};
     pages[page]();
   }
   async function exportPreferences(){return invoke<boolean>("export_preferences",{backup:createPreferencesBackup(key=>window.localStorage.getItem(key),launchTemplateCollection.templates,shortcutMac)});}
   async function importPreferences(backup:PreferencesBackup){
-    const writes=preferencesImportWrites(backup,launchTemplateCollection.templates,undefined,launchTemplateCollection.loadError,appPreferences,window.localStorage.getItem('yam.piRoutingSetup.v1'));
+    const writes=preferencesImportWrites(backup,launchTemplateCollection.templates,undefined,launchTemplateCollection.loadError,appPreferences,window.localStorage.getItem(piSetupStorageKey));
+    const imported=writes[piSetupStorageKey];
+    if(imported){
+      const current=loadRoutingPolicyLibrary();
+      if(current.error)throw Error(current.error);
+      const rows=importPreviousPiPolicy(current.rows,imported,t("Imported Pi policy"));
+      if(rows!==current.rows)writes[routingPolicyStorageKey]=JSON.stringify(rows);
+    }
     // Commit local preferences before publishing them; no task or CLI configuration is touched.
     applyPreferencesImport(window.localStorage,writes);
     const appearance=loadAppPreferences(()=>window.localStorage.getItem(APP_PREFERENCES_KEY));if(!appearance.error)applyAppPreferences(appearance.value,false);
@@ -3122,10 +3218,18 @@ function App() {
     if(writes["yam.terminalCursor.v1"]){const next=loadTerminalCursor(()=>window.localStorage.getItem("yam.terminalCursor.v1"));terminalCursorRef.current=next.cursor;setTerminalCursor(next.cursor);}
     if(writes["yam.appShortcuts.v1"]){const keyboard=loadAppShortcuts(key=>window.localStorage.getItem(key),shortcutMac);shortcutsRef.current=keyboard.bindings;setShortcuts(keyboard.bindings);}
     launchTemplateCollection.load();refreshLaunchTemplateUi();
+    if(imported)setRoutingPolicyLibrary(loadRoutingPolicyLibrary());
     for(const [key,value]of Object.entries(writes))await publishWindowPreference(nativeInvoke,desktopWindow,key,value);
   }
   function settingsNavigation(page:SettingsPage){return (dirty:boolean)=><SettingsNavigation current={page} dirty={dirty} blocked={starting||systemEntryBusy||piPluginsBusy} onSelect={openSettingsSection}/>;}
-  const settingsOpen=piPluginsOpen||appearanceOpen||terminalSettingsOpen||terminalProfilesOpen||keyboardShortcutsOpen||pasteSettingsOpen||updaterOpen||systemEntryOpen||directoryReportingOpen||commandReportingOpen||dataSettingsOpen||capacityOpen;
+  function saveRoutingPolicy(policy:RoutingPolicy){
+    const current=loadRoutingPolicyLibrary();
+    if(current.error)throw Error(current.error);
+    const rows=upsertRoutingPolicy(current.rows,policy);
+    localStorage.setItem(routingPolicyStorageKey,JSON.stringify(rows));
+    setRoutingPolicyLibrary({rows,error:null});
+  }
+  const settingsOpen=piRoutingOpen||piPluginsOpen||appearanceOpen||terminalSettingsOpen||terminalProfilesOpen||keyboardShortcutsOpen||pasteSettingsOpen||updaterOpen||systemEntryOpen||directoryReportingOpen||commandReportingOpen||dataSettingsOpen||capacityOpen;
   const settingsOrigin=useRef<HTMLElement|null>(null);
   useLayoutEffect(()=>{
     if(settingsOpen){settingsOrigin.current=document.activeElement instanceof HTMLElement&&document.activeElement!==document.body?document.activeElement:null;return;}
@@ -3144,6 +3248,7 @@ function App() {
     <div className={`app-shell ${sidebarOpen ? "" : "sidebar-collapsed"} ${projectToolsOpen?"project-tools-open":""}`}>
       {!conversationOpen&&scrollView?.find?.state.visible&&<TerminalFindBar key={session!.session_id} controller={scrollView.find} onClose={()=>closeTerminalFind(scrollView,session!.session_id)} onLogSearch={()=>setLogSearchOpen(true)}/>}
       {terminalSettingsError&&<p role="alert" className="terminal-preference-error">{t(terminalSettingsError)}</p>}
+      {piRoutingOpen&&<PiRoutingSettings cwd={cwd||currentProject?.path||session?.cwd||activeProject||""} invoke={invoke} installedGateways={installedGateways} navigation={settingsNavigation("pi-routing")} onClose={()=>setPiRoutingOpen(false)} policies={routingPolicyLibrary.rows} loadError={routingPolicyLibrary.error} onSave={saveRoutingPolicy} initialAdapter={formAdapter==="codex"?"codex":"pi"}/>}
       {piPluginsOpen&&<PiPlugins navigation={settingsNavigation("pi-plugins")} invoke={invoke} onBusyChange={setPiPluginsBusy} onClose={()=>setPiPluginsOpen(false)} onOpenCatalog={()=>openUrl("https://pi.dev/packages")}/>}
       {dataSettingsOpen&&<DataSettings navigation={settingsNavigation("support")} mac={shortcutMac} onClose={()=>setDataSettingsOpen(false)} onExport={exportPreferences} onImport={importPreferences} onDiagnostics={()=>void exportDiagnostics()} diagnosticsStatus={diagnosticsMessage} diagnosticsBusy={diagnosticsExporting} onNotification={()=>void testNotification()} notificationStatus={notificationTestStatus} canNotify={!!session&&!notificationTestBusy.current}/>}
       {updaterOpen&&<UpdaterSettings navigation={settingsNavigation("updates")} snapshot={updaterSnapshot} automatic={updaterAutomatic} busy={updaterBusyAction} error={updaterError} onAutomatic={value=>void changeUpdaterAutomatic(value)} onAction={action=>void runUpdaterAction(action)} onClose={closeUpdaterSettings}/>}
@@ -3568,7 +3673,8 @@ function App() {
                     : t("Memory sampling unavailable or incomplete. Refreshes every 5 seconds while visible.")}>{memoryLabel(memory,Date.now(),t)}</span>
         </footer>
 
-        {session?.launch?.adapter==="pi"&&currentAgent?.phase!=="shell"&&<PiRoutingBar key={`${session.session_id}:${currentAgent?.generation??''}`} sessionId={session.session_id} generation={currentAgent?.generation??''} active={isRunning} available={ownerConnectionAvailable.current.available} invoke={invoke}/>}
+        {session?.launch?.adapter==="codex"&&session.launch.codex?.route&&currentAgent?.phase!=="shell"&&<NativeCodexRoutingBar key={`${session.session_id}:${currentAgent?.generation??''}`} sessionId={session.session_id} generation={currentAgent?.generation??''} active={isRunning} available={ownerConnectionAvailable.current.available} invoke={invoke} policies={routingPolicyLibrary.rows}/>}
+        {session?.launch?.adapter==="pi"&&currentAgent?.phase!=="shell"&&<PiRoutingBar key={`${session.session_id}:${currentAgent?.generation??''}`} sessionId={session.session_id} generation={currentAgent?.generation??''} active={isRunning} available={ownerConnectionAvailable.current.available} invoke={invoke} policies={routingPolicyLibrary.rows}/>}
         <section
           className={`terminal-area ${terminalLayout.panes.some(Boolean) ? "" : "terminal-empty"} ${terminalLayout.mode==="single"&&!terminalLayout.panes.some(Boolean)?"terminal-whole-empty":""}`}
           aria-label={t("Terminal")}
@@ -3597,7 +3703,7 @@ function App() {
             </div>
           )}
         </section>
-        <ConversationView onTerminal={()=>showConversation(false)} roundRevision={conversationRoundRevision(currentAgent)} visible={conversationOpen} available={ownerConnectionAvailable.current.available} scope={JSON.stringify([ownerConnectionAvailable.current.version,session?.session_id,currentAgent?.generation,currentAgent?.agent_session_id,session?.cwd,session?.launch])} target={session?.launch?.adapter==="codex"&&!session.ssh&&currentAgent?.generation&&currentAgent.agent_session_id?{sessionId:session.session_id,threadId:currentAgent.agent_session_id,generation:currentAgent.generation}:null} invoke={invoke}/>
+        <ConversationView onTerminal={()=>showConversation(false)} roundRevision={conversationRoundRevision(currentAgent)} visible={conversationOpen} available={ownerConnectionAvailable.current.available} scope={JSON.stringify([ownerConnectionAvailable.current.version,session?.session_id,currentAgent?.generation,currentAgent?.agent_session_id,session?.cwd,session?.launch])} target={session?.launch?.adapter==="codex"&&!session.ssh&&currentAgent?.generation&&currentAgent.agent_session_id?{sessionId:session.session_id,threadId:currentAgent.agent_session_id,generation:currentAgent.generation}:null} awaitingCodexHooks={isRunning&&session?.launch?.adapter==="codex"&&!session.ssh&&currentAgent?.integration==="connecting"} invoke={invoke}/>
         {!ownerConnectionAvailable.current.available&&<div className="terminal-notice" role="alert">{t("Background connection unavailable. Tasks were not restarted.")}<button type="button" disabled={reconnecting} onClick={()=>void reconnectBackground()}>{t("Reconnect background")}</button></div>}
         {session&&finishPending.current.has(session.session_id)&&<div className="terminal-notice" role="status"><span>{t("Final saving needs attention. Retry saving without restarting the task.")}</span><button type="button" disabled={!ownerConnectionAvailable.current.available||finishRetries.current.has(session.session_id)} onClick={()=>void retrySessionSave()}>{t("Retry saving session")}</button></div>}
         {session?.launch&&!session.ssh&&taskDeliveryNotice(currentAgent,sessionStatus)&&<div className="terminal-notice" role="status">
@@ -3646,9 +3752,9 @@ function App() {
             {isMainWindow&&<ProjectFiles sessionId={session&&!session.ssh?session.session_id:null} root={session?.cwd??""} active={projectToolsOpen&&projectToolsTab==="files"} invoke={invoke} request={projectFileRequest}/>}
           </section>
           <section id="project-tools-changes" className="project-tools-panel" role="tabpanel" aria-labelledby="project-tools-tab-changes" hidden={projectToolsTab!=="changes"}>
-            <RunChanges sessionId={session&&!session.ssh?session.session_id:null} root={session?.cwd??""} active={projectToolsOpen&&projectToolsTab==="changes"} invoke={invoke} onOpenFile={openDiffFile} onReview={reviewDiffFile}/>
+            <RunChanges sessionId={session&&!session.ssh?session.session_id:null} root={session?.cwd??""} active={projectToolsOpen&&projectToolsTab==="changes"} invoke={invoke} onOpenFile={openDiffFile} onReview={reviewDiffFile} onBaselineMutation={startReviewBaselineMutation}/>
             <GitChanges path={projectToolsPath} owner={gitOwner} active={projectToolsOpen&&projectToolsTab==="changes"} sessionId={session&&!session.ssh?session.session_id:null} onOpenFile={openDiffFile} onReview={reviewDiffFile}/>
-            {isMainWindow&&<ReviewFeedback active={projectToolsOpen&&projectToolsTab==="changes"} origin={currentReviewOrigin} ready={reviewReady(reviewRecord,currentReviewOrigin)&&ownerConnectionAvailable.current.available} location={reviewLocation} onFill={fillReviewInOriginalTerminal}/>}
+            {isMainWindow&&<ReviewFeedback active={projectToolsOpen&&projectToolsTab==="changes"} origin={currentReviewOrigin} ready={reviewReady(reviewRecord,currentReviewOrigin)&&ownerConnectionAvailable.current.available} location={reviewLocation} locationRevision={reviewBaseline.pending?null:reviewBaseline.version} onCheck={checkOriginalReviewLocations} onFill={fillReviewInOriginalTerminal}/>}
           </section>
           <section id="project-tools-worktrees" className="project-tools-panel" role="tabpanel" aria-labelledby="project-tools-tab-worktrees" hidden={projectToolsTab!=="worktrees"}>
             {projectToolsOpen&&<div className="dialog-fields"><p>{projectToolsPath}</p><WorktreeControls root={projectToolsPath} owner={gitOwner} selected={selectedWorktree} onCreated={worktreeCreated} onStart={startManagedWorktree}/></div>}
@@ -3685,7 +3791,7 @@ function App() {
           onSubmit={(event) => {
             event.preventDefault();
             if(launchWorkspace&&!launchWorktreeAttempt)return;
-            if(selectedCliMissing)void installSelectedCli();else void startNewSession();
+            if(selectedCliMissing)void installSelectedCli();else void startNewSession(undefined,codexRoute);
           }}
         >
           <header className="dialog-header">
@@ -3712,9 +3818,9 @@ function App() {
             <div className="startup-program-field">
               <span>{t("Startup program")}</span>
               <div className="startup-programs" role="group" aria-label={t("Startup program")}>
-                {adapters.map(adapter => <button type="button" key={adapter.id} aria-pressed={formAdapter===adapter.id||(formAdapter==="custom"&&adapter.id==="shell")} title={formLaunch.provider&&!supportsProvider(adapter.id,formLaunch.provider)?t("Switch Model connection to existing CLI configuration to choose this program."):!adapter.available&&adapter.id!=="shell"?t("Not detected. Select to install."):adapter.label}
+                {adapters.map(adapter => <button type="button" key={adapter.id} aria-pressed={formAdapter===adapter.id||(formAdapter==="custom"&&adapter.id==="shell")} title={formLaunch.provider&&!supportsProvider(adapter.id,formLaunch.provider)?t("Switch Model connection to existing CLI configuration to choose this program."):!adapter.available&&adapter.id!=="shell"?t("Not detected. Select to install."):adapter.id==="pi"?"Pi":adapter.label}
                   disabled={starting || adapterInstalling || (!!formLaunch.provider&&!supportsProvider(adapter.id,formLaunch.provider))}
-                  onClick={()=>changeAdapter(adapter.id)}>{adapter.id==="shell"?t("Terminal"):adapter.id==="codex"?t("Codex"):adapter.id==="claude"?t("Claude"):adapter.id==="gemini"?t("Gemini"):adapter.label}</button>)}
+                  onClick={()=>changeAdapter(adapter.id)}>{adapter.id==="shell"?t("Terminal"):adapter.id==="codex"?t("Codex"):adapter.id==="claude"?t("Claude"):adapter.id==="gemini"?t("Gemini"):adapter.id==="pi"?"Pi":adapter.label}</button>)}
               </div>
             </div>
             {selectedCliMissing&&selectedCliInstaller&&<section className="cli-setup" aria-label={t("CLI setup")}>
@@ -3723,13 +3829,13 @@ function App() {
               {selectedCliInstaller.requiresNode&&<p className="settings-help">{t("This installer requires Node.js with npm. Install Node.js first if it is not available.")}</p>}
               <details><summary>{t("View installation command")}</summary><code>{selectedCliInstaller.command}</code></details>
             </section>}
-            {formAdapter==="pi"&&!selectedCliMissing&&<PiRoutingConfig args={formLaunch.extra_args} cwd={cwd} invoke={invoke} onChange={args=>editLaunch({extra_args:args})} onValidity={setPiValidation} installedGateways={installedGateways}/>}
-            {installedTerminals.length>0&&<label><span>{t("Open in")}</span><Select aria-label={t("Open session in")} value={sessionTerminal} onChange={event=>setSessionTerminal(event.target.value)}>
+            {["pi","codex","opencode"].includes(formAdapter)&&!selectedCliMissing&&<RoutingPolicyChoice adapter={formAdapter} codexAvailable={!shellWindows} policies={routingPolicyLibrary.rows} choice={routingChoice} launchPolicy={launchPolicy===launchRoutingPolicy} invalid={!piFormValid||codexRoute===null} onChange={setRoutingPolicySelection} onManage={()=>openSettingsSection("pi-routing")}/>}
+            {installedTerminals.length>0&&!codexRoute&&<label><span>{t("Open in")}</span><Select aria-label={t("Open session in")} value={sessionTerminal} onChange={event=>setSessionTerminal(event.target.value)}>
               <option value="yam">{t("YAM")}</option>
               {installedTerminals.includes("terminal")&&<option value="terminal">{t("System Terminal")}</option>}
               {installedTerminals.includes("iterm2")&&<option value="iterm2">{t("iTerm2")}</option>}
             </Select></label>}
-            {sessionTerminal!=="yam"&&<small>{t("YAM keeps managing the task and notifications. Closing the external window or pressing Ctrl+] detaches the view; the task continues. The external app uses its own font and theme.")}</small>}
+            {!codexRoute&&sessionTerminal!=="yam"&&<small>{t("YAM keeps managing the task and notifications. Closing the external window or pressing Ctrl+] detaches the view; the task continues. The external app uses its own font and theme.")}</small>}
             {formLaunch.provider&&<div className="connection-summary" role="status"><span>{t("Session connection ·")+" "}{connectionDetails(formLaunch).model}</span><small>{t("Use existing CLI configuration to select any installed program.")}</small><button type="button" onClick={()=>changeProvider("inherited")}>{t("Use existing CLI configuration")}</button></div>}
             <details className="advanced-options">
               <summary>{t("Advanced options")}</summary>

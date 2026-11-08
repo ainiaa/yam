@@ -2,9 +2,8 @@ import {createAssistantMessageEventStream,getCurrentTools,getCurrentSystemPrompt
 import {createNativeCodex} from './native-codex.mjs';
 // Author: Jeff.Liu. Pi supplies its own model capability and credential handling.
 import {getSupportedThinkingLevels} from '@earendil-works/pi-ai/models';
-import {estimateMessageTokens} from '@earendil-works/pi-ai/utils/estimate';
 import {Text} from '@earendil-works/pi-tui';
-import {convertToPng,SettingsManager} from '@earendil-works/pi-coding-agent';
+import {convertToPng,estimateTokens as estimateMessageTokens,SettingsManager} from '@earendil-works/pi-coding-agent';
 import install from './router.mjs';
 import {installAgents} from './agent-orchestrator.mjs';
 import {createAgentDiscovery} from './agent-executor.mjs';
@@ -17,7 +16,7 @@ export default async function(pi) {
  installAgents(pi,routing,{validateImage,discover});
  return routing;
  } catch(error) {
-  if(process.argv.includes('--yam-catalog-probe'))console.log(JSON.stringify({type:'yam_catalog',error:'Pi cannot load the required YAM routing extension APIs; update or configure Pi and retry'}));
+  if(process.argv.includes('--yam-catalog-probe')||process.argv.includes('--yam-runtime-probe'))console.log(JSON.stringify({type:'yam_catalog',error:'Pi cannot load the required YAM routing extension APIs; update or configure Pi and retry'}));
   throw error;
  }
 }

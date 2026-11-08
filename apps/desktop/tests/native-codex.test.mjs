@@ -2,14 +2,14 @@ import assert from 'node:assert/strict';
 import {test} from 'node:test';
 const api=await import('../src-tauri/pi/native-codex.mjs').catch(e=>{if(e.code==='ERR_MODULE_NOT_FOUND')return {};throw e;});
 const id='01234567-1234-1234-1234-0123456789ab';
-function fixture({error,restricted=false,notice,persistAt=Infinity,now,onDiscover,onExecute,discovery,configuredExecutable='/native/codex',extraModels=[]}={}){
+function fixture({error,restricted=false,notice,persistAt=Infinity,now,onDiscover,onExecute,discovery,configuredExecutable='/native/codex',extraModels=[],loadModels=async()=>[]}={}){
  const entries=[],calls=[],providers=[],commands={};let writes=0;
  const original={provider:'openai',id:'gpt-test',api:'openai-responses',reasoning:true,input:['text','image'],contextWindow:100000,maxTokens:10000,thinkingLevelMap:{off:'none',medium:'medium',high:'high',max:'xhigh'}};
  const profile={id:'codex',kind:'codex',executable:'/native/codex',auth:'subscription',capabilities:['text','files','image_input','image_generation']};
  const pi={getActiveTools:()=>restricted?['read']:['read','bash','edit','write'],registerProvider:(...v)=>providers.push(v),appendEntry:(customType,data)=>{if(++writes>=persistAt)throw Error('receipt disk write failed');entries.push({type:'custom',customType,data});},registerCommand:(n,c)=>commands[n]=c};
  const ctx={cwd:'/repo',ui:{setStatus(){},notify(){},confirm:async()=>true},isIdle:()=>true,sessionManager:{getBranch:()=>entries,getSessionFile:()=>'/owned/parent.jsonl'},modelRegistry:{isUsingOAuth:()=>true,getAll:()=>[original,...extraModels]}};
  const createStream=()=>{let resolve;const promise=new Promise(r=>resolve=r);return {events:[],push(e){this.events.push(e);if(e.type==='done')resolve(e.message);if(e.type==='error')resolve(e.error);},end(){},result:()=>promise};};
- const bridge=api.createNativeCodex?.(pi,{now,createStream,getTools:c=>c.tools??[],getSystemPrompt:c=>c.systemPrompt??c.messages.filter(m=>m.role==='system').map(m=>m.content).join('\n'),loadModels:async()=>[],executable:configuredExecutable,discover:discovery??(async()=>{onDiscover?.();return [profile];}),execute:async(a,o)=>{calls.push({a,o});if(onExecute)return onExecute(o);o.onLine?.(JSON.stringify({type:'thread.started',thread_id:id}));if(notice)o.onLine?.(JSON.stringify({type:'item.completed',item:{type:notice}}));if(error)throw typeof error==='string'?Error(error):error;return {text:'native commentary\nFinal answer',finalText:'Final answer',sessionId:id,usage:{input_tokens:20,cached_input_tokens:5,output_tokens:4}};}});
+ const bridge=api.createNativeCodex?.(pi,{now,createStream,getTools:c=>c.tools??[],getSystemPrompt:c=>c.systemPrompt??c.messages.filter(m=>m.role==='system').map(m=>m.content).join('\n'),loadModels,executable:configuredExecutable,discover:discovery??(async()=>{onDiscover?.();return [profile];}),execute:async(a,o)=>{calls.push({a,o});if(onExecute)return onExecute(o);o.onLine?.(JSON.stringify({type:'thread.started',thread_id:id}));if(notice)o.onLine?.(JSON.stringify({type:'item.completed',item:{type:notice}}));if(error)throw typeof error==='string'?Error(error):error;return {text:'native commentary\nFinal answer',finalText:'Final answer',sessionId:id,usage:{input_tokens:20,cached_input_tokens:5,output_tokens:4}};}});
  return {bridge,entries,calls,providers,commands,ctx,original,profile};
 }
 const context={messages:[{role:'user',content:'Write the article with a cover'}],tools:[{name:'read'}]};
@@ -102,6 +102,19 @@ test('native prompt budget accepts the boundary and rejects empty, NUL and overs
  for(const prompt of ['',null,'a\0b','x'.repeat(maxAgentPromptCharacters+1)])assert.throws(()=>validateAgentPrompt(prompt));
 });
 test('official Codex execution bridge is available',()=>assert.equal(typeof api.createNativeCodex,'function'));
+test('official Codex catalog excludes registry and saved aliases after refresh or failed login',async()=>{
+ let cached=[],login=true;
+ const f=fixture({loadModels:async()=>cached,discovery:async()=>login?[f.profile]:[]});
+ cached=[{...f.original,id:'listed'}];await f.bridge.initialize(f.ctx);
+ assert.equal(f.bridge.resolveModel(f.ctx,f.original).id,'gpt-test');
+ assert.deepEqual(f.bridge.catalogModels().map(model=>model.id),['listed']);
+ cached=[];await f.bridge.initialize(f.ctx);
+ assert.deepEqual(f.bridge.catalogModels(),[]);
+ cached=[{...f.original,id:'new-listed'}];await f.bridge.initialize(f.ctx);
+ assert.deepEqual(f.bridge.catalogModels().map(model=>model.id),['new-listed']);
+ login=false;await f.bridge.initialize(f.ctx);
+ assert.deepEqual(f.bridge.catalogModels(),[]);
+});
 test('subscription model resolves to CLI execution while API models keep Pi transport',{skip:!api.createNativeCodex},async()=>{
  const f=fixture();await f.bridge.initialize(f.ctx);const model=f.bridge.resolveModel(f.ctx,f.original);
  assert.equal(model.provider,'yam-codex');assert.equal(model.id,'gpt-test');assert.equal(f.providers.at(-1)[1].api,'yam-native-codex');

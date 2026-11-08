@@ -611,12 +611,13 @@ pub(crate) fn validate_command(command: &str, args: &serde_json::Value) -> Resul
             &["session_id", "adapter", "mode", "extra", "cwd"],
             &["session_id", "adapter", "mode", "extra", "cwd"],
         ),
-        "get_pi_routing" => (&["session_id"], &["session_id"]),
+        "get_pi_routing" | "copy_codex_routing" => (&["session_id"], &["session_id"]),
         "pi_routing_control" => (
             &["session_id", "generation", "request"],
             &["session_id", "generation", "request"],
         ),
         "pi_routing_catalog" => (&["cwd", "gateway", "probe_model"], &["cwd", "gateway"]),
+        "codex_routing_catalog" => (&["cwd", "config", "probe_model"], &["cwd", "config"]),
         "pi_packages" => (&["request"], &["request"]),
         "cli_start" => (&["request_key", "start"], &["request_key", "start"]),
         "cli_events" => (&["cursor"], &["cursor"]),
@@ -1206,6 +1207,11 @@ fn dispatch(app: &tauri::AppHandle, request: Request) -> Result<serde_json::Valu
                         .map_err(|_| "Home directory unavailable")?,
                     argument(args, "request")?,
                 )?),
+                "copy_codex_routing" => serde_json::to_value(super::copy_codex_routing(
+                    app.clone(),
+                    manager,
+                    argument(args, "session_id")?,
+                )?),
                 "get_pi_routing" => serde_json::to_value(super::get_pi_routing(
                     app.clone(),
                     manager,
@@ -1226,6 +1232,15 @@ fn dispatch(app: &tauri::AppHandle, request: Request) -> Result<serde_json::Valu
                         manager,
                         argument(args, "cwd")?,
                         argument(args, "gateway")?,
+                        argument(args, "probe_model")?,
+                    ),
+                )?),
+                "codex_routing_catalog" => serde_json::to_value(tauri::async_runtime::block_on(
+                    super::codex_routing_catalog(
+                        app.clone(),
+                        manager,
+                        argument(args, "cwd")?,
+                        argument(args, "config")?,
                         argument(args, "probe_model")?,
                     ),
                 )?),
@@ -2601,7 +2616,10 @@ impl Client {
             write_frame(&mut stream, &bytes, MAX_REQUEST).map_err(|error| (true, error))?;
             let (limit, deadline) = if command == "diagnostics_report" {
                 (1024 * 1024, Duration::from_secs(3))
-            } else if command == "pi_packages" || command == "pi_routing_catalog" {
+            } else if command == "pi_packages"
+                || command == "pi_routing_catalog"
+                || command == "codex_routing_catalog"
+            {
                 (2 * 1024 * 1024, Duration::from_secs(150))
             } else {
                 (MAX_RESPONSE, Duration::from_secs(35))

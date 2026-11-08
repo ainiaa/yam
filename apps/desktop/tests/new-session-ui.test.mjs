@@ -9,6 +9,7 @@ import {readFileSync as rawReadFileSync} from 'node:fs';
 import ts from 'typescript';
 import * as providers from '../src/provider-config.ts';
 import {resolveLaunchDefaults} from '../src/project-config.ts';
+import {shellStartError} from '../src/shell-launch.ts';
 import * as layout from '../src/terminal-layout.ts';
 
 const raw=readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8');
@@ -157,6 +158,29 @@ test('auxiliary window starts an available CLI with the same isolated provider p
 test('auxiliary CLI startup error does not retry or redirect',async()=>{
  const redirected=[],f=startFixture(false,{isMainWindow:false,openMainSettings:()=>redirected.push(true),invoke:async()=>{throw Error('terminal_start_outcome_unknown');}});
  await f.start();assert.deepEqual(redirected,[]);assert.match(f.errors.join(' '),/outcome unknown/i);
+});
+
+test('a missing project directory reopens the form and starts once in the corrected directory',async()=>{
+ const stale='/deleted-project',requests=[],opened=[];
+ const focus={},dialog={open:true,contains:()=>true,close(){this.open=false;},showModal(){this.open=true;}};
+ const f=startFixture(false,{
+  launchDialog:{current:dialog},document:{activeElement:focus,body:{},querySelector:()=>null},shellStartError,
+  invoke:async(name,args)=>{
+   requests.push([name,args.cwd]);
+   if(args.cwd===stale)throw 'worktree_invalid_target';
+   return {session_id:'s',cwd:args.cwd,command:null,status:'running',launch:args.launch};
+  },
+  openHistory:async record=>{opened.push(record.summary.cwd);},
+ });
+ assert.equal(await f.start({cwd:stale,command:'',launch:null,shell:{program:null,login:true}}),undefined);
+ assert.equal(dialog.open,true);
+ assert.match(f.errors.at(-1),/project directory.*choose an existing directory/i);
+ assert.deepEqual(opened,[]);
+ assert.deepEqual(requests,[['create_session',stale]]);
+ await f.start({cwd:'/project',command:'',launch:null});
+ assert.equal(dialog.open,false);
+ assert.deepEqual(opened,['/project']);
+ assert.deepEqual(requests,[['create_session',stale],['create_session','/project']]);
 });
 
 test('explicit custom commands remain visible and editable in either window, including copied sessions',()=>{

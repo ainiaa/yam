@@ -5,7 +5,7 @@ import {Select} from "./Select";
 import {useCallback, useEffect, useMemo, useRef, useState} from "react";
 import {invoke} from "@tauri-apps/api/core";
 import {GitChangesController,validGitBaseline, type GitChangesRequest, type GitChangesState, type GitPatch} from "./git-context";
-import {parseUnifiedDiff, findDiffLine,type DiffTarget} from "./git-diff-navigation";
+import {parseUnifiedDiff, findDiffLine,type DiffTarget,type ReviewPatch} from "./git-diff-navigation";
 import {FilePreview} from "./FilePreview";
 import type {PreviewTarget} from "./file-preview";
 
@@ -129,9 +129,15 @@ export function GitChanges({path, owner, sessionId = null,active=true,onOpenFile
       await load(patch?{path:patch.path,side:patch.side}:undefined,latest.value.root??undefined,true);
     });
   },[open,active,load]);
-  function act(file:string,line:number|null,side:"old"|"new",basis:"staged"|"worktree",action:((target:DiffTarget)=>void)|undefined){
+  function act(file:string,line:number|null,side:"old"|"new",basis:"staged"|"worktree",action:((target:DiffTarget)=>void)|undefined,reviewPatch?:ReviewPatch){
     const current=context.current;if(!action||!value?.root||!sessionId||!current.open||current.path!==path||current.owner!==owner||current.sessionId!==sessionId||current.baseline!==baseline)return;
-    action({sessionId,absolutePath:`${value.root.replace(/\/$/,"")}/${file}`,line,side,basis});
+    action({sessionId,absolutePath:`${value.root.replace(/\/$/,"")}/${file}`,line,side,basis,...(reviewPatch?{reviewPatch}:{})});
+  }
+  function reviewLine(side:"old"|"new",line:number) {
+    const patch=value?.patch;
+    if(value?.root&&patch?.kind==="text"&&patch.text!==null&&patch.side!=="committed"){
+      act(patch.path,line,side,patch.side,onReview,{root:value.root,baselineId:null,text:patch.text});
+    }
   }
   return <section className="git-changes">
     {!open ? <button type="button" onClick={() => setOpen(true)} disabled={!path}>{t("Git changes")}</button> : <>
@@ -170,7 +176,7 @@ export function GitChanges({path, owner, sessionId = null,active=true,onOpenFile
         </li>)}</ul>
         {value.patch && <div className="git-patch">
           <h4>{value.patch.side} · {value.patch.path}</h4>
-          {value.patch.kind === "text" ? <GitPatchView key={JSON.stringify([path,owner,value.patch.path,value.patch.side,value.comparison])} patch={value.patch} onEditLine={value.patch.side==="worktree"&&onOpenFile?line=>act(value.patch!.path,line,"new","worktree",onOpenFile):undefined} onReviewLine={onReview&&value.patch.side!=="committed"?(side,line)=>act(value.patch!.path,line,side,value.patch!.side as "staged"|"worktree",onReview):undefined}/> : <p>{value.patch.kind === "binary"
+          {value.patch.kind === "text" ? <GitPatchView key={JSON.stringify([path,owner,value.patch.path,value.patch.side,value.comparison])} patch={value.patch} onEditLine={value.patch.side==="worktree"&&onOpenFile?line=>act(value.patch!.path,line,"new","worktree",onOpenFile):undefined} onReviewLine={onReview&&value.patch.side!=="committed"?reviewLine:undefined}/> : <p>{value.patch.kind === "binary"
             ? t("Binary changes cannot be shown as text.") : t("This change type has no text comparison.")}</p>}
         </div>}
       </>}

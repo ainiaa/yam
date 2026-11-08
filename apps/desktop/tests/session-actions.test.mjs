@@ -2,6 +2,12 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {duplicateSessionDraft,readSessionLaunchSettings,saveSessionLaunchSettings} from '../src/session-actions.ts';
+test('copying a routed Codex session retains policy but removes conversation state',()=>{
+ const route={name:'native policy',config:JSON.stringify({connections:{native:{billing:'subscription',native:true}},classifiers:[],executionGroups:[{small:'native/a',medium:'native/b',strong:'native/c'}]}),state:'old-session'};
+ const copy=duplicateSessionDraft({cwd:'/tmp',launch:{adapter:'codex',mode:'interactive',extra_args:'',prompt:null,codex:{image_mode:'native',route}}});
+ assert.deepEqual(copy.codexRoute,{name:route.name,config:route.config});
+ assert.equal(JSON.stringify(copy).includes('old-session'),false);
+});
 const provider={id:'custom',model:'gateway/model',base_url:'http://127.0.0.1:3425',api_key_env:'GATEWAY_KEY'};
 const source={session_id:'s-source-1',cwd:'/project 中文',command:null,launch:{adapter:'codex',mode:'interactive',extra_args:'--no-alt-screen',prompt:'do not repeat this task',codex:{image_mode:'gateway_api',context:'PRIVATE_OLD_ID'},provider,env_refs:{TOOLS_TOKEN:'TOOLS_TOKEN_SOURCE'}}};
 test('duplicate takes a fresh CLI snapshot, provider references and image mode without old prompt or identity',()=>{
@@ -169,3 +175,36 @@ test('pending ordinary copy retains its captured launch settings when another dr
  const pending=actual('startNewSession',bindings)(copy);snapshot.current=undefined;resolve({session_id:'s-new-1',launch:null});await pending;
  const saved=JSON.parse(data.get('yam.sessionLaunch.s-new-1'));assert.deepEqual(saved.ordinary,original);assert.deepEqual(saved.appearance,original.appearance);
 });
+
+test('Pi session copies keep the routing snapshot and discard other CLI arguments',async()=>{
+ const {parsePiDraft}=await import('../src/pi-routing.ts');
+ const copied=duplicateSessionDraft({...source,launch:{adapter:'pi',mode:'interactive',
+  extra_args:'--yam-small p/light --yam-strong p/strong --yam-classifier p/fast --theme old -- old-prompt',
+  prompt:'old-task'}});
+ assert.equal(copied.draft.prompt,null);
+ assert.equal(parsePiDraft(copied.draft.extra_args).classifier,'p/fast');
+ assert.equal(parsePiDraft(copied.draft.extra_args).strong,'p/strong');
+ assert.doesNotMatch(copied.draft.extra_args,/old-prompt|old-task|--theme/);
+ assert.match(copied.warning,/routing policy.*copied/i);
+});
+
+test('duplicate action copies effective native strategy and respects routing off',async()=>{
+ const config=JSON.stringify({connections:{native:{billing:'subscription',native:true}},classifiers:[],executionGroups:[{small:'native/a',medium:'native/b',strong:'native/c'}]});
+ const record={...source,launch:{adapter:'codex',mode:'interactive',extra_args:'',codex:{image_mode:'native',route:{name:'old',config,state:'old-session'}}}};
+ for(const effective of [{name:'changed',config},{name:'changed',config,enabled:false,connection:'native',nativeModel:{model:'deepseek/deepseek-v4-pro',effort:'high'}}]){
+  const calls=[];let copy;
+  const bindings={terminalViews:{current:{get:()=>null}},titlesRef:{current:{}},t:s=>s,sessionCopyIntent:{current:0},starting:false,creatingSession:{current:false},terminalMounted:{current:true},invoke:async(name)=>{calls.push(name);return name==='get_session'?{summary:record}:effective;},duplicateSessionDraft,readSessionLaunchSettings,localStorage:{getItem:()=>null},startNewSession:async value=>{copy=value;},setError:assert.fail};
+  await actual('duplicateSession',bindings)(source.session_id,true);
+  assert.deepEqual(calls,['get_session','copy_codex_routing']);assert.deepEqual(copy.codexRoute,effective);assert.equal(JSON.stringify(copy).includes('old-session'),false);
+ }
+});
+
+ test('disabled native session copy keeps actual settings and refuses an unknown model',()=>{
+ const config=JSON.stringify({connections:{native:{billing:'subscription',native:true}},classifiers:[],executionGroups:[{small:'native/a',medium:'native/b',strong:'native/c'}]});
+ const record={cwd:'/tmp',launch:{adapter:'codex',mode:'interactive',extra_args:'',codex:{image_mode:'native',route:{name:'route',config}}}};
+ const effective={name:'route',config,enabled:false,connection:'native',nativeModel:{model:'vendor/deepseek:pro',effort:'high'}};
+ const copied=duplicateSessionDraft(record,null,effective);
+ assert.deepEqual(copied.codexRoute,effective);
+ copied.codexRoute.nativeModel.model='changed';assert.equal(effective.nativeModel.model,'vendor/deepseek:pro');
+ for(const nativeModel of [undefined,null,{model:'',effort:'high'},{model:'deepseek',effort:'unknown'},{model:'bad\\nmodel',effort:'high'},{model:'x'.repeat(451),effort:'high'}])assert.throws(()=>duplicateSessionDraft(record,null,{...effective,nativeModel}),/native model|native settings/i);
+ });

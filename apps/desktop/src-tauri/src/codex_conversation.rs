@@ -503,7 +503,9 @@ fn record_identity(
     if !cwd.is_dir() {
         return Err("conversation_identity_changed".into());
     }
-    let (home, provider) = if launch.provider.is_some() {
+    let (home, provider) = if let Some(route) = crate::codex_routing::route(launch) {
+        crate::codex_routing::conversation_home(&root.join("sessions"), route, &thread)?
+    } else if launch.provider.is_some() {
         (
             crate::provider_launch::existing_home(root, launch)
                 .map_err(|_| "conversation_storage_unavailable")?,
@@ -1164,6 +1166,21 @@ mod tests {
         assert_eq!(
             before,
             std::fs::read(env.home.as_ref().unwrap().join("config.toml")).unwrap()
+        );
+        let route_id = "11111111-1111-1111-1111-111111111111";
+        let state_dir = f.0.join("sessions/codex-routing-sessions").join(route_id);
+        crate::background::private_root(&state_dir).unwrap();
+        let state = json!({"v":2,"threadId":"native","connectionHome":env.home.as_ref().unwrap(),"provider":"yam_api"});
+        crate::background::private_file(&state_dir.join("state.json"), true)
+            .unwrap()
+            .write_all(state.to_string().as_bytes())
+            .unwrap();
+        let launch = record.summary.launch.as_mut().unwrap();
+        launch.provider = None;
+        launch.codex = Some(serde_json::from_value(json!({"image_mode":"native","route":{"name":"Gateway","config":"{}","state":route_id}})).unwrap());
+        assert_eq!(
+            record_identity(&record, &f.0, "owner").unwrap().provider,
+            "yam_api"
         );
         record.agent.generation.clear();
         assert!(record_identity(&record, &f.0, "owner").is_err());
