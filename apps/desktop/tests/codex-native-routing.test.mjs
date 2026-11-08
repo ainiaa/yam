@@ -336,6 +336,44 @@ test('native relay preserves extended length payloads and interleaved control fr
  await s.waitFor(()=>Buffer.concat(s.incoming).length===expected.length);
  assert.deepEqual(Buffer.concat(s.incoming),expected);
 });
+test('native relay forwards a valid 30 MiB App Server plugin catalog response',async t=>{
+ const errors=[],seen=[],s=await setup(t,{onError:reason=>errors.push(reason),onEvent:message=>seen.push(message.result.plugins[0].description.length)});
+ const description='x'.repeat(30*1024*1024),response=frame(JSON.stringify({id:'plugin-list-fixture',result:{plugins:[{description}]}}),{mask:false});
+ s.peer.write(response.subarray(0,3));s.peer.write(response.subarray(3,11));s.peer.write(response.subarray(11));
+ await s.waitFor(()=>errors.length||s.outgoing.reduce((length,chunk)=>length+chunk.length,0)===response.length);
+ assert.deepEqual(errors,[]);assert.deepEqual(seen,[description.length]);
+ assert.ok(Buffer.concat(s.outgoing).equals(response));
+});
+test('native relay enforces the App Server response ceiling from its frame header',async t=>{
+ const errors=[],s=await setup(t,{onError:reason=>errors.push(reason)}),closed=once(s.client,'close');
+ const header=Buffer.from([0x81,127,0,0,0,0,0,0,0,0]);
+ header.writeBigUInt64BE(BigInt(128*1024*1024+1),2);
+ s.peer.write(header);await closed;
+ assert.equal(s.outgoing.length,0);assert.match(errors[0],/Oversized Codex frame/);
+});
+test('native relay preserves fragmented masked UTF-8 and rejects invalid UTF-8',async t=>{
+ const seen=[],s=await setup(t,{onRequest:async message=>{seen.push(message);return message;}});
+ const message={id:13,method:'thread/name/set',params:{name:'测试🧪'}},payload=Buffer.from(JSON.stringify(message));
+ const split=payload.indexOf(Buffer.from('🧪'))+1;
+ const start=frame(payload.subarray(0,split),{fin:false}),end=frame(payload.subarray(split),{opcode:0});
+ const ping=frame('ping',{opcode:9});s.client.write(Buffer.concat([start,ping,end]));
+ await s.waitFor(()=>seen.length&&Buffer.concat(s.incoming).length===start.length+ping.length+end.length);
+ assert.deepEqual(seen,[message]);assert.deepEqual(Buffer.concat(s.incoming),Buffer.concat([ping,start,end]));
+ const closed=once(s.client,'close');s.client.write(frame(Buffer.from([0xff])));await closed;
+ assert.deepEqual(seen,[message]);
+});
+test('native relay bounds cumulative payload and header bytes of fragmented messages',async t=>{
+ const errors=[],upstream=await setup(t,{onError:reason=>errors.push(reason)}),clientClosed=once(upstream.client,'close');
+ const first=frame('x'.repeat(4*1024*1024),{fin:false}),continuation=Buffer.from([0x80,0xff,0,0,0,0,0,0,0,0]);
+ continuation.writeBigUInt64BE(BigInt(4*1024*1024+1),2);
+ upstream.client.write(first);upstream.client.write(continuation);await clientClosed;
+ assert.equal(upstream.incoming.length,0);
+ const downstream=await setup(t,{onError:reason=>errors.push(reason)}),serverClosed=once(downstream.client,'close');
+ const emptyFragments=Buffer.alloc(64*1024+2);emptyFragments[0]=1;
+ downstream.peer.write(emptyFragments);await serverClosed;
+ assert.equal(downstream.outgoing.length,0);
+ assert.deepEqual(errors,['Native Codex relay client message: Oversized Codex message','Native Codex relay App Server message: Oversized Codex message']);
+});
 test('native relay rejects unmasked clients, invalid fragments, oversized frames and callback failure',async t=>{
  for(const bytes of [frame('{}',{mask:false}),frame('{}',{opcode:0}),Buffer.from([0x81,0xff,0,0,0,0,0,0x80,0,1])]){
   await t.test('invalid frame '+bytes.toString('hex').slice(0,20),async sub=>{
