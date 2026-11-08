@@ -2438,9 +2438,7 @@ mod tests {
         let mut runtime = Some(Bridge::start(history.clone(), |_, _| {}).unwrap());
         let (release, wait) = std::sync::mpsc::channel();
         *runtime.as_ref().unwrap().delivery_worker.lock().unwrap() =
-            Some(std::thread::spawn(move || {
-                let _ = wait.recv_timeout(Duration::from_secs(2));
-            }));
+            Some(std::thread::spawn(move || wait.recv().unwrap()));
         assert!(runtime
             .as_ref()
             .unwrap()
@@ -2449,7 +2447,22 @@ mod tests {
         assert!(Bridge::retire_stopped(&mut runtime).is_err());
         assert!(runtime.is_some());
         release.send(()).unwrap();
-        std::thread::sleep(Duration::from_millis(30));
+        let bridge = runtime.as_ref().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        for worker in [&bridge.worker, &bridge.delivery_worker] {
+            while worker
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|worker| !worker.is_finished())
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "bridge worker did not exit"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
         Bridge::retire_stopped(&mut runtime).unwrap();
         assert!(runtime.is_none());
         history

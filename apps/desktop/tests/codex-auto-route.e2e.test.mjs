@@ -9,6 +9,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {createServer} from 'node:http';
+import {connect} from 'node:net';
 
 const runner=fileURLToPath(new URL('../../../scripts/codex-auto-route.mjs',import.meta.url));
 const threadId='11111111-1111-1111-1111-111111111111',turnId='22222222-2222-2222-2222-222222222222';
@@ -62,7 +63,10 @@ else if(args.includes('--remote')){
  let loaded=false;
  const handle=({id,method,params})=>{
   if(method==='account/read')send(id,{account:{type:'chatgpt'}});
-  if(method==='model/list')send(id,{data:['offline','fast','deepseek-v4-pro','deepseek-v4-flash'].map(model=>({model,supportedReasoningEfforts:['medium','high','max'].map(reasoningEffort=>({reasoningEffort}))})),nextCursor:null});
+  if(method==='model/list'){
+   const names=env.ROUTING_TEST_CASE==='live-policy'?JSON.parse(readFileSync(env.ROUTING_TEST_LOG+'.models','utf8')):['offline','fast','deepseek-v4-pro','deepseek-v4-flash'];
+   send(id,{data:names.map(model=>({model,supportedReasoningEfforts:['medium','high','max'].map(reasoningEffort=>({reasoningEffort}))})),nextCursor:null});
+  }
   if(method==='initialize')send(id,{userAgent:'fake-codex'});
   if(method==='thread/start'||method==='thread/resume'){
    loaded=true;
@@ -179,19 +183,24 @@ AbortSignal.timeout=ms=>{
   }finally{clearTimeout(guard);clearInterval(monitor);}
  }
  async function events(){return (await readFile(log,'utf8')).trim().split('\n').filter(Boolean).map(JSON.parse);}
- async function desktop(prompts,mode=''){
+ async function desktop(prompts,mode='',beforeInput){
   const {codex,...policy}=config;
+  const controlFile=log+'.control',generation='e'.repeat(64);
   const child=spawn(process.execPath,[runner,'--interactive','--session',session,'--codex',codex],{
    cwd:paths.project,env:{...process.env,CODEX_HOME:paths.global,YAM_TEST_API_KEY:'fixture-key',
+    ...beforeInput?{YAM_PI_CONTROL_FILE:controlFile,YAM_PI_GENERATION:generation}:{},
     YAM_CODEX_ROUTE_CONFIG:JSON.stringify(policy),ROUTING_TEST_CASE:mode,ROUTING_TEST_LOG:log,ROUTING_TEST_PROJECT:paths.project},stdio:['pipe','pipe','pipe'],
   });
   const output={stdout:'',stderr:''};
   for(const key of ['stdout','stderr'])child[key].setEncoding('utf8').on('data',data=>{output[key]+=data;});
   const closed=once(child,'close'),guard=setTimeout(()=>child.kill('SIGKILL'),12000);
-  child.stdin.end(prompts.join('\n')+'\n');
-  try{const [code]=await closed;return {code,...output};}finally{clearTimeout(guard);}
+  try{
+   if(beforeInput)await beforeInput(controlFile,generation);
+   child.stdin.end(prompts.join('\n')+'\n');
+   const [code]=await closed;return {code,...output};
+  }finally{clearTimeout(guard);if(child.exitCode===null&&child.signalCode===null){child.kill('SIGTERM');await closed;}}
  }
- return {config,run,events,paths,globalConfig,sentinel,desktop,session};
+ return {config,run,events,paths,globalConfig,sentinel,desktop,session,log};
 }
 
 test('managed mixed Codex starts on a gateway then dispatches one turn per source change and reopens the current connection',async t=>{
@@ -240,6 +249,43 @@ test('desktop terminal preserves the no-paid-dispatch guard when subscription cl
  assert.equal(result.code,0,result.stderr);
  assert.match(result.stdout,/automatic paid dispatch is disabled/);
  assert.equal((await events()).filter(event=>event.method==='turn/start').length,0);
+});
+
+test('desktop control refreshes a live strategy catalog before dispatching on the existing thread',async t=>{
+ const {config,desktop,events,session,log}=await fixture(t);
+ config.connections={native:{native:true,billing:'subscription'}};
+ config.classifiers=[];config.executionGroups=[{}];config.model='native/fast';config.effort='high';
+ const {codex,...policy}=config;
+ await writeFile(log+'.models',JSON.stringify(['fast']));
+ const result=await desktop(['Use newly discovered model','/exit'],'live-policy',async(controlFile,generation)=>{
+  async function waitFor(predicate){
+   for(let attempt=0;attempt<200;attempt++){
+    const descriptor=await readFile(controlFile,'utf8').then(JSON.parse,error=>{if(error.code!=='ENOENT')throw error;});
+    if(descriptor&&predicate(descriptor.state))return descriptor;
+    await delay(20);
+   }
+   throw Error('Expected routing control state was not published');
+  }
+  async function change(id,model){
+   const {token,port,state}=await waitFor(state=>state.threadId===threadId&&!state.pending);
+   const socket=connect({host:'127.0.0.1',port});socket.setTimeout(2000,()=>socket.destroy(Error('Routing control timed out')));
+   await once(socket,'connect');
+   socket.end(JSON.stringify({token,generation,revision:state.revision,action:'mode',data:{policy:{id,name:id,config:JSON.stringify({...policy,model})}}}));
+   socket.setEncoding('utf8');let raw='';for await(const chunk of socket)raw+=chunk;
+   assert.equal(JSON.parse(raw).ok,true);
+  }
+  await change('missing','native/missing');
+  const rejected=(await waitFor(state=>!state.pending&&!!state.error)).state;
+  assert.equal(rejected.policyId,null);assert.match(rejected.error,/model unavailable/);
+  await writeFile(log+'.models',JSON.stringify(['fast','fresh']));
+  await change('fresh','native/fresh');
+  await waitFor(state=>state.policyId==='fresh'&&!state.pending&&!state.error);
+ });
+ assert.equal(result.code,0,result.stderr);assert.equal(result.stdout,'');
+ const state=JSON.parse(await readFile(join(session,'state.json'),'utf8'));
+ assert.equal(state.config.model,'native/fresh');assert.equal(state.policyId,'fresh');
+ const turns=(await events()).filter(row=>row.method==='turn/start');
+ assert.deepEqual(turns.map(row=>[row.params.threadId,row.params.model]),[[threadId,'fresh']]);
 });
 
 test('protocol routes isolated subscription classification to explicit DeepSeek and resumes the same thread',async t=>{

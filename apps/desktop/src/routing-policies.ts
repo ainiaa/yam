@@ -1,6 +1,6 @@
 // Author: Jeff.Liu.
 import {disablePiRouting,hasPiLaunchRouting,hasPiRoutingSelection,isPiRoutingOff,parsePiDraft,portablePiRoutingPolicy,restorePiSetup,validatePiDraft,type PiRoutingPolicy,type PiDraft,type PiModel} from './pi-routing.ts';
-import {readCodexPolicy,type CodexPolicy} from '../src-tauri/pi/codex-route-config.mjs';
+import {readCodexPolicy,validateCodexModelCatalog,type CodexPolicy} from '../src-tauri/pi/codex-route-config.mjs';
 import {defaultTierRules} from '../src-tauri/pi/task-rules.mjs';
 
 export function codexRoutingConfig(raw:string):CodexPolicy{
@@ -29,19 +29,10 @@ export function codexQuickSetupConfig(raw:string,piArgs:string,models:PiModel[])
  const issue=validateCodexDraft(args,models);if(issue)throw Error(issue);
  return {args,fixedEffort};
 }
-export function validateCodexDraft(raw:string,models?:PiModel[]):string|null{
+export function validateCodexDraft(raw:string,models?:PiModel[],checkedConnections?:readonly string[]):string|null{
  try{
-  const config=readCodexPolicy(raw),fixed=config.model&&config.model!=='auto'?config.model:null;
-  if(models){
-   const requirements=new Map<string,Set<string>>(),add=(key:string,effort:string)=>{const list=requirements.get(key)??new Set();list.add(effort);requirements.set(key,list);};
-   const rules=config.rules??defaultTierRules;
-   for(const key of config.classifiers)add(key,config.connections[key.slice(0,key.indexOf('/'))]?.billing==='paid'?'high':'medium');
-   if(fixed&&config.effort&&config.effort!=='auto')add(fixed,config.effort);
-   else for(const selection of [...rules.rules,rules.fallback,{model:'strong',effort:rules.rules.find(rule=>rule.task==='review')!.effort}]){
-    for(const key of fixed?[fixed]:config.executionGroups.map(group=>group[selection.model]).filter(Boolean))add(key,config.effort&&config.effort!=='auto'?config.effort:selection.effort);
-   }
-   for(const [key,efforts] of requirements){const model=models.find(row=>row.key===key);if(!model)throw Error('Codex model unavailable: '+key);for(const effort of efforts)if(!model.levels.includes(effort))throw Error(`${key}: unsupported reasoning ${effort}`);}
-  }
+  const config=readCodexPolicy(raw);
+  if(models)validateCodexModelCatalog(config,models,checkedConnections);
   return null;
  }catch(error){return error instanceof Error?error.message:'Invalid Codex routing configuration';}
 }

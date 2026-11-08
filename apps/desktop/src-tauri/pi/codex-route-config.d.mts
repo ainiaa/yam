@@ -3,3 +3,4 @@ export type CodexConnection={billing:'subscription';native:true}|{billing:'subsc
 export type CodexPolicy={connections:Record<string,CodexConnection>;classifiers:string[];executionGroups:Record<string,string>[];rules?:TaskRules;model?:string;effort?:string;respectSystemProxy?:boolean};
 export function readCodexPolicy(raw:string,options?:{allowIncomplete?:boolean}):CodexPolicy;
 export function validateCodexPolicy(config:CodexPolicy):unknown;
+export function validateCodexModelCatalog(config:CodexPolicy,models:ReadonlyArray<{key:string;levels:readonly string[]}>,checkedConnections?:readonly string[]):void;

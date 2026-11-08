@@ -70,3 +70,33 @@ export function readCodexPolicy(raw,{allowIncomplete=false}={}){
  }
  return config;
 }
+
+export function codexModelRequirements(config){
+ const {candidate,rules}=validateCodexPolicy(config);
+ const fixed=config.model&&config.model!=='auto'?config.model:null;
+ const fixedEffort=config.effort&&config.effort!=='auto'?config.effort:null;
+ if(fixed&&fixedEffort)return new Map([[fixed,new Set([fixedEffort])]]);
+ const requirements=new Map();
+ const requireEffort=(key,effort)=>{
+  const efforts=requirements.get(key)??new Set();
+  efforts.add(effort);requirements.set(key,efforts);
+ };
+ for(const key of config.classifiers)requireEffort(key,candidate(key).billing==='paid'?'high':'medium');
+ for(const selection of [...rules.rules,rules.fallback,{model:'strong',effort:rules.rules.find(rule=>rule.task==='review').effort}]){
+  for(const key of fixed?[fixed]:config.executionGroups.map(group=>group[selection.model]).filter(Boolean))requireEffort(key,fixedEffort??selection.effort);
+ }
+ return requirements;
+}
+
+export function validateCodexModelCatalog(config,models,checkedConnections){
+ const requirements=codexModelRequirements(config);
+ for(const [key,efforts] of requirements){
+  const model=models.find(row=>row.key===key);
+  if(!model){
+   const name=key.split('/',1)[0];
+   if(checkedConnections&&!checkedConnections.includes(name))throw Error('Codex model catalog unavailable: '+name);
+   throw Error('Codex model unavailable: '+key);
+  }
+  for(const effort of efforts)if(!model.levels.includes(effort))throw Error(`${key}: unsupported reasoning ${effort}`);
+ }
+}
