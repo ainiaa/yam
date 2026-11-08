@@ -8,7 +8,7 @@ import {basename,dirname,isAbsolute,join,resolve,sep} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {parseArgs,isDeepStrictEqual} from 'node:util';
 import {spawn} from 'node:child_process';
-import {once} from 'node:events';
+import {addAbortListener,once} from 'node:events';
 import {connect} from 'node:net';
 import {createNativeRelay} from './codex-native-routing.mjs';
 import {serveControls} from '../apps/desktop/src-tauri/pi/control.mjs';
@@ -38,7 +38,7 @@ const canShareNativeHome=connection=>connection?.native||connection?.gateway;
 // The same facts and continuation rule used by Pi; native Codex retains the thread.
 export function createCodexTurnRouter({config,connectionName,models,classify,switchConnection,loadCatalog,initial={},save=async()=>{},onSaved=()=>{}}){
  let state={v:2,status:'idle',requestId:null,enabled:true,name:'',policyId:null,...initial,connectionName,config:readCodexPolicy(JSON.stringify(config))};
- let classifying=null,submitting=false,applying=null;
+ let preDispatch=null,submitting=false,applying=null;
  let recoveringSwitch=!!initial.connectionSwitch,pendingSettings=null;
  const settings={};
  function rememberSettings(source,patch=false){
@@ -134,25 +134,37 @@ export function createCodexTurnRouter({config,connectionName,models,classify,swi
     starts.set(message.id,{method:message.method,threadId:params.threadId,params});return message;
    }
    if(message.method==='thread/turns/list'&&params.threadId===state.threadId){starts.set(message.id,{method:message.method,threadId:params.threadId,cursor:params.cursor??null,descending:params.sortDirection!=='asc'});return message;}
-   if(message.method==='turn/interrupt'&&params.threadId===state.threadId&&classifying){
-    classifying.abort(Error('Routing cancelled before task dispatch'));
+   if(message.method==='turn/interrupt'&&params.threadId===state.threadId&&preDispatch){
+    preDispatch.abort(Error('Routing cancelled before task dispatch'));
     respond?.({id:message.id,result:{}});return null;
    }
    if(message.method!=='turn/start'||params.threadId!==state.threadId)return message;
-   if(!busy()&&state.pendingPolicy)await settle();
-   if(busy())throw Error('Inspect the current Codex turn before starting another task');
-   submitting=true;
-   activeRequestId=message.id;recoveryHistory=null;
-   const nativeModel={model:params.collaborationMode?.settings?.model??params.model??state.nativeModel?.model,effort:params.collaborationMode?.settings?.reasoning_effort??params.effort??state.nativeModel?.effort??null};
-   if(nativeModel.effort==='none')nativeModel.effort='off';
-   const before=structuredClone(state),previous=state.previous;
-   const controller=state.enabled?new AbortController():null;
-   if(controller)classifying=controller;
-   let changing=false,confirmedConnection=null;
+   if(preDispatch||busy())throw Error('Inspect the current Codex turn before starting another task');
+   const controller=new AbortController();preDispatch=controller;
+   const requestSignal=signal?AbortSignal.any([signal,controller.signal]):controller.signal;
+   let before,changing=false,confirmedConnection=null;
    try{
-    if(!controller){await publish({status:'pending',requestId:message.id,pendingAfterTurnId:state.turnId??state.pendingAfterTurnId,turnId:null,decision:null,dispatched:null,pendingRoute:{previous:null,previousPrompt:'',nativeModel},error:null});pendingSettings=params;return message;}
+    requestSignal.throwIfAborted();
+    const policyCheck=settle();
+    if(policyCheck){
+     let listener;
+     const cancelled=new Promise((_,reject)=>{listener=addAbortListener(requestSignal,()=>reject(requestSignal.reason));});
+     try{await Promise.race([policyCheck,cancelled]);}finally{listener[Symbol.dispose]();}
+    }
+    requestSignal.throwIfAborted();
+    if(busy())throw Error('Inspect the current Codex turn before starting another task');
+    submitting=true;
+    activeRequestId=message.id;recoveryHistory=null;
+    before=structuredClone(state);
+    const previous=state.previous;
+    if(!state.enabled){
+     const model=params.collaborationMode?.settings?.model??params.model??state.nativeModel?.model;
+     const effort=params.collaborationMode?.settings?.reasoning_effort??params.effort??state.nativeModel?.effort??null;
+     const nativeModel={model,effort:effort==='none'?'off':effort};
+     await publish({status:'pending',requestId:message.id,pendingAfterTurnId:state.turnId??state.pendingAfterTurnId,turnId:null,decision:null,dispatched:null,pendingRoute:{previous:null,previousPrompt:'',nativeModel},error:null});
+     requestSignal.throwIfAborted();pendingSettings=params;return message;
+    }
     const current=structuredClone(state.config),{candidate,connections,rules}=validateCodexPolicy(current);
-    const requestSignal=signal?AbortSignal.any([signal,controller.signal]):controller.signal;
     const prompt=(params.input??[]).filter(item=>item.type==='text').map(item=>item.text??'').join('\n');
     requestSignal.throwIfAborted();
     await publish({status:'classifying'});
@@ -203,10 +215,10 @@ export function createCodexTurnRouter({config,connectionName,models,classify,swi
     return {...message,params:next};
    }catch(error){
     if(changing&&!confirmedConnection)await publish({status:'unknown',requestId:null,error:'Codex connection change could not be confirmed. Reopen this session before sending another task.'});
-    else if(state.status==='classifying'||state.status==='pending'&&state.requestId===message.id)await publish(current=>({...before,...confirmedConnection,
+    else if(before&&(state.status==='classifying'||state.status==='pending'&&state.requestId===message.id))await publish(current=>({...before,...confirmedConnection,
      connectionSwitch:null,pendingPolicy:current.pendingPolicy,lifecycleAcknowledged:current.lifecycleAcknowledged,requestId:null,error:error.message}));
     throw error;
-   }finally{submitting=false;classifying=null;}
+   }finally{submitting=false;preDispatch=null;}
   },
   async event(message){
    const start=starts.get(message.id);
@@ -331,12 +343,12 @@ async function localGatewayModels(connection,signal){
   supportedReasoningEfforts:(Array.isArray(row.reasoning_levels)?row.reasoning_levels:row.reasoning===false?['off']:[]).filter(level=>['none','off','minimal','low','medium','high','xhigh','max','ultra'].includes(level)).map(reasoningEffort=>({reasoningEffort})),inputModalities:row.modalities?.input??['text']}));
 }
 
-export async function codexCatalog({config,codex,cwd,probeModel,signal,onlyConnections},{inspect=openCodexThread,probe=executeAgent}={}){
+export async function codexCatalog({config,codex,cwd,session,probeModel,signal,onlyConnections},{inspect=openCodexThread,probe=executeAgent}={}){
  const {connections,candidate}=validateCodexPolicy(config),models=[],warnings=[],checkedConnections=[];
  for(const connection of connections.values()){
   if(onlyConnections&&!onlyConnections.has(connection.name))continue;
   try{
-   const env=await profileEnvironment(connection,connections,[cwd]);
+   const env=await profileEnvironment(connection,connections,[cwd],session);
    const rows=connection.gateway?await localGatewayModels(connection,signal):await inspect({executable:codex,env,cwd,connection,signal,catalogOnly:true,respectSystemProxy:config.respectSystemProxy});
    const connectionModels=[];
    for(const row of rows){
@@ -351,7 +363,7 @@ export async function codexCatalog({config,codex,cwd,probeModel,signal,onlyConne
  if(probeModel){
   const entry=candidate(probeModel),model=models.find(row=>row.key===probeModel);
   if(!model||!model.levels.includes('high'))throw Error('Codex model unavailable or high reasoning unsupported');
-  const env=await profileEnvironment(entry.connection,connections,[cwd]);
+  const env=await profileEnvironment(entry.connection,connections,[cwd],session);
   let result;
   if(entry.billing==='paid'){
    const thread=await inspect({executable:codex,env,cwd,model:entry.model,connection:entry.connection,signal,readOnly:true,respectSystemProxy:config.respectSystemProxy});
@@ -576,7 +588,7 @@ export async function runNativeCodex({codex,cwd,session,config,prompt}){
   if(prior?.config)config=readCodexPolicy(JSON.stringify(prior.config));
   const {candidate,connections,rules}=validateCodexPolicy(config);
   const key=prior?.previous?.identity??prior?.model??(config.model&&config.model!=='auto'?config.model:config.executionGroups.map(group=>group[rules.fallback.model]).find(Boolean));
-  const catalog=await codexCatalog({config,codex,cwd,signal:controller.signal});
+  const catalog=await codexCatalog({config,codex,cwd,session,signal:controller.signal});
   if(!catalog.models.length)throw Error(catalog.warning??'No native Codex models available');
   const initial=candidate(key),alternatives=config.model&&config.model!=='auto'?[key]:config.executionGroups.map(group=>group[rules.fallback.model]).filter(Boolean);
   let selected=prior?.threadId?initial:alternatives.map(candidate).find(entry=>entry.billing===initial.billing&&catalog.models.some(model=>model.key===entry.identity))??initial;
@@ -624,7 +636,7 @@ export async function runNativeCodex({codex,cwd,session,config,prompt}){
   router=createCodexTurnRouter({config,connectionName:connection.name,models:catalog.models,
    switchConnection:mixed?change=>resumeCodexConnection({...change,gatewayKey:gatewayKeys.get(change.connection.name)}):undefined,
    initial:{...priorState,enabled:prior?.enabled??(process.env.YAM_CODEX_ROUTE_ENABLED!=='false'),name:prior?.name??process.env.YAM_CODEX_ROUTE_NAME??''},
-   loadCatalog:config=>codexCatalog({config,codex,cwd,onlyConnections:new Set([...codexModelRequirements(config).keys()].map(key=>key.split('/',1)[0])),signal:AbortSignal.any([controller.signal,AbortSignal.timeout(12000)])}),
+   loadCatalog:config=>codexCatalog({config,codex,cwd,session,onlyConnections:new Set([...codexModelRequirements(config).keys()].map(key=>key.split('/',1)[0])),signal:AbortSignal.any([controller.signal,AbortSignal.timeout(12000)])}),
    classify:request=>classifyNativeTurn(request,codex,cwd,session),save,onSaved:()=>{revision++;controls?.publish();}});
   const settlePolicy=()=>{
    if(controller.signal.aborted)return;

@@ -34,6 +34,7 @@ test('Codex catalog validation distinguishes failed and successfully empty conne
  const available=[{...models[0],key:'native/ready'}];
  assert.equal(routingPolicies.validateCodexDraft(JSON.stringify({...config,model:'native/ready'}),available,['native']),null);
  assert.equal(routingPolicies.validateCodexDraft(JSON.stringify({...config,model:'native/ready'}),available,[]),null);
+ assert.equal(routingPolicies.validateCodexDraft(JSON.stringify({...config,model:'native/ready',classifiers:['local/offline']}),available,['native']),null);
 });
 test('Pi legacy classifier remains A and ordered B/C survive settings and launch args',()=>{
  const saved=JSON.stringify({gateway:null,small:'p/small',strong:'p/strong',classifier:'p/a'});
@@ -187,12 +188,13 @@ test('Pi setup reports installed tools separately from discovered models and pro
  const fs=await import('node:fs'),ts=(await import('typescript')).default;
  const ast=ts.createSourceFile('PiRouting.tsx',fs.readFileSync(new URL('../src/PiRouting.tsx',import.meta.url),'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
  const declaration=ast.statements.find(n=>ts.isFunctionDeclaration(n)&&n.name?.text==='PiRoutingConfig');
- const slots=[],refs=[],opened=[],stored=[],scannedGateways=[];let index=0,refIndex=0,result={models:[]},failed=false,detected=[],gatewayWarning=false,cwd='/tmp',args='--yam-small p/small --yam-strong p/strong';
+ const slots=[],refs=[],opened=[],stored=[],scannedGateways=[];let index=0,refIndex=0,result={models:[]},failed=false,detected=[],gatewayWarning=false,cwd='/tmp',args='--yam-small p/small --yam-strong p/strong',adapter='pi';
  const invoke=async(name,request)=>{if(name==='list_local_gateways')return detected;scannedGateways.push(request.gateway);if(failed)throw Error('offline');return request.gateway&&gatewayWarning?{...result,warning:'Magpie is offline'}:result;};
  const env={useState:value=>{const i=index++;if(!(i in slots))slots[i]=typeof value==='function'?value():value;return[slots[i],v=>slots[i]=typeof v==='function'?v(slots[i]):v];},useRef:value=>{const i=refIndex++;return refs[i]??(refs[i]={current:value});},useEffect:()=>{},Select:'select',RoutingModelPicker:'routing-model-picker',hasPiRoutingSelection,probePiSetupModel,maxPiBackupModels,piExecutionTiers,piModelCatalogSource,piSubscriptionCatalog,piSubscriptionOnly,PiTaskRules:()=>null,defaultRules:{},validateRules:()=>({}),buildPiArgs,parsePiDraft,validatePiDraft,verifyPiSetup,selectPiSetupModel,restorePiSetup,piSetupMapping,piSetupStorageKey:'setup',piLevels:['high'],t:(s,v={})=>s.replace('{{value0}}',v.value0??''),openUrl:async url=>opened.push(url),localStorage:{getItem:()=>null,setItem:(_key,value)=>stored.push(value)},React:{createElement:(type,props,...children)=>({type,props:props??{},children})}};
  const code=ts.transpileModule(declaration.getText(ast).replace(/^export /,''),{compilerOptions:{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2020}}).outputText;
+ Object.assign(env,routingPolicies,{CodexRoutingConnections:'codex-connections'});
  const component=new Function(...Object.keys(env),code+';return PiRoutingConfig;')(...Object.values(env));
- const render=gateways=>{index=refIndex=0;return component({args,cwd,invoke,onChange:value=>args=value,onValidity:()=>{},installedGateways:gateways});};
+ const render=gateways=>{index=refIndex=0;return component({adapter,args,cwd,invoke,onChange:value=>args=value,onValidity:()=>{},installedGateways:gateways});};
  const all=n=>!n||typeof n!=='object'?[]:[n,...(n.children??[]).flat(Infinity).flatMap(all)];
  const scan=async gateways=>{all(render(gateways)).find(n=>n.type==='button'&&n.children.includes('Find available models')).props.onClick();await new Promise(r=>setImmediate(r));return render(gateways);};
  assert.equal(all(render([])).find(n=>n.props.label==='Lightweight model').props.catalogChecked,false);
@@ -248,6 +250,13 @@ test('Pi setup reports installed tools separately from discovered models and pro
  assert.ok(groups().every(n=>all(n).filter(child=>child.type===env.RoutingModelPicker).length===3));
  all(groups()[2]).find(n=>n.props.label==='Execution group C · Strong model').props.onChange({target:{value:'p/standby'}});
  assert.deepEqual(parsePiDraft(args).executionFallbacks,{strong:['','p/standby']});
+ adapter='codex';failed=false;
+ const config={connections:{native:{billing:'subscription',native:true},local:{billing:'paid',gateway:true,baseUrl:'http://127.0.0.1:3425'}},classifiers:[],executionGroups:[{}],model:'native/saved',effort:'high'};
+ args=JSON.stringify(config);result={models:[{...models[0],key:'native/available'}],warning:'local: Offline'};
+ await button('Check connection and models').props.onClick();
+ assert.match(JSON.stringify(render([])),/Codex model unavailable: native\/saved/);
+ args=JSON.stringify({...config,model:'local/saved'});
+ assert.match(JSON.stringify(render([])),/Codex model catalog unavailable: local/);
 });
 test('Pi quick setup verifies before saving and ignores stale completion',async()=>{
  const fs=await import('node:fs'),ts=(await import('typescript')).default;

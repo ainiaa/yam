@@ -162,7 +162,7 @@ export function PiRoutingConfig({args,cwd,invoke,onChange,onValidity,onSaved,ins
  const invokeCatalog=(params:Record<string,unknown>)=>invoke<CatalogReply>(adapter==='codex'?'codex_routing_catalog':'pi_routing_catalog',adapter==='codex'?{cwd,config:JSON.stringify(codexRoutingConfig(args)),probeModel:params.probeModel??null}:params);
  function recordCatalog(result:CatalogReply,rows=result.models){
   setModels(rows);setVerified(scope);
-  setCheckedConnections(adapter==='codex'?result.checkedConnections??(result.warning?[]:undefined):undefined);
+  setCheckedConnections(adapter==='codex'?result.checkedConnections??(result.warning?[...new Set(result.models.map(model=>model.key.split('/',1)[0]))]:undefined):undefined);
  }
  async function check(){const current=++version.current;setBusy(true);setError(null);setWarning(null);setVerified('');setSetupScope('');setSetupModel('');if(scanned)setSetupStatus('');try{const result=await invokeCatalog({cwd,gateway});if(current===version.current&&scopeRef.current===scope){recordCatalog(result);setWarning(result.warning??null);}}catch(e){if(current===version.current)setError(String(e));}finally{if(current===version.current)setBusy(false);}}
  useEffect(()=>{setModels([]);setVerified('');setSetupScope('');if(!visible){version.current++;setBusy(false);return;}const scheduledVersion=version.current;const timer=setTimeout(()=>{if(version.current===scheduledVersion)void check();},300);return()=>{clearTimeout(timer);version.current++;};},[scope,visible]);

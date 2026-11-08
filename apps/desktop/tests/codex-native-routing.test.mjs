@@ -3,7 +3,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
 import {once} from 'node:events';
-import {mkdir,mkdtemp,rm,symlink} from 'node:fs/promises';
+import {mkdir,mkdtemp,realpath,rm,symlink} from 'node:fs/promises';
 import {join} from 'node:path';
 import * as routes from '../../../scripts/codex-auto-route.mjs';
 
@@ -317,6 +317,10 @@ test('independent Codex homes cannot overlap the canonical effective native home
  assert.deepEqual(listed.models.map(model=>model.key),['native/light','other/light']);
  assert.deepEqual(listed.checkedConnections,['native','other']);
  assert.match(listed.warning,/overlap: Codex connection must use a separate CODEX_HOME/);
+ const inSession={...routingPolicy,connections:{...routingPolicy.connections,other:{billing:'subscription',home:independent}}};
+ const live=await routes.codexCatalog({config:inSession,codex:process.execPath,cwd:'/elsewhere',session:await realpath(independent)}, {inspect:async()=>available});
+ assert.deepEqual(live.checkedConnections,['native']);
+ assert.match(live.warning,/other: Codex connection must use a separate CODEX_HOME/);
 });
 
 const runtime=await import('../../../scripts/codex-native-routing.mjs').catch(error=>{
@@ -801,6 +805,27 @@ test('cancelling a live policy while its catalog is loading discards the late re
  assert.equal(router.state.pendingPolicy,null);
  assert.equal(router.state.policyId,null);
  assert.equal((await router.request({id:1,method:'turn/start',params:{threadId:'main',input:[]}})).params.model,'light');
+});
+
+test('interrupting a submission waiting for a strategy catalog prevents dispatch',async()=>{
+ let entered,release;
+ const started=new Promise(resolve=>entered=resolve),result=new Promise(resolve=>release=resolve);
+ const old={...routingPolicy,classifiers:[],model:'native/light',effort:'high'},saved=[];
+ const router=routes.createCodexTurnRouter({config:old,connectionName:'native',models:catalog,initial:{threadId:'main'},
+  loadCatalog:()=>{entered();return result;},save:async state=>saved.push(state)});
+ await router.queuePolicy({id:'new',name:'New model',config:JSON.stringify({...old,model:'native/deep'})});
+ const submitted=router.request({id:1,method:'turn/start',params:{threadId:'main',input:[]}});
+ await started;
+ const responses=[];
+ const interrupt=await router.request({id:2,method:'turn/interrupt',params:{threadId:'main'}},{respond:result=>responses.push(result)});
+ const outcome=await Promise.race([submitted.then(()=>null,error=>error.message),new Promise(resolve=>setImmediate(()=>resolve('still waiting')))]);
+ release({models:catalog,checkedConnections:['native']});
+ await router.settlePolicy();
+ assert.equal(interrupt,null);
+ assert.deepEqual(responses,[{id:2,result:{}}]);
+ assert.match(outcome,/Routing cancelled before task dispatch/);
+ assert.equal(saved.some(state=>state.status==='pending'),false);
+ assert.equal(router.state.policyId,'new');
 });
 
 test('a failed strategy write keeps the current policy and its catalog until the change is saved',async()=>{
