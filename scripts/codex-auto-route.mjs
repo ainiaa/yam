@@ -141,7 +141,7 @@ export function createCodexTurnRouter({config,connectionName,models,classify,swi
      await publish({connectionSwitch:{to:selected.connection.name}});
      requestSignal.throwIfAborted();
      changing=true;
-     await switchConnection({threadId:state.threadId,connection:selected.connection,model:selected.model,effort,settings:sticky,requestBackend,signal:requestSignal});
+     await switchConnection({threadId:state.threadId,connection:selected.connection,model:selected.model,effort,settings:sticky,requestBackend,respond,signal:requestSignal});
      connectionName=selected.connection.name;switched=true;
      await publish({connectionName,connectionSwitch:null,nativeModel:{model:selected.model,effort}});
     }

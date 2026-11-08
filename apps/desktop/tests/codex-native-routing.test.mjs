@@ -33,8 +33,10 @@ test('native null turn overrides preserve confirmed permissions before switching
   await router.event({method:'turn/started',params:{threadId:'main',turn:{id:'first'}}});
   await router.event({method:'turn/completed',params:{threadId:'main',turn:{id:'first',status:'completed'}}});
   answer=newAnswer;
-  const next=await router.request(turn(3));
+  const respond=()=>{};
+  const next=await router.request(turn(3),{respond});
   assert.equal(switched.connection.name,'native');
+  assert.equal(switched.respond,respond);
   assert.equal(switched.settings.cwd,nativeSettings.cwd);
   assert.equal(switched.settings.approvalPolicy,'on-request');
   assert.equal(switched.settings.approvalsReviewer,'user');
@@ -134,6 +136,26 @@ test('failed or cancelled connection changes do not dispatch and a fresh process
   assert.equal(reopened.state.connectionSwitch,null);assert.equal(reopened.state.connectionName,'native');
   reopened.setEnabled(false);assert.equal(await reopened.request(turn),turn);
  }
+});
+
+test('mixed resume publishes only server-confirmed settings when no settings event follows',async()=>{
+ const {resumeCodexConnection}=await import('../../../scripts/codex-route-app-server.mjs');
+ const confirmed={thread:{id:'main'},model:'gpt-6.1-sol',modelProvider:'yam_route',...nativeSettings,
+  activePermissionProfile:null,serviceTier:null,reasoningEffort:'high',multiAgentMode:'explicitRequestOnly',
+  collaborationMode:{mode:'default',settings:{model:'gpt-6.1-sol',reasoning_effort:'high',developer_instructions:'confirmed'}}};
+ const messages=[];
+ const args={threadId:'main',model:'gpt-6.1-sol',effort:'high',connection:{native:true},settings:nativeSettings,respond:message=>messages.push(message),
+  requestBackend:async method=>method==='thread/unsubscribe'?{status:'unsubscribed'}:method==='thread/loaded/list'?{data:[]}:confirmed};
+ await resumeCodexConnection(args);
+ assert.deepEqual(messages,[{method:'thread/settings/updated',params:{threadId:'main',threadSettings:{
+  disabledPluginIds:confirmed.disabledPluginIds,cwd:confirmed.cwd,approvalPolicy:confirmed.approvalPolicy,approvalsReviewer:confirmed.approvalsReviewer,
+  sandboxPolicy:confirmed.sandbox,activePermissionProfile:null,model:confirmed.model,modelProvider:confirmed.modelProvider,
+  serviceTier:null,effort:'high',collaborationMode:confirmed.collaborationMode,multiAgentMode:confirmed.multiAgentMode,
+ }}}]);
+ messages.length=0;confirmed.model='unexpected';
+ await assert.rejects(resumeCodexConnection(args),/different thread, model or provider/);assert.equal(messages.length,0);
+ confirmed.model=args.model;confirmed.collaborationMode=null;
+ await assert.rejects(resumeCodexConnection(args),/confirmed settings/);assert.equal(messages.length,0);
 });
 
 test('mixed connection resume waits for unload, retains thread settings and replaces gateway authentication',async()=>{

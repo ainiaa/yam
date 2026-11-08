@@ -9,7 +9,8 @@ import {defaultRules,defaultTierRules,validateRules,rulesVersion,type TaskRules,
 import {buildPiArgs,hasPiRoutingSelection,knownClassifierBilling,maxPiBackupModels,parsePiDraft,piExecutionTiers,piLevels,piModelCatalogSource,piSetupMapping,piSetupStorageKey,portablePiRoutingPolicy,piSubscriptionCatalog,piSubscriptionOnly,probePiSetupModel,restorePiSetup,selectPiSetupModel,validatePiDraft,verifyPiSetup,type NativeFailure,type PiDraft,type PiModel,type PiRoutingState,type PiSessionRoutingMode,type PiSnapshot} from './pi-routing';
 type Invoke=<T>(command:string,args?:Record<string,unknown>)=>Promise<T>;
 type CodexConnections=ReturnType<typeof codexRoutingConfig>['connections'];
-function routingModelPresentation(key:string,model:PiModel|undefined,connections?:CodexConnections|null){
+type RoutingModelMetadata=Pick<PiModel,'source'|'billing'|'legacy_alias'>;
+function routingModelPresentation(key:string,model:RoutingModelMetadata|undefined,connections?:CodexConnections|null){
  const provider=key.split('/',1)[0],id=key.slice(key.indexOf('/')+1),catalog=piModelCatalogSource(key);
  const connection=connections&&Object.prototype.hasOwnProperty.call(connections,provider)?connections[provider]:null;
  const gateway=connection?'gateway' in connection:!connections&&catalog!=='pi';
@@ -31,6 +32,14 @@ function routingModelPresentation(key:string,model:PiModel|undefined,connections
   supplier=provider==='openai'?'OpenAI':['yam-codex','yam-gateway'].includes(provider)?model?.billing==='api'?t('API'):'':provider;
  }
  return {source,label:[source,supplier,modelId].filter(Boolean).join(' · ')};
+}
+function routingModelOptions(models:PiModel[],connections?:CodexConnections|null){
+ const groups=new Map<string,{model:PiModel;label:string}[]>();
+ for(const model of models){
+  const {source,label}=routingModelPresentation(model.key,model,connections),rows=groups.get(source)??[];
+  rows.push({model,label});groups.set(source,rows);
+ }
+ return Array.from(groups,([source,rows])=><optgroup key={source} label={source}>{rows.map(({model,label})=><option key={model.key} value={model.key} data-search={`${model.name} ${model.key}`}>{label}</option>)}</optgroup>);
 }
 function codexConnectionLabels(connections:CodexConnections,models:PiModel[]=[]){
  const labels=Object.entries(connections).map(([key,connection])=>{
@@ -69,11 +78,6 @@ function RoutingModelPicker({label,models,value,connections,emptyValue='',emptyL
  const current=configured(savedConnection)&&models.some(model=>model.key===saved);
  const pending=!!saved&&connection!==savedConnection;
  const savedLabel=saved?routingModelPresentation(saved,models.find(model=>model.key===saved),connections).label:'';
- const groups=new Map<string,{model:PiModel;label:string}[]>();
- for(const model of available){
-  const {source,label}=routingModelPresentation(model.key,model,connections),rows=groups.get(source)??[];
-  rows.push({model,label});groups.set(source,rows);
- }
  return <div className="pi-model-picker" role="group" aria-label={label}>
   <span>{label}</span>
   <label><span>{t('Connection')}</span><Select aria-label={`${label} · ${t('Connection')}`} value={connection} disabled={disabled||!options.size} onChange={event=>{
@@ -85,7 +89,7 @@ function RoutingModelPicker({label,models,value,connections,emptyValue='',emptyL
    {pending&&<option value="pending" disabled>{t('Choose a model')}</option>}
    <option value={emptyValue}>{t(emptyLabel)}</option>
    {!pending&&saved&&!available.some(model=>model.key===saved)&&<option value={saved} disabled>{t(current?'Current selection':'Saved model unavailable')} · {savedLabel}</option>}
-   {Array.from(groups,([source,rows])=><optgroup key={source} label={source}>{rows.map(({model,label})=><option key={model.key} value={model.key} data-search={`${model.name} ${model.key}`}>{label}</option>)}</optgroup>)}
+   {routingModelOptions(available,connections)}
   </Select></label>
   {pending&&<span className="settings-help">{t(current?'Current selection':'Saved model unavailable')} · {savedLabel}</span>}
  </div>;
@@ -378,10 +382,10 @@ export function LiveRoutingControls({mode,policies,models,disabled,onSwitch}:{mo
   {mode.enabled&&<p>{t('Active routing strategy: {{value0}}',{value0:t(mode.policyName??'Current launch policy')})}</p>}
   {mode.pending&&<><p role="status">{t('Routing change queued: {{value0}}',{value0:t(mode.pending)})}</p><button type="button" disabled={disabled} onClick={()=>onSwitch({cancel:true})}>{t('Cancel pending routing change')}</button></>}
   {mode.error&&<p role="alert">{t(mode.error)}</p>}
-  {(mode.enabled||mode.error)&&!!explicitNative.length&&(!mode.nativeModel||!!mode.error)&&<label>
-   <span>{t('Native model when routing is off')}</span><Select aria-label={t('Native model when routing is off')} disabled={disabled} value={nativeModel} onChange={event=>setNativeModel(event.target.value)}>
+  {(mode.enabled||mode.error)&&!!explicitNative.length&&(!mode.nativeModel||!!mode.error)&&<label className="pi-model-picker">
+   <span>{t('Native model when routing is off')}</span><Select aria-label={t('Native model when routing is off')} searchLabel={t('Search models')} disabled={disabled} value={nativeModel} onChange={event=>setNativeModel(event.target.value)}>
     <option value="">{t('Use current Pi defaults')}</option>
-    {explicitNative.map(model=><option key={model.key} value={model.key}>{model.key}</option>)}
+    {routingModelOptions(explicitNative)}
    </Select>
    {!mode.enabled&&nativeModel&&<button type="button" disabled={disabled} onClick={()=>change('')}>{t('Use native Pi model')}</button>}
   </label>}
@@ -464,13 +468,19 @@ export function PiRoutingBar({sessionId,generation,active,available,invoke,polic
  const executionStages={discovering:'Checking native login…',preparing:'Preparing context…',starting:'Starting native CLI…',executing:'Native task running',completed:'Native task completed',failed:'Execution failed',aborted:'Task interrupted'};
  const handoffReasons={'verified-prefix':'Verified context prefix','prefix-unverified':'Context checkpoint unavailable or changed','new-task':'New task requested','identity-changed':'Native identity changed','new-session':'New native session'};
  const selected=live&&state?.phase==='selected'?state.target:null;
+ function modelLabel(key:string){
+  const observed=state?.actual?.model===key?state.actual:null;
+  const metadata=observed?.source||observed?.billing&&observed.billing!=='unknown'?observed:models.find(model=>model.key===key);
+  return metadata||piModelCatalogSource(key)!=='pi'||key.startsWith('yam-codex/')?routingModelPresentation(key,metadata).label:key;
+ }
+ const actualModel=state?.actual?modelLabel(state.actual.model):'';
  function choose(fields:Partial<{model:string;effort:string}>){if(state&&choice)setDraft({...choice,revision:draft?.revision??state.revision,...fields});}
  return <section className="pi-routing-bar" aria-label={t('Pi automatic routing')}>
   <div className="pi-routing-status"><strong>{t('Pi routing')}</strong>{routingOff&&<span>{t('Routing is off')}</span>}{(!available||!state||!active||state.phase==='error'||state.phase==='classifying')&&<span role="status">{!available?t('Background unavailable'):!state?t(active?'Waiting for Pi routing state…':'Routing state unavailable'):!active?t('Session ended'):t(state.phase==='classifying'?'Choosing a model…':'Routing needs attention')}</span>}
-   {state&&<span className="pi-routing-model" role="status" title={selected?t('Selected for this turn; waiting for a native model response'):t('Recorded by the native Pi assistant message')}>{selected?t('Selected for this turn: {{value0}} · {{value1}}',{value0:selected.model,value1:selected.effort}):state.actual?t(live&&state.phase==='working'?'Actual model: {{value0}} · {{value1}}':'Latest reply used: {{value0}} · {{value1}}',{value0:state.actual.model,value1:state.actual.effort==='unknown'?t('Reasoning not confirmed'):state.actual.effort}):t('No native model response recorded yet')}</span>}
-   {state?.actual?.source&&<span>{t(state.actual.source==='chatgpt-subscription'?'ChatGPT subscription':state.actual.source==='magpie'?'Magpie gateway':state.actual.billing==='subscription'?'Pi native subscription':'Pi native API')}</span>}
+   {state&&<span className="pi-routing-model" role="status" title={selected?t('Selected for this turn; waiting for a native model response'):t('Recorded by the native Pi assistant message')}>{selected?t('Selected for this turn: {{value0}} · {{value1}}',{value0:modelLabel(selected.model),value1:selected.effort}):state.actual?t(live&&state.phase==='working'?'Actual model: {{value0}} · {{value1}}':'Latest reply used: {{value0}} · {{value1}}',{value0:actualModel,value1:state.actual.effort==='unknown'?t('Reasoning not confirmed'):state.actual.effort}):t('No native model response recorded yet')}</span>}
+   {!selected&&state?.actual?.source==='pi-native'&&<span>{t(state.actual.billing==='subscription'?'Pi native subscription':'Pi native API')}</span>}
    {execution&&<span role="status">{t(executionStages[execution.stage])}</span>}
-   {state&&!routingOff&&<span className="pi-routing-policy">{state.preferences.model==='auto'?t('Automatic model'):t('Fixed model: {{value0}}',{value0:state.preferences.model})}</span>}
+   {state&&!routingOff&&<span className="pi-routing-policy">{state.preferences.model==='auto'?t('Automatic model'):t('Fixed model: {{value0}}',{value0:modelLabel(state.preferences.model)})}</span>}
    {!routingOff&&<button type="button" aria-expanded={expanded} aria-controls={`pi-routing-controls-${sessionId}`} onClick={()=>setExpanded(value=>!value)}>{t('Adjust routing')}</button>}
    {recovery&&<button type="button" disabled={!active||!available||busy} aria-expanded={recoveryOpen} onClick={()=>{setRecoveryOpen(true);void control('native-recovery');}}>{t('View recovery information')}</button>}
    {!routingOff&&(error||readError||catalogError||state?.error||state?.gatewayError)&&<button type="button" disabled={disabled} onClick={()=>void control('retry')}>{busy?t('Applying…'):t('Refresh connection')}</button>}
@@ -506,7 +516,7 @@ export function PiRoutingBar({sessionId,generation,active,available,invoke,polic
    {state.rules&&<PiTaskRules rules={state.rules} disabled={disabled} onApply={async rules=>{if(!await control('rules',rules))throw Error(t('Control result is unconfirmed. It may have been applied.'));}} onPreview={async(text,rules)=>{const next=await control('preview',{text,rules}),p=next?.preview;if(!p)throw Error(t('Task rule preview failed'));return `${t('Matched task rule')}: ${t(p.rule)}\n${t(p.selection.model==='small'?'Lightweight model':p.selection.model==='medium'?'Standard model':'Strong model')} · ${p.selection.effort}\n${t('Classification time')}: ${p.latencyMs} ms\n${t('Model-reported cost')}: ${p.cost??t('Unknown cost')}\n${t('Policy preview only. Session locks, capacity and cache can change the final selection.')}`;}}/>}
    {state.decision&&<p className="settings-help">{t('Matched task rule')}: {t(state.decision.rule)} · {state.decision.ruleVersion}<br/>{state.decision.classificationSource&&<>{t('Classification source')}: {state.decision.classificationSource==='local'?t('Local routing rules'):state.decision.classificationSource} · </>}{t('Classification time')}: {state.decision.classificationMs} ms · {t('Model-reported cost so far')}: {state.decision.totalCost??t(state.actual?.billing==='subscription'?'Subscription usage; API cost unavailable':'Unknown cost')}</p>}
    {state.decision?.budget&&<p className="settings-help">{t('Local context estimate')}: {state.decision.budget.inputTokens??'—'} + {state.decision.budget.reserveTokens??'—'} {t('local reserve')} / {state.decision.budget.contextWindow??'—'} {t('context window')}<br/>{t('Local estimate only; native accumulated context is not measured.')}</p>}
-   {!!state.decision?.rejected?.length&&<ul className="settings-help">{state.decision.rejected.map((item,index)=><li key={index}>{item.model}: {t(budgetReasons[item.reason]??'Context estimate unavailable')}</li>)}</ul>}
+   {!!state.decision?.rejected?.length&&<ul className="settings-help">{state.decision.rejected.map((item,index)=><li key={index}>{modelLabel(item.model)}: {t(budgetReasons[item.reason]??'Context estimate unavailable')}</li>)}</ul>}
    {state.actual?.usage&&<p className="settings-help">{t('Reply tokens')}: {state.actual.usage.input??'—'} {t('input')} / {state.actual.usage.output??'—'} {t('output')}</p>}
    {state.diagnostics&&<p className="settings-help">{t(state.diagnostics.configSource==='session'?'Saved session configuration':'Launch configuration')} · {t(state.diagnostics.billing==='subscription'?'Subscription only':'Configured channels')}</p>}
    {execution&&<div className="settings-help" aria-label={t('Execution diagnostics')}>
@@ -516,7 +526,7 @@ export function PiRoutingBar({sessionId,generation,active,available,invoke,polic
     {execution.handoff&&<p>{t(execution.handoff.mode==='incremental'?'Incremental context':'Full context')} · {t(handoffReasons[execution.handoff.reason])} · {execution.handoff.characters} / {execution.handoff.budget} {t('characters')}</p>}
     {execution.failure==='context-budget'&&<p role="status">{t('Context was not sent. Use /compact in Pi or split the task, then explicitly retry. No task was replayed.')}</p>}
    </div>}
-   <div className="pi-routing-details"><p>{state.preferences.effort==='auto'?t('Automatic reasoning'):t('Fixed reasoning: {{value0}}',{value0:state.preferences.effort})}</p><p>{state.config.gateway?t('Gateway: {{value0}}',{value0:state.config.gateway}):t('Existing Pi configuration')}</p>{state.target&&<p>{t('Selected for this turn: {{value0}} · {{value1}}',{value0:state.target.model,value1:state.target.effort})}<br/>{state.target.reason}</p>}{state.actual?<p title={t('Recorded by the native Pi assistant message')}>{t('Latest reply used: {{value0}} · {{value1}}',{value0:state.actual.model,value1:state.actual.effort==='unknown'?t('Reasoning not confirmed'):state.actual.effort})}</p>:<p>{t('No native model response recorded yet')}</p>}<p className="settings-help">{t('Refreshing never resends a task. Review the terminal before explicitly retrying work.')}</p></div>
+   <div className="pi-routing-details"><p>{state.preferences.effort==='auto'?t('Automatic reasoning'):t('Fixed reasoning: {{value0}}',{value0:state.preferences.effort})}</p><p>{state.config.gateway?t('Gateway: {{value0}}',{value0:state.config.gateway}):t('Existing Pi configuration')}</p>{state.target&&<p>{t('Selected for this turn: {{value0}} · {{value1}}',{value0:modelLabel(state.target.model),value1:state.target.effort})}<br/>{state.target.reason}</p>}{state.actual?<p title={t('Recorded by the native Pi assistant message')}>{t('Latest reply used: {{value0}} · {{value1}}',{value0:actualModel,value1:state.actual.effort==='unknown'?t('Reasoning not confirmed'):state.actual.effort})}</p>:<p>{t('No native model response recorded yet')}</p>}<p className="settings-help">{t('Refreshing never resends a task. Review the terminal before explicitly retrying work.')}</p></div>
   </div>
   {dirty&&<p className="settings-help" role="status">{stale?t('Routing changed. Cancel this selection and choose again from the current state.'):t('Selection is not applied. Apply model and reasoning together when ready.')}</p>}
   {state.gatewayError&&<p className="settings-help" role="status">{t(state.gatewayError)}</p>}

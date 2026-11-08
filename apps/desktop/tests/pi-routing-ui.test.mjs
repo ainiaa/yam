@@ -351,7 +351,8 @@ test('Pi status clears recovered polling errors while retaining a rejected contr
  const healthy={revision:1,generation:'g',phase:'idle',config:{small:'p/small',strong:'p/strong',classifier:'p/small',gateway:null},preferences:{model:'auto',effort:'auto'},target:null,actual:null,error:null,pendingInput:false};
  const invoke=async name=>{if(name==='get_pi_routing'){if(++reads===1)throw Error('previous generation');return {active:true,state:healthy};}if(controlError)throw Error('unsupported selection');return {state:healthy};};
  const dependencies={useState:initial=>{const i=index++;if(!(i in slots))slots[i]=initial;return[slots[i],next=>slots[i]=typeof next==='function'?next(slots[i]):next];},useRef:initial=>{const i=refIndex++;return refs[i]??(refs[i]={current:initial});},useEffect:fn=>{if(first)effects.push(fn);},Select:()=>null,RoutingModelPicker:'routing-model-picker',hasPiRoutingSelection,probePiSetupModel,maxPiBackupModels,piExecutionTiers,piModelCatalogSource,piSubscriptionCatalog,piSubscriptionOnly,piLevels:['high','max'],t:(s)=>s,React:{createElement:(type,props,...children)=>({type,props:props??{},children})},document:{visibilityState:'visible'},setTimeout:fn=>{timers.push(fn);return timers.length;},clearTimeout(){}};
- const code=ts.transpileModule(declaration.getText(ast).replace(/^export /,''),{compilerOptions:{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2020}}).outputText;
+ const presentation=ast.statements.find(n=>ts.isFunctionDeclaration(n)&&n.name?.text==='routingModelPresentation');
+ const code=ts.transpileModule(presentation.getText(ast)+'\n'+declaration.getText(ast).replace(/^export /,''),{compilerOptions:{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2020}}).outputText;
  const component=new Function(...Object.keys(dependencies),code+';return PiRoutingBar;')(...Object.values(dependencies));
  const render=()=>{index=refIndex=0;return component({sessionId:'s-pi',generation:'g',active,available:true,invoke});};
  function nodes(root){if(!root||typeof root!=='object')return[];return[root,...(root.children??[]).flat(Infinity).flatMap(nodes)];}
@@ -370,7 +371,8 @@ async function routingBarFixture(invoke,options={}){
  const declaration=ast.statements.find(n=>ts.isFunctionDeclaration(n)&&n.name?.text==='PiRoutingBar');
  const slots=[],refs=[],dependencies=[],pending=[],timers=[];let index=0,refIndex=0,effectIndex=0;
  const env={useState:initial=>{const i=index++;if(!(i in slots))slots[i]=initial;return[slots[i],next=>slots[i]=typeof next==='function'?next(slots[i]):next];},useRef:initial=>{const i=refIndex++;return refs[i]??(refs[i]={current:initial});},useEffect:(fn,deps)=>{const i=effectIndex++,old=dependencies[i];if(!old||deps.some((v,j)=>v!==old[j])){dependencies[i]=deps;pending.push(fn);}},Select:()=>null,RoutingModelPicker:'routing-model-picker',hasPiRoutingSelection,probePiSetupModel,maxPiBackupModels,piExecutionTiers,piModelCatalogSource,piSubscriptionCatalog,piSubscriptionOnly,PiTaskRules:'task-rules',piLevels:['high','max'],t:(s,values={})=>s.replace(/{{(\w+)}}/g,(_,key)=>values[key]??''),React:{createElement:(type,props,...children)=>({type,props:props??{},children})},document:{visibilityState:options.visibility??'visible'},setTimeout:fn=>{timers.push(fn);return timers.length;},clearTimeout(){}};
- const code=ts.transpileModule(declaration.getText(ast).replace(/^export /,''),{compilerOptions:{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2020}}).outputText;
+ const presentation=ast.statements.find(n=>ts.isFunctionDeclaration(n)&&n.name?.text==='routingModelPresentation');
+ const code=ts.transpileModule(presentation.getText(ast)+'\n'+declaration.getText(ast).replace(/^export /,''),{compilerOptions:{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2020}}).outputText;
  const component=new Function(...Object.keys(env),code+';return PiRoutingBar;')(...Object.values(env));let tree;
  const render=()=>{index=refIndex=effectIndex=0;tree=component({sessionId:options.sessionId??'s-pi',generation:options.generation??'g',active:options.active??true,available:options.available??true,invoke});return tree;};
  const all=node=>!node||typeof node!=='object'?[]:[node,...(node.children??[]).flat(Infinity).flatMap(all)];
@@ -468,6 +470,22 @@ test('Pi summary separates planned selection, native response, prior response an
  state={...state,phase:'error',error:'request failed'};await f.poll();assert.match(visible(),/Latest reply used: p\/native/);assert.match(visible(),/request failed/);
  state={...state,phase:'idle',actual:null,target:null,error:null};await f.poll();assert.match(visible(),/No native model response recorded yet/);assert.doesNotMatch(visible(),/Actual model:|Selected for this turn:/);
 });
+test('Pi live model labels match the picker for subscription and gateway roles',async()=>{
+ const sol='yam-codex/gpt-6.1-sol',flash='magpie/auto/deepseek-v4-flash',rejected='yam-gateway/deepseek/other';
+ let state={...barState(),phase:'selected',preferences:{model:sol,effort:'high'},
+  target:{model:flash,effort:'high',reason:'answer'},actual:{model:sol,effort:'medium',at:2,source:'chatgpt-subscription',billing:'subscription'},
+  decision:{rule:'answer',ruleVersion:'v2',classificationMs:0,totalCost:null,rejected:[{model:rejected,reason:'effort'}]}};
+ const f=await routingBarFixture(async name=>name==='get_pi_routing'?{state}:{models:[{...models[0],key:rejected,source:'magpie',billing:'gateway'}]});
+ const visible=()=>visibleRoutingText(f.tree());
+ assert.match(visible(),/Selected for this turn: Magpie · Automatic routing · deepseek-v4-flash · high/);
+ assert.match(visible(),/Fixed model: Pi native · ChatGPT subscription · gpt-6\.1-sol/);
+ f.button('Adjust routing').props.onClick();await f.flush();
+ assert.match(visible(),/Magpie · deepseek · other\s*:\s*Reasoning level unsupported/);
+ assert.match(visible(),/Latest reply used: Pi native · ChatGPT subscription · gpt-6\.1-sol · medium/);
+ state={...state,phase:'working'};await f.poll();
+ assert.match(visible(),/Actual model: Pi native · ChatGPT subscription · gpt-6\.1-sol · medium/);
+ assert.doesNotMatch(visible(),/yam-codex|yam-gateway|magpie\/auto\//);
+});
 test('Pi ended and disconnected summaries never claim a current response or planned selection',async()=>{
  for(const ended of [false,true]){
   let fail=false;const state={...barState(),phase:'working',actual:{model:'p/native',effort:'high',at:1},target:{model:'p/next',effort:'max',reason:'critical'}};
@@ -506,7 +524,7 @@ test('routing model picker separates connections, preserves model paths and wait
  let state;
  const react={createElement:(type,props,...children)=>({type,props:props??{},children})};
  const env={React:react,Select:'select',t:s=>s,useState:initial=>[state??initial,next=>state=next],piModelCatalogSource};
- const helpers=ast.statements.filter(node=>ts.isFunctionDeclaration(node)&&['routingModelPresentation','codexConnectionLabels'].includes(node.name?.text));
+ const helpers=ast.statements.filter(node=>ts.isFunctionDeclaration(node)&&['routingModelPresentation','routingModelOptions','codexConnectionLabels'].includes(node.name?.text));
  const code=ts.transpileModule([...helpers,declaration].map(node=>node.getText(ast)).join('\n'),{compilerOptions:{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2020}}).outputText;
  const component=new Function(...Object.keys(env),code+';return RoutingModelPicker;')(...Object.values(env));
  const all=node=>node&&typeof node==='object'?[node,...(node.children??[]).flat(Infinity).flatMap(all)]:[];
@@ -853,8 +871,9 @@ test('live route selector can enable a saved strategy from off and replace a pen
  const api=await import('../src/routing-policies.ts');
  const ast=ts.createSourceFile('PiRouting.tsx',fs.readFileSync(new URL('../src/PiRouting.tsx',import.meta.url),'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
  const declaration=ast.statements.find(node=>ts.isFunctionDeclaration(node)&&node.name?.text==='LiveRoutingControls');
- const code=ts.transpileModule(declaration.getText(ast).replace(/^export /,''),{compilerOptions:{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2020}}).outputText;
- const env={Select:'select',t:text=>text,useState:value=>[value,()=>{}],React:{createElement:(type,props,...children)=>({type,props:props??{},children})},...api};
+ const helpers=ast.statements.filter(node=>ts.isFunctionDeclaration(node)&&['routingModelPresentation','routingModelOptions'].includes(node.name?.text));
+ const code=ts.transpileModule(helpers.map(node=>node.getText(ast)).join('\n')+'\n'+declaration.getText(ast).replace(/^export /,''),{compilerOptions:{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2020}}).outputText;
+ const env={piModelCatalogSource,Select:'select',t:text=>text,useState:value=>[value,()=>{}],React:{createElement:(type,props,...children)=>({type,props:props??{},children})},...api};
  const render=new Function(...Object.keys(env),code+';return LiveRoutingControls;')(...Object.values(env));
  const all=node=>node&&typeof node==='object'?[node,...(node.children??[]).flat(Infinity).flatMap(all)]:[];
  const policies=api.readRoutingPolicies(null,JSON.stringify({gateway:null,small:'p/a',strong:'p/b',classifier:'p/c'})),calls=[];
@@ -869,6 +888,12 @@ test('live route selector can enable a saved strategy from off and replace a pen
  assert.equal(pending.props.value,policies[0].id);
  pending.props.onChange({target:{value:''}});
  assert.deepEqual(calls[1],{policy:null});
+ const subscription={...models[0],key:'openai-codex/gpt-6.1-sol',source:'chatgpt-subscription',billing:'subscription'};
+ const gateway={...models[0],key:'yam-gateway/deepseek/flash',source:'magpie',billing:'gateway'};
+ const nativePicker=all(render({...options,mode:{...mode,enabled:true,nativeModel:null},models:[subscription,gateway]})).find(node=>node.props['aria-label']==='Native model when routing is off');
+ assert.equal(nativePicker.props.searchLabel,'Search models');
+ assert.deepEqual(all(nativePicker).filter(node=>node.type==='optgroup').map(node=>node.props.label),['Pi native']);
+ assert.deepEqual(all(nativePicker).filter(node=>node.type==='option').map(node=>[node.props.value,node.children.join('')]),[['','Use current Pi defaults'],[subscription.key,'Pi native · ChatGPT subscription · gpt-6.1-sol']]);
 });
 
 test('Codex gateway drafts retain the explicit API classifier billing channel',()=>{

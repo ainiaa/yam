@@ -40,7 +40,7 @@ export function codexConnectionArgs(connection,respectSystemProxy,initial,mixed)
  return Object.entries(overrides).flatMap(([key,value])=>['-c',key+'='+toml(value)]);
 }
 
-export async function resumeCodexConnection({threadId,model,effort,connection,gatewayKey,settings,requestBackend,signal}){
+export async function resumeCodexConnection({threadId,model,effort,connection,gatewayKey,settings,requestBackend,respond,signal}){
  const providerConfig=mixedProviderConfig(connection,gatewayKey);
  const unloadSignal=AbortSignal.any([AbortSignal.timeout(5000),...signal?[signal]:[]]);
  const unsubscribed=await requestBackend('thread/unsubscribe',{threadId},{signal:unloadSignal});
@@ -64,6 +64,14 @@ export async function resumeCodexConnection({threadId,model,effort,connection,ga
   cwd,runtimeWorkspaceRoots,approvalPolicy,approvalsReviewer,permissions,
   config:{[mixedProviderKey]:providerConfig,[gatewayShellPolicy]:false,model_reasoning_effort:effort==='off'?'none':effort}},{signal});
  if(result?.thread?.id!==threadId||result.modelProvider!==mixedCodexProvider||result.model!==model)throw Error('Codex resumed a different thread, model or provider');
+ // A private resume response is hidden from the TUI. A subsequent no-op turn may emit no settings event.
+ if(respond){
+  const fields=['disabledPluginIds','cwd','approvalPolicy','approvalsReviewer','activePermissionProfile','model','modelProvider','serviceTier','collaborationMode','multiAgentMode'];
+  if(!result.collaborationMode||!result.sandbox||!fields.every(key=>Object.hasOwn(result,key))||!Object.hasOwn(result,'reasoningEffort'))throw Error('Codex resumed without complete confirmed settings');
+  const threadSettings=Object.fromEntries(fields.map(key=>[key,result[key]]));
+  threadSettings.sandboxPolicy=result.sandbox;threadSettings.effort=result.reasoningEffort;
+  respond({method:'thread/settings/updated',params:{threadId,threadSettings}});
+ }
 }
 
 export async function openCodexThread({executable,env,cwd,model,connection,resume,signal,respectSystemProxy,catalogOnly=false,readOnly=false,outputSchema}){
