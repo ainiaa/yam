@@ -95,7 +95,7 @@ export function validateAgentPrompt(prompt){
  if(typeof prompt!=='string'||!prompt.trim()||prompt.includes('\0'))throw nativeError('protocol-invalid','Invalid agent prompt');
  if(prompt.length>maxAgentPromptCharacters)throw nativeError('context-budget','Native handoff context exceeds the 128000 character budget; compact or split the task explicitly');
 }
-export function invocation(profile,{prompt,resume=null,sessionDirectory,imagePaths=[],imageSchema,outputSchema,images=[],mode='task',allowCollaboration=false}={}){
+export function invocation(profile,{prompt,resume=null,sessionDirectory,imagePaths=[],imageSchema,outputSchema,images=[],mode='task',allowCollaboration=false,workflowWriter=false}={}){
  validateAgentPrompt(prompt);
  if(!isAbsolute(profile.executable??''))throw Error('Agent executable must be an absolute installed path');
  if(resume!==null&&!isNativeSessionId(resume))throw nativeError('protocol-invalid','Invalid child session ID');
@@ -112,6 +112,13 @@ export function invocation(profile,{prompt,resume=null,sessionDirectory,imagePat
    // Ignore role/provider overrides while retaining native authentication and default Skill discovery.
    args.push('--ignore-user-config','--enable','multi_agent','-c','agents.max_depth=1','-c','agents.max_concurrent_threads_per_session=3');
   }else args.push('--disable','multi_agent');
+  if(workflowWriter){
+   args.push('--ignore-user-config','-c','sandbox_workspace_write.network_access=false',
+    '-c','sandbox_workspace_write.exclude_tmpdir_env_var=true','-c','sandbox_workspace_write.exclude_slash_tmp=true',
+    '-c','web_search="disabled"');
+   for(const feature of ['apps','plugins','remote_plugin','hooks','image_generation','skill_mcp_dependency_install','browser_use','in_app_browser','computer_use'])
+    args.push('--disable',feature);
+  }
   if(mode==='readonly'){
    if(resume)throw Error('Read-only inference cannot resume a business session');
    args.push('--ignore-user-config','--ignore-rules','--ephemeral','-c','project_doc_max_bytes=0','-c','skills.max_context_tokens=1','-c','web_search="disabled"');

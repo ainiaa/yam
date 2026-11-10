@@ -124,3 +124,14 @@ test('repeated attention requests reserve selection order before their asynchron
 test('followup history with no selected terminal completes without hidden metadata errors',async()=>{
  const h=refreshHarness(async command=>command==='list_session_summaries'?{items:[],next_cursor:null}:{});await h.refresh();assert.deepEqual(h.errors,[]);
 });
+
+test('deletion refresh awaits updated inbox and unread badge; delayed pre-delete responses are ignored',async()=>{
+ const counts=[],writes=[],pending=[];const versions={current:0};
+ const refreshInbox=runCoordinator('refreshInbox',{inboxVersion:versions,inboxLoading:{current:false},inboxCursor:null,invoke:async()=>new Promise(resolve=>pending.push(resolve)),setInbox:next=>writes.push(typeof next==='function'?next([]):next),setInboxCursor(){},setError:assert.fail});
+ const old=refreshInbox();
+ const refresh=runCoordinator('refreshHistory',{sessionId:{current:null},historyRefreshVersion:{current:0},setHistoryLoading(){},historyContext:{current:{query:'',status:'all',titles:{},projects:[]}},historyRequest,invoke:async name=>name==='history_overview'?{unread_receipts:0}:{items:[],next_cursor:null},migrateTerminalMetadata(){},setHistory(){},setHistoryCursor(){},setHistoryOverview:v=>counts.push(v.unread_receipts),refreshInbox,refreshSelectedAgent:async()=>{},setError:assert.fail});
+ let done=false;const deletion=refresh(()=>true).then(()=>done=true);await new Promise(setImmediate);assert.equal(done,false);
+ pending[1]({items:[],next_cursor:null});await deletion;
+ pending[0]({items:[{session:{summary:{session_id:'deleted'}}}],next_cursor:null});await old;
+ assert.deepEqual(counts,[0]);assert.deepEqual(writes,[[]]);assert.equal(done,true);
+});

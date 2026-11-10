@@ -28,6 +28,17 @@ test('Pi launch eligibility can be checked without any model catalog',()=>{
  assert.match(validatePiDraft({...configured,gateway:'https://user@example.com'},undefined),/Gateway/);
  assert.match(validatePiDraft(configured,undefined,'--yam-billing subscription'),/Subscription/);
 });
+test('Codex strategy tolerates unavailable backups but requires a compatible candidate in the original billing channel',()=>{
+ const config={connections:{native:{billing:'subscription',native:true},local:{billing:'paid',gateway:true,baseUrl:'http://127.0.0.1:3425'}},
+  classifiers:['native/offline','native/ready'],executionGroups:[{small:'native/ready',medium:'native/unsupported',strong:'native/ready'},{medium:'native/ready',strong:'native/offline'}]};
+ const rows=[{key:'native/ready',levels:['medium','high']},{key:'native/unsupported',levels:['medium']},{key:'local/ready',levels:['high']}];
+ const issue=()=>routingPolicies.validateCodexDraft(JSON.stringify(config),rows,['native','local']);
+ assert.equal(issue(),null);
+ config.executionGroups[1].medium='local/ready';
+ assert.match(issue(),/unsupported reasoning high/);
+ config.executionGroups[1].medium='native/offline';
+ assert.match(issue(),/unsupported reasoning high/);
+});
 test('Codex catalog validation distinguishes failed and successfully empty connections',()=>{
  const config={connections:{native:{billing:'subscription',native:true},local:{billing:'paid',gateway:true,baseUrl:'http://127.0.0.1:3425'}},classifiers:[],executionGroups:[{}],model:'local/flash',effort:'high'};
  assert.match(routingPolicies.validateCodexDraft(JSON.stringify(config),[],['native']),/Codex model catalog unavailable: local/);
@@ -195,7 +206,7 @@ test('Pi setup reports installed tools separately from discovered models and pro
  const code=ts.transpileModule(declaration.getText(ast).replace(/^export /,''),{compilerOptions:{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2020}}).outputText;
  Object.assign(env,routingPolicies,{CodexRoutingConnections:'codex-connections'});
  const component=new Function(...Object.keys(env),code+';return PiRoutingConfig;')(...Object.values(env));
- const render=gateways=>{index=refIndex=0;return component({adapter,args,cwd,invoke,onChange:value=>args=value,onValidity:()=>{},installedGateways:gateways});};
+ const render=(gateways,onSaved)=>{index=refIndex=0;return component({adapter,args,cwd,invoke,onChange:value=>args=value,onValidity:()=>{},onSaved,installedGateways:gateways});};
  const all=n=>!n||typeof n!=='object'?[]:[n,...(n.children??[]).flat(Infinity).flatMap(all)];
  const scan=async gateways=>{all(render(gateways)).find(n=>n.type==='button'&&n.children.includes('Find available models')).props.onClick();await new Promise(r=>setImmediate(r));return render(gateways);};
  assert.equal(all(render([])).find(n=>n.props.label==='Lightweight model').props.catalogChecked,false);
@@ -258,6 +269,22 @@ test('Pi setup reports installed tools separately from discovered models and pro
  assert.match(JSON.stringify(render([])),/Codex model unavailable: native\/saved/);
  args=JSON.stringify({...config,model:'local/saved'});
  assert.match(JSON.stringify(render([])),/Codex model catalog unavailable: local/);
+ for(adapter of ['pi','codex']){
+  const codex=adapter==='codex';
+  args=codex?JSON.stringify({...config,model:'native/available',effort:undefined}):buildPiArgs('',draft);
+  result={models:codex?[{...models[0],key:'native/available'}]:models};
+  const saves=[],current=()=>all(render([],(_args,policy)=>saves.push(policy)));
+  const section=()=>current().find(n=>n.type==='fieldset'&&n.props['aria-label']==='Routing preferences');
+  assert.ok(section(),`${adapter} exposes model and reasoning without expanding a section`);
+  assert.ok(all(section()).some(n=>n.props.label==='Model selection'));
+  const reasoning=()=>all(section()).find(n=>n.props['aria-label']==='Reasoning selection');
+  assert.equal(reasoning().props.value,'auto');
+  reasoning().props.onChange({target:{value:'high'}});
+  assert.equal(reasoning().props.value,'high');
+  await current().find(n=>n.type==='button'&&n.children.includes('Check connection and models')).props.onClick();
+  current().find(n=>n.type==='button'&&n.children.includes('Save routing roles on this device')).props.onClick();
+  assert.equal(JSON.parse(saves[0]).effort,'high');
+ }
 });
 test('Pi quick setup verifies before saving and ignores stale completion',async()=>{
  const fs=await import('node:fs'),ts=(await import('typescript')).default;
@@ -371,8 +398,8 @@ test('Pi status clears recovered polling errors while retaining a rejected contr
  const healthy={revision:1,generation:'g',phase:'idle',config:{small:'p/small',strong:'p/strong',classifier:'p/small',gateway:null},preferences:{model:'auto',effort:'auto'},target:null,actual:null,error:null,pendingInput:false};
  const invoke=async name=>{if(name==='get_pi_routing'){if(++reads===1)throw Error('previous generation');return {active:true,state:healthy};}if(controlError)throw Error('unsupported selection');return {state:healthy};};
  const dependencies={useState:initial=>{const i=index++;if(!(i in slots))slots[i]=initial;return[slots[i],next=>slots[i]=typeof next==='function'?next(slots[i]):next];},useRef:initial=>{const i=refIndex++;return refs[i]??(refs[i]={current:initial});},useEffect:fn=>{if(first)effects.push(fn);},Select:()=>null,RoutingModelPicker:'routing-model-picker',hasPiRoutingSelection,probePiSetupModel,maxPiBackupModels,piExecutionTiers,piModelCatalogSource,piSubscriptionCatalog,piSubscriptionOnly,piLevels:['high','max'],t:(s)=>s,React:{createElement:(type,props,...children)=>({type,props:props??{},children})},document:{visibilityState:'visible'},setTimeout:fn=>{timers.push(fn);return timers.length;},clearTimeout(){}};
- const presentation=ast.statements.find(n=>ts.isFunctionDeclaration(n)&&n.name?.text==='routingModelPresentation');
- const code=ts.transpileModule(presentation.getText(ast)+'\n'+declaration.getText(ast).replace(/^export /,''),{compilerOptions:{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2020}}).outputText;
+ const helpers=ast.statements.filter(n=>ts.isFunctionDeclaration(n)&&['routingModelPresentation','routeMatchText','classificationSourceText','workflowRoleLabel'].includes(n.name?.text));
+ const code=ts.transpileModule(helpers.map(n=>n.getText(ast)).join('\n')+'\n'+declaration.getText(ast).replace(/^export /,''),{compilerOptions:{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2020}}).outputText;
  const component=new Function('modelPresentation',...Object.keys(dependencies),code+';return PiRoutingBar;')(modelPresentation,...Object.values(dependencies));
  const render=()=>{index=refIndex=0;return component({sessionId:'s-pi',generation:'g',active,available:true,invoke});};
  function nodes(root){if(!root||typeof root!=='object')return[];return[root,...(root.children??[]).flat(Infinity).flatMap(nodes)];}
@@ -391,8 +418,8 @@ async function routingBarFixture(invoke,options={}){
  const declaration=ast.statements.find(n=>ts.isFunctionDeclaration(n)&&n.name?.text==='PiRoutingBar');
  const slots=[],refs=[],dependencies=[],pending=[],timers=[];let index=0,refIndex=0,effectIndex=0;
  const env={useState:initial=>{const i=index++;if(!(i in slots))slots[i]=initial;return[slots[i],next=>slots[i]=typeof next==='function'?next(slots[i]):next];},useRef:initial=>{const i=refIndex++;return refs[i]??(refs[i]={current:initial});},useEffect:(fn,deps)=>{const i=effectIndex++,old=dependencies[i];if(!old||deps.some((v,j)=>v!==old[j])){dependencies[i]=deps;pending.push(fn);}},Select:()=>null,RoutingModelPicker:'routing-model-picker',hasPiRoutingSelection,probePiSetupModel,maxPiBackupModels,piExecutionTiers,piModelCatalogSource,piSubscriptionCatalog,piSubscriptionOnly,PiTaskRules:'task-rules',piLevels:['high','max'],t:(s,values={})=>s.replace(/{{(\w+)}}/g,(_,key)=>values[key]??''),React:{createElement:(type,props,...children)=>({type,props:props??{},children})},document:{visibilityState:options.visibility??'visible'},setTimeout:fn=>{timers.push(fn);return timers.length;},clearTimeout(){}};
- const presentation=ast.statements.find(n=>ts.isFunctionDeclaration(n)&&n.name?.text==='routingModelPresentation');
- const code=ts.transpileModule(presentation.getText(ast)+'\n'+declaration.getText(ast).replace(/^export /,''),{compilerOptions:{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2020}}).outputText;
+ const helpers=ast.statements.filter(n=>ts.isFunctionDeclaration(n)&&['routingModelPresentation','routeMatchText','classificationSourceText','workflowRoleLabel'].includes(n.name?.text));
+ const code=ts.transpileModule(helpers.map(n=>n.getText(ast)).join('\n')+'\n'+declaration.getText(ast).replace(/^export /,''),{compilerOptions:{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2020}}).outputText;
  const component=new Function('modelPresentation',...Object.keys(env),code+';return PiRoutingBar;')(modelPresentation,...Object.values(env));let tree;
  const render=()=>{index=refIndex=effectIndex=0;tree=component({sessionId:options.sessionId??'s-pi',generation:options.generation??'g',cliVersion:options.cliVersion,installedPiVersion:options.installedPiVersion,active:options.active??true,available:options.available??true,invoke});return tree;};
  const all=node=>!node||typeof node!=='object'?[]:[node,...(node.children??[]).flat(Infinity).flatMap(all)];
@@ -755,6 +782,76 @@ test('T2 unknown recovery control does not report success and its refreshed rece
  state={...state,revision:2,nativeRecovery:{...state.nativeRecovery,receiptId:'new'}};f.button('Refresh current state').props.onClick();await f.flush();assert.ok(!f.button('I checked the old task; clear the block')||f.button('I checked the old task; clear the block').props.disabled);assert.equal(writes,1);
 });
 
+test('task rules editor adds, orders and applies local classification rules',async()=>{
+ const fs=await import('node:fs'),ts=(await import('typescript')).default,rulesApi=await import('../src-tauri/pi/task-rules.mjs');
+ const ast=ts.createSourceFile('PiRouting.tsx',fs.readFileSync(new URL('../src/PiRouting.tsx',import.meta.url),'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
+ const declaration=ast.statements.find(n=>ts.isFunctionDeclaration(n)&&n.name?.text==='PiTaskRules');
+ const code=ts.transpileModule(declaration.getText(ast).replace(/^export /,''),{compilerOptions:{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2020}}).outputText;
+ const slots=[];let index=0,saved;
+ const env={useState:value=>{const i=index++;if(!(i in slots))slots[i]=typeof value==='function'?value():value;return[slots[i],next=>slots[i]=typeof next==='function'?next(slots[i]):next];},useEffect(){},Select:'select',RoutingModelPicker:'picker',t:s=>s,React:{createElement:(type,props,...children)=>({type,props:props??{},children})},...rulesApi};
+ const component=new Function(...Object.keys(env),code+';return PiTaskRules;')(...Object.values(env));
+ const all=n=>!n||typeof n!=='object'?[]:[n,...(n.children??[]).flat(Infinity).flatMap(all)];
+ const render=()=>{index=0;return all(component({rules:defaultRules,disabled:false,onApply:value=>{saved=value;}}));};
+ const button=(label,index=0)=>render().filter(node=>node.type==='button'&&node.children.includes(label))[index];
+ button('Add classification rule').props.onClick();
+ button('Add classification rule').props.onClick();
+ const prefixes=()=>render().filter(node=>node.props['aria-label']==='Classification prefix');
+ prefixes()[0].props.onChange({target:{value:'yam:first'}});
+ prefixes()[1].props.onChange({target:{value:'yam:second'}});
+ button('Move rule up',1).props.onClick();
+ await button('Apply task rules').props.onClick();
+ assert.deepEqual(saved.classificationRules.map(rule=>rule.prefix),['yam:second','yam:first']);
+});
+
+test('collaboration evidence includes only authorized paths and excludes credential-like files in tracked changes',async()=>{
+ const {mkdtemp,writeFile,rm}=await import('node:fs/promises'),{tmpdir}=await import('node:os'),{join}=await import('node:path');
+ const {execFileSync}=await import('node:child_process');
+ const {workspaceEvidence}=await import('../src-tauri/pi/agent-orchestrator.mjs');
+ const cwd=await mkdtemp(join(tmpdir(),'yam-evidence-scope-'));
+ const git=(...args)=>execFileSync('git',args,{cwd,stdio:'ignore'});
+ try{
+  git('init','-q');
+  for(const file of ['task.txt','unrelated.txt','.ENV.local'])await writeFile(join(cwd,file),'before\n');
+  git('add','.');git('-c','user.email=test@example.invalid','-c','user.name=Fixture','commit','-qm','fixture');
+  await writeFile(join(cwd,'task.txt'),'ALLOWED_TASK_CHANGE\n');
+  await writeFile(join(cwd,'unrelated.txt'),'UNRELATED_TRACKED\n');
+  await writeFile(join(cwd,'.ENV.local'),'SECRET_TRACKED\n');
+  await writeFile(join(cwd,'notes.txt'),'UNRELATED_UNTRACKED\n');
+  const snapshot=await workspaceEvidence(cwd,undefined,['task.txt','.ENV.local']);
+  assert.match(snapshot,/ALLOWED_TASK_CHANGE/);
+  assert.doesNotMatch(snapshot,/UNRELATED_|SECRET_TRACKED/);
+ }finally{await rm(cwd,{recursive:true,force:true});}
+});
+
+test('an explicit deep-review model lock applies to the main role and previews its independent backup chain',async()=>{
+ const {routingPreview}=await import('../src-tauri/pi/task-rules.mjs');
+ const first={model:'p/first',effort:'high',runner:'model',billing:'api'};
+ const audit={...first,model:'p/audit'};
+ const rules={...defaultRules,workflows:[{id:'deep-review',name:'Deep review',preset:'review',paths:['src'],
+  roles:{review:[first],audit:[audit,{...audit,model:'p/audit-backup'}]}}]};
+ const p=routingPreview(rules,{answer:null,source:'fixed'},{configuredKeys:()=>[],fixed:'p/locked',fixedEffort:'max',workflow:'deep-review',collaboration:true});
+ assert.equal(p.supported,true);
+ assert.equal(p.model,'p/locked');
+ assert.deepEqual(p.roles.review,[{model:'p/locked',effort:'max'}]);
+ assert.deepEqual(p.roles.audit.map(choice=>choice.model),['p/audit','p/audit-backup']);
+ const delivery={...rules,workflows:[{id:'delivery',name:'Delivery',preset:'delivery',paths:['src'],
+  roles:{plan:[first],implement:[{...first,model:'yam-codex/writer',runner:'codex',billing:'subscription'}],review:[audit]}}]};
+ const cannotWrite=routingPreview(delivery,{answer:null,source:'fixed'},{configuredKeys:()=>[],fixed:'p/locked',fixedEffort:'max',workflow:'delivery',collaboration:true});
+ assert.equal(cannotWrite.supported,false);
+});
+
+test('collaboration recovery binds the same image data along with the prompt',async()=>{
+ const {createWorkflowRunner}=await import('../src-tauri/pi/agent-orchestrator.mjs');
+ const choice={model:'p/test',effort:'high',runner:'model',billing:'api'};
+ const workflow={id:'review',name:'Review',preset:'review',paths:['src'],roles:{review:[choice],audit:[choice]}};
+ const runner=createWorkflowRunner({snapshot:async()=>'+ source',append(){},resolve:async()=>choice,
+  execute:async()=>{throw Object.assign(Error('lost execution'),{mayBeRunning:true});}});
+ const request={workflow,cwd:'/repo',prompt:'Review image',images:[{mimeType:'image/png',data:'AA=='}]};
+ assert.equal((await runner.run(request)).status,'needs-inspection');
+ runner.authorizeResume();
+ await assert.rejects(runner.run({...request,images:[{mimeType:'image/png',data:'AQ=='}]}),/same request/);
+});
+
 test('T2 repair unknown rule application retains the draft without claiming saved or not applied',async()=>{
  const fs=await import('node:fs'),ts=(await import('typescript')).default,rulesApi=await import('../src-tauri/pi/task-rules.mjs');
  const ast=ts.createSourceFile('PiRouting.tsx',fs.readFileSync(new URL('../src/PiRouting.tsx',import.meta.url),'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
@@ -990,4 +1087,52 @@ test('launch dialog applies migrated Pi defaults only while routing selection is
  const initial=render(null);assert.equal(initial.routingChoice,'previous-pi');assert.equal(piSubscriptionOnly(initial.piLaunchArgs),true);
  const off=render('');assert.equal(off.routingChoice,'');assert.match(off.piLaunchArgs,/--yam-routing-off/);
  const chosen=render('previous-pi');assert.equal(chosen.routingChoice,'previous-pi');assert.equal(piSubscriptionOnly(chosen.piLaunchArgs),true);
+});
+
+test('session routing shows classification provenance and workflow fallback without opening settings',async()=>{
+ const {createWorkflowRunner}=await import('../src-tauri/pi/agent-orchestrator.mjs');
+ const {nativeError}=await import('../src-tauri/pi/failure.mjs');
+ const choice=model=>({model,effort:'high',billing:'api',runner:'model'});
+ const workflow={id:'deep-review',name:'Deep review',preset:'review',paths:['src'],
+  roles:{review:[choice('p/sol'),choice('p/glm')],audit:[choice('p/audit')]}};
+ const decision={rule:'review',ruleVersion:'v2',classificationSource:'A',classificationRule:1,classificationTask:'review',
+  executionRule:2,classificationMs:12,workflow:workflow.id};
+ let state={...barState(),phase:'working',decision,actual:{model:'p/old',effort:'medium',at:1}};
+ const f=await routingBarFixture(async name=>name==='get_pi_routing'?{state}:{models:[]});
+ assert.match(visibleRoutingText(f.tree()),/Local rule matched; model classified remaining details/);
+ const runner=createWorkflowRunner({
+  resolve:async candidate=>candidate,snapshot:async()=>'git diff',append(){},
+  execute:async candidate=>{if(candidate.model==='p/sol')throw nativeError('native-reported-error','rate limit',{stage:'execution',dispatch:'started'});return {text:'{"summary":"reviewed","findings":[]}'};},
+  publish:workflowReceipt=>{state={...state,workflowReceipt:{...workflowReceipt,current:true}};},
+ });
+ await runner.run({workflow,prompt:'Review this',cwd:'/repo',billing:'configured',version:'v2'});
+ await f.poll();
+ const visible=visibleRoutingText(f.tree());
+ assert.match(visible,/Deep review.*completed/s);
+ assert.doesNotMatch(visible,/Actual model: p\/old/);
+ const details=f.select('Routing and collaboration details');
+ assert.ok(details);assert.match(JSON.stringify(details),/p\/sol.*native-reported-error.*p\/glm/s);
+ assert.equal(f.button('Adjust routing').props['aria-expanded'],false);
+ const completed=state.workflowReceipt;
+ const [failed,backup]=completed.roles.review.attempts;
+ state={...state,workflowReceipt:{...completed,status:'running',roles:{review:{status:'running',attempts:[failed]}}}};
+ await f.poll();
+ assert.doesNotMatch(visibleRoutingText(f.tree()),/Reviewer.*p\/sol.*high/s);
+ state={...state,workflowReceipt:{...state.workflowReceipt,roles:{review:{status:'running',attempts:[failed,{...backup,status:'running'}]}}}};
+ await f.poll();
+ assert.match(visibleRoutingText(f.tree()),/Reviewer.*p\/glm.*high/s);
+ state={...state,phase:'selected',workflowReceipt:null,decision:{...decision,classificationSource:'rule',workflow:'single'}};
+ await f.poll();
+ assert.match(visibleRoutingText(f.tree()),/Classified by local rule/);
+ assert.doesNotMatch(visibleRoutingText(f.tree()),/Deep review|p\/glm/);
+});
+
+test('Pi routing details distinguish a planned tier from the selected model',async()=>{
+ const state={...barState(),phase:'selected',target:{model:'p/sol',effort:'max',reason:'selected'},
+  decision:{rule:'review',ruleVersion:'v2',classificationSource:'rule',planned:{model:'strong',effort:'high'},selected:{model:'strong',effort:'max'}}};
+ const f=await routingBarFixture(async name=>name==='get_pi_routing'?{state}:{models:[]});
+ const detail=JSON.stringify(f.select('Routing and collaboration details'));
+ assert.match(detail,/Planned route: strong · high/);
+ assert.match(detail,/Selected for this turn: p\/sol · max/);
+ assert.doesNotMatch(detail,/Selected for this turn: strong/);
 });

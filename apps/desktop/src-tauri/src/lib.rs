@@ -2,7 +2,6 @@ mod agent_bridge;
 mod agent_cli;
 mod agent_events;
 mod background;
-mod browser_window;
 mod claude_context;
 mod claude_resume;
 mod cli;
@@ -1968,6 +1967,11 @@ mod terminal_environment_tests;
 
 #[cfg(unix)]
 fn configure_terminal_environment(builder: &mut CommandBuilder) {
+    // Desktop/automation launchers can suppress their own output with NO_COLOR.
+    // The embedded PTY is a color terminal; explicit session env is applied later.
+    builder.env_remove("NO_COLOR");
+    builder.env("COLORTERM", "truecolor");
+    builder.env("TERM_PROGRAM", "YAM");
     // Launchers may omit TERM or inherit dumb, which disables zsh's terminal key bindings.
     if builder
         .get_env("TERM")
@@ -5213,11 +5217,83 @@ fn write_session(
     session_id: String,
     data: String,
 ) -> Result<(), String> {
-    proxy!(
-        manager,
-        "write_session",
-        serde_json::json!({"session_id":session_id,"data":data})
-    );
+    write_session_guarded(manager, session_id, data, None)
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DraftInputGuard {
+    cwd: String,
+    generation: String,
+    native_session_id: String,
+    turn_id: Option<String>,
+    revision: u64,
+    managed_codex: bool,
+}
+
+impl DraftInputGuard {
+    fn validate(&self, record: &SessionRecord, data: &str) -> Result<(), String> {
+        let launch = record.summary.launch.as_ref();
+        let agent = &record.agent;
+        if record.status != "running"
+            || record.summary.ssh.is_some()
+            || record.summary.cwd != self.cwd
+            || !launch.is_some_and(|launch| {
+                launch.mode == "interactive"
+                    && matches!(
+                        launch.adapter.as_str(),
+                        "codex" | "claude" | "gemini" | "opencode" | "pi"
+                    )
+                    && launch
+                        .codex
+                        .as_ref()
+                        .is_some_and(|codex| codex.route.is_some())
+                        == self.managed_codex
+            })
+            || agent.integration != "connected"
+            || agent.route_pending
+            || !matches!(agent.phase.as_str(), "idle" | "response_finished")
+            || self.generation.is_empty()
+            || self.native_session_id.is_empty()
+            || agent.generation != self.generation
+            || agent.agent_session_id.as_deref() != Some(self.native_session_id.as_str())
+            || agent.turn_id != self.turn_id
+            || agent.revision != self.revision
+        {
+            return Err("Agent draft target changed; no bytes were accepted".into());
+        }
+        let body = data
+            .strip_prefix("\x1b[200~")
+            .and_then(|body| body.strip_suffix("\x1b[201~"))
+            .filter(|body| {
+                !body.is_empty()
+                    && body.len() <= 64 * 1024
+                    && !body.chars().any(|c| {
+                        (c.is_control() && !matches!(c, '\t' | '\r'))
+                            || (self.managed_codex && c == '\r')
+                            || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+                    })
+            });
+        if body.is_none() {
+            return Err("Invalid Agent draft input; no bytes were accepted".into());
+        }
+        Ok(())
+    }
+}
+
+fn write_session_guarded(
+    manager: State<'_, SessionManager>,
+    session_id: String,
+    data: String,
+    expected_agent: Option<DraftInputGuard>,
+) -> Result<(), String> {
+    proxy!(manager, "write_session", {
+        let mut args = serde_json::json!({"session_id":session_id,"data":data});
+        if let Some(guard) = &expected_agent {
+            args["expected_agent"] = serde_json::to_value(guard).map_err(|e| e.to_string())?;
+        }
+        args
+    });
     let session = manager
         .sessions
         .lock()
@@ -5233,6 +5309,19 @@ fn write_session(
         .as_raw_fd()
         .ok_or("PTY input does not support bounded native writes")?;
     let mut writer = input_lock(&session.writer, deadline, &session.stop_requested)?;
+    // Agent events and input admission share the authoritative history record.
+    // Hold it through the bounded write so a committed turn change cannot interleave.
+    let draft_records = if let Some(guard) = &expected_agent {
+        let records = input_lock(&session.history.records, deadline, &session.stop_requested)?;
+        let record = records
+            .iter()
+            .find(|record| record.summary.session_id == session_id)
+            .ok_or("Agent draft target changed; no bytes were accepted")?;
+        guard.validate(record, &data)?;
+        Some(records)
+    } else {
+        None
+    };
     #[cfg(unix)]
     write_input_until(
         writer.as_mut(),
@@ -5248,6 +5337,7 @@ fn write_session(
         deadline,
         &session.stop_requested,
     )?;
+    drop(draft_records);
     if let Ok(mut activity) = session.last_activity.lock() {
         *activity = Instant::now();
     }
@@ -5632,15 +5722,21 @@ fn read_agent_receipt<R: tauri::Runtime>(
     session_id: String,
     receipt: String,
     revision: u64,
+    only_current: Option<bool>,
 ) -> Result<(), String> {
-    proxy!(
-        manager,
-        "read_agent_receipt",
-        serde_json::json!({"session_id":session_id,"receipt":receipt,"revision":revision})
-    );
-    manager
-        .history(&app)?
-        .read_agent_receipt(&session_id, &receipt, revision)
+    proxy!(manager, "read_agent_receipt", {
+        let mut args = serde_json::json!({"session_id":session_id,"receipt":receipt,"revision":revision});
+        if only_current == Some(true) {
+            args["only_current"] = true.into();
+        }
+        args
+    });
+    let history = manager.history(&app)?;
+    if only_current == Some(true) {
+        history.read_current_agent_receipt(&session_id, &receipt, revision)
+    } else {
+        history.read_agent_receipt(&session_id, &receipt, revision)
+    }
 }
 
 #[tauri::command]
@@ -6396,7 +6492,6 @@ pub fn run() {
                 return;
             }
             if matches!(event, tauri::WindowEvent::Destroyed) {
-                browser_window::main_destroyed(window.app_handle());
                 if let Ok(mut table) = window.state::<SessionManager>().desktop_windows.lock() {
                     table.note_destroyed(desktop_windows::Slot::Main, 1);
                 }
@@ -6473,12 +6568,11 @@ pub fn run() {
             Ok(())
         })
         .manage(SessionManager::default())
-        .manage(browser_window::Browser::<tauri::Wry>::default())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(|invoke| {
             let webview = invoke.message.webview_ref().label().to_owned();
             let window = invoke.message.webview_ref().window().label().to_owned();
-            browser_window::invoke_gate(
+            desktop_windows::invoke_gate(
                 &webview,
                 &window,
                 invoke,
@@ -6570,11 +6664,6 @@ pub fn run() {
                     desktop_windows::set_terminal_viewport,
                     desktop_windows::navigate_reported_prompt,
                     desktop_windows::clear_terminal_display,
-                    browser_window::browser_status,
-                    browser_window::browser_open,
-                    browser_window::browser_show,
-                    browser_window::browser_reload,
-                    browser_window::browser_close,
                     provider_probe::probe_provider_endpoint,
                     provider_probe::list_local_gateways,
                     external_terminal::list_external_terminals,

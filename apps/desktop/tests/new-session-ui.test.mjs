@@ -8,7 +8,9 @@ import assert from 'node:assert/strict';
 import {readFileSync as rawReadFileSync} from 'node:fs';
 import ts from 'typescript';
 import * as providers from '../src/provider-config.ts';
+import {readLastConnection,rememberConnection} from '../src/saved-connections.ts';
 import {resolveLaunchDefaults} from '../src/project-config.ts';
+import {projectLaunchFields} from '../src/launch-templates.ts';
 import {shellStartError} from '../src/shell-launch.ts';
 import * as layout from '../src/terminal-layout.ts';
 
@@ -93,6 +95,29 @@ test('new session does not persist draft changes or inherit one-shot task prompt
  const bindings={cancelLayoutRestore(){},setCwd(){},cancelProjectPreview(){},setProjectLaunchEdits:v=>state.edits=v,setLaunchDraft:v=>state.draft=v,globalLaunchDefaults:{...draft,mode:'task',prompt:'old task',command:'old command'},adapters:[{id:'codex',available:true}],readPreference:(key,fallback)=>fallback,localStorage:{setItem:(...args)=>state.writes.push(args)},setError(){},launchDialog:{current:{showModal(){},querySelectorAll(){return [];}}}};
  callback('newSession',bindings)('/project');assert.equal(state.draft.mode,'interactive');assert.equal(state.draft.prompt,null);assert.equal(state.draft.command,null);assert.deepEqual(state.writes,[]);
 });
+test('successful connection is restored when opening another session or selecting Codex',async()=>{
+ const data=new Map(),storage={getItem:key=>data.get(key)??null,setItem:(key,value)=>data.set(key,value)};
+ const provider={id:'custom',model:'group/model',base_url:'http://127.0.0.1:3425',api_key_env:'GATEWAY_KEY'};
+ const action=callback('startNewSession',{formLaunch:{...draft,provider},localStorage:storage,rememberConnection,startSession:async()=>({launch:{adapter:'codex',provider}}),setError:assert.fail});
+ await action();assert.deepEqual(readLastConnection(storage,'codex',null),provider);
+ let next;callback('newSession',{globalLaunchDefaults:draft,adapters:[{id:'codex',available:true}],readPreference:()=> 'codex',readLastConnection,localStorage:storage,supportsProvider:providers.supportsProvider,cancelLayoutRestore(){},cancelProjectPreview(){},setProjectLaunchEdits(){},setLaunchDraft:v=>next=v,setError(){},launchDialog:{current:null}})('/repo');
+ assert.deepEqual(next.provider,provider);
+ const f=formFixture({...draft,adapter:'shell',provider:null});callback('changeAdapter',{...f.bindings,localStorage:storage,readLastConnection})('codex');assert.deepEqual(f.state.draft.provider,provider);
+});
+test('failed, routed, copied and project starts do not replace the remembered direct connection',async()=>{
+ const provider=providers.providerPreset('custom').provider;
+ for(const scenario of [{result:undefined},{route:{}},{project:true},{copy:true}]){
+  const writes=[],action=callback('startNewSession',{formLaunch:{...draft,extra_args:'',provider:scenario.route?null:provider},useProjectSettings:!!scenario.project,sessionCopy:scenario.copy?{settings:{}}:null,localStorage:{setItem:(...args)=>writes.push(args)},rememberConnection,startSession:async()=>scenario.result===undefined&&'result' in scenario?undefined:{launch:{adapter:'codex',provider:scenario.route?null:provider}},setError:assert.fail,shellWindows:false});
+  if(scenario.route){await action(undefined,{});}else await action();
+  assert.equal(writes.some(([key])=>key.startsWith('yam.lastConnection.')),false);
+ }
+});
+test('explicitly saving application defaults replaces an older remembered connection',async()=>{
+ const data=new Map(),localStorage={getItem:key=>data.get(key)??null,setItem:(key,value)=>data.set(key,value)};
+ rememberConnection(localStorage,'codex',providers.providerPreset('custom').provider);
+ await callback('saveLaunchDefaults',{formLaunch:{...draft,provider:null},projectLaunchFields,rememberConnection,localStorage,invoke:async()=>{},setGlobalLaunchDefaults(){},setLaunchDefaultsNotice(){}})();
+ assert.equal(readLastConnection(localStorage,'codex',null),null);
+});
 
 test('editing trusted fields keeps the effective draft rather than reviving hidden manual values',()=>{
  const effective={...draft,adapter:'claude',provider:providers.providerPreset('claude-api').provider};
@@ -105,7 +130,7 @@ test('remembered CLI is saved only after success, and storage failure does not r
  for(const result of [undefined,{launch:{adapter:'claude'}}]){
   const calls=[],errors=[];
   const action=callback('startNewSession',{startSession:async()=>{calls.push('start');return result;},localStorage:{setItem:(key,value)=>calls.push([key,JSON.parse(value)])},setError:v=>errors.push(v)});
-  await action();assert.deepEqual(errors,[]);assert.deepEqual(calls,result?['start',['yam.lastSessionCli','claude']]:['start']);
+  await action();assert.deepEqual(errors,[]);assert.deepEqual(calls,result?['start',['yam.lastSessionCli','claude'],['yam.lastConnection.claude',null]]:['start']);
  }
  let starts=0;const errors=[];
  await callback('startNewSession',{startSession:async()=>{starts++;return {launch:{adapter:'codex'}};},localStorage:{setItem(){throw Error('quota');}},setError:v=>errors.push(v)})();

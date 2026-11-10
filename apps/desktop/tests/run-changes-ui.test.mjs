@@ -79,3 +79,52 @@ test('baseline metadata and clearing do not require an available project directo
   assert.doesNotMatch(body,/project_files::session_root\(/);assert.match(body,/project_files::session_directory\(/);
  }
 });
+
+test('task changes expose worktree and recorded output alongside the baseline without running commands',async()=>{
+ const f=fixture(),navigation=[];
+ Object.assign(f.props,{branch:'feature/task',worktree:'/repo',deliveryNotice:'Agent response available. Tests and task acceptance are not verified by YAM.',
+  onOpenWorktree:()=>navigation.push('worktree'),onReviewOutput:()=>navigation.push('logs')});
+ await f.settle();
+ assert.match(f.text(),/feature\/task/);
+ assert.match(f.text(),/Tests and task acceptance are not verified/);
+ f.button('View worktree').props.onClick();
+ f.button('Review recorded output').props.onClick();
+ assert.deepEqual(navigation,['worktree','logs']);
+ assert.deepEqual(f.calls.map(([name])=>name),['get_run_baseline_info']);
+ f.props.sessionId=null;f.render(false);
+ assert.doesNotMatch(f.text(),/feature\/task|Review recorded output/);
+});
+
+test('owner replacement immediately removes old baseline and ignores a late comparison',async()=>{
+ const f=fixture();f.props.owner=1;f.render();await f.settle();
+ f.button('Record baseline').props.onClick();await f.settle();
+ let oldCompare, newBaseline;
+ const invoke=f.props.invoke;
+ f.props.invoke=async(name,args)=>{
+  if(name==='compare_run_baseline')return new Promise(resolve=>oldCompare=resolve);
+  if(name==='get_run_baseline_info'&&f.props.owner===2)return new Promise(resolve=>newBaseline=resolve);
+  return invoke(name,args);
+ };
+ f.render();await f.settle();
+ f.button('Compare since baseline').props.onClick();
+ assert.equal(typeof oldCompare,'function');
+ f.props.owner=2;f.render(false);
+ assert.equal(f.button('Replace baseline'),undefined);
+ assert.equal(f.button('Compare since baseline').props.disabled,true);
+ f.render();await f.settle();
+ assert.equal(typeof newBaseline,'function');
+ oldCompare({baseline:{id:'base-one',root:'/repo',captured_at:1,files:1,skipped:0},rows:[{path:'stale.txt',kind:'modified'}],skipped:0,patch:null});
+ await f.settle();
+ assert.doesNotMatch(f.text(),/stale.txt/);
+ newBaseline({id:'new-owner',root:'/repo',captured_at:2,files:2,skipped:0});
+ await f.settle();
+ assert.equal(f.button('Compare since baseline').props.disabled,false);
+ f.cleanup();
+});
+
+test('the task difference scope follows a successful background reconnect without a gap event',()=>{
+ const text=readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8');
+ const props=text.match(/<RunChanges[^>]+/s)?.[0];
+ assert.match(props,/owner=\{[^}]*ownerConnectionAvailable\.current\.version/);
+ assert.match(props,/active=\{[^}]*ownerConnectionAvailable\.current\.available/);
+});

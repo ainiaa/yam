@@ -6,12 +6,12 @@ import {PiPlugins} from "./PiPlugins";
 import DataSettings from './DataSettings';
 import {createPreferencesBackup,preferencesImportWrites,applyPreferencesImport,type PreferencesBackup} from './preferences-backup';
 import {startupTimings} from './startup-timings';
-import {connectionTemplate} from './saved-connections';
+import {connectionTemplate,readLastConnection,rememberConnection} from './saved-connections';
 import {duplicateSessionDraft,readSessionLaunchSettings,saveSessionLaunchSettings,readSessionName,saveSessionName,loadSessionNames,isSessionPreferenceKey,type SessionLaunchSettings} from "./session-actions";
 import {SettingsNavigation,type SettingsPage} from "./SettingsNavigation";
 import {applyAppThemeDocument,applyAppTerminalTheme} from "./app-themes";
 import {AppAppearance} from "./AppAppearance";
-import {APP_PREFERENCES_KEY,loadAppPreferences,saveAppPreferences,resolveLocale,type AppPreferences} from "./app-preferences";
+import {APP_PREFERENCES_KEY,loadAppPreferences,saveAppPreferences,resolveLocale,type AppPreferences,type AppTheme} from "./app-preferences";
 import {setLocale} from "./i18n";
 import {useTranslation} from "react-i18next";
 import {i18n} from "./i18n";
@@ -31,8 +31,6 @@ import {isSshLaunch,sshTitle,snapshotSshSettings,type SshLaunch} from "./ssh-lau
 import {loadTerminalRetention,decodeTerminalRetention,saveTerminalRetention,type TerminalRetention} from "./terminal-retention";
 import {loadTerminalCursor,decodeTerminalCursor,saveTerminalCursor,terminalCursorOptions,type TerminalCursor} from "./terminal-cursor";
 import {TerminalFilePreview} from "./TerminalFilePreview";
-import {BrowserWindowDialog} from "./BrowserWindowDialog";
-import {BrowserControls,type BrowserAction} from "./browser-window";
 import {selectedFilePath,filePreviewReply,type TerminalFilePreviewData} from "./terminal-file-actions";
 import {ZshDirectoryReporting} from "./ZshDirectoryReporting";
 import {ZshCommandReporting} from "./ZshCommandReporting";
@@ -42,7 +40,7 @@ import {installTerminalLinks} from "./terminal-links";
 import {openUrl} from "@tauri-apps/plugin-opener";
 import {cliInstaller} from "./cli-setup";
 import {TerminalPastePreview,TerminalPasteSettings} from "./TerminalPastePreview";
-import {loadTerminalPaste,saveTerminalPaste,inspectTerminalPaste,terminalPasteInputEligible,sameTerminalPasteTarget,type TerminalPasteMode,type TerminalPasteText,type PendingTerminalPaste,type TerminalPasteTarget} from "./terminal-paste";
+import {loadTerminalPaste,saveTerminalPaste,inspectTerminalPaste,terminalPasteAllowed,terminalPasteInputEligible,sameTerminalPasteTarget,type TerminalPasteMode,type TerminalPasteText,type PendingTerminalPaste,type TerminalPasteTarget} from "./terminal-paste";
 import {SearchAddon} from "@xterm/addon-search";
 import {TerminalFindController,FindWorker,createFindWorker} from "./terminal-find";
 import {TerminalFindBar} from "./TerminalFind";
@@ -51,6 +49,8 @@ import {GitChanges} from "./GitChanges";
 import {ProjectFiles} from "./ProjectFiles";
 import {RunChanges} from "./RunChanges";
 import {ReviewFeedback} from "./ReviewFeedback";
+import {TerminalSelectionContext} from "./TerminalSelectionContext";
+import {matchesTerminalSelection,terminalSelectionOrigin,terminalSelectionText,type TerminalSelectionOrigin} from "./terminal-selection-context";
 import {reviewOrigin,reviewReady,sameReviewOrigin,deliverReviewFeedback,createReviewAnchor,checkReviewLocations,type ReviewOrigin,type ReviewLocation,type ReviewRecord} from "./review-feedback";
 import {relativeProjectFile,type ProjectFileRequest} from "./project-files";
 import type {DiffTarget} from "./git-diff-navigation";
@@ -188,7 +188,7 @@ type SessionStateEvent = {
   reason: string | null;
 };
 
-type TerminalView = {continuation?:{chunks:{data:string;paste:boolean}[];length:number;cancelled:boolean};inputQueue?:{write:Promise<void>|null;version:number;length:number;count:number};agentRefreshVersion?:number;recordedOnly?:boolean;clearDisplayVersion?:1|null;clearPending?:boolean; reportedPromptNavigation?:ReturnType<typeof terminalReportedPromptNavigation>;promptNavigationPending?:boolean; moving?:boolean;moveDisposal?:boolean;moveListenerRevision?:number;refreshMoveListeners?:()=>void; desktopGeneration:number; reportedCommand:ReturnType<typeof terminalReportedCommand>;reportedCommandSequence:number;reportedCommandPair:string|null; reportedCwd:string|null;reportedCwdSequence:number; appearance:TerminalSettings;appearanceRevision:number;appearanceFitPending?:()=>boolean; find?:TerminalFindController; scroll?:TerminalScrollState;scrollReturnPending?:boolean;scrollReturnIntent?:number; availability?:SessionAvailability; record?:SessionRecord; attachVersion?:number; attaching?:boolean; instance: Terminal; fit: FitAddon; element: HTMLDivElement; cursor: number | null; ready: boolean; replayVersion:number; firstAttachment:boolean; parsing:Promise<void>|null; finishReplay:(()=>void)|null; live: boolean; status:string|null; notice: string | null; persisted:boolean; projection:boolean; frameRevision:number; frameInstance:string|null; dirty:boolean; updating:boolean; selecting:boolean; lifecycleRevision:number; projecting:boolean; viewportRevision:number; resizing:boolean;resizePending:{cols:number;rows:number}|null;disposed:boolean;writable:boolean; dispose(): void };
+type TerminalView = {draftInputGuard?:Omit<TerminalSelectionOrigin,'sessionId'>;continuation?:{chunks:{data:string;paste:boolean}[];length:number;cancelled:boolean};inputQueue?:{write:Promise<void>|null;version:number;length:number;count:number};agentRefreshVersion?:number;recordedOnly?:boolean;clearDisplayVersion?:1|null;clearPending?:boolean; reportedPromptNavigation?:ReturnType<typeof terminalReportedPromptNavigation>;promptNavigationPending?:boolean; moving?:boolean;moveDisposal?:boolean;moveListenerRevision?:number;refreshMoveListeners?:()=>void; desktopGeneration:number; reportedCommand:ReturnType<typeof terminalReportedCommand>;reportedCommandSequence:number;reportedCommandPair:string|null; reportedCwd:string|null;reportedCwdSequence:number; appearance:TerminalSettings;appearanceRevision:number;appearanceFitPending?:()=>boolean; find?:TerminalFindController; scroll?:TerminalScrollState;scrollReturnPending?:boolean;scrollReturnIntent?:number; availability?:SessionAvailability; record?:SessionRecord; attachVersion?:number; attaching?:boolean; instance: Terminal; fit: FitAddon; element: HTMLDivElement; cursor: number | null; ready: boolean; replayVersion:number; firstAttachment:boolean; parsing:Promise<void>|null; finishReplay:(()=>void)|null; live: boolean; status:string|null; notice: string | null; persisted:boolean; projection:boolean; frameRevision:number; frameInstance:string|null; dirty:boolean; updating:boolean; selecting:boolean; lifecycleRevision:number; projecting:boolean; viewportRevision:number; resizing:boolean;resizePending:{cols:number;rows:number}|null;disposed:boolean;writable:boolean; dispose(): void };
 
 type AgentPhase = "idle" | "working" | "waiting";
 
@@ -444,24 +444,16 @@ function App() {
   const pasteModeRef=useRef(pasteMode);pasteModeRef.current=pasteMode;
   const [pastePolicyError,setPastePolicyError]=useState<string|null>(pastePreferenceLoad.error);
   const [pasteSettingsOpen,setPasteSettingsOpen]=useState(false);
-  const pastePending=useRef<PendingTerminalPaste<TerminalView,Terminal>|null>(null);
+  type SessionPaste=PendingTerminalPaste<TerminalView,Terminal>&{selection?:TerminalSelectionOrigin&{title:string}};
+  const pastePending=useRef<SessionPaste|null>(null);
   const [pastePreview,setPastePreview]=useState<TerminalPasteText|null>(null);
   const pasteDialog=useRef<HTMLDialogElement>(null);
+  const selectionFillBusy=useRef(false);
   function applyPastePolicy(mode:TerminalPasteMode){saveTerminalPaste((key,raw)=>localStorage.setItem(key,raw),mode);pasteModeRef.current=mode;setPasteMode(mode);setPastePolicyError(null);}
   const filePending=useRef<{id:string;view:TerminalView;instance:Terminal;buffer:Terminal["buffer"]["active"];identity:string;path:string;preview:TerminalFilePreviewData|null;selection:{dispose():void}|null}|null>(null);
   const fileJobBusy=useRef(false);
   const [fileBusy,setFileBusy]=useState(false);
   const [filePreview,setFilePreview]=useState<TerminalFilePreviewData|null>(null);
-  const browserControls=useRef(new BrowserControls()),browserMounted=useRef(false);
-  const [browserOpen,setBrowserOpen]=useState(false),[,setBrowserVersion]=useState(0);
-  useEffect(()=>{browserMounted.current=true;browserControls.current.activate();return()=>{browserMounted.current=false;browserControls.current.dispose();};},[]);
-  async function openBrowserDialog(){
-    if(!isMainWindow)return;setBrowserOpen(true);const pending=browserControls.current.read(invoke);setBrowserVersion(value=>value+1);await pending;if(browserMounted.current)setBrowserVersion(value=>value+1);
-  }
-  async function browserAction(action:BrowserAction,url:string){
-    if(!isMainWindow)return;const pending=browserControls.current.action(action,url,invoke);setBrowserVersion(value=>value+1);await pending;if(browserMounted.current)setBrowserVersion(value=>value+1);
-  }
-  function closeBrowserDialog(){setBrowserOpen(false);}
   const fileDialog=useRef<HTMLDialogElement>(null);
   const fileDropDialog=useRef<HTMLDialogElement>(null);
   const fileDropPending=useRef<{target:TerminalFileDropTarget<TerminalView,Terminal>;path:string;preview:TerminalFileDropContent|null;selection:{dispose():void}|null}|null>(null);
@@ -501,7 +493,7 @@ function App() {
   useEffect(()=>{const pending=fileDropPending.current;if(pending&&!terminalFileDropCurrent(pending))cancelTerminalFileDrop();});
   function terminalFileIdentity(id:string,view:TerminalView):string|null{
     const layout=terminalLayoutRef.current;
-    if(view.disposed||!view.ready||!view.instance.getSelectionPosition()||terminalViews.current.get(id)!==view||sessionId.current!==id||layout.panes[layout.focused]!==id||!terminalPaneVisible(id)||!view.element.isConnected||view.element.inert||view.element.style.visibility==="hidden"||!document.hasFocus()||view.instance.modes.mouseTrackingMode!=="none"||Array.from(document.querySelectorAll('dialog[open],[role="dialog"][aria-modal="true"],.modal-backdrop')).some(node=>node!==fileDialog.current))return null;
+    if(view.disposed||!view.ready||view.availability!=="available"||view.moving||!view.instance.getSelectionPosition()||terminalViews.current.get(id)!==view||sessionId.current!==id||layout.panes[layout.focused]!==id||!terminalPaneVisible(id)||!view.element.isConnected||view.element.inert||view.element.style.visibility==="hidden"||!document.hasFocus()||view.instance.modes.mouseTrackingMode!=="none"||Array.from(document.querySelectorAll('dialog[open],[role="dialog"][aria-modal="true"],.modal-backdrop')).some(node=>node!==fileDialog.current))return null;
     return JSON.stringify([desktopWindow.epoch,view.frameInstance,view.attachVersion,view.lifecycleRevision,view.frameRevision,view.viewportRevision,view.appearanceRevision,ownerConnectionAvailable.current.version,selectionVersion.current,layout.revision,layout.focused,layout.panes,view.instance.cols,view.instance.rows,view.instance.getSelection(),view.instance.getSelectionPosition()]);
   }
   function terminalFileCurrent(pending:NonNullable<typeof filePending.current>){return filePending.current===pending&&pending.view.instance===pending.instance&&pending.instance.buffer.active===pending.buffer&&terminalFileIdentity(pending.id,pending.view)===pending.identity;}
@@ -576,7 +568,57 @@ function App() {
       throw reason;
     }
   }
-  function confirmTerminalPaste(){const pending=pastePending.current;pastePending.current=null;if(!pending)return;pasteDialog.current?.close();setPastePreview(null);if(!terminalPasteCurrent(pending)){setError("Paste target changed or is unavailable. Nothing was sent.");return;}pending.target.instance.focus();if(!terminalPasteCurrent(pending)||!terminalHasInputFocus(pending.target.sessionId)){setError("The original terminal could not receive focus. Nothing was sent.");return;}if(canContinueTerminalInput(pending.target.sessionId,pending.target.view))continueTerminalInput(pending.target.sessionId,pending.target.view,pending.content.text,true);else pending.target.instance.paste(pending.content.text);}
+  function terminalSelectionCurrent(pending:SessionPaste){
+    const {view,instance}=pending.target;
+    return !!pending.selection&&terminalMounted.current&&ownerConnectionAvailable.current.available&&!conversationOpenRef.current
+      &&terminalPasteCurrent(pending)&&view.ready&&view.live&&view.availability==="available"&&!view.moving&&!view.persisted
+      &&!view.attaching&&!view.parsing&&!view.projecting&&!view.resizing&&!view.clearPending&&!view.scrollReturnPending
+      &&instance.modes.bracketedPasteMode&&terminalPasteAllowed(pending.content,pending.selection.managedCodex)&&matchesTerminalSelection(view.record,pending.selection);
+  }
+  function previewTerminalSelectionContext(){
+    if(pastePending.current||selectionFillBusy.current)return;
+    const id=sessionId.current,view=id?terminalViews.current.get(id):undefined,record=view?.record;
+    const origin=terminalSelectionOrigin(record);
+    if(!id||!view||!record||!origin||origin.sessionId!==id||!document.hasFocus()
+      ||document.querySelector('dialog[open],[role="dialog"][aria-modal="true"],.modal-backdrop')){
+      setError("The current Agent cannot receive a draft now.");return;
+    }
+    try{
+      const pending={target:terminalPasteTarget(id,view),selection:{...origin,title:titleFor(record.summary)},
+        content:terminalSelectionText(view.instance.getSelection(),origin)};
+      if(!terminalSelectionCurrent(pending)){setError("The current Agent cannot receive a draft now.");return;}
+      pastePending.current=pending;setPastePreview(pending.content);
+    }catch(reason){setError(reason instanceof Error?reason.message:"Select terminal text first.");}
+  }
+  async function fillTerminalSelectionContext(pending:SessionPaste){
+    const selection=pending.selection;
+    if(!selection||pastePending.current!==pending||selectionFillBusy.current)return;
+    selectionFillBusy.current=true;
+    const {view,instance,sessionId:id}=pending.target;
+    let started=false;
+    try{
+      if(!terminalSelectionCurrent(pending))throw Error();
+      const fresh=await invoke<SessionRecord>("get_session",{sessionId:id});
+      if(pastePending.current!==pending)return;
+      if(!matchesTerminalSelection(fresh,selection)||!terminalSelectionCurrent(pending))throw Error();
+      cancelTerminalPaste(false);instance.focus();
+      if(!terminalSelectionCurrent(pending)||!terminalHasInputFocus(id)||view.inputQueue?.write||view.inputQueue?.count||view.inputQueue?.length)throw Error();
+      const version=view.inputQueue?.version??0;
+      const {cwd,generation,nativeSessionId,turnId,revision,managedCodex}=selection;
+      view.draftInputGuard={cwd,generation,nativeSessionId,turnId,revision,managedCodex};
+      started=true;
+      try{instance.paste(pending.content.text);}finally{delete view.draftInputGuard;}
+      const write=view.inputQueue?.write;
+      if(!write)throw Error();
+      await write;
+      if(!terminalSelectionCurrent(pending)||view.inputQueue?.version!==version||!view.writable)throw Error();
+      setTerminalNotice("Agent draft filled. Check it in the terminal before sending.");
+    }catch{
+      if(pastePending.current===pending)cancelTerminalPaste(false);
+      setError(started?"Draft delivery could not be confirmed. Check the terminal before retrying.":"The current Agent cannot receive a draft now.");
+    }finally{selectionFillBusy.current=false;}
+  }
+  function confirmTerminalPaste(){const pending=pastePending.current;if(pending?.selection){void fillTerminalSelectionContext(pending);return;}pastePending.current=null;if(!pending)return;pasteDialog.current?.close();setPastePreview(null);if(!terminalPasteCurrent(pending)){setError("Paste target changed or is unavailable. Nothing was sent.");return;}pending.target.instance.focus();if(!terminalPasteCurrent(pending)||!terminalHasInputFocus(pending.target.sessionId)){setError("The original terminal could not receive focus. Nothing was sent.");return;}if(canContinueTerminalInput(pending.target.sessionId,pending.target.view))continueTerminalInput(pending.target.sessionId,pending.target.view,pending.content.text,true);else pending.target.instance.paste(pending.content.text);}
   function validatePendingTerminalPaste(){const pending=pastePending.current;if(pending&&!terminalPasteCurrent(pending))cancelTerminalPaste(false);}
   function captureTerminalPaste(id:string,view:TerminalView,event:ClipboardEvent){
     if(event.target!==view.instance.textarea||!event.clipboardData||!Array.from(event.clipboardData.types).includes("text/plain"))return;
@@ -586,7 +628,7 @@ function App() {
     let text:string;try{text=event.clipboardData.getData("text/plain");}catch{stop();setError("Pasted text is invalid. Nothing was sent.");return;}
     let content:TerminalPasteText;try{content=inspectTerminalPaste(text);}catch(reason){stop();setError(reason instanceof Error?reason.message:"Pasted text is invalid. Nothing was sent.");return;}
     if(content.text===""){stop();return;}
-    if(view.record?.summary.launch?.codex?.route&&content.risky){stop();setError("Paste a single line of plain text into a managed Codex terminal, then press Enter.");return;}
+    if(!terminalPasteAllowed(content,!!view.record?.summary.launch?.codex?.route)){stop();setError("Paste a single line of plain text into a managed Codex terminal, then press Enter.");return;}
     if(pasteModeRef.current==="never"||(pasteModeRef.current==="risky"&&!content.risky)){if(canContinueTerminalInput(id,view)){stop();continueTerminalInput(id,view,content.text,true);}return;}
     stop();pastePending.current={target:terminalPasteTarget(id,view),content};setPastePreview(content);
   }
@@ -627,6 +669,7 @@ function App() {
   const [terminalSettingsError,setTerminalSettingsError]=useState<string|null>(terminalPreferenceLoad.error);
   const [terminalSettingsOpen,setTerminalSettingsOpen]=useState(false);
   const [appearanceOpen,setAppearanceOpen]=useState(false);
+  const [appearanceThemePreview,setAppearanceThemePreview]=useState<AppTheme|null>(null);
   const [appPreferenceLoad]=useState(()=>loadAppPreferences(()=>localStorage.getItem(APP_PREFERENCES_KEY)));
   const [appPreferences,setAppPreferences]=useState(appPreferenceLoad.value);
   const [appPreferenceError,setAppPreferenceError]=useState(appPreferenceLoad.error);
@@ -638,10 +681,11 @@ function App() {
   useEffect(()=>{const changed=()=>setLocale(resolveLocale(appPreferences.language,navigator.languages));changed();window.addEventListener("languagechange",changed);return()=>window.removeEventListener("languagechange",changed);},[appPreferences.language]);
   useEffect(()=>{
     let active=true;let media:MediaQueryList|undefined;
-    const refresh=()=>{if(!active)return;const theme=applyAppThemeDocument(appPreferences,media?.matches!==false,document.documentElement);applyAppTerminalTheme(terminalViews.current.all,theme);void nativeInvoke("native_menu_labels",{labels:nativeMenuLabels(shortcutsRef.current,shortcutMac),locale:i18n.language,theme:appPreferences.theme==="system"?"system":theme==="light"?"light":"dark"}).catch(()=>setAppPreferenceError("Window appearance could not be updated. Try again."));};
+    const preferences=appearanceThemePreview?{...appPreferences,theme:appearanceThemePreview}:appPreferences;
+    const refresh=()=>{if(!active)return;const theme=applyAppThemeDocument(preferences,media?.matches!==false,document.documentElement);applyAppTerminalTheme(terminalViews.current.all,theme);void nativeInvoke("native_menu_labels",{labels:nativeMenuLabels(shortcutsRef.current,shortcutMac),locale:i18n.language,theme:preferences.theme==="system"?"system":theme==="light"?"light":"dark"}).catch(()=>setAppPreferenceError("Window appearance could not be updated. Try again."));};
     try{media=window.matchMedia("(prefers-color-scheme: dark)");media.addEventListener("change",refresh);}catch{/* Deterministic dark fallback when OS appearance is unavailable. */}
     refresh();window.addEventListener("focus",refresh);return()=>{active=false;window.removeEventListener("focus",refresh);media?.removeEventListener?.("change",refresh);};
-  },[appPreferences]);
+  },[appPreferences,appearanceThemePreview]);
 
 
 
@@ -716,10 +760,10 @@ function App() {
   const [adapterChecking,setAdapterChecking]=useState(false),[adapterInstalling,setAdapterInstalling]=useState(false);
   const [globalLaunchDefaults,setGlobalLaunchDefaults]=useState<LaunchDefaults>(launchDraft);
   const launchSettingsDialog=useRef<HTMLDialogElement>(null);
-  const [projectToolsPath,setProjectToolsPath]=useState("");
   const [projectToolsOpen,setProjectToolsOpen]=useState(false);
   const projectToolsOpenRef=useRef(projectToolsOpen);projectToolsOpenRef.current=projectToolsOpen;
   const [projectToolsTab,setProjectToolsTab]=useState<"files"|"changes"|"worktrees">("changes");
+  const [projectToolsRequest,setProjectToolsRequest]=useState<{directory:string;owner:number;path:string}|null>(null);
   function closeProjectTools(){
     const id=sessionId.current,origin=document.activeElement;projectToolsOpenRef.current=false;setProjectToolsOpen(false);
     requestAnimationFrame(()=>{requestTerminalLayoutFit();if(!projectToolsOpenRef.current&&sessionId.current===id&&(document.activeElement===origin||document.activeElement===document.body)&&!document.querySelector('dialog[open],[role="dialog"][aria-modal="true"]')){showConversation(false);focusTerminalPane(terminalLayoutRef.current.focused,true);}});
@@ -829,6 +873,7 @@ function App() {
     const gateway=current?.id==="custom"?providerChoice(formAdapter,current):null;
     if(gateway==="echobird"&&adapter==="gemini"){setError("EchoBird does not provide a native Gemini API preset. Use existing CLI configuration or configure a compatible gateway before switching.");return;}
     let provider=current;
+    if(adapter!==formAdapter&&!current&&!useProjectSettings&&!sessionCopy)provider=readLastConnection(localStorage,adapter,null);
     if(adapter!==formAdapter&&current&&["cc-switch","echobird"].includes(gateway??"")){
       const next=providerPreset(gateway!,adapter).provider;
       if(next)provider={...current,base_url:next.base_url};
@@ -883,7 +928,7 @@ function App() {
     try{await projectSelection.current.approve(preview=>invoke<ProjectPreview>("trust_project_config",{cwd:preview.root,preview}));if(version===projectConfigVersion.current)setProjectPreview(projectSelection.current.preview);}
     catch(reason){if(version===projectConfigVersion.current)setProjectConfigError(String(reason));}finally{if(version===projectConfigVersion.current)setProjectConfigBusy(false);}
   }
-  async function saveLaunchDefaults(){if(!isMainWindow){openMainSettings();return;}try{const defaults=projectLaunchFields(formLaunch);await invoke("set_launch_defaults",{defaults});setGlobalLaunchDefaults(defaults);try{localStorage.setItem("yam.lastSessionCli",JSON.stringify(defaults.adapter==="custom"?"shell":defaults.adapter));setLaunchDefaultsNotice("Defaults saved for new sessions.");}catch{setLaunchDefaultsNotice("Defaults saved, but the last CLI choice could not be updated.");}}catch(reason){setLaunchDefaultsNotice(String(reason));}}
+  async function saveLaunchDefaults(){if(!isMainWindow){openMainSettings();return;}try{const defaults=projectLaunchFields(formLaunch);await invoke("set_launch_defaults",{defaults});setGlobalLaunchDefaults(defaults);try{rememberConnection(localStorage,defaults.adapter,defaults.provider??null);localStorage.setItem("yam.lastSessionCli",JSON.stringify(defaults.adapter==="custom"?"shell":defaults.adapter));setLaunchDefaultsNotice("Defaults saved for new sessions.");}catch{setLaunchDefaultsNotice("Defaults saved, but the last CLI choice could not be updated.");}}catch(reason){setLaunchDefaultsNotice(String(reason));}}
 
   const [session, setSession] = useState<SessionSummary | null>(null);
   const [selectedAgent,setSelectedAgent]=useState<AgentState|undefined>();
@@ -1163,7 +1208,7 @@ function App() {
     }
     const key = `${event.session_id}:${event.status}`;
     const discardMissing=(reason:unknown)=>{
-      if(!/^(?:Error: )?(?:Unknown notification session|Unknown session)$/.test(String(reason)))return false;
+      if(!/^(?:Error: )?(?:Unknown notification session|Unknown session|Unknown or unavailable archived session)$/.test(String(reason)))return false;
       retryNotifications.current.delete(key);notifications.current.clearFailure(key);notifications.current.suppress(key);
       if(!retryNotifications.current.size)setNotificationError(null);
       return true;
@@ -1291,9 +1336,10 @@ function App() {
       };
       const bindData=()=>{const generation=view.desktopGeneration,listenerRevision=view.moveListenerRevision??0;return instance.onData(data => {
         if(view.desktopGeneration!==generation||(view.moveListenerRevision??0)!==listenerRevision)return;
+        const expectedAgent=view.draftInputGuard;
         const protocol=isTerminalProtocolResponse(data),mouse=isTerminalMouseReport(data);
         const connected=ownerConnectionAvailable.current.available&&view.availability!=="owner_unavailable";
-        if(!view.live&&!protocol){if(!mouse)continueTerminalInput(id,view,data);return;}
+        if(!view.live&&!protocol){if(!mouse&&!expectedAgent)continueTerminalInput(id,view,data);return;}
         if (!view.disposed && !view.moving && connected && !(view.projection&&protocol) && view.live && (view.projection || (view.cursor !== null && (view.ready || view.firstAttachment)))
           && (terminalHasInputFocus(id) || (!view.projection && protocol))){
           const owner=view.frameInstance,attachment=view.attachVersion,connectionVersion=ownerConnectionAvailable.current.version;
@@ -1306,7 +1352,7 @@ function App() {
           // Separate IPC calls can reach the owner out of order; keep one write in flight per view.
           const write=async()=>{
             if(version!==queue.version||!valid())return;
-            try{await invoke("write_session",{desktopGeneration:generation,sessionId:id,data});if(version===queue.version&&valid()){view.writable=true;syncViewSize(view);}}
+            try{await invoke("write_session",{desktopGeneration:generation,sessionId:id,data,...(expectedAgent?{expectedAgent}:{})});if(version===queue.version&&valid()){view.writable=true;syncViewSize(view);}}
             catch(reason){if(version===queue.version)queue.version++;if(valid()){view.writable=false;if((!protocol&&!mouse||queue.count>1)&&terminalHasInputFocus(id))setError(`${String(reason)}. Pending terminal input was discarded; check the prompt before typing again.`);}}
           };
           const pending=queue.write?queue.write.then(write):write();
@@ -1713,7 +1759,10 @@ function App() {
     }catch{setError("Session started, but its name or launch settings could not be saved. Use the existing session; do not start it again.");}
     if(next&&worktree){setLaunchWorktreeAttempt(undefined);setLaunchWorkspace(null);}
     if(next&&outputTerminal!=="yam")try{await invoke("open_external_terminal",{sessionId:next.session_id,terminal:outputTerminal});}catch{setError("The session was created in YAM, but the external terminal could not be opened. Check macOS Automation permission; use this existing session instead of starting it again.");}
-    if(next&&isMainWindow)try{localStorage.setItem("yam.lastSessionCli",JSON.stringify(next.launch?.adapter??"shell"));}catch{setError("Session started, but the last CLI choice could not be saved.");}
+    if(next&&isMainWindow)try{
+      localStorage.setItem("yam.lastSessionCli",JSON.stringify(next.launch?.adapter??"shell"));
+      if(next.launch&&!route&&!projectSettings&&!copy)rememberConnection(localStorage,next.launch.adapter,next.launch.provider??null);
+    }catch{setError("Session started, but the CLI or connection choice could not be saved.");}
   }
   async function startSession(overrides?: { cwd?: string; command?: string; launch?: AgentLaunch | null; resumeFrom?: string; shell?: ShellLaunch; envRefs?: Record<string,string>; appearance?:TerminalSettings; viewAppearance?:TerminalSettings; directoryReporting?:boolean; commandReporting?:boolean; retainedLines?:number;ssh?:SshLaunch }, worktreeAttempt?: string, routingArgs?:string, codexRouting?:CodexRoutingLaunch) {
     if(overrides?.ssh&&(!isSshLaunch(overrides.ssh)||overrides.command!==undefined||overrides.launch!==undefined||overrides.resumeFrom||worktreeAttempt||overrides.shell||overrides.envRefs&&Object.keys(overrides.envRefs).length||overrides.directoryReporting||overrides.commandReporting)){setError("Invalid SSH launch.");return;}
@@ -2637,7 +2686,7 @@ function App() {
     (project) =>
       projectKey(project.path) === projectKey(session?.cwd || activeProject),
   ) : undefined;
-  const gitProjectPath = currentProject?.path ?? activeProject;
+  const gitProjectPath = session ? (session.ssh ? "" : session.cwd) : (currentProject?.path ?? activeProject);
   useEffect(() => {
     let active = true;
     gitPolling.current.select(gitProjectPath, String(gitOwner));
@@ -2652,7 +2701,9 @@ function App() {
     return () => { active = false; clearInterval(timer); gitPolling.current.cancel(); };
   }, [gitProjectPath, gitOwner]);
   const visibleGitContext = gitContext?.path === gitProjectPath && gitContext.owner === gitOwner ? gitContext.value : null;
-  useEffect(()=>{if(projectToolsOpen)setProjectToolsPath(visibleGitContext?.root||gitProjectPath);},[projectToolsOpen,gitProjectPath,visibleGitContext?.root]);
+  const requestedProjectToolsPath=projectToolsRequest?.directory===gitProjectPath&&projectToolsRequest.owner===gitOwner?projectToolsRequest.path:"";
+  const projectToolsPath=visibleGitContext?.root||requestedProjectToolsPath||gitProjectPath;
+  function setProjectToolsPath(path:string){setProjectToolsRequest({directory:gitProjectPath,owner:gitOwner,path});}
   worktreeContextRef.current={root:projectToolsPath,owner:gitOwner};
   const titleFor = (summary: SessionSummary | HistoryItem["summary"]) => {
     if(sessionTitles[summary.session_id])return sessionTitles[summary.session_id];
@@ -2871,7 +2922,8 @@ function App() {
     const available=adapters.filter(item=>item.available||item.id==="shell");
     const preferred=readPreference("yam.lastSessionCli",defaults.adapter==="custom"?"shell":defaults.adapter,(value):value is string=>typeof value==="string"&&available.some(item=>item.id===value));
     const adapter=profileId!==undefined?"shell":available.some(item=>item.id===preferred)?preferred:available.find(item=>item.id!=="shell")?.id??"shell";
-    setLaunchDraft({...defaults,adapter,mode:"interactive",...(adapter!==defaults.adapter&&(adapter==="pi"||defaults.adapter==="pi")?{extra_args:adapter==="pi"?defaultPiArgs:""}:{}),...(defaults.provider&&!supportsProvider(adapter,defaults.provider)?{provider:null}:{}),...(adapter!=="shell"||!isMainWindow?{command:null}:{}),...(profileId!==undefined?{command:null,provider:null,prompt:null,extra_args:""}:{})});
+    const provider=readLastConnection(localStorage,adapter,defaults.provider&&supportsProvider(adapter,defaults.provider)?defaults.provider:null);
+    setLaunchDraft({...defaults,adapter,provider,mode:"interactive",...(adapter!==defaults.adapter&&(adapter==="pi"||defaults.adapter==="pi")?{extra_args:adapter==="pi"?defaultPiArgs:""}:{}),...(adapter!=="shell"||!isMainWindow?{command:null}:{}),...(profileId!==undefined?{command:null,provider:null,prompt:null,extra_args:""}:{})});
     let directory=path??currentProject?.path??session?.cwd??activeProject??"";
     if(adapter==="shell"&&!worktreeAttempt)try{directory=terminalDirectory(path,profileId);}catch(reason){setError(reason instanceof Error?reason.message:"Terminal profile is unavailable.");}
     setCwd(directory);
@@ -2879,6 +2931,7 @@ function App() {
     launchDialog.current?.showModal();
   }
   const currentAgent=selectedAgent;
+  const deliveryNotice=taskDeliveryNotice(currentAgent,sessionStatus);
   const reviewRecord=session?{summary:session,status:sessionStatus,agent:currentAgent}:null;
   reviewRecordRef.current=reviewRecord;
   const currentReviewOrigin=reviewOrigin(reviewRecord);
@@ -2892,7 +2945,7 @@ function App() {
     try{await invoke("read_agent_receipt",{sessionId:record.summary.session_id,receipt:entry.id,revision:entry.revision});if(valid())await refreshHistory(valid);}
     catch(reason){if(valid())setError(String(reason));}
   }
-  async function openReceipt(record:HistoryItem,entry:AgentReceipt,agent?:AgentState){
+  async function openReceipt(record:HistoryItem,entry:AgentReceipt,agent?:AgentState,ownerCurrent?:boolean){
     const action=captureAttention(record,entry,agent),focusOrigin=document.activeElement;
     const operation=++attentionOperation.current,owner=ownerConnectionAvailable.current.version;
     const valid=()=>terminalMounted.current&&operation===attentionOperation.current&&owner===ownerConnectionAvailable.current.version;
@@ -2909,12 +2962,13 @@ function App() {
       &&attachment.view.availability!=="terminal_unavailable";
     const current=()=>attached()&&attachment.view.live&&["starting","running"].includes(attachment.view.status??"");
     if(!attached())return;
-    if(action.state==="historical"||!current()){showConversation(false,focusOrigin);return;}
+    if(ownerCurrent===false||action.state==="historical"||!current()){showConversation(false,focusOrigin);return;}
     try {
       const fresh=await invoke<SessionRecord>("get_session",{sessionId:action.sessionId});
       const confirmed=action.state==="unknown"?captureAttention(fresh,action.receipt,fresh.agent):action;
       if(!current()||fresh.summary.session_id!==action.sessionId||!isCurrentAttention(confirmed,fresh))return;
-      await invoke("read_agent_receipt",{sessionId:action.sessionId,receipt:action.receipt.id,revision:action.receipt.revision});
+      if(ownerCurrent&&entry.kind==="needs_permission"&&!entry.permission_key&&fresh.agent?.revision!==entry.revision)return;
+      await invoke("read_agent_receipt",{sessionId:action.sessionId,receipt:action.receipt.id,revision:action.receipt.revision,onlyCurrent:true});
       if(current())await refreshHistory(current);
     }catch(reason){if(current())setError(String(reason));}
     finally{if(attached())showConversation(false,focusOrigin);}
@@ -3057,26 +3111,56 @@ function App() {
     setNewProjectName("");
     projectDialog.current?.showModal();
   }
-  const projectDeleteDialog=useRef<HTMLDialogElement>(null),projectDeleteRef=useRef<Project|null>(null);
-  const [projectDelete,setProjectDelete]=useState<Project|null>(null);
+  type ProjectDeleteTarget=Project&{targets?:SessionDeleteTarget[]};
+  const projectDeleteDialog=useRef<HTMLDialogElement>(null),projectDeleteRef=useRef<ProjectDeleteTarget|null>(null),projectDeleteBusyRef=useRef(false);
+  const [projectDelete,setProjectDelete]=useState<ProjectDeleteTarget|null>(null);
+  const [projectDeleteBusy,setProjectDeleteBusy]=useState(false),[projectDeleteError,setProjectDeleteError]=useState<string|null>(null);
   const sessionDeleteDialog=useRef<HTMLDialogElement>(null);
-  type SessionDeleteTarget={id:string;title:string;stopBeforeDelete:boolean;archived:boolean;previewId:string|null};
+  type SessionDeleteTarget={id:string;title:string;stopBeforeDelete:boolean;archived:boolean;previewId:string|null;deleted?:boolean};
   const sessionDeleteRef=useRef<SessionDeleteTarget|null>(null),sessionDeleteBusyRef=useRef(false);
   const [sessionDelete,setSessionDelete]=useState<SessionDeleteTarget|null>(null);
   const [sessionDeleteBusy,setSessionDeleteBusy]=useState(false),[sessionDeleteError,setSessionDeleteError]=useState<string|null>(null);
   function deleteProject(project:Project){
-    if(!isMainWindow)return;
-    const intent={path:project.path,name:project.name};projectDeleteRef.current=intent;setProjectDelete(intent);projectDeleteDialog.current?.showModal();
+    if(!isMainWindow||projectDeleteBusyRef.current||sessionDeleteBusyRef.current)return;
+    const intent={path:project.path,name:project.name};projectDeleteRef.current=intent;setProjectDelete(intent);setProjectDeleteError(null);projectDeleteDialog.current?.showModal();
   }
-  function closeProjectDeletion(){projectDeleteRef.current=null;setProjectDelete(null);projectDeleteDialog.current?.close();}
-  function confirmProjectDeletion(intent:Project|null){
-    if(!isMainWindow||!intent||projectDeleteRef.current!==intent)return;
-    const current=projectsRef.current,matches=current.filter(row=>projectKey(row.path)===projectKey(intent.path));
-    if(matches.length>1||matches.length===1&&(matches[0].path!==intent.path||matches[0].name!==intent.name)){setError("This project changed. Reopen Delete project.");return;}
+  function closeProjectDeletion(){if(projectDeleteBusyRef.current)return;projectDeleteRef.current=null;setProjectDelete(null);projectDeleteDialog.current?.close();}
+  async function collectProjectDeletionTargets(path:string){
+    const targets=new Map<string,SessionDeleteTarget>();
+    for(const command of ["list_session_summaries","list_archived_sessions"]){
+      let cursor:HistoryCursor|null=null;
+      do{
+        const page:HistoryPage<HistoryItem>=await invoke<HistoryPage<HistoryItem>>(command,{request:{page_size:100,cursor}});
+        for(const item of page.items){
+          if(projectKey(item.summary.cwd)===projectKey(path))targets.set(item.summary.session_id,{id:item.summary.session_id,title:item.summary.title,stopBeforeDelete:true,archived:command==="list_archived_sessions",previewId:null});
+          for(const id of item.previous_runs??[]){
+            const previous=await invoke<SessionRecord>("get_session",{sessionId:id});
+            if(projectKey(previous.summary.cwd)===projectKey(path))targets.set(id,{id,title:id,stopBeforeDelete:true,archived:false,previewId:null});
+          }
+        }
+        cursor=page.next_cursor;
+      }while(cursor);
+    }
+    return [...targets.values()];
+  }
+  async function confirmProjectDeletion(intent:ProjectDeleteTarget|null){
+    if(!isMainWindow||!intent||projectDeleteRef.current!==intent||projectDeleteBusyRef.current||sessionDeleteBusyRef.current)return;
+    const unchanged=()=>{const matches=projectsRef.current.filter(row=>projectKey(row.path)===projectKey(intent.path));return matches.length===0||matches.length===1&&matches[0].path===intent.path&&matches[0].name===intent.name;};
+    if(!unchanged()){setProjectDeleteError("This project changed. Reopen Delete project.");return;}
+    projectDeleteBusyRef.current=true;setProjectDeleteBusy(true);setProjectDeleteError(null);let complete=false;
     try{
-      const next=matches.length?current.map(row=>row===matches[0]?{...row,hidden:true,hiddenBefore:Date.now()/1000}:row):[...current,{...intent,hidden:true,hiddenBefore:Date.now()/1000}];
-      commitProjects(next);if(activeProject===intent.path)setActiveProject("");closeProjectDeletion();
-    }catch{setError("Could not delete project. Try again.");}
+      intent.targets??=await collectProjectDeletionTargets(intent.path);
+      for(const target of intent.targets)await deleteSessionTarget(target);
+      if((await collectProjectDeletionTargets(intent.path)).length){intent.targets=undefined;throw Error("New sessions were found. Confirm deletion again to delete the remaining sessions.");}
+      if(!unchanged())throw Error("This project changed. Reopen Delete project.");
+      commitProjects(projectsRef.current.filter(row=>projectKey(row.path)!==projectKey(intent.path)));
+      if(activeProject===intent.path)setActiveProject("");complete=true;
+    }catch(reason){setProjectDeleteError(String(reason));}
+    finally{
+      await refreshHistory(()=>true).catch(reason=>setProjectDeleteError(String(reason)));
+      projectDeleteBusyRef.current=false;setProjectDeleteBusy(false);
+      if(complete)closeProjectDeletion();
+    }
   }
   function openSessionMenu(row:HTMLElement,x:number,y:number){
     const menu=row.parentElement?.querySelector<HTMLDetailsElement>("details.session-context-menu");if(!menu)return;
@@ -3095,7 +3179,7 @@ function App() {
     actions.style.top=Math.max(8,Math.min(top,window.innerHeight-height-8))+"px";
   }
   function beginSessionDeletion(record:HistoryItem|SessionRecord|null=selectedRecord.current){
-    if(!isMainWindow||sessionDeleteBusyRef.current||!record)return;
+    if(!isMainWindow||sessionDeleteBusyRef.current||projectDeleteBusyRef.current||!record)return;
     if(!["starting","running","succeeded","failed","stopped"].includes(record.status)){setError("Stop the session before deleting it.");return;}
     const target={id:record.summary.session_id,title:titleFor(record.summary),stopBeforeDelete:["starting","running"].includes(record.status),archived:false,previewId:null};
     sessionDeleteRef.current=target;setSessionDelete(target);setSessionDeleteError(null);sessionDeleteDialog.current?.showModal();
@@ -3105,49 +3189,53 @@ function App() {
     const target=sessionDeleteRef.current;sessionDeleteRef.current=null;setSessionDelete(null);sessionDeleteDialog.current?.close();
     if(target?.previewId)void invoke("cancel_archive_deletion_preview",{previewId:target.previewId}).catch(()=>{});
   }
+  async function deleteSessionTarget(target:SessionDeleteTarget){
+    if(target.deleted)return;
+    if(!target.archived){
+      let record=await invoke<SessionRecord>("get_session",{sessionId:target.id});
+      if(["starting","running"].includes(record.status)){
+        try{await invoke("stop_session",{sessionId:target.id});}
+        catch(reason){
+          record=await invoke<SessionRecord>("get_session",{sessionId:target.id});
+          if(!["succeeded","failed","stopped"].includes(record.status))throw reason;
+        }
+      }
+      // Stop acknowledges termination before final log/frame persistence completes.
+      for(let attempt=0;attempt<100;attempt++){
+        record=await invoke<SessionRecord>("get_session",{sessionId:target.id});
+        if(["succeeded","failed","stopped"].includes(record.status)){
+          if(record.notification_pending)await invoke("acknowledge_notification",{sessionId:target.id,expectedStatus:record.status});
+          for(const receipt of record.agent?.inbox??[]){
+            if(!receipt.read||["pending","failed"].includes(receipt.delivery))await invoke("read_agent_receipt",{sessionId:target.id,receipt:receipt.id,revision:receipt.revision});
+          }
+          try{await invoke("archive_session",{sessionId:target.id});target.archived=true;break;}
+          catch(reason){if(String(reason)!=="Session is still finalizing")throw reason;}
+        }else if(!["starting","running"].includes(record.status))throw Error("This session cannot be deleted in its current state.");
+        if(attempt===99)throw Error("The session is still stopping. Nothing was deleted. Retry when it has stopped.");
+        await new Promise(resolve=>setTimeout(resolve,100));
+      }
+    }
+    if(!target.previewId){
+      const preview=await invoke<{preview_id:string;session_ids:string[]}>("preview_archive_deletion",{sessionIds:[target.id]});
+      if(preview.session_ids.length!==1||preview.session_ids[0]!==target.id)throw Error("Deletion preview changed.");
+      target.previewId=preview.preview_id;
+    }
+    let result:{deleted_ids:string[];complete:boolean;issues:string[]};
+    try{result=await invoke("confirm_archive_deletion",{previewId:target.previewId});}
+    catch(reason){if(String(reason)==="Deletion preview expired; preview again")target.previewId=null;throw reason;}
+    if(result.deleted_ids.some(id=>id!==target.id)||result.complete&&!result.deleted_ids.includes(target.id))throw Error("Deletion preview changed.");
+    if(result.deleted_ids.length)clearDeletedSessionNames(result.deleted_ids);
+    if(!result.complete)throw Error("Deletion remains pending. Retry to finish, or browse archived sessions.");
+    target.deleted=true;
+  }
   async function confirmSessionDeletion(){
-    const target=sessionDeleteRef.current;if(!isMainWindow||!target||sessionDeleteBusyRef.current)return;
+    const target=sessionDeleteRef.current;if(!isMainWindow||!target||sessionDeleteBusyRef.current||projectDeleteBusyRef.current)return;
     sessionDeleteBusyRef.current=true;setSessionDeleteBusy(true);setSessionDeleteError(null);
     let complete=false;
-    try{
-      if(target.stopBeforeDelete&&!target.archived){
-        let record=await invoke<SessionRecord>("get_session",{sessionId:target.id});
-        if(["starting","running"].includes(record.status)){
-          try{await invoke("stop_session",{sessionId:target.id});}
-          catch(reason){
-            record=await invoke<SessionRecord>("get_session",{sessionId:target.id});
-            if(!["succeeded","failed","stopped"].includes(record.status))throw reason;
-          }
-        }
-        // Stop acknowledges termination before final log/frame persistence completes.
-        for(let attempt=0;attempt<100;attempt++){
-          record=await invoke<SessionRecord>("get_session",{sessionId:target.id});
-          if(["succeeded","failed","stopped"].includes(record.status)){
-            if(record.notification_pending)await invoke("acknowledge_notification",{sessionId:target.id,expectedStatus:record.status});
-            for(const receipt of record.agent?.inbox??[]){
-              if(!receipt.read||["pending","failed"].includes(receipt.delivery))await invoke("read_agent_receipt",{sessionId:target.id,receipt:receipt.id,revision:receipt.revision});
-            }
-            try{await invoke("archive_session",{sessionId:target.id});target.archived=true;break;}
-            catch(reason){if(String(reason)!=="Session is still finalizing")throw reason;}
-          }else if(!["starting","running"].includes(record.status))throw Error("This session cannot be deleted in its current state.");
-          if(attempt===99)throw Error("The session is still stopping. Nothing was deleted. Retry when it has stopped.");
-          await new Promise(resolve=>setTimeout(resolve,100));
-        }
-      }
-      if(!target.archived){await invoke("archive_session",{sessionId:target.id});target.archived=true;}
-      if(!target.previewId){
-        const preview=await invoke<{preview_id:string;session_ids:string[]}>("preview_archive_deletion",{sessionIds:[target.id]});
-        if(preview.session_ids.length!==1||preview.session_ids[0]!==target.id)throw Error("Deletion preview changed.");
-        target.previewId=preview.preview_id;
-      }
-      const result=await invoke<{deleted_ids:string[];complete:boolean;issues:string[]}>("confirm_archive_deletion",{previewId:target.previewId});
-      if(result.deleted_ids.some(id=>id!==target.id))throw Error("Deletion preview changed.");
-      if(result.deleted_ids.length)clearDeletedSessionNames(result.deleted_ids);
-      complete=result.complete;
-      if(!complete)setSessionDeleteError("Deletion remains pending. Retry to finish, or browse archived sessions.");
-    }catch(reason){setSessionDeleteError(String(reason));}
+    try{await deleteSessionTarget(target);complete=true;}
+    catch(reason){setSessionDeleteError(String(reason));}
     finally{
-      if(target.archived)await refreshHistory().catch(reason=>setSessionDeleteError(String(reason)));
+      await refreshHistory(()=>true).catch(reason=>setSessionDeleteError(String(reason)));
       sessionDeleteBusyRef.current=false;setSessionDeleteBusy(false);
       if(complete)closeSessionDeletion();
     }
@@ -3274,16 +3362,17 @@ function App() {
       {dataSettingsOpen&&<DataSettings navigation={settingsNavigation("support")} mac={shortcutMac} onClose={()=>setDataSettingsOpen(false)} onExport={exportPreferences} onImport={importPreferences} onDiagnostics={()=>void exportDiagnostics()} diagnosticsStatus={diagnosticsMessage} diagnosticsBusy={diagnosticsExporting} onNotification={()=>void testNotification()} notificationStatus={notificationTestStatus} canNotify={!!session&&!notificationTestBusy.current}/>}
       {updaterOpen&&<UpdaterSettings navigation={settingsNavigation("updates")} snapshot={updaterSnapshot} automatic={updaterAutomatic} busy={updaterBusyAction} error={updaterError} onAutomatic={value=>void changeUpdaterAutomatic(value)} onAction={action=>void runUpdaterAction(action)} onClose={closeUpdaterSettings}/>}
       {systemEntryOpen&&<dialog ref={systemEntryDialog} className="app-dialog system-entry-dialog settings-surface" aria-label={t("System entry")} onCancel={event=>{event.preventDefault();if(!systemEntryBusy)setSystemEntryOpen(false);}}><header className="dialog-header"><h2>{t("System entry")}</h2></header>{settingsNavigation("system-entry")(false)}<div className="settings-page-body"><SystemEntrySettings showTitle={false} enabled={systemEntry.global_shortcut_enabled} registered={systemEntry.global_shortcut_registered} available={systemEntry.shortcut_available} busy={systemEntryBusy} warning={systemEntry.warning} onChange={enabled=>void setGlobalShortcut(enabled)}/></div><footer className="dialog-actions"><button type="button" disabled={systemEntryBusy} onClick={()=>setSystemEntryOpen(false)}>{t("Close")}</button></footer></dialog>}
-      {isMainWindow&&browserOpen&&<BrowserWindowDialog snapshot={browserControls.current.snapshot} busy={browserControls.current.busy} error={browserControls.current.error} onAction={(action,url)=>void browserAction(action,url)} onRefresh={()=>void openBrowserDialog()} onClose={closeBrowserDialog}/>}
       {fileDropPreview&&<TerminalFileDropDialog content={fileDropPreview} dialog={fileDropDialog} busy={fileBusy} onConfirm={()=>void confirmTerminalFileDrop()} onCancel={cancelTerminalFileDrop}/>}
       {filePreview&&<TerminalFilePreview content={filePreview} dialog={fileDialog} onConfirm={()=>void confirmTerminalFile()} onCancel={cancelTerminalFile}/>}
-      {pastePreview&&<TerminalPastePreview content={pastePreview} dialog={pasteDialog} onConfirm={confirmTerminalPaste} onCancel={()=>cancelTerminalPaste()}/>}
+      {pastePreview&&(pastePending.current?.selection
+        ?<TerminalSelectionContext content={pastePreview} source={pastePending.current.selection} dialog={pasteDialog} onConfirm={confirmTerminalPaste} onCancel={()=>cancelTerminalPaste()}/>
+        :<TerminalPastePreview content={pastePreview} dialog={pasteDialog} onConfirm={confirmTerminalPaste} onCancel={()=>cancelTerminalPaste()}/>)}
       {directoryReportingOpen&&<ZshDirectoryReporting navigation={settingsNavigation("directory-reporting")} enabled={directoryReporting} error={directoryReportingError} onApply={applyDirectoryReporting} onClose={()=>setDirectoryReportingOpen(false)}/>}
       {commandReportingOpen&&<ZshCommandReporting navigation={settingsNavigation("command-reporting")} enabled={commandReporting} error={commandReportingError} onApply={applyCommandReporting} onClose={()=>setCommandReportingOpen(false)}/>}
       {pasteSettingsOpen&&<TerminalPasteSettings navigation={settingsNavigation("paste-settings")} mode={pasteMode} error={pastePolicyError} onApply={applyPastePolicy} onClose={()=>setPasteSettingsOpen(false)}/>}
       {isMainWindow&&sshOpen&&<SshLaunchDialog busy={starting} error={sshError??error} cwd={currentProject?.path||session?.cwd||activeProject||cwd} onConnect={value=>void connectSsh(value)} onClose={()=>setSshOpen(false)}/>}
       {terminalProfilesOpen&&<TerminalProfiles navigation={settingsNavigation("profiles")} fonts={terminalFonts} fontError={fontCatalogError} profiles={terminalProfileCollection.profiles} selectedId={terminalProfileCollection.selectedId} defaultId={terminalProfileCollection.defaultId} draft={terminalProfileDraft} windows={shellWindows} starting={starting} error={terminalProfileCollection.writeError??terminalProfileActionError??terminalProfileCollection.loadError??error} onDraftChange={setTerminalProfileDraft} onSelect={selectTerminalProfile} onNew={newTerminalProfile} onSave={saveTerminalProfile} onUpdate={updateTerminalProfile} onDuplicate={duplicateTerminalProfile} onDelete={deleteTerminalProfile} onDefault={defaultTerminalProfile} onStart={()=>void startSelectedTerminalProfile()} onWithoutProfile={()=>{setTerminalProfilesOpen(false);newSession(undefined,null);}} onClose={()=>setTerminalProfilesOpen(false)}/>}
-      {appearanceOpen&&<AppAppearance navigation={settingsNavigation("appearance")} onTerminalSettings={()=>{setAppearanceOpen(false);setTerminalSettingsOpen(true);}} value={appPreferences} error={appPreferenceError} onSave={applyAppPreferences} onClose={()=>setAppearanceOpen(false)}/>}
+      {appearanceOpen&&<AppAppearance navigation={settingsNavigation("appearance")} onTerminalSettings={()=>{setAppearanceOpen(false);setTerminalSettingsOpen(true);}} value={appPreferences} error={appPreferenceError} onSave={applyAppPreferences} onPreviewTheme={setAppearanceThemePreview} onClose={()=>setAppearanceOpen(false)}/>}
       {terminalSettingsOpen&&<TerminalSettingsDialog navigation={settingsNavigation("settings")} settingsError={terminalSettingsError} fonts={terminalFonts} fontError={fontCatalogError} lineHeight={terminalLineHeight} lineHeightError={terminalLineHeightError} onLineHeightApply={applyTerminalLineHeight} retention={terminalRetention} retentionError={terminalRetentionError} onRetentionApply={applyTerminalRetention} cursor={terminalCursor} cursorError={terminalCursorError} onCursorApply={applyTerminalCursor} settings={terminalSettings} shell={shellLaunch} shellWindows={shellWindows} shellError={shellLaunchError} onDirectoryReporting={()=>{setTerminalSettingsOpen(false);setDirectoryReportingOpen(true);}} onCommandReporting={()=>{setTerminalSettingsOpen(false);setCommandReportingOpen(true);}} onShellApply={applyShellPreferences} onApply={applyTerminalPreferences} onClose={()=>setTerminalSettingsOpen(false)}/>}
       {keyboardShortcutsOpen&&<KeyboardShortcutSettings navigation={settingsNavigation("keyboard-shortcuts")} bindings={shortcuts} mac={shortcutMac} warning={shortcutError} onSave={saveKeyboardShortcuts} onClose={()=>setKeyboardShortcutsOpen(false)}/>}
       {paletteOpen&&<CommandPalette query={paletteQuery} onQuery={setPaletteQuery} entries={commandEntries} onChoose={entry=>void choosePaletteEntry(entry)} onClose={closeCommandPalette}/>}
@@ -3306,8 +3395,9 @@ function App() {
       {logExportOpen&&session&&<SessionLogExport sessionId={session.session_id} title={titleFor(session)} onClose={()=>setLogExportOpen(false)}/>}
       <dialog ref={projectDeleteDialog} className="app-dialog confirmation-dialog" aria-label={t("Delete project")} aria-describedby="project-delete-description" onCancel={event=>{event.preventDefault();closeProjectDeletion();}}>
         <header className="dialog-header"><h2>{t("Delete project")}</h2></header>
-        <div className="dialog-body" id="project-delete-description"><p>{t("Delete project {{value0}} from the sidebar?",{value0:projectDelete?.name??""})}</p><p className="confirmation-note">{t("Project files and session history are kept. Add the directory again to show it in the sidebar.")}</p></div>
-        <div className="dialog-actions"><button type="button" onClick={closeProjectDeletion}>{t("Cancel")}</button><button type="button" className="danger-button" onClick={()=>confirmProjectDeletion(projectDelete)}>{t("Delete")}</button></div>
+        <div className="dialog-body" id="project-delete-description"><p>{t("Permanently delete project {{value0}} and all its sessions?",{value0:projectDelete?.name??""})}</p><p>{projectDelete?.path}</p><p className="confirmation-note">{t("Running sessions will be stopped. All YAM session history, logs, saved terminal scenes and inbox receipts for this project will be permanently deleted. Project source files and native CLI history are kept.")}</p></div>
+        {projectDeleteError&&<p className="error" role="alert">{t(projectDeleteError)}</p>}
+        <div className="dialog-actions"><button type="button" disabled={projectDeleteBusy} onClick={closeProjectDeletion}>{t("Cancel")}</button><button type="button" className="danger-button" disabled={projectDeleteBusy} onClick={()=>void confirmProjectDeletion(projectDelete)}>{projectDeleteBusy?t("Deleting…"):t("Delete")}</button></div>
       </dialog>
       <dialog ref={sessionDeleteDialog} className="app-dialog session-delete-dialog confirmation-dialog" aria-label={t("Delete session")} aria-describedby="session-delete-description" onCancel={event=>{event.preventDefault();closeSessionDeletion();}}>
         <header className="dialog-header"><h2>{t("Delete session")}</h2></header>
@@ -3382,7 +3472,7 @@ function App() {
           {historyOverview.attention_sessions>0&&<button type="button" className={unreadTotal>0?"icon-button small":"inbox-toggle"} onClick={jumpToAttention} aria-label={t("Next attention")} title={t("Next attention")+(shortcutHint(shortcuts.attention,shortcutMac)?" · "+shortcutHint(shortcuts.attention,shortcutMac):"")}>{unreadTotal>0?<ChevronRight aria-hidden="true"/>:t("Next attention")}</button>}
         </div>}
         {inboxOpen && <section className="agent-inbox" aria-label={t("Agent round inbox")}>
-          <SessionInbox items={inbox} titleFor={titleFor} selectedId={sessionId.current} currentAgent={currentAgent} onOpen={(record,entry,agent)=>void openReceipt(record,entry,agent)} onMarkRead={(record,entry)=>void markReceiptRead(record,entry)}/>
+          <SessionInbox items={inbox} titleFor={titleFor} selectedId={sessionId.current} currentAgent={currentAgent} onOpen={(record,entry,agent,ownerCurrent)=>void openReceipt(record,entry,agent,ownerCurrent)} onMarkRead={(record,entry)=>void markReceiptRead(record,entry)}/>
           {inboxCursor&&<button type="button" onClick={()=>void refreshInbox(true)}>{t("Load more unread rounds")}</button>}
           {!unreadTotal && <p>{t("No unread rounds")}</p>}
         </section>}
@@ -3499,7 +3589,7 @@ function App() {
           <button type="button" className="secondary-button inbox-toggle" onClick={()=>setInboxOpen(value=>!value)} aria-expanded={inboxOpen}><Bell aria-hidden="true"/><span>{t("Inbox")}</span><span className="menu-meta">{unreadTotal}</span></button>
           <button type="button" className="secondary-button inbox-toggle" onClick={jumpToAttention} disabled={!historyOverview.attention_sessions} title={shortcutHint(shortcuts.attention,shortcutMac)||undefined}><ArrowDown aria-hidden="true"/><span>{t("Next attention")}</span></button>
           <div className="menu-separator" role="separator"/>
-          <button type="button" className="secondary-button" disabled={!gitProjectPath} onClick={()=>{if(!isMainWindow){openMainSettings();return;}setProjectToolsPath(visibleGitContext?.root||gitProjectPath);setProjectToolsOpen(true);}}><GitBranch aria-hidden="true"/><span>{t("Project Git and worktrees")}</span></button>
+          <button type="button" className="secondary-button" disabled={!gitProjectPath} onClick={()=>{if(!isMainWindow){openMainSettings();return;}setProjectToolsOpen(true);}}><GitBranch aria-hidden="true"/><span>{t("Project Git and worktrees")}</span></button>
           <button type="button" aria-label={t("Browse archived sessions")} onClick={()=>setArchiveOpen(true)}><Archive aria-hidden="true"/><span>{t("Browse archived sessions")}</span></button>
           <button type="button" onClick={()=>{setCapacityOpen(true);void scanCapacity();}}><HardDrive aria-hidden="true"/><span>{t("Manage history capacity")}</span></button>
           <div className="menu-separator" role="separator"/>
@@ -3579,7 +3669,9 @@ function App() {
                 className="icon-button small"
                 title={t("Copy terminal output")}
                 aria-label={t("Copy terminal output")}
+                disabled={!scrollView?.ready||scrollView.availability!=="available"}
                 onClick={() => {
+                  if(!scrollView?.ready||scrollView.availability!=="available")return;
                   const buffer = terminal.current?.buffer.active;
                   if (!buffer) return;
                   const lines = Array.from(
@@ -3606,7 +3698,8 @@ function App() {
                 <button type="button" aria-label={t("Previous reported prompt")} disabled={!canNavigateReportedPrompt("previous")} onClick={event=>{event.currentTarget.closest("details")?.removeAttribute("open");void navigateReportedPrompt("previous");}}>{t("Previous reported prompt")}</button>
                 <button type="button" aria-label={t("Next reported prompt")} disabled={!canNavigateReportedPrompt("next")} onClick={event=>{event.currentTarget.closest("details")?.removeAttribute("open");void navigateReportedPrompt("next");}}>{t("Next reported prompt")}</button>
                 <small>{t("Reported prompt positions may differ from the visible prompt.")}</small>
-                {shortcutMac&&<button type="button" aria-label={t("Show selected file in Finder…")} disabled={fileBusy||!!filePreview} onClick={event=>{event.currentTarget.closest("details")?.removeAttribute("open");void previewSelectedTerminalFile();}}>{t("Show selected file in Finder…")}</button>}
+                {session?.launch?.mode==="interactive"&&!session.ssh&&<button type="button" disabled={!scrollView?.ready||scrollView.availability!=="available"||scrollView.moving} onClick={event=>{event.currentTarget.closest("details")?.removeAttribute("open");previewTerminalSelectionContext();}}>{t("Add selected text to Agent draft…")}</button>}
+                {shortcutMac&&<button type="button" aria-label={t("Show selected file in Finder…")} disabled={!scrollView?.ready||scrollView.availability!=="available"||scrollView.moving||fileBusy||!!filePreview} onClick={event=>{event.currentTarget.closest("details")?.removeAttribute("open");void previewSelectedTerminalFile();}}>{t("Show selected file in Finder…")}</button>}
 
 
 
@@ -3616,7 +3709,6 @@ function App() {
                 {movePending&&terminalMoveIncomingRef.current?.target===desktopWindow.slot&&<button type="button" disabled={moveBusy} onClick={()=>void openMovedTerminalTab()}>{t("Open moved session")}</button>}
                 <button type="button" aria-label={t("Second terminal window")} onClick={event=>{event.currentTarget.closest("details")?.removeAttribute("open");void openSecondWindow();}}>{t("Second terminal window")}</button>
                 {isMainWindow&&<button type="button" aria-label={t("Connect SSH")} onClick={event=>{event.currentTarget.closest("details")?.removeAttribute("open");setSshError(null);setSshOpen(true);}}>{t("Connect SSH")}</button>}
-                {isMainWindow&&<button type="button" aria-label={t("Browser")} onClick={event=>{event.currentTarget.closest("details")?.removeAttribute("open");void openBrowserDialog();}}>{t("Browser")}</button>}
                 <button type="button" aria-label={t("Search session logs")} onClick={event=>{const menu=event.currentTarget.closest("details");if(menu)menu.open=false;setLogSearchOpen(true);}}>{t("Search session logs")}</button>
                 <button type="button" aria-label={t("Command palette")} title={shortcutHint(shortcuts.palette,shortcutMac)||undefined} onClick={event=>{const menu=event.currentTarget.closest("details");if(menu)menu.open=false;openCommandPalette();}}>{t("Command palette")}</button>
                 <strong>{t("Session details")}</strong>
@@ -3677,13 +3769,15 @@ function App() {
           <div className="workspace-layout-slot" hidden={conversationOpen} ref={setLayoutMenuHost}/>
           <div className="workspace-actions">
             {isMainWindow&&session&&!session.ssh&&<button type="button" onClick={()=>{setProjectToolsTab("files");setProjectToolsPath(visibleGitContext?.root||session.cwd);setProjectToolsOpen(true);}}>{t("Files")}</button>}
-            {session&&visibleGitContext?.branch&&<button type="button" className="workspace-changes" title={gitContextLabel(visibleGitContext,t)} onClick={()=>{if(!isMainWindow){openMainSettings();return;}setProjectToolsTab("changes");setProjectToolsPath(visibleGitContext.root||gitProjectPath);setProjectToolsOpen(true);}}>{t("Changes")}{visibleGitContext.dirty&&<span className="changes-dot" aria-label={t("Uncommitted changes")}/>}</button>}
+            {session&&visibleGitContext?.root&&<button type="button" className="workspace-changes" title={gitContextLabel(visibleGitContext,t)} onClick={()=>{if(!isMainWindow){openMainSettings();return;}setProjectToolsTab("changes");setProjectToolsPath(visibleGitContext.root||gitProjectPath);setProjectToolsOpen(true);}}>
+              <span className="workspace-branch">{visibleGitContext.branch??t("Detached HEAD")}</span>{t("Changes")}{visibleGitContext.dirty&&<span className="changes-dot" aria-label={t("Uncommitted changes")}/>}
+            </button>}
           </div>
         </div>}
         <footer className="statusbar workspace-footer" aria-label={t("Status bar")}>
           <span className="statusbar-engine" title={health?.status==="ready"?t("Local engine ready"):t("Connecting...")}><span className={`session-dot ${health?.status==="ready"?"status-running":""}`}/><span>{health?.status==="ready"?t("Local engine ready"):t("Connecting...")}</span></span>
           <span className="statusbar-directory" title={session?.cwd||currentProject?.path||t("No session selected")}><Folder aria-hidden="true"/><span>{session?.cwd||currentProject?.path||t("No session selected")}</span></span>
-          {visibleGitContext?.branch&&<span className="statusbar-branch" title={visibleGitContext.branch}><GitBranch aria-hidden="true"/><span>{visibleGitContext.branch}</span></span>}
+          {!session&&visibleGitContext?.branch&&<span className="statusbar-branch" title={visibleGitContext.branch}><GitBranch aria-hidden="true"/><span>{visibleGitContext.branch}</span></span>}
           {session&&history.filter(record=>record.summary.cwd===session.cwd&&["starting","running"].includes(record.status)).length>1&&<span className="parallel-directory-warning" title={t("Another loaded session uses this directory.")}>{t("Shared directory")}</span>}
           {showScrollControl&&<span className="terminal-scroll-status">
             {scrollView.scroll?.newOutput&&<span role="status">{t("New output")}</span>}
@@ -3727,8 +3821,8 @@ function App() {
         <ConversationView onTerminal={()=>showConversation(false)} roundRevision={conversationRoundRevision(currentAgent)} visible={conversationOpen} available={ownerConnectionAvailable.current.available} scope={JSON.stringify([ownerConnectionAvailable.current.version,session?.session_id,currentAgent?.generation,currentAgent?.agent_session_id,session?.cwd,session?.launch])} target={session?.launch?.adapter==="codex"&&!session.ssh&&currentAgent?.generation&&currentAgent.agent_session_id?{sessionId:session.session_id,threadId:currentAgent.agent_session_id,generation:currentAgent.generation}:null} awaitingCodexHooks={isRunning&&session?.launch?.adapter==="codex"&&!session.ssh&&currentAgent?.integration==="connecting"} invoke={invoke}/>
         {!ownerConnectionAvailable.current.available&&<div className="terminal-notice" role="alert">{t("Background connection unavailable. Tasks were not restarted.")}<button type="button" disabled={reconnecting} onClick={()=>void reconnectBackground()}>{t("Reconnect background")}</button></div>}
         {session&&finishPending.current.has(session.session_id)&&<div className="terminal-notice" role="status"><span>{t("Final saving needs attention. Retry saving without restarting the task.")}</span><button type="button" disabled={!ownerConnectionAvailable.current.available||finishRetries.current.has(session.session_id)} onClick={()=>void retrySessionSave()}>{t("Retry saving session")}</button></div>}
-        {session?.launch&&!session.ssh&&taskDeliveryNotice(currentAgent,sessionStatus)&&<div className="terminal-notice" role="status">
-          <span>{t(taskDeliveryNotice(currentAgent,sessionStatus)!)}</span>
+        {session?.launch&&!session.ssh&&deliveryNotice&&<div className="terminal-notice" role="status">
+          <span>{t(deliveryNotice)}</span>
           {isMainWindow&&<><button type="button" onClick={()=>{setProjectToolsTab("changes");setProjectToolsPath(session.cwd);setProjectToolsOpen(true);}}>{t("Review task changes")}</button><button type="button" onClick={()=>{setProjectToolsTab("files");setProjectToolsPath(session.cwd);setProjectToolsOpen(true);}}>{t("View task files")}</button></>}
           <button type="button" onClick={()=>setLogSearchOpen(true)}>{t("Review recorded output")}</button>
         </div>}
@@ -3773,12 +3867,14 @@ function App() {
             {isMainWindow&&<ProjectFiles sessionId={session&&!session.ssh?session.session_id:null} root={session?.cwd??""} active={projectToolsOpen&&projectToolsTab==="files"} invoke={invoke} request={projectFileRequest}/>}
           </section>
           <section id="project-tools-changes" className="project-tools-panel" role="tabpanel" aria-labelledby="project-tools-tab-changes" hidden={projectToolsTab!=="changes"}>
-            <RunChanges sessionId={session&&!session.ssh?session.session_id:null} root={session?.cwd??""} active={projectToolsOpen&&projectToolsTab==="changes"} invoke={invoke} onOpenFile={openDiffFile} onReview={reviewDiffFile} onBaselineMutation={startReviewBaselineMutation}/>
+            <RunChanges sessionId={session&&!session.ssh?session.session_id:null} root={session?.cwd??""} owner={`${ownerConnectionAvailable.current.version}:${gitOwner}`} active={projectToolsOpen&&projectToolsTab==="changes"&&ownerConnectionAvailable.current.available} invoke={invoke} onOpenFile={openDiffFile} onReview={reviewDiffFile} onBaselineMutation={startReviewBaselineMutation}
+              branch={visibleGitContext?.branch} worktree={visibleGitContext?.root} deliveryNotice={deliveryNotice}
+              onOpenWorktree={()=>setProjectToolsTab("worktrees")} onReviewOutput={()=>setLogSearchOpen(true)}/>
             <GitChanges path={projectToolsPath} owner={gitOwner} active={projectToolsOpen&&projectToolsTab==="changes"} sessionId={session&&!session.ssh?session.session_id:null} onOpenFile={openDiffFile} onReview={reviewDiffFile}/>
             {isMainWindow&&<ReviewFeedback active={projectToolsOpen&&projectToolsTab==="changes"} origin={currentReviewOrigin} ready={reviewReady(reviewRecord,currentReviewOrigin)&&ownerConnectionAvailable.current.available} location={reviewLocation} locationRevision={reviewBaseline.pending?null:reviewBaseline.version} onCheck={checkOriginalReviewLocations} onFill={fillReviewInOriginalTerminal}/>}
           </section>
           <section id="project-tools-worktrees" className="project-tools-panel" role="tabpanel" aria-labelledby="project-tools-tab-worktrees" hidden={projectToolsTab!=="worktrees"}>
-            {projectToolsOpen&&<div className="dialog-fields"><p>{projectToolsPath}</p><WorktreeControls root={projectToolsPath} owner={gitOwner} selected={selectedWorktree} onCreated={worktreeCreated} onStart={startManagedWorktree}/></div>}
+            {projectToolsOpen&&projectToolsPath&&<div className="dialog-fields"><p>{projectToolsPath}</p><WorktreeControls root={projectToolsPath} owner={gitOwner} selected={selectedWorktree} onCreated={worktreeCreated} onStart={startManagedWorktree}/></div>}
           </section>
           {error&&<p role="alert">{t(error)}</p>}
         </div>

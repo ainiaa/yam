@@ -654,7 +654,7 @@ pub(crate) fn validate_command(command: &str, args: &serde_json::Value) -> Resul
             (&["selected", "paused", "pause_revision"], &["selected"])
         }
         "read_agent_receipt" => (
-            &["session_id", "receipt", "revision"],
+            &["session_id", "receipt", "revision", "only_current"],
             &["session_id", "receipt", "revision"],
         ),
         "search_session_logs" => (&["session_id", "request"], &["session_id", "request"]),
@@ -713,7 +713,10 @@ pub(crate) fn validate_command(command: &str, args: &serde_json::Value) -> Resul
         | "read_session_snapshot"
         | "read_session_log"
         | "read_terminal_frame" => (&["session_id"], &["session_id"]),
-        "write_session" => (&["session_id", "data"], &["session_id", "data"]),
+        "write_session" => (
+            &["session_id", "data", "expected_agent"],
+            &["session_id", "data"],
+        ),
         "resize_session" => (
             &["session_id", "cols", "rows"],
             &["session_id", "cols", "rows"],
@@ -727,6 +730,10 @@ pub(crate) fn validate_command(command: &str, args: &serde_json::Value) -> Resul
         || required.iter().any(|key| !args.contains_key(*key))
     {
         return Err("Invalid background command arguments".into());
+    }
+    if let Some(guard) = args.get("expected_agent").filter(|_| command == "write_session") {
+        serde_json::from_value::<super::DraftInputGuard>(guard.clone())
+            .map_err(|_| "Invalid background argument: expected_agent")?;
     }
     if matches!(command, "session_finish_pending" | "retry_session_finish")
         && args["session_id"]
@@ -1423,6 +1430,7 @@ fn dispatch(app: &tauri::AppHandle, request: Request) -> Result<serde_json::Valu
                     argument(args, "session_id")?,
                     argument(args, "receipt")?,
                     argument(args, "revision")?,
+                    argument(args, "only_current")?,
                 )?),
                 "search_session_logs" => serde_json::to_value(tauri::async_runtime::block_on(
                     super::search_session_logs(
@@ -1679,10 +1687,11 @@ fn dispatch_with<'a>(
             manager,
             argument(args, "session_id")?,
         )?),
-        "write_session" => serde_json::to_value(super::write_session(
+        "write_session" => serde_json::to_value(super::write_session_guarded(
             manager,
             argument(args, "session_id")?,
             argument(args, "data")?,
+            argument(args, "expected_agent")?,
         )?),
         "resize_session" => serde_json::to_value(super::resize_session(
             manager,
@@ -5026,6 +5035,7 @@ mod cli_event_tests {
             ..Default::default()
         };
         agent.inbox.push(super::super::agent_events::AgentReceipt {
+            permission_key: None,
             id: "SECRET_RECEIPT".into(),
             revision: 1,
             turn_id: "SECRET_TURN".into(),

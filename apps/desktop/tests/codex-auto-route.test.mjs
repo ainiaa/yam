@@ -4,7 +4,8 @@ import assert from 'node:assert/strict';
 import {mkdtemp,mkdir,readFile,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {readCodexPolicy} from '../src-tauri/pi/codex-route-config.mjs';
+import {readCodexPolicy,validateCodexModelCatalog} from '../src-tauri/pi/codex-route-config.mjs';
+import {defaultTierRules} from '../src-tauri/pi/task-rules.mjs';
 
 test('Codex validates every reachable tier, not only the fallback',()=>{
  const base={connections:{native:{billing:'subscription',native:true}},classifiers:['native/small'],executionGroups:[{medium:'native/medium'}]};
@@ -17,6 +18,32 @@ test('native routing preferences preserve fixed model and exact effort',()=>{
  const base={connections:{native:{billing:'subscription',native:true}},classifiers:[],executionGroups:[{}],model:'native/fixed',effort:'max'};
  assert.equal(readCodexPolicy(JSON.stringify(base)).effort,'max');
  assert.throws(()=>readCodexPolicy(JSON.stringify({...base,effort:'made-up'})),/reasoning|preference/i);
+});
+
+test('Codex catalog validates an enabled execution rule with an exact model and reasoning level',()=>{
+ const executionRules=[{enabled:true,when:{task:'review'},use:{model:'native/strong',effort:'max'}}];
+ const base={connections:{native:{billing:'subscription',native:true}},classifiers:['native/small'],
+  executionGroups:[{small:'native/small',medium:'native/medium',strong:'native/strong'}],rules:{...defaultTierRules,executionRules}};
+ const catalog=['small','medium','strong'].map(model=>({key:'native/'+model,levels:['medium','high']}));
+ assert.throws(()=>validateCodexModelCatalog(base,catalog),/native\/strong: unsupported reasoning max/);
+ catalog[2].levels.push('max');
+ assert.doesNotThrow(()=>validateCodexModelCatalog(base,catalog));
+ const modelOnly={...base,rules:{...defaultTierRules,executionRules:[
+  {enabled:true,when:{task:'review'},use:{model:'native/missing'}},
+ ]}};
+ assert.throws(()=>validateCodexModelCatalog(modelOnly,catalog),/configured tier/);
+ const lowBackup={...modelOnly,executionGroups:[...base.executionGroups,{strong:'native/low-backup'}],
+  rules:{...defaultTierRules,executionRules:[{enabled:true,when:{task:'review',depth:'deep'},use:{model:'native/low-backup'}}]}};
+ assert.throws(()=>validateCodexModelCatalog(lowBackup,[...catalog,{key:'native/low-backup',levels:['low']}]),
+  /native\/low-backup: unsupported reasoning high/);
+ const effortOnly={...base,rules:{...defaultTierRules,executionRules:[
+  {enabled:true,when:{task:'review',depth:'deep'},use:{effort:'xhigh'}},
+ ]}};
+ assert.throws(()=>validateCodexModelCatalog(effortOnly,catalog),/unsupported reasoning xhigh/);
+ const otherWorkspace={...base,rules:{...defaultTierRules,executionRules:[
+  {enabled:true,when:{task:'review',workspace:'/other'},use:{model:'native/strong',effort:'xhigh'}},
+ ]}};
+ assert.doesNotThrow(()=>validateCodexModelCatalog(otherWorkspace,catalog,undefined,undefined,'/current'));
 });
 
 const facts={intent:'new',task:'coding',context:'dependent',action:'write',depth:'normal',uncertain:false,readOnly:false,requires:['files']};
@@ -64,6 +91,20 @@ test('independent routing selects a same-channel sparse backup and resumes its p
  assert.equal(next.threadId,first.threadId);
  assert.equal(next.model,'c/model');
  assert.deepEqual(seen,['fast','c/model','dispatch']);
+});
+
+test('headless Codex preserves fixed reasoning off across native thread resume',async t=>{
+ const {routeCodex,options,deps}=await fixture(t);
+ Object.assign(options.config,{model:'sub/regular',effort:'off'});
+ const observed=[];
+ deps.classify=async()=>{throw Error('Fixed settings do not need a classifier');};
+ deps.open=async({resume})=>({threadId:resume??'55555555-5555-5555-5555-555555555555',close:async()=>{},
+  run:async(_prompt,effort)=>{observed.push({resume,effort});return {status:'completed',text:'done'};}});
+ const first=await routeCodex(options,deps);
+ const second=await routeCodex(options,deps);
+ assert.equal(first.effort,'off');
+ assert.equal(second.threadId,first.threadId);
+ assert.deepEqual(observed,[{resume:null,effort:'none'},{resume:first.threadId,effort:'none'}]);
 });
 
 test('a new task in an existing Codex thread is classified again and can change tier',async t=>{

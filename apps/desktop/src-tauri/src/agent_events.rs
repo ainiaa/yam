@@ -6,6 +6,8 @@ pub struct AgentReceipt {
     pub revision: u64,
     pub turn_id: String,
     pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_key: Option<String>,
     pub delivery: String,
     pub read: bool,
     pub error: Option<String>,
@@ -27,6 +29,8 @@ pub struct AgentState {
     pub background: String,
     pub integration: String,
     pub revision: u64,
+    #[serde(default)]
+    pub route_pending: bool,
     pub turns: Vec<String>,
     pub seen: Vec<String>,
     pub inbox: Vec<AgentReceipt>,
@@ -47,6 +51,7 @@ impl Default for AgentState {
             background: "unknown".into(),
             integration: "unavailable".into(),
             revision: 0,
+            route_pending: false,
             turns: vec![],
             seen: vec![],
             inbox: vec![],
@@ -133,6 +138,7 @@ impl AgentState {
                 .revision
                 .checked_add(1)
                 .ok_or("Agent revision exhausted")?;
+            self.route_pending = false;
             return Ok(None);
         }
         if ![
@@ -146,6 +152,8 @@ impl AgentState {
             "TurnFailed",
             "ResponseReady",
             "IntegrationUnavailable",
+            "RoutingStarted",
+            "RoutingCancelled",
         ]
         .contains(&event.kind.as_str())
         {
@@ -169,6 +177,17 @@ impl AgentState {
         }
         // Notify also runs on the title-generation thread; it cannot establish routing.
         if self.agent_session_id.as_deref() != Some(&event.agent_session_id) {
+            return Ok(None);
+        }
+        if matches!(event.kind.as_str(), "RoutingStarted" | "RoutingCancelled") {
+            if event.turn_id.is_some() || event.permission_key.is_some() || event.source.is_some() {
+                return Err("Invalid routing admission event".into());
+            }
+            let pending = event.kind == "RoutingStarted";
+            if self.route_pending != pending {
+                self.route_pending = pending;
+                self.revision = self.revision.checked_add(1).ok_or("Agent revision exhausted")?;
+            }
             return Ok(None);
         }
         let turn = event.turn_id.as_deref().ok_or("Missing agent turn ID")?;
@@ -211,6 +230,7 @@ impl AgentState {
             }
             self.turns.push(turn.into());
             self.turn_id = Some(turn.into());
+            self.route_pending = false;
             self.permission_keys.clear();
             self.phase = "working".into();
         } else {
@@ -343,6 +363,8 @@ impl AgentState {
                 revision: self.revision,
                 turn_id: turn.into(),
                 kind: phase.into(),
+                permission_key: (event.kind == "PermissionRequest")
+                    .then(|| event.permission_key.as_deref().unwrap_or("unknown").to_string()),
                 delivery: "pending".into(),
                 read: false,
                 error: None,
@@ -379,13 +401,20 @@ impl super::HistoryStore {
         id: &str,
         edit: impl FnOnce(&mut AgentState) -> Result<T, String>,
     ) -> Result<T, String> {
+        self.edit_agent_record(id, |record| edit(&mut record.agent))
+    }
+    fn edit_agent_record<T>(
+        &self,
+        id: &str,
+        edit: impl FnOnce(&mut super::SessionRecord) -> Result<T, String>,
+    ) -> Result<T, String> {
         let mut records = self.lock_records()?;
         let mut next = records.clone();
         let record = next
             .iter_mut()
             .find(|record| record.summary.session_id == id)
             .ok_or("Unknown agent session")?;
-        let result = edit(&mut record.agent)?;
+        let result = edit(record)?;
         if next != *records {
             self.save_locked(&next)?;
             *records = next;
@@ -507,6 +536,12 @@ impl super::HistoryStore {
             .and_then(crate::codex_routing::route)
             .and_then(|route| route.state.as_deref());
         let resume_outcome = event.source.as_deref() == Some("codex-resume");
+        if matches!(event.kind.as_str(), "RoutingStarted" | "RoutingCancelled")
+            && (managed_state.is_none()
+                || record.agent.agent_session_id.as_deref() != Some(event.agent_session_id.as_str()))
+        {
+            return Err("Routing admission requires the managed Codex session".into());
+        }
         if resume_outcome
             && (managed_state.is_none()
                 || !matches!(
@@ -570,6 +605,22 @@ impl super::HistoryStore {
         revision: u64,
     ) -> Result<(), String> {
         self.edit_agent(id, |state| state.read(receipt, revision))
+    }
+    pub(super) fn read_current_agent_receipt(
+        &self,
+        id: &str,
+        receipt: &str,
+        revision: u64,
+    ) -> Result<(), String> {
+        self.edit_agent_record(id, |record| {
+            if record.agent.inbox.iter().any(|entry| {
+                entry.id == receipt && entry.revision == revision
+                    && super::history::current_inbox_receipt(record, entry)
+            }) {
+                record.agent.read(receipt, revision)?;
+            }
+            Ok(())
+        })
     }
     pub(super) fn agent_delivery(
         &self,

@@ -69,3 +69,26 @@ test('shared classification fails over within a channel and cancellation stops t
  const cancel=new AbortController();
  await assert.rejects(classifyCandidates({...options,requestSignal:cancel.signal,run:async()=>{cancel.abort();return '{}';}}),/Routing aborted/);
 });
+
+test('ordered local classification rules retain precedence and ignore nested text and partial markers',async()=>{
+ const {classifyWithRules}=await import('../src-tauri/pi/task-rules.mjs');
+ const rules=validateRules({...defaultRules,classificationRules:[
+  {prefix:'yam:review',task:'coding',enabled:false},
+  {prefix:'yam:review',task:'review',enabled:true},
+  {prefix:'yam:review',task:'answer',enabled:true},
+ ]});
+ const answer={intent:'continue',task:'coding',context:'dependent',action:'read',depth:'normal',uncertain:false,readOnly:false,requires:['files']};
+ let calls=0;
+ const classify=async()=>{calls++;return {answer,source:'A'};};
+ const run=(prompt,firstTextTurn=true)=>classifyWithRules({rules,prompt,firstTextTurn},classify);
+ assert.equal((await run('yam:review Check the change')).answer.task,'review');
+ assert.equal(calls,0);
+ const continued=await run('yam:review Check that too',false);
+ assert.deepEqual(continued.answer,{...answer,task:'review'});
+ assert.equal(calls,1);
+ for(const prompt of ['yam:reviewed Check','> yam:review Check','Quoted:\nyam:review Check','yam:review']){
+  assert.equal((await run(prompt)).answer.task,'coding');
+ }
+ assert.equal(calls,5);
+ assert.throws(()=>validateRules({...rules,classificationRules:[{prefix:'bad prefix',task:'review',enabled:true}]}));
+});

@@ -60,7 +60,7 @@ function changeActualCli(adapter,provider,target,previousEdits={}) {
  const body=compileCliChange(readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8'));
  const selected={adapter,provider,edits:previousEdits};
  const formLaunch={adapter,provider,mode:'interactive',extra_args:'--verbose',prompt:'keep prompt'};
- const bindings={adapter:{id:target},useProjectSettings:false,launchWorktreeAttempt:undefined,launchDirectoryOverride:"/project",formLaunch,formAdapter:adapter,providerPreset,providerChoice,supportsProvider,setError:value=>selected.error=value,setLaunchDraft:update=>{const next=update({adapter:selected.adapter,provider:selected.provider});selected.adapter=next.adapter;selected.provider=next.provider;},setProjectLaunchEdits:update=>selected.edits=update(selected.edits)};
+ const bindings={readLastConnection:(_storage,_adapter,fallback)=>fallback,localStorage:{},sessionCopy:null,adapter:{id:target},useProjectSettings:false,launchWorktreeAttempt:undefined,launchDirectoryOverride:"/project",formLaunch,formAdapter:adapter,providerPreset,providerChoice,supportsProvider,setError:value=>selected.error=value,setLaunchDraft:update=>{const next=update({adapter:selected.adapter,provider:selected.provider});selected.adapter=next.adapter;selected.provider=next.provider;},setProjectLaunchEdits:update=>selected.edits=update(selected.edits)};
  const change=new Function(...Object.keys(bindings),body)(...Object.values(bindings));
  change();return selected;
 }

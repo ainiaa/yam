@@ -460,7 +460,8 @@ fn closure_t04_target_generation_reads_resizes_and_fences_all_old_source_tickets
         1,
         fixture.generation,
         fixture.session.id(),
-        "blocked".into()
+        "blocked".into(),
+        None,
     )
     .is_err());
     let before = fixture.session.requests();
@@ -1086,7 +1087,8 @@ fn rust85_window_move_commands_ack_accept_complete_and_fence_old_generations() {
         1,
         fixture.generation,
         fixture.session.id(),
-        "blocked".into()
+        "blocked".into(),
+        None,
     )
     .is_err());
     assert_eq!(
@@ -1238,7 +1240,8 @@ fn rust85_window_terminal_wrappers_use_ticket_and_real_state_commands() {
         0,
         fixture.generation,
         fixture.session.id(),
-        "x".into()
+        "x".into(),
+        None,
     )
     .is_err());
     let snapshot = read_session_snapshot(

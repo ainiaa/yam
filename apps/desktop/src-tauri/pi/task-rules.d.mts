@@ -1,5 +1,11 @@
 export type TaskRule={task:'transform'|'answer'|'repository'|'coding'|'review'|'other';description:string;examples:string[];model:'small'|'medium'|'strong';effort:'medium'|'high'|'xhigh'|'max'};
-export type TaskRules={v:1|2;rules:TaskRule[];fallback:{model:'medium'|'strong';effort:'high'|'xhigh'|'max'}};
+export type ClassificationRule={prefix:string;task:TaskRule['task'];enabled:boolean};
+export type ExecutionRule={enabled:boolean;when:{task?:TaskRule['task'];workspace?:string;depth?:'normal'|'deep'};use:{model?:string;effort?:TaskRule['effort'];workflow?:string}};
+export type WorkflowRole='plan'|'implement'|'review'|'audit';
+export type WorkflowCandidate={runner:'codex'|'model';model:string;effort:TaskRule['effort']|'off'|'minimal'|'low';billing:'subscription'|'api'|'gateway'};
+export type CollaborationWorkflow={id:string;name:string;preset:'delivery'|'review';paths?:string[];roles:Partial<Record<WorkflowRole,WorkflowCandidate[]>>};
+export type TaskRules={v:1|2;rules:TaskRule[];fallback:{model:'medium'|'strong';effort:'high'|'xhigh'|'max'};classificationRules?:ClassificationRule[];executionRules?:ExecutionRule[];workflows?:CollaborationWorkflow[]};
+export const workflowRoles:Record<CollaborationWorkflow['preset'],WorkflowRole[]>;
 export const defaultRules:TaskRules;
 export const defaultTierRules:TaskRules;
 export function validateRules(value:unknown):TaskRules;

@@ -33,6 +33,23 @@ fn terminal_environment_defaults_unusable_launcher_term() {
     }
 }
 
+#[test]
+fn terminal_environment_advertises_yam_colors_without_inheriting_launcher_suppression() {
+    let mut builder = CommandBuilder::new("/bin/sh");
+    builder.env("NO_COLOR", "1");
+    builder.env("COLORTERM", "");
+    builder.env("TERM_PROGRAM", "parent-automation");
+    configure_terminal_environment(&mut builder);
+    assert_eq!(builder.get_env("NO_COLOR"), None);
+    assert_eq!(builder.get_env("COLORTERM"), Some(std::ffi::OsStr::new("truecolor")));
+    assert_eq!(builder.get_env("TERM_PROGRAM"), Some(std::ffi::OsStr::new("YAM")));
+    // Explicit profile/session environment is applied after terminal defaults.
+    builder.env("NO_COLOR", "1");
+    builder.env("COLORTERM", "profile-color");
+    assert_eq!(builder.get_env("NO_COLOR"), Some(std::ffi::OsStr::new("1")));
+    assert_eq!(builder.get_env("COLORTERM"), Some(std::ffi::OsStr::new("profile-color")));
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn terminal_environment_real_zsh_pty_supports_both_delete_keys() {

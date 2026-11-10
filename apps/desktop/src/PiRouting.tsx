@@ -5,14 +5,43 @@ import {Select} from './Select';
 import type {SettingsNavigationRenderer} from './SettingsNavigation';
 import {t} from './i18n';
 import {codexQuickSetupConfig,codexRoutingConfig,codexRoutingDraft,buildCodexRoutingConfig,validateCodexDraft,compatibleRoutingPolicies,launchRoutingPolicy,routingPolicyPayload,supportsDesktopRouting,type LiveRoutingPolicy,type RoutingPolicy} from './routing-policies';
-import {defaultRules,defaultTierRules,validateRules,rulesVersion,type TaskRules,type TaskRule} from '../src-tauri/pi/task-rules.mjs';
+import {defaultRules,defaultTierRules,validateRules,rulesVersion,workflowRoles,type TaskRules,type TaskRule,type ClassificationRule,type ExecutionRule,type CollaborationWorkflow,type WorkflowCandidate} from '../src-tauri/pi/task-rules.mjs';
 import {modelPresentation} from '../src-tauri/pi/model-label.mjs';
-import {buildPiArgs,hasPiRoutingSelection,knownClassifierBilling,maxPiBackupModels,parsePiDraft,piExecutionTiers,piLevels,piModelCatalogSource,piSetupMapping,piSetupStorageKey,portablePiRoutingPolicy,piSubscriptionCatalog,piSubscriptionOnly,probePiSetupModel,restorePiSetup,selectPiSetupModel,validatePiDraft,verifyPiSetup,type NativeFailure,type PiDraft,type PiModel,type PiRoutingState,type PiSessionRoutingMode,type PiSnapshot} from './pi-routing';
+import {buildPiArgs,hasPiRoutingSelection,knownClassifierBilling,maxPiBackupModels,parsePiDraft,piExecutionTiers,piLevels,piModelCatalogSource,piSetupMapping,piSetupStorageKey,portablePiRoutingPolicy,piSubscriptionCatalog,piSubscriptionOnly,probePiSetupModel,restorePiSetup,selectPiSetupModel,validatePiDraft,verifyPiSetup,type NativeFailure,type PiDraft,type PiModel,type PiRouteMatches,type PiRoutePreview,type PiRoutingState,type PiSessionRoutingMode,type PiSnapshot} from './pi-routing';
 type Invoke=<T>(command:string,args?:Record<string,unknown>)=>Promise<T>;
 type CodexConnections=ReturnType<typeof codexRoutingConfig>['connections'];
 type RoutingModelMetadata=Pick<PiModel,'source'|'billing'|'legacy_alias'>;
 function routingModelPresentation(key:string,model:RoutingModelMetadata|undefined,connections?:CodexConnections|null){
  return modelPresentation(key,model,connections,t);
+}
+function routeMatchText(decision:PiRouteMatches){
+ return [
+  decision.classificationRule?`${t('Classification rule')} ${decision.classificationRule}`:'',
+  decision.classificationTask?t(decision.classificationTask):'',
+  decision.executionRule?`${t('Execution rule')} ${decision.executionRule}`:'',
+  decision.workflow?`${t('Collaboration workflow')} · ${decision.workflow==='single'?t('Single agent'):decision.workflow}`:'',
+ ].filter(Boolean).join(' · ');
+}
+function classificationSourceText(decision:PiRouteMatches){
+ const source=decision.classificationSource;
+ if(source==='fixed')return t('Fixed model and reasoning');
+ if(source==='rule')return t('Classified by local rule');
+ if(decision.classificationRule)return t(source&&source!=='local'?'Local rule matched; model classified remaining details':'Local rule matched; semantic classification unavailable');
+ if(source==='local')return t('Local routing fallback');
+ return source?t('Classified by model {{value0}}',{value0:source}):'';
+}
+function workflowRoleLabel(role:string){
+ return t(role==='plan'?'Planner':role==='implement'?'Implementer':role==='audit'?'Independent reviewer':'Reviewer');
+}
+function routePreviewText(preview:PiRoutePreview,modelLabel:(key:string)=>string){
+ const model=preview.model?modelLabel(preview.model):t(preview.selection.model==='small'?'Lightweight model':preview.selection.model==='medium'?'Standard model':'Strong model');
+ const source=classificationSourceText(preview);
+ return [`${t('Matched task rule')}: ${t(preview.rule)}`,routeMatchText(preview),
+  `${model} · ${preview.selection.effort}`,source?`${t('Classification source')}: ${source}`:'',
+  ...Object.entries(preview.roles??{}).map(([role,choices])=>`${workflowRoleLabel(role)} · ${choices.map(choice=>`${modelLabel(choice.model)} / ${choice.effort}`).join(' → ')}`),
+  preview.supported===false?t('The selected collaboration workflow is unavailable in this session.'):'',
+  `${t('Classification time')}: ${preview.latencyMs} ms · ${t('Model-reported cost')}: ${preview.cost??t('Unknown cost')}`,
+  t('Policy preview only. Session locks, capacity and cache can change the final selection.')].filter(Boolean).join('\n');
 }
 function routingModelOptions(models:PiModel[],connections?:CodexConnections|null){
  const groups=new Map<string,{model:PiModel;label:string}[]>();
@@ -216,6 +245,17 @@ export function PiRoutingConfig({args,cwd,invoke,onChange,onValidity,onSaved,ins
  }
  return <fieldset className="pi-routing-config" ref={root}><legend>{t(adapter==='codex'?'Codex automatic routing':'Pi automatic routing')}</legend>
   <p className="settings-help">{t(adapter==='codex'?'Codex keeps its native terminal, history, approvals, Skills and tools. Routing chooses the model and reasoning for each new task.':'Pi keeps this chat history. ChatGPT subscription tasks use the official Codex CLI with its default native Skills and tools. Model and reasoning can be automatic or fixed independently.')}</p>
+  {draft&&<fieldset className="pi-routing-config" aria-label={t('Routing preferences')}>
+   <legend>{t('Routing preferences')}</legend>
+   <div className="pi-routing-pair">
+    <RoutingModelPicker label={t('Model selection')} models={roleModels} value={draft.model} {...modelCatalog} emptyValue="auto" emptyLabel="Automatic by task" onChange={e=>change({model:e.target.value})}/>
+    <label><span>{t('Reasoning selection')}</span><Select aria-label={t('Reasoning selection')} value={draft.effort} onChange={e=>change({effort:e.target.value})}>
+     <option value="auto">{t('Automatic by task')}</option>
+     {['off','minimal',...piLevels].map(level=><option key={level} value={level}>{level==='off'?t('Reasoning off (fixed)'):level}</option>)}
+    </Select></label>
+   </div>
+   <p className="settings-help">{t('A fixed reasoning level is preserved exactly. Unsupported selections stop with an explanation.')}</p>
+  </fieldset>}
   <details className="pi-routing-advanced" open={setupOpen} onToggle={e=>setSetupOpen(e.currentTarget.open)}><summary>{t('Quick model setup')}</summary>
    <p className="settings-help">{t(adapter==='codex'?'Read the models available to the official Codex CLI. Verification sends a short request using the selected connection quota.':'Scan the providers available to Pi, the official Codex CLI, and the direct gateway when configured or detected. Verification sends a short test request and may use your selected connection quota.')}</p>
    <button type="button" disabled={busy} onClick={()=>void discoverSetup()}>{t('Find available models')}</button>
@@ -281,9 +321,7 @@ export function PiRoutingConfig({args,cwd,invoke,onChange,onValidity,onSaved,ins
    </fieldset>
    {onSaved&&<><button type="button" disabled={busy||!!issue||adapter==='codex'&&(!!catalogIssue||verified!==scope)} onClick={saveSetup}>{t('Save routing roles on this device')}</button>
    {setupStatusScope===scope&&setupStatus==='Routing roles saved on this device.'&&<p role="status">{t(setupStatus)}</p>}</>}
-   <details className="pi-routing-advanced"><summary>{t('Routing preferences')}</summary><div className="pi-routing-pair"><RoutingModelPicker label={t('Model selection')} models={roleModels} value={draft.model} {...modelCatalog} emptyValue="auto" emptyLabel="Automatic by task" onChange={e=>change({model:e.target.value})}/><label><span>{t('Reasoning selection')}</span><Select aria-label={t('Reasoning selection')} value={draft.effort} onChange={e=>change({effort:e.target.value})}><option value="auto">{t('Automatic by task')}</option>{['off','minimal',...piLevels].map(level=><option key={level} value={level}>{level==='off'?t('Reasoning off (fixed)'):level}</option>)}</Select></label></div>
-   <p className="settings-help">{t('A fixed reasoning level is preserved exactly. Unsupported selections stop with an explanation.')}</p></details>
-   {taskRules?<PiTaskRules rules={taskRules} disabled={busy} onApply={rules=>change({rules:JSON.stringify(rules)})}/>:<button type="button" onClick={()=>change({rules:JSON.stringify(defaultRules)})}>{t('Restore default task rules')}</button>}
+   {taskRules?<PiTaskRules rules={taskRules} disabled={busy} models={roleModels} adapter={adapter} connections={connections} onApply={rules=>change({rules:JSON.stringify(rules)})}/>:<button type="button" onClick={()=>change({rules:JSON.stringify(defaultRules)})}>{t('Restore default task rules')}</button>}
    <p className="settings-help">{t(adapter==='codex'?'Saved rules apply to new sessions. Select a saved strategy in the session to apply it at the next safe turn boundary.':'These defaults apply to new sessions. Existing sessions keep their saved task rules; use Adjust routing to edit and preview them.')}</p>
   </>}
   {warning&&<p className="settings-help" role="status">{t(warning)}</p>}
@@ -399,6 +437,7 @@ export function PiRoutingBar({sessionId,generation,cliVersion,installedPiVersion
    try{
     if(available&&document.visibilityState!=='hidden'){
      const next=await invoke<PiSnapshot>('get_pi_routing',{sessionId});
+     if(next.state&&next.state.generation!==generation)throw Error('Pi runtime changed');
      if(!stopped&&epoch===readEpoch.current){needsRead=false;setReadError(null);setState(old=>JSON.stringify(old)===JSON.stringify(next.state)?old:next.state);}
     }
    }catch(e){if(!stopped&&epoch===readEpoch.current)setReadError(String(e));}
@@ -466,14 +505,25 @@ export function PiRoutingBar({sessionId,generation,cliVersion,installedPiVersion
   return metadata||piModelCatalogSource(key)!=='pi'||key.startsWith('yam-codex/')?routingModelPresentation(key,metadata).label:key;
  }
  const actualModel=state?.actual?modelLabel(state.actual.model):'';
+ const currentDecision=live&&state?.phase!=='classifying'?state?.decision:null;
+ const collaborating=!!currentDecision?.workflow&&currentDecision.workflow!=='single';
+ const receipt=state?.workflowReceipt;
+ const currentReceipt=collaborating&&receipt?.current&&receipt.workflow===currentDecision.workflow?receipt:null;
+ const runningRole=currentReceipt?.status==='running'?Object.entries(currentReceipt.roles).find(([,role])=>role.status==='running'):undefined;
+ const runningAttempts=runningRole?.[1].attempts;
+ const lastAttempt=runningAttempts?.[runningAttempts.length-1];
+ const runningCandidate=lastAttempt?.status==='running'?lastAttempt:null;
+ const classification=currentDecision?classificationSourceText(currentDecision.rule==='fixed'?{classificationSource:'fixed'}:currentDecision):'';
  function choose(fields:Partial<{model:string;effort:string}>){if(state&&choice)setDraft({...choice,revision:draft?.revision??state.revision,...fields});}
  return <section className="pi-routing-bar" aria-label={t('Pi automatic routing')}>
   <div className="pi-routing-status"><strong>{t('Pi routing')}</strong>
    <span>{installedPiVersion?t('Local Pi {{version}}',{version:installedPiVersion}):t('Local Pi version unknown')}</span>
    {cliVersion&&cliVersion!==installedPiVersion&&<span>{t('Session launched with Pi {{version}}',{version:cliVersion})}</span>}
    {routingOff&&<span>{t('Routing is off')}</span>}{(!available||!state||!active||state.phase==='error'||state.phase==='classifying')&&<span role="status">{!available?t('Background unavailable'):!state?t(active?'Waiting for Pi routing state…':'Routing state unavailable'):!active?t('Session ended'):t(state.phase==='classifying'?'Choosing a model…':'Routing needs attention')}</span>}
-   {state&&<span className="pi-routing-model" role="status" title={selected?t('Selected for this turn; waiting for a native model response'):t('Recorded by the native Pi assistant message')}>{selected?t('Selected for this turn: {{value0}} · {{value1}}',{value0:modelLabel(selected.model),value1:selected.effort}):state.actual?t(live&&state.phase==='working'?'Actual model: {{value0}} · {{value1}}':'Latest reply used: {{value0}} · {{value1}}',{value0:actualModel,value1:state.actual.effort==='unknown'?t('Reasoning not confirmed'):state.actual.effort}):t('No native model response recorded yet')}</span>}
-   {!selected&&state?.actual?.source==='pi-native'&&<span>{t(state.actual.billing==='subscription'?'Pi native subscription':'Pi native API')}</span>}
+   {state&&!collaborating&&<span className="pi-routing-model" role="status" title={selected?t('Selected for this turn; waiting for a native model response'):t('Recorded by the native Pi assistant message')}>{selected?t('Selected for this turn: {{value0}} · {{value1}}',{value0:modelLabel(selected.model),value1:selected.effort}):state.actual?t(live&&state.phase==='working'?'Actual model: {{value0}} · {{value1}}':'Latest reply used: {{value0}} · {{value1}}',{value0:actualModel,value1:state.actual.effort==='unknown'?t('Reasoning not confirmed'):state.actual.effort}):t('No native model response recorded yet')}</span>}
+   {!collaborating&&!selected&&state?.actual?.source==='pi-native'&&<span>{t(state.actual.billing==='subscription'?'Pi native subscription':'Pi native API')}</span>}
+   {classification&&<span>{classification}{currentDecision?.classificationRule&&` · ${t('Classification rule')} ${currentDecision.classificationRule}`}{currentDecision?.executionRule&&` · ${t('Execution rule')} ${currentDecision.executionRule}`}</span>}
+   {collaborating&&<span className="pi-routing-model" role="status">{currentReceipt?`${currentReceipt.name} · ${t(currentReceipt.status)}`:t('Preparing collaboration…')}{runningRole&&` · ${workflowRoleLabel(runningRole[0])}`}{runningCandidate&&` · ${modelLabel(runningCandidate.model)} · ${runningCandidate.effort}`}</span>}
    {execution&&<span role="status">{t(executionStages[execution.stage])}</span>}
    {state&&!routingOff&&<span className="pi-routing-policy">{state.preferences.model==='auto'?t('Automatic model'):t('Fixed model: {{value0}}',{value0:modelLabel(state.preferences.model)})}</span>}
    {!routingOff&&<button type="button" aria-expanded={expanded} aria-controls={`pi-routing-controls-${sessionId}`} onClick={()=>setExpanded(value=>!value)}>{t('Adjust routing')}</button>}
@@ -501,6 +551,22 @@ export function PiRoutingBar({sessionId,generation,cliVersion,installedPiVersion
     <button type="button" disabled={disabled||!!readError||recoveryStale||!recovery.needsInspection} onClick={()=>{if(!recoveryStale)void control('native-reset',{receiptId:recoveryConfirmation.receiptId,confirmed:true},recoveryConfirmation.revision);}}>{t('I checked the old task; clear the block')}</button>
    </section>}
   </div>}
+  {(currentDecision||receipt)&&<details key={receipt?.id??'route'} className="pi-routing-advanced" aria-label={t('Routing and collaboration details')}>
+   <summary>{t(currentDecision?'Routing and collaboration details':'Previous collaboration receipt')}</summary>
+   {currentDecision&&<p className="settings-help">{t('Matched task rule')}: {t(currentDecision.rule)} · {currentDecision.ruleVersion}
+    {currentDecision.planned&&` · ${t('Planned route')}: ${t(currentDecision.planned.model)} · ${currentDecision.planned.effort}`}
+    {currentDecision.selected&&state?.target&&` · ${t('Selected for this turn: {{value0}} · {{value1}}',{value0:modelLabel(state.target.model),value1:state.target.effort})}`}
+   </p>}
+   {receipt&&<section className="settings-help" aria-label={t(currentReceipt?'Collaboration receipt':'Previous collaboration receipt')}>
+    {currentDecision&&!currentReceipt&&<p>{t('Previous collaboration receipt')}</p>}
+    <p><strong>{receipt.name}</strong> · {t(receipt.status)} · {receipt.version}</p>
+    <ul>{Object.entries(receipt.roles).map(([role,details])=><li key={role}>
+     {workflowRoleLabel(role)} · {t(details.status)}
+     <ul>{details.attempts.map((candidate,index)=><li key={index}>{modelLabel(candidate.model)} · {candidate.effort} · {t(candidate.status)}{candidate.reason&&` · ${t(candidate.reason)}`}</li>)}</ul>
+    </li>)}</ul>
+    {receipt.error&&<p>{t(receipt.error)}</p>}
+   </section>}
+  </details>}
   {state&&choice&&<><div id={`pi-routing-controls-${sessionId}`} className="pi-routing-controls" hidden={!expanded}>
    <RoutingModelPicker label={t('Pi model selection')} models={roleModels} value={choice.model} emptyValue="auto" emptyLabel="Automatic by task" disabled={disabled} onChange={e=>choose({model:e.target.value})}/>
    <label><span>{t('Reasoning')}</span><Select aria-label={t('Pi reasoning selection')} value={choice.effort} disabled={disabled} onChange={e=>choose({effort:e.target.value})}><option value="auto">{t('Automatic by task')}</option>{['off','minimal',...piLevels].map(level=><option key={level} value={level}>{level==='off'?t('Reasoning off (fixed)'):level}</option>)}</Select></label>
@@ -508,8 +574,9 @@ export function PiRoutingBar({sessionId,generation,cliVersion,installedPiVersion
    {draft&&<button type="button" disabled={busy} onClick={()=>setDraft(null)}>{t('Cancel selection')}</button>}
    <button type="button" disabled={disabled||(!dirty&&state.preferences.model==='auto'&&state.preferences.effort==='auto')} onClick={()=>void control('reset')}>{t('Reset both to automatic')}</button>
    <button type="button" disabled={disabled} onClick={()=>void control('retry')}>{busy?t('Applying…'):t('Refresh connection')}</button>
-   {state.rules&&<PiTaskRules rules={state.rules} disabled={disabled} onApply={async rules=>{if(!await control('rules',rules))throw Error(t('Control result is unconfirmed. It may have been applied.'));}} onPreview={async(text,rules)=>{const next=await control('preview',{text,rules}),p=next?.preview;if(!p)throw Error(t('Task rule preview failed'));return `${t('Matched task rule')}: ${t(p.rule)}\n${t(p.selection.model==='small'?'Lightweight model':p.selection.model==='medium'?'Standard model':'Strong model')} · ${p.selection.effort}\n${t('Classification time')}: ${p.latencyMs} ms\n${t('Model-reported cost')}: ${p.cost??t('Unknown cost')}\n${t('Policy preview only. Session locks, capacity and cache can change the final selection.')}`;}}/>}
+   {state.rules&&<PiTaskRules rules={state.rules} disabled={disabled} models={roleModels} onApply={async rules=>{if(!await control('rules',rules))throw Error(t('Control result is unconfirmed. It may have been applied.'));}} onPreview={async(text,rules)=>{const next=await control('preview',{text,rules}),p=next?.preview;if(!p)throw Error(t('Task rule preview failed'));return routePreviewText(p,modelLabel);}}/>}
    {state.decision&&<p className="settings-help">{t('Matched task rule')}: {t(state.decision.rule)} · {state.decision.ruleVersion}<br/>{state.decision.classificationSource&&<>{t('Classification source')}: {state.decision.classificationSource==='local'?t('Local routing rules'):state.decision.classificationSource} · </>}{t('Classification time')}: {state.decision.classificationMs} ms · {t('Model-reported cost so far')}: {state.decision.totalCost??t(state.actual?.billing==='subscription'?'Subscription usage; API cost unavailable':'Unknown cost')}</p>}
+   {state.decision&&(state.decision.classificationRule||state.decision.executionRule||state.decision.workflow&&state.decision.workflow!=='single')&&<p className="settings-help">{routeMatchText(state.decision)}</p>}
    {state.decision?.budget&&<p className="settings-help">{t('Local context estimate')}: {state.decision.budget.inputTokens??'—'} + {state.decision.budget.reserveTokens??'—'} {t('local reserve')} / {state.decision.budget.contextWindow??'—'} {t('context window')}<br/>{t('Local estimate only; native accumulated context is not measured.')}</p>}
    {!!state.decision?.rejected?.length&&<ul className="settings-help">{state.decision.rejected.map((item,index)=><li key={index}>{modelLabel(item.model)}: {t(budgetReasons[item.reason]??'Context estimate unavailable')}</li>)}</ul>}
    {state.actual?.usage&&<p className="settings-help">{t('Reply tokens')}: {state.actual.usage.input??'—'} {t('input')} / {state.actual.usage.output??'—'} {t('output')}</p>}
@@ -531,17 +598,119 @@ export function PiRoutingBar({sessionId,generation,cliVersion,installedPiVersion
  </section>;
 }
 
-export function PiTaskRules({rules,disabled,onApply,onPreview}:{rules:TaskRules;disabled:boolean;onApply:(rules:TaskRules)=>Promise<void>|void;onPreview?:(text:string,rules:TaskRules)=>Promise<string>}){
+export function PiTaskRules({rules,disabled,onApply,onPreview,models=[],adapter='pi',connections}:{rules:TaskRules;disabled:boolean;onApply:(rules:TaskRules)=>Promise<void>|void;onPreview?:(text:string,rules:TaskRules)=>Promise<string>;models?:PiModel[];adapter?:'pi'|'codex';connections?:CodexConnections|null}){
  const saved=JSON.stringify(rules);
  const [draft,setDraft]=useState(()=>({rules:validateRules(rules),base:saved})),[text,setText]=useState(''),[result,setResult]=useState(''),[busy,setBusy]=useState(false),[error,setError]=useState('');
  const dirty=JSON.stringify(draft.rules)!==draft.base,stale=draft.base!==saved;
  useEffect(()=>{if(!dirty)setDraft({rules:validateRules(rules),base:saved});},[saved,dirty]);
  let issue='';try{validateRules(draft.rules);}catch(e){issue=String(e);}
  function change(task:TaskRule['task'],fields:Partial<TaskRule>){setDraft(old=>({...old,rules:{...old.rules,rules:old.rules.rules.map(r=>r.task===task?{...r,...fields}:r)}}));setResult('');}
+ function update(fields:Partial<TaskRules>){setDraft(old=>({...old,rules:{...old.rules,...fields}}));setResult('');}
+ const classifications=draft.rules.classificationRules??[],executions=draft.rules.executionRules??[],workflows=draft.rules.workflows??[];
+ const categories=draft.rules.rules.map(rule=><option key={rule.task} value={rule.task}>{t(rule.task)}</option>);
+ const replace=<T,>(list:T[],index:number,value:T)=>list.map((item,i)=>i===index?value:item);
+ const move=<T,>(list:T[],index:number,offset:number)=>{const copy=[...list];[copy[index],copy[index+offset]]=[copy[index+offset],copy[index]];return copy;};
+ function reorder(index:number,length:number,onMove:(offset:number)=>void,onRemove:()=>void,keepOne=false){
+  return <><button type="button" disabled={index===0} onClick={()=>onMove(-1)}>{t('Move rule up')}</button>
+   <button type="button" disabled={index===length-1} onClick={()=>onMove(1)}>{t('Move rule down')}</button>
+   <button type="button" disabled={keepOne&&length===1} onClick={onRemove}>{t('Remove entry')}</button></>;
+ }
+ function addWorkflow(preset:CollaborationWorkflow['preset']){
+  const base=preset==='delivery'?'complex-delivery':'deep-review';
+  let id=base,n=1;while(workflows.some(workflow=>workflow.id===id))id=`${base}-${++n}`;
+  const roles=Object.fromEntries(workflowRoles[preset].map(role=>{
+   const candidate:WorkflowCandidate={model:'',runner:role==='implement'?'codex':'model',billing:role==='implement'?'subscription':'api',effort:'high'};
+   return [role,[candidate]];
+  }));
+  update({workflows:[...workflows,{id,name:t(preset==='delivery'?'Complex delivery':'Deep review'),preset,roles,paths:[]}]});
+ }
  async function apply(){if(disabled||busy||stale||issue||!dirty)return;setBusy(true);setError('');try{const next=validateRules(draft.rules);await onApply(next);setDraft({rules:next,base:JSON.stringify(next)});setResult('');}catch(e){setError(String(e));}finally{setBusy(false);}}
  async function preview(){if(!onPreview||disabled||busy||issue||!text.trim())return;setBusy(true);setError('');setResult('');try{setResult(await onPreview(text,validateRules(draft.rules)));}catch(e){setError(String(e));}finally{setBusy(false);}}
  return <details className="pi-routing-advanced"><summary>{t('Task rules')} · {rulesVersion(rules)}</summary>
   <p className="settings-help">{t('Rules describe task types. Model locks and capability checks always apply. Changes require Apply.')}</p>
+  <fieldset className="pi-routing-config" disabled={disabled||busy}><legend>{t('Local classification rules')}</legend>
+   <p className="settings-help">{t('Rules match an exact prefix in order. Without a match, YAM uses the classification model.')}</p>
+   {classifications.map((rule,index)=>{
+    const set=(next:Partial<ClassificationRule>)=>update({classificationRules:replace(classifications,index,{...rule,...next})});
+    return <fieldset key={index}><legend>{t('Classification rule')} {index+1}</legend>
+     <label><input type="checkbox" checked={rule.enabled} onChange={e=>set({enabled:e.target.checked})}/>{t('Enabled')}</label>
+     <label><span>{t('Classification prefix')}</span><input aria-label="Classification prefix" value={rule.prefix} placeholder="yam:review" maxLength={64} onChange={e=>set({prefix:e.target.value})}/></label>
+     <label><span>{t('Task category')}</span><Select value={rule.task} onChange={e=>set({task:e.target.value as TaskRule['task']})}>{categories}</Select></label>
+     {reorder(index,classifications.length,offset=>update({classificationRules:move(classifications,index,offset)}),
+      ()=>update({classificationRules:classifications.filter((_,i)=>i!==index)}))}
+    </fieldset>;
+   })}
+   <button type="button" disabled={classifications.length>=16} onClick={()=>update({classificationRules:[...classifications,{enabled:true,prefix:'yam:review',task:'review'}]})}>{t('Add classification rule')}</button>
+  </fieldset>
+  <fieldset className="pi-routing-config" disabled={disabled||busy}><legend>{t('Execution rules')}</legend>
+   <p className="settings-help">{t('The first matching execution rule applies. Blank choices use the existing automatic policy.')}</p>
+   {executions.map((rule,index)=>{
+    const set=(next:Partial<ExecutionRule>)=>update({executionRules:replace(executions,index,{...rule,...next})});
+    const when=(key:keyof ExecutionRule['when'],value:string)=>{
+     const next={...rule.when};if(value)Object.assign(next,{[key]:value});else delete next[key];set({when:next});
+    };
+    const use=(key:keyof ExecutionRule['use'],value:string)=>{
+     const next={...rule.use};if(value)Object.assign(next,{[key]:value});else delete next[key];set({use:next});
+    };
+    return <fieldset key={index}><legend>{t('Execution rule')} {index+1}</legend>
+     <label><input type="checkbox" checked={rule.enabled} onChange={e=>set({enabled:e.target.checked})}/>{t('Enabled')}</label>
+     <label><span>{t('Task category')}</span><Select value={rule.when.task??''} onChange={e=>when('task',e.target.value)}><option value="">{t('Any')}</option>{categories}</Select></label>
+     <label><span>{t('Workspace path')}</span><input value={rule.when.workspace??''} placeholder="/path/to/project" onChange={e=>when('workspace',e.target.value)}/></label>
+     <label><span>{t('Analysis depth')}</span><Select value={rule.when.depth??''} onChange={e=>when('depth',e.target.value)}><option value="">{t('Any')}</option><option value="normal">{t('Normal')}</option><option value="deep">{t('Deep')}</option></Select></label>
+     <label><span>{t('Model')}</span><Select value={rule.use.model??''} onChange={e=>use('model',e.target.value)}>
+      <option value="">{t('Automatic')}</option><option value="small">{t('Lightweight model')}</option>{draft.rules.v===2&&<option value="medium">{t('Standard model')}</option>}<option value="strong">{t('Strong model')}</option>
+      {rule.use.model?.includes('/')&&!models.some(model=>model.key===rule.use.model)&&<option value={rule.use.model}>{rule.use.model}</option>}
+      {models.length>0&&routingModelOptions(models,connections)}
+     </Select></label>
+     <label><span>{t('Reasoning')}</span><Select value={rule.use.effort??''} onChange={e=>use('effort',e.target.value)}><option value="">{t('Automatic')}</option>{['medium','high','xhigh','max'].map(level=><option key={level} value={level}>{level}</option>)}</Select></label>
+     <label><span>{t('Collaboration workflow')}</span><Select value={rule.use.workflow??''} onChange={e=>use('workflow',e.target.value)}>
+      <option value="">{t('Automatic')}</option><option value="single">{t('Single agent')}</option>
+      {rule.use.workflow&&rule.use.workflow!=='single'&&!workflows.some(workflow=>workflow.id===rule.use.workflow)&&<option value={rule.use.workflow}>{rule.use.workflow}</option>}
+      {workflows.map(workflow=><option key={workflow.id} value={workflow.id} disabled={adapter==='codex'}>{workflow.name}</option>)}
+     </Select></label>
+     {reorder(index,executions.length,offset=>update({executionRules:move(executions,index,offset)}),
+      ()=>update({executionRules:executions.filter((_,i)=>i!==index)}))}
+    </fieldset>;
+   })}
+   <button type="button" disabled={executions.length>=16} onClick={()=>update({executionRules:[...executions,{enabled:true,when:{task:'review'},use:{model:'strong'}}]})}>{t('Add execution rule')}</button>
+  </fieldset>
+  {adapter==='pi'?<fieldset className="pi-routing-config" disabled={disabled||busy}><legend>{t('Collaboration workflows')}</legend>
+   <p className="settings-help">{t('Choose a workflow in an execution rule or start a request with yam:flow:WORKFLOW-ID. Candidates are tried in order and must match the configured billing channel for that candidate.')}</p>
+   {workflows.map((workflow,index)=>{
+    const set=(next:Partial<CollaborationWorkflow>)=>update({workflows:replace(workflows,index,{...workflow,...next})});
+    return <fieldset key={workflow.id}><legend>{workflow.name} · <code>{workflow.id}</code></legend>
+     <label><span>{t('Workflow name')}</span><input value={workflow.name} maxLength={80} onChange={e=>set({name:e.target.value})}/></label>
+     <label><span>{t('Evidence paths')}</span><textarea value={(workflow.paths??[]).join('\n')} placeholder="src/router.ts" onChange={e=>set({paths:e.target.value.split('\n')})}/></label>
+     <p className="settings-help">{t('Enter one workspace-relative file or directory per line. Its changes and this request’s attachments may be sent to the listed role models.')}</p>
+     {workflowRoles[workflow.preset].map(role=>{
+      const choices=workflow.roles[role]??[];
+      const setChoices=(values:WorkflowCandidate[])=>set({roles:{...workflow.roles,[role]:values}});
+      return <fieldset key={role}><legend>{t(role==='plan'?'Planner':role==='implement'?'Implementer':role==='audit'?'Independent reviewer':'Reviewer')}</legend>
+       {choices.map((choice,slot)=>{
+        const choose=(fields:Partial<WorkflowCandidate>)=>setChoices(replace(choices,slot,{...choice,...fields}));
+        const available=models.filter(model=>choice.runner==='codex'?model.key.startsWith('yam-codex/'):!model.key.startsWith('yam-codex/'));
+        const levels=models.find(model=>model.key===choice.model)?.levels??['off','minimal','low','medium','high','xhigh','max'];
+        return <fieldset key={slot}><legend>{t(slot===0?'Primary candidate':'Backup candidate')} {slot+1}</legend>
+         <label><span>{t('Runner')}</span><Select value={choice.runner} disabled={role==='implement'} onChange={e=>choose({runner:e.target.value as WorkflowCandidate['runner'],model:'',billing:e.target.value==='codex'?'subscription':'api'})}><option value="model">{t('Tool-free model')}</option><option value="codex">{t('Codex native')}</option></Select></label>
+         <RoutingModelPicker label={t('Model')} models={available} value={choice.model} onChange={e=>{
+          const model=available.find(item=>item.key===e.target.value);
+          const billing=model?.billing&&model.billing!=='unknown'?model.billing:choice.billing;
+          choose({model:e.target.value,billing,effort:(model?.levels.includes(choice.effort)?choice.effort:model?.levels.includes('high')?'high':model?.levels[0]??choice.effort) as WorkflowCandidate['effort']});
+         }}/>
+         <label><span>{t('Reasoning')}</span><Select value={choice.effort} onChange={e=>choose({effort:e.target.value as WorkflowCandidate['effort']})}>{levels.map(level=><option key={level} value={level}>{level}</option>)}</Select></label>
+         <p className="settings-help">{t('Candidate billing')}: {t(choice.billing==='subscription'?'Subscription':choice.billing==='gateway'?'Magpie gateway':'Pi native API')}</p>
+         {reorder(slot,choices.length,offset=>setChoices(move(choices,slot,offset)),()=>setChoices(choices.filter((_,i)=>i!==slot)),true)}
+        </fieldset>;
+       })}
+       <button type="button" disabled={choices.length>=4} onClick={()=>setChoices([...choices,{model:'',runner:role==='implement'?'codex':'model',billing:role==='implement'?'subscription':'api',effort:'high'}])}>{t('Add role candidate')}</button>
+      </fieldset>;
+     })}
+     <button type="button" onClick={()=>update({workflows:workflows.filter((_,i)=>i!==index),executionRules:executions.filter(rule=>rule.use.workflow!==workflow.id)})}>{t('Remove workflow and its rules')}</button>
+    </fieldset>;
+   })}
+   <button type="button" disabled={workflows.length>=6} onClick={()=>addWorkflow('delivery')}>{t('Add complex delivery workflow')}</button>
+   <button type="button" disabled={workflows.length>=6} onClick={()=>addWorkflow('review')}>{t('Add deep review workflow')}</button>
+  </fieldset>:<p className="settings-help">{t('Collaboration workflows require a Pi session.')}</p>}
   <fieldset disabled={disabled||busy}>{draft.rules.rules.map(rule=><div key={rule.task}>
    <strong>{t(rule.task)}</strong>
    <label><span>{t('Task description')}</span><textarea aria-label={`Rule description: ${rule.task}`} maxLength={600} value={rule.description} onChange={e=>change(rule.task,{description:e.target.value})}/></label>
@@ -559,9 +728,11 @@ export function PiTaskRules({rules,disabled,onApply,onPreview}:{rules:TaskRules;
  </details>;
 }
 
-type NativeCodexRoutingState={generation:string;revision:number;phase:string;enabled:boolean;name:string;policyId:string|null;pending?:{id:string|null;name:string}|null;target?:{model:string;effort:string}|null;dispatched?:{model:string;effort:string;rerouted?:boolean}|null;error?:string|null};
+type NativeRouteModel={model:string;effort:string};
+type NativeCodexRoutingState={generation:string;revision:number;phase:string;enabled:boolean;name:string;policyId:string|null;pending?:{id:string|null;name:string}|null;target?:(NativeRouteModel&PiRouteMatches&{selection?:NativeRouteModel})|null;preview?:PiRoutePreview|null;dispatched?:(NativeRouteModel&{rerouted?:boolean;original?:NativeRouteModel})|null;error?:string|null};
 export function NativeCodexRoutingBar({sessionId,generation,active,available,invoke,policies=[],launchConfig}:{sessionId:string;generation:string;active:boolean;available:boolean;invoke:Invoke;policies?:RoutingPolicy[];launchConfig?:string}){
  const [state,setState]=useState<NativeCodexRoutingState|null>(null),[error,setError]=useState<string|null>(null),[busy,setBusy]=useState(false);
+ const [previewText,setPreviewText]=useState('');
  useEffect(()=>{
   let stopped=false;let timer:ReturnType<typeof setTimeout>;
   async function read(){
@@ -576,15 +747,25 @@ export function NativeCodexRoutingBar({sessionId,generation,active,available,inv
  let connections:CodexConnections|undefined;
  try{if(setup)connections=codexRoutingConfig(setup).connections;}catch{}
  const modelLabel=(key:string)=>connections&&Object.prototype.hasOwnProperty.call(connections,key.split('/',1)[0])?routingModelPresentation(key,undefined,connections).label:key;
- async function control(data:unknown){
+ const showRoute=available&&state?.phase!=='classifying';
+ const target=showRoute?state?.target:null,dispatched=showRoute?state?.dispatched:null;
+ const originalDispatch=dispatched?.rerouted?dispatched.original:dispatched;
+ const modelText=(key:string,route:NativeRouteModel)=>t(key,{value0:modelLabel(route.model),value1:route.effort==='unknown'?t('Reasoning not confirmed'):route.effort});
+ const phaseLabels:Record<string,string>={classifying:'Choosing a model…',pending:'Waiting for native dispatch…',working:'Native task running',completed:'Turn completed',failed:'Turn failed',interrupted:'Turn interrupted',unknown:'Routing needs attention'};
+ async function control(data:unknown,action='mode'){
   if(!state||busy)return;setBusy(true);setError(null);
-  try{const result=await invoke<{state:NativeCodexRoutingState;controlFailure?:unknown}>('pi_routing_control',{sessionId,generation,request:{action:'mode',revision:state.revision,data}});if(result.controlFailure)throw Error('Routing result unknown; refresh state before retrying');setState(result.state);}
+  try{const result=await invoke<{state:NativeCodexRoutingState;controlFailure?:unknown}>('pi_routing_control',{sessionId,generation,request:{action,revision:state.revision,data}});if(result.controlFailure)throw Error('Routing result unknown; refresh state before retrying');setState(result.state);}
   catch(error){setError(String(error));}finally{setBusy(false);}
  }
  return <section className="pi-routing-bar" aria-label={t('Codex automatic routing')}>
   <div className="pi-routing-status"><strong>{t('Codex routing')}</strong>
-   <span role="status">{t(!available?'Background unavailable':!active?'Session ended':!state?'Waiting for routing state…':!state.enabled?'Routing is off':state.phase==='classifying'?'Choosing a model…':'Native Codex session')}</span>
-   {state?.dispatched?<span>{t('Dispatched model: {{value0}} · {{value1}}',{value0:modelLabel(state.dispatched.model),value1:state.dispatched.effort==='unknown'?t('Reasoning not confirmed'):state.dispatched.effort})}{state.dispatched.rerouted&&` · ${t('Changed by the model service')}`}</span>:state?.target&&<span>{t('Selected for this turn: {{value0}} · {{value1}}',{value0:modelLabel(state.target.model),value1:state.target.effort})}</span>}
+   <span role="status">{t(!available?'Background unavailable':!state?active?'Waiting for routing state…':'Session ended':phaseLabels[state.phase]??(active?'Native Codex session':'Session ended'))}</span>
+   {state&&!state.enabled&&<span>{t('Routing is off')}</span>}
+   {target?.selection&&<span>{`${t('Planned route')}: ${t(target.selection.model)} · ${target.selection.effort}`}</span>}
+   {target&&<span>{modelText('Selected for this turn: {{value0}} · {{value1}}',target)}</span>}
+   {originalDispatch&&<span>{modelText('Dispatched model: {{value0}} · {{value1}}',originalDispatch)}</span>}
+   {dispatched?.rerouted&&<span>{modelText('Rerouted model: {{value0}} · {{value1}}',dispatched)}</span>}
+   {target&&(target.classificationSource||target.classificationRule||target.executionRule)&&<span>{[classificationSourceText(target),routeMatchText(target)].filter(Boolean).join(' · ')}</span>}
   </div>
   <label><span>{t('Session routing strategy')}</span><Select aria-label={t('Session routing strategy')} value={current} disabled={!state||!active||!available||busy||!!error} onChange={event=>{const policy=choices.find(row=>row.id===event.target.value);return control({policy:policy?{id:policy.id,name:policy.name,config:policy.setup}:null});}}>
    <option value="">{t('Do not enable routing')}</option>
@@ -592,6 +773,12 @@ export function NativeCodexRoutingBar({sessionId,generation,active,available,inv
    {choices.map(row=><option key={row.id} value={row.id}>{row.name}</option>)}
   </Select></label>
   {state?.pending&&<p role="status">{t('Routing change queued: {{value0}}',{value0:state.pending.name})} <button type="button" disabled={busy||!active||!available} onClick={()=>void control({cancel:true})}>{t('Cancel pending routing change')}</button></p>}
+  {state?.enabled&&<details className="pi-routing-advanced"><summary>{t('Try task rules')}</summary>
+   <label><span>{t('Preview request')}</span><textarea value={previewText} maxLength={4000} onChange={event=>setPreviewText(event.target.value)}/></label>
+   <p className="settings-help">{t('Preview classifies this text only. It does not execute or save the task. A classifier call may incur cost.')}</p>
+   <button type="button" disabled={!active||!available||busy||state.phase!=='idle'&&state.phase!=='completed'&&state.phase!=='failed'&&state.phase!=='interrupted'||!previewText.trim()} onClick={()=>void control({text:previewText},'preview')}>{t('Try task rules')}</button>
+   {state.preview&&<pre role="status">{routePreviewText(state.preview,modelLabel)}</pre>}
+  </details>}
   {(error||state?.error)&&<p role="alert">{t(error??state?.error??'')}</p>}
  </section>;
 }

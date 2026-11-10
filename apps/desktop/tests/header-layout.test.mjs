@@ -56,7 +56,7 @@ function layoutElement() {
  return component({layout:{mode:'single',panes:['fixture'],focused:0,revision:0},labels:['Terminal'],splitPercent:50,swapDisabled:false,canReopen:true,onHost(){},onMode(){},onFocus(){},onClose(){}});
 }
 const piConnection={integration:'connected',cli_path:'/Users/example-user/.npm-global/bin/pi',agent_session_id:'c349ad0b-9961-410c-aba5-61d4bea0458e',cli_version:'1.4.0'};
-function markup(interactive, collapsed, longPath, stopped=false, pi=false) {
+function markup(interactive, collapsed, longPath, stopped=false, pi=false, terminalAvailability=null, moving=false) {
   const bindings = {React, SessionConnection, installedPiVersion:pi?'1.5.0':null, ...Object.fromEntries(Object.entries(icons).filter(([name]) => /^[A-Z]/.test(name))), gitProjectPath:'/work',sidebarOpen: !collapsed, currentProject: {name: 'YAM'},
     sidebarSessions,searchInput:{current:null},historyQuery:'',statusFilter:'all',unreadTotal:0,inboxOpen:false,shortcutError:null,history:[],historyCursor:null,historyLoading:false,capacityOpen:false,capacity:null,capacityError:null,capacityBusy:false,scanCapacity(){},jumpToAttention(){},addProject(){},endProjectDrag(){},
     visibleProjects:[{path:'/work',name:'Project',sessions:[{summary:{session_id:'fixture',mode:'command'},status:'stopped',started_at:0}]}],projectKey:path=>path,collapsedProjects:new Set(),normalizedQuery:'',projectColor:()=>'',canRenameProject:()=>true,canMoveProject:()=>false,pinnedSessions:[],
@@ -68,7 +68,7 @@ function markup(interactive, collapsed, longPath, stopped=false, pi=false) {
     historyOverview: {failed_receipts: 1,attention_sessions:0,total:1,active:1}, canNavigateReportedPrompt: () => false,
     shortcutMac: true, fileBusy: false, filePreview: null, canMoveTerminalTab: () => false,
     moveBusy: false, movePending: false, isMainWindow: true, stopAllBusy:false,
-    updaterSnapshot:null,isMainWindow:true,health:{status:'ready',version:'0.1.0'}, memory:null, memoryLabel:()=> '100 MB', notificationTestBusy:{current:false},notificationTestStatus:null,openCommandPalette(){},diagnosticsExporting:false,diagnosticsMessage:null, notificationError:null,scrollView:null, ownerConnectionAvailable:{current:{available:true}},terminalPaneVisible:()=>true,canClearTerminalDisplay:()=>false, shortcuts: {}, shortcutHint: () => '',
+    updaterSnapshot:null,isMainWindow:true,health:{status:'ready',version:'0.1.0'}, memory:null, memoryLabel:()=> '100 MB', notificationTestBusy:{current:false},notificationTestStatus:null,openCommandPalette(){},diagnosticsExporting:false,diagnosticsMessage:null, notificationError:null,scrollView:terminalAvailability?{ready:true,availability:terminalAvailability,moving}:null, ownerConnectionAvailable:{current:{available:true}},terminalPaneVisible:()=>true,canClearTerminalDisplay:()=>false, shortcuts: {}, shortcutHint: () => '',
     terminalViews: {current: new Map()}, recovery: {canRunAgain: false}, canContinue: false,
     closeEndedView() {}, rerunSelectedSession() {}, resumeSelectedSession() {}};
   assert.ok(creation,'actual shared new-session control');
@@ -88,6 +88,30 @@ test('production workspace chrome renders shell, Agent, ended and collapsed stat
   assert.match(html,/class="sidebar-footer"/);assert.match(html,/class="workspace-viewbar"/);
   assert.match(html,/aria-label="Session view"/);assert.doesNotMatch(html,/<time\b/);
  }
+});
+
+test('terminal copy and Finder actions require a ready terminal',()=>{
+ for(const [availability,disabled] of [[null,true],["terminal_unavailable",true],["available",false]]){
+  const html=markup(true,false,false,false,false,availability);
+  for(const label of ['Copy terminal output','Show selected file in Finder…']){
+   const button=[...html.matchAll(/<button[^>]*>/g)].find(([tag])=>tag.includes('aria-label="'+label+'"'))?.[0];
+   assert.ok(button);
+   assert.equal(button.includes('disabled=""'),disabled,label);
+  }
+ }
+});
+
+test('Finder action is disabled while the ready terminal is moving',()=>{
+ const html=markup(true,false,false,false,false,'available',true);
+ const button=[...html.matchAll(/<button[^>]*>/g)].find(([tag])=>tag.includes('aria-label="Show selected file in Finder…"'))?.[0];
+ assert.ok(button);
+ assert.match(button,/disabled=""/);
+});
+
+test('More actions has no built-in browser entry',()=>{
+ const html=markup(true,false,false);
+ assert.match(html,/aria-label="More actions"/);
+ assert.doesNotMatch(html,/aria-label="Browser"/);
 });
 
 test('expanding session connection keeps its parent menu open and exposes the launch version',()=>{
@@ -210,4 +234,21 @@ test('actual header keeps Git readable, terminal space, and actions reachable', 
       assert.deepEqual(value.inaccessible, [], `${value.name}: controls remain visible inside header`);
     }
   } finally { rmSync(directory, {recursive: true, force: true}); }
+});
+
+test('the workspace Git lookup follows the actual local session directory and excludes SSH',()=>{
+ const text=source.getFullText();
+ const path=text.match(/const gitProjectPath = ([^;]+);/)?.[1];
+ assert.ok(path);
+ const getPath=new Function('session','currentProject','activeProject','return '+path);
+ assert.equal(getPath({cwd:'/repo/worktree'},{path:'/repo'},'/last'),'/repo/worktree');
+ assert.equal(getPath({cwd:'/repo/remote',ssh:{}},{path:'/repo'},'/last'),'');
+ assert.equal(getPath(null,{path:'/repo'},'/last'),'/repo');
+ assert.match(viewbar.getText(source),/workspace-branch[^>]*>[\s\S]*visibleGitContext\.branch/);
+ const scopedPath=text.match(/const requestedProjectToolsPath=([^;]+);/)?.[1];
+ assert.ok(scopedPath);
+ const getRequestedPath=new Function('projectToolsRequest','gitProjectPath','gitOwner','return '+scopedPath);
+ assert.equal(getRequestedPath({directory:'/repo/one',owner:2,path:'/repo/one'},'/repo/two',2),'');
+ assert.equal(getRequestedPath({directory:'/repo/two',owner:1,path:'/repo/two'},'/repo/two',2),'');
+ assert.equal(getRequestedPath({directory:'/repo/two',owner:2,path:'/repo/two'},'/repo/two',2),'/repo/two');
 });

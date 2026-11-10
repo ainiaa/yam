@@ -30,27 +30,43 @@ test('project order skips removed groups and re-adding a directory restores it',
  await actual('saveProject',{isMainWindow:true,projectPath:'/gone',newProjectName:'Restored',projectName:workspaces.projectName,projectKey:workspaces.projectKey,invoke:async()=>{},projectsRef:{current:rows},commitProjects:next=>rows=next,setProjectError:assert.fail,setActiveProject(){},setCollapsedProjects(){},projectDialog:{current:{close(){}}}})();
  assert.equal(rows[0].hidden,false);assert.equal(workspaces.groupProjects(rows,[]).length,1);
 });
-test('delete project persists before closing and handles stale targets and failed writes',()=>{
- const project={path:'/one',name:'One'},other={path:'/two',name:'Two'},intent={...project};let rows=[project,other],closed=0;const errors=[];
- const bindings={...workspaces,isMainWindow:true,projectDeleteRef:{current:intent},projectsRef:{current:rows},commitProjects:next=>{rows=next;},closeProjectDeletion:()=>closed++,setError:e=>errors.push(e),setActiveProject(){},activeProject:'/one'};
- actual('confirmProjectDeletion',bindings)(intent);assert.equal(rows.find(p=>p.path==='/one').hidden,true);assert.equal(rows[1],other);assert.equal(closed,1);
- bindings.commitProjects=()=>{throw Error('storage');};actual('confirmProjectDeletion',bindings)(intent);assert.equal(closed,1);assert.equal(errors.length,1);
- bindings.projectDeleteRef.current=null;actual('confirmProjectDeletion',bindings)(intent);assert.equal(errors.length,1);
- bindings.projectDeleteRef.current=intent;bindings.isMainWindow=false;actual('confirmProjectDeletion',bindings)(intent);assert.equal(errors.length,1);
+function projectDeletionFixture(){
+ const intent={path:'/one',name:'One'},other={path:'/two',name:'Two'},errors=[],deleted=[];let rows=[intent,other],closed=0;
+ const bindings={...workspaces,isMainWindow:true,projectDeleteRef:{current:intent},projectDeleteBusyRef:{current:false},sessionDeleteBusyRef:{current:false},projectsRef:{current:rows},setProjectDeleteBusy(){},setProjectDeleteError:e=>errors.push(e),setError:e=>errors.push(e),commitProjects:next=>{rows=next;bindings.projectsRef.current=next;},closeProjectDeletion:()=>closed++,setActiveProject(){},activeProject:'/one',collectProjectDeletionTargets:async()=>[],deleteSessionTarget:async target=>deleted.push(target.id),refreshHistory:async()=>{}};
+ return {intent,other,bindings,errors,deleted,get rows(){return rows;},get closed(){return closed;},run:()=>actual('confirmProjectDeletion',bindings)(intent)};
+}
+test('project deletion removes the entry only after all sessions are permanently deleted',async()=>{
+ const h=projectDeletionFixture();let scans=0;h.bindings.collectProjectDeletionTargets=async()=>scans++?[]:[{id:'running'},{id:'ended'},{id:'archived'}];
+ h.bindings.deleteSessionTarget=async target=>{assert.equal(h.rows.length,2);h.deleted.push(target.id);};
+ await h.run();assert.deepEqual(h.deleted,['running','ended','archived']);assert.deepEqual(h.rows,[h.other]);assert.equal(h.closed,1);
+});
+test('project deletion failures retain the project and reject duplicate or stale confirmation',async()=>{
+ const h=projectDeletionFixture();h.bindings.collectProjectDeletionTargets=async()=>[{id:'failed'}];h.bindings.deleteSessionTarget=async()=>{throw Error('disk error');};
+ await h.run();assert.equal(h.rows.length,2);assert.equal(h.closed,0);assert.ok(h.errors.some(Boolean));assert.equal(h.bindings.projectDeleteBusyRef.current,false);
+ h.bindings.projectDeleteBusyRef.current=true;await h.run();h.bindings.projectDeleteBusyRef.current=false;
+ h.bindings.projectsRef.current=[{...h.intent,name:'Renamed'}];await h.run();assert.equal(h.closed,0);
+});
+test('a session created during project deletion keeps the project available for another confirmation',async()=>{
+ const h=projectDeletionFixture();h.bindings.collectProjectDeletionTargets=async()=>[{id:'new'}];await h.run();assert.equal(h.rows.length,2);assert.equal(h.closed,0);
+});
+test('project deletion enumerates every page, previous run and archive using exact directory identity',async()=>{
+ const item=(id,cwd,previous_runs=[])=>({summary:{session_id:id,cwd},previous_runs});const calls=[];
+ const targets=await actual('collectProjectDeletionTargets',{projectKey:workspaces.projectKey,invoke:async(name,args)=>{calls.push([name,args]);if(name==='get_session')return item(args.sessionId,args.sessionId==='old'?'/one':'/else');if(name==='list_session_summaries')return args.request.cursor?{items:[item('two','/one-other')],next_cursor:null}:{items:[item('one','/one/',['old','else'])],next_cursor:{offset:100}};return args.request.cursor?{items:[item('archive','/one')],next_cursor:null}:{items:[],next_cursor:{offset:100}};}})('/one');
+ assert.deepEqual(targets.map(t=>[t.id,t.archived]),[['one',false],['old',false],['archive',true]]);assert.equal(calls.filter(([n])=>n==='list_archived_sessions').length,2);
 });
 function deletionFixture(invoke){const target={id:'s-one',title:'One',archived:false,previewId:null};const calls=[],deleted=[],errors=[];let closed=0;
- const bindings={sessionDeleteRef:{current:target},sessionDeleteBusyRef:{current:false},isMainWindow:true,setSessionDeleteBusy(){},setTimeout:callback=>callback(),setSessionDeleteError:e=>errors.push(e),invoke:async(name,args)=>{calls.push([name,args]);return invoke(name,args);},clearDeletedSessionNames:ids=>deleted.push(...ids),refreshHistory:async()=>calls.push(['refresh']),closeSessionDeletion:()=>closed++};
- return {target,bindings,calls,deleted,errors,get closed(){return closed;},run:()=>actual('confirmSessionDeletion',bindings)()};}
+ const bindings={sessionDeleteRef:{current:target},sessionDeleteBusyRef:{current:false},projectDeleteBusyRef:{current:false},isMainWindow:true,setSessionDeleteBusy(){},setTimeout:callback=>callback(),setSessionDeleteError:e=>errors.push(e),invoke:async(name,args)=>{calls.push([name,args]);if(name==='get_session'){const value=await invoke(name,args);return value??{summary:{session_id:args.sessionId},status:'succeeded',agent:{inbox:[]}};}return invoke(name,args);},clearDeletedSessionNames:ids=>deleted.push(...ids),refreshHistory:async()=>calls.push(['refresh']),closeSessionDeletion:()=>closed++};
+ bindings.deleteSessionTarget=target=>actual('deleteSessionTarget',bindings)(target);return {target,bindings,calls,deleted,errors,get closed(){return closed;},run:()=>actual('confirmSessionDeletion',bindings)()};}
 test('session deletion uses the captured ID, confirms its exact preview, and cleans actual IDs only',async()=>{
  const h=deletionFixture(async name=>name==='preview_archive_deletion'?{preview_id:'token',session_ids:['s-one']}:name==='confirm_archive_deletion'?{deleted_ids:['s-one'],complete:true,issues:[]}:null);
- await h.run();assert.deepEqual(h.deleted,['s-one']);assert.equal(h.closed,1);assert.deepEqual(h.calls.slice(0,3),[['archive_session',{sessionId:'s-one'}],['preview_archive_deletion',{sessionIds:['s-one']}],['confirm_archive_deletion',{previewId:'token'}]]);
+ await h.run();assert.deepEqual(h.deleted,['s-one']);assert.equal(h.closed,1);assert.deepEqual(h.calls.filter(([name])=>name!=='get_session').slice(0,3),[['archive_session',{sessionId:'s-one'}],['preview_archive_deletion',{sessionIds:['s-one']}],['confirm_archive_deletion',{previewId:'token'}]]);
 });
 test('partial deletion retains the token for retry and never removes undeleted sessions',async()=>{
  let complete=false;const h=deletionFixture(async name=>name==='preview_archive_deletion'?{preview_id:'token',session_ids:['s-one']}:name==='confirm_archive_deletion'?{deleted_ids:complete?['s-one']:[],complete,issues:['pending']}:null);
  await h.run();assert.deepEqual(h.deleted,[]);assert.equal(h.closed,0);assert.equal(h.target.previewId,'token');complete=true;await h.run();assert.deepEqual(h.deleted,['s-one']);assert.equal(h.calls.filter(([name])=>name==='archive_session').length,1);
 });
 test('archive failure, unrelated preview and reentrant clicks cannot delete another session',async()=>{
- for(const mode of ['archive','preview']){const h=deletionFixture(async name=>{if(mode==='archive')throw Error('Session has pending notifications');return {preview_id:'wrong',session_ids:['s-other']};});await h.run();assert.deepEqual(h.deleted,[]);assert.equal(h.closed,0);assert.equal(h.calls.some(([name])=>name==='confirm_archive_deletion'),false);assert.ok(h.errors.some(Boolean));}
+ for(const mode of ['archive','preview']){const h=deletionFixture(async name=>{if(name==='get_session')return null;if(mode==='archive')throw Error('Session has pending notifications');return {preview_id:'wrong',session_ids:['s-other']};});await h.run();assert.deepEqual(h.deleted,[]);assert.equal(h.closed,0);assert.equal(h.calls.some(([name])=>name==='confirm_archive_deletion'),false);assert.ok(h.errors.some(Boolean));}
  const h=deletionFixture(()=>assert.fail('busy'));h.bindings.sessionDeleteBusyRef.current=true;await h.run();assert.deepEqual(h.calls,[]);
 });
 test('delete dialogs are mounted before showModal and project deletion includes derived groups',()=>{
@@ -59,21 +75,15 @@ test('delete dialogs are mounted before showModal and project deletion includes 
  const button=buttons.find(node=>node.getText(tree).includes('deleteProject(project)'));assert.ok(!ts.isBinaryExpression(button.parent));
 });
 test('running sessions open a confirmation and cancellation never mutates history',()=>{
- const shown=[],errors=[];const state={isMainWindow:true,sessionDeleteBusyRef:{current:false},selectedRecord:{current:null},setError:e=>errors.push(e),sessionDeleteRef:{current:null},setSessionDelete:v=>shown.push(v),setSessionDeleteError(){},sessionDeleteDialog:{current:{showModal(){}}},titleFor:()=> 'One'};
+ const shown=[],errors=[];const state={isMainWindow:true,sessionDeleteBusyRef:{current:false},projectDeleteBusyRef:{current:false},selectedRecord:{current:null},setError:e=>errors.push(e),sessionDeleteRef:{current:null},setSessionDelete:v=>shown.push(v),setSessionDeleteError(){},sessionDeleteDialog:{current:{showModal(){}}},titleFor:()=> 'One'};
  actual('beginSessionDeletion',state)({summary:{session_id:'s-one'},status:'running'});assert.equal(shown.length,1);assert.equal(shown[0].stopBeforeDelete,true);assert.equal(errors.length,0);
  actual('beginSessionDeletion',state)({summary:{session_id:'s-one'},status:'stopped'});assert.equal(shown.length,2);assert.equal(shown[1].stopBeforeDelete,false);
  const commands=[];actual('closeSessionDeletion',{...state,setSessionDelete:()=>{},sessionDeleteDialog:{current:{close(){}}},invoke:async name=>commands.push(name)})();assert.equal(state.sessionDeleteRef.current,null);assert.deepEqual(commands,[]);
 });
-test('deleted project intent uses its own full path for derived groups and rejects renamed targets',()=>{
- const intent={path:'/first/api',name:'API'},other={path:'/second/api',name:'API'},ref={current:intent};let saved=null;const errors=[];
- const bindings={...workspaces,isMainWindow:true,projectDeleteRef:ref,projectsRef:{current:[other]},commitProjects:next=>saved=next,activeProject:'',setActiveProject(){},closeProjectDeletion(){},setError:error=>errors.push(error)};
- actual('confirmProjectDeletion',bindings)(intent);assert.equal(saved[0],other);assert.equal(saved[1].path,intent.path);assert.equal(saved[1].hidden,true);assert.equal(typeof saved[1].hiddenBefore,'number');
- bindings.projectsRef.current=[{...intent,name:'Renamed'},other];saved=null;actual('confirmProjectDeletion',bindings)(intent);assert.equal(saved,null);assert.equal(errors.length,1);
-});
 test('lost deletion reply retries the same token and rejects unrelated result IDs',async()=>{
  let attempts=0;const h=deletionFixture(async name=>{if(name==='preview_archive_deletion')return {preview_id:'token',session_ids:['s-one']};if(name==='confirm_archive_deletion'){if(attempts++===0)throw Error('connection lost');return {deleted_ids:['s-one'],complete:true,issues:[]};}});
  await h.run();assert.equal(h.target.previewId,'token');await h.run();assert.deepEqual(h.deleted,['s-one']);assert.equal(h.calls.filter(([name])=>name==='preview_archive_deletion').length,1);
- const wrong=deletionFixture(async name=>name==='preview_archive_deletion'?{preview_id:'token',session_ids:['s-one']}:{deleted_ids:['s-other'],complete:true,issues:[]});await wrong.run();assert.deepEqual(wrong.deleted,[]);assert.equal(wrong.closed,0);
+ const wrong=deletionFixture(async name=>name==='get_session'?null:name==='preview_archive_deletion'?{preview_id:'token',session_ids:['s-one']}:{deleted_ids:['s-other'],complete:true,issues:[]});await wrong.run();assert.deepEqual(wrong.deleted,[]);assert.equal(wrong.closed,0);
 });
 test('session actions live in a context menu instead of inline buttons',()=>{
  assert.ok(source.includes('onContextMenu={event=>{event.preventDefault();'));
@@ -141,4 +151,28 @@ test('active deletion is enabled in the sidebar and warns before stopping',()=>{
 test('confirmed deletion acknowledges only its own unread Agent receipts before archiving',async()=>{
  const h=activeDeletionFixture({agent:true});await h.run();assert.equal(h.closed,1);
  assert.deepEqual(h.calls.find(([n])=>n==='read_agent_receipt'),['read_agent_receipt',{sessionId:'s-one',receipt:'receipt-one',revision:7}]);
+});
+
+test('ended session deletion clears unread receipts and pending notification before archive',async()=>{
+ const h=deletionFixture(async name=>name==='get_session'?{summary:{session_id:'s-one'},status:'succeeded',notification_pending:true,agent:{inbox:[{id:'unread',revision:4,read:false,delivery:'pending'}]}}:name==='preview_archive_deletion'?{preview_id:'token',session_ids:['s-one']}:name==='confirm_archive_deletion'?{deleted_ids:['s-one'],complete:true}:null);
+ await h.run();assert.equal(h.closed,1);assert.ok(h.calls.findIndex(([n])=>n==='read_agent_receipt')<h.calls.findIndex(([n])=>n==='archive_session'));assert.ok(h.calls.some(([n])=>n==='acknowledge_notification'));
+});
+
+test('expired deletion preview can be regenerated on retry',async()=>{
+ let attempts=0;const h=deletionFixture(async name=>name==='preview_archive_deletion'?{preview_id:'token',session_ids:['s-one']}:name==='confirm_archive_deletion'?(attempts++===0?Promise.reject('Deletion preview expired; preview again'):{deleted_ids:['s-one'],complete:true}):null);
+ await h.run();assert.equal(h.target.previewId,null);await h.run();assert.equal(h.closed,1);assert.equal(h.calls.filter(([n])=>n==='preview_archive_deletion').length,2);
+});
+test('project deletion retry keeps completed targets and failed target preview',async()=>{
+ const h=projectDeletionFixture();let scans=0,attempts=0;
+ h.bindings.collectProjectDeletionTargets=async()=>scans++?[]:[{id:'a',archived:true},{id:'b',archived:true}];
+ h.bindings.invoke=async(name,args)=>name==='preview_archive_deletion'?{preview_id:args.sessionIds[0],session_ids:args.sessionIds}:args.previewId==='b'&&attempts++===0?{deleted_ids:[],complete:false}:{deleted_ids:[args.previewId],complete:true};
+ h.bindings.clearDeletedSessionNames=ids=>h.deleted.push(...ids);
+ h.bindings.deleteSessionTarget=target=>actual('deleteSessionTarget',h.bindings)(target);
+ await h.run();assert.deepEqual(h.deleted,['a']);assert.equal(h.closed,0);await h.run();assert.deepEqual(h.deleted,['a','b']);assert.equal(h.closed,1);
+});
+test('project storage failure preserves retry and cancel while deleting keeps intent',async()=>{
+ const h=projectDeletionFixture();h.bindings.commitProjects=()=>{throw Error('storage');};await h.run();assert.equal(h.closed,0);assert.equal(h.rows.length,2);
+ const ref={current:h.intent};let closed=0;
+ const bindings={projectDeleteBusyRef:{current:true},projectDeleteRef:ref,setProjectDelete(){},projectDeleteDialog:{current:{close:()=>closed++}}};
+ actual('closeProjectDeletion',bindings)();assert.equal(ref.current,h.intent);bindings.projectDeleteBusyRef.current=false;actual('closeProjectDeletion',bindings)();assert.equal(ref.current,null);assert.equal(closed,1);
 });

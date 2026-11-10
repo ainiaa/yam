@@ -494,7 +494,7 @@ F1–F6源码与有限smoke helper已通过独立源码复审。当前实际检�
 
 [F7当前证据](evidence/yam-functional-f7/README.md)区分first candidate/R1、真实RED/harness、构建及原生阶段输入、最终自动检查和未覆盖边界；formal provider coverage仍uncovered。
 
-| 独立浏览器窗口 C01a | main More actions → Browser，HTTP(S)URL与Show/Reload/Close；固定单独窗口，native identity gate和exact WebView plugin scope，generation/Destroyed保留不确定关闭状态 | [C01a回执](superpowers/plans/2026-10-09-yam-cmux-c01a.md)；60/1073front、599Rust+2原ignored/10target，独立60+10 PASS。124-file frontend/security投影绑定；native iframe/plugin/render/ReactDOM/跨平台/full C01/Suite未验，旧debug138未含，updater暂停 |
+| 网页链接 | 终端中的 HTTP(S) 链接使用系统默认浏览器打开。已移除「更多操作」中的独立浏览器窗口。 | [原 C01a 回执](superpowers/plans/2026-10-09-yam-cmux-c01a.md) |
 
 | A11有限owner/parser测量 | 隔离F7实跑r6完成：300/300 submission→parser P95 30.329208ms，writeRPC P95 15.197292ms，3251476bytes exact drain；cleanup真实wait/absent | [回执](superpowers/plans/2026-10-09-yam-cmux-a11-fixture.md)：高档1MiB/s offered仅544755.82B/s、stall4.938s；134 helper/独立sol，原失败和清理recoverable错误保留。非paint/ACK起点；nativeGUI/ReactDOM/cmux/RSS/full A11/Suite仍open，updater暂停 |
 

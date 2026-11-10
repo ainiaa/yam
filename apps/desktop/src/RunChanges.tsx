@@ -21,21 +21,31 @@ function runError(code:string):string {
   default:return t('Baseline comparison is unavailable. Retry or reload baseline information.');
  }
 }
-export function RunChanges({sessionId,root,active,invoke=nativeInvoke,onOpenFile,onReview,onBaselineMutation}:{sessionId:string|null;root:string;active:boolean;invoke?:FilesInvoke;onOpenFile?:(target:DiffTarget)=>void;onReview?:(target:DiffTarget)=>void;onBaselineMutation?:()=>()=>void}) {
+export function RunChanges({sessionId,root,owner=0,active,invoke=nativeInvoke,onOpenFile,onReview,onBaselineMutation,branch,worktree,deliveryNotice,onOpenWorktree,onReviewOutput}:{
+ sessionId:string|null;root:string;owner?:string|number;active:boolean;invoke?:FilesInvoke;onOpenFile?:(target:DiffTarget)=>void;
+ onReview?:(target:DiffTarget)=>void;onBaselineMutation?:()=>()=>void;
+ branch?:string|null;worktree?:string|null;deliveryNotice?:string|null;onOpenWorktree?:()=>void;onReviewOutput?:()=>void;
+}) {
  const controller=useRef(new RunChangesController()),mounted=useRef(false);
  const [,refresh]=useState(0),[replace,setReplace]=useState<string|null>(null);
- const c=controller.current,scope=JSON.stringify([sessionId,root]),ready=!!sessionId&&c.scope===scope;
+ const c=controller.current,scope=JSON.stringify([sessionId,root,owner]),ready=!!sessionId&&c.scope===scope;
  const baseline=ready?c.baseline:null,report=ready?c.report:null;
  function act(path:string,line:number|null,side:'old'|'new',action:((target:DiffTarget)=>void)|undefined,reviewPatch?:ReviewPatch){if(action&&sessionId&&c.scope===scope&&baseline&&c.baseline?.id===baseline.id)action({sessionId,absolutePath:`${baseline.root.replace(/\/$/,'')}/${path}`,line,side,basis:'round',...(reviewPatch?{reviewPatch}:{})});}
  function reviewLine(side:'old'|'new',line:number){if(baseline&&report?.patch)act(report.patch.path,line,side,onReview,{root:baseline.root,baselineId:baseline.id,text:report.patch.text});}
  function run(action:()=>Promise<void>){const pending=action();refresh(v=>v+1);void pending.finally(()=>{if(mounted.current)refresh(v=>v+1);});}
  function mutateBaseline(action:()=>Promise<void>){const finish=onBaselineMutation?.();run(async()=>{try{await action();}finally{finish?.();}});}
- useEffect(()=>{mounted.current=true;if(active&&sessionId){c.select(sessionId,root);run(()=>c.load(invoke));}return()=>{mounted.current=false;c.cancel();};},[sessionId,root,active,invoke]);
+ useEffect(()=>{mounted.current=true;if(active&&sessionId){c.select(sessionId,root,owner);run(()=>c.load(invoke));}return()=>{mounted.current=false;c.cancel();};},[sessionId,root,owner,active,invoke]);
  if(!active)return null;
  return <section className="run-changes" aria-label={t('Run changes')}>
   <h3>{t('Run changes')}</h3>
   <p>{t('Record before starting a task. Differences include human and concurrent edits; authorship is not verified.')}</p>
   {!sessionId?<p>{t('Select a local session to record a baseline.')}</p>:<>
+   {worktree&&<p className="run-worktree" title={worktree}>{branch??t('Detached HEAD')} · {worktree}</p>}
+   {deliveryNotice&&<p>{t(deliveryNotice)}</p>}
+   {(worktree&&onOpenWorktree||onReviewOutput)&&<div className="project-files-controls">
+    {worktree&&onOpenWorktree&&<button type="button" onClick={onOpenWorktree}>{t('View worktree')}</button>}
+    {onReviewOutput&&<button type="button" onClick={onReviewOutput}>{t('Review recorded output')}</button>}
+   </div>}
    <div className="project-files-controls">
     <button type="button" disabled={!ready||c.busy} onClick={()=>{if(baseline)setReplace(`${scope}:${baseline.id}`);else mutateBaseline(()=>c.capture(invoke));}}>{baseline?t('Replace baseline'):t('Record baseline')}</button>
     <button type="button" disabled={!baseline||c.busy} onClick={()=>run(()=>c.compare(invoke))}>{t('Compare since baseline')}</button>

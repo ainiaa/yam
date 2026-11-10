@@ -1,5 +1,5 @@
 // Author: Jeff.Liu. Validate the Codex projection without reading files or credentials.
-import {defaultTierRules,validateRules} from './task-rules.mjs';
+import {defaultTierRules,matchesWorkspace,validateRules} from './task-rules.mjs';
 
 const tiers=['small','medium','strong'];
 const keyPattern=/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.:/-]+$/;
@@ -71,32 +71,74 @@ export function readCodexPolicy(raw,{allowIncomplete=false}={}){
  return config;
 }
 
-export function codexModelRequirements(config){
+function* modelRequirements(config,cwd){
  const {candidate,rules}=validateCodexPolicy(config);
  const fixed=config.model&&config.model!=='auto'?config.model:null;
  const fixedEffort=config.effort&&config.effort!=='auto'?config.effort:null;
- if(fixed&&fixedEffort)return new Map([[fixed,new Set([fixedEffort])]]);
- const requirements=new Map();
- const requireEffort=(key,effort)=>{
-  const efforts=requirements.get(key)??new Set();
-  efforts.add(effort);requirements.set(key,efforts);
+ if(fixed&&fixedEffort){yield {keys:[fixed],effort:fixedEffort,execution:true};return;}
+ const tierKeys=tier=>{
+  const keys=config.executionGroups.map(group=>group[tier]).filter(Boolean);
+  if(!keys.length)return keys;
+  const channel=candidate(keys[0]).billing;
+  return keys.filter(key=>candidate(key).billing===channel);
  };
- for(const key of config.classifiers)requireEffort(key,candidate(key).billing==='paid'?'high':'medium');
- for(const selection of [...rules.rules,rules.fallback,{model:'strong',effort:rules.rules.find(rule=>rule.task==='review').effort}]){
-  for(const key of fixed?[fixed]:config.executionGroups.map(group=>group[selection.model]).filter(Boolean))requireEffort(key,fixedEffort??selection.effort);
+ const deep={model:'strong',effort:rules.rules.find(rule=>rule.task==='review').effort};
+ function* ruleDefaults(when,includeFallback=true){
+  if(when.depth!=='normal')yield deep;
+  if(when.depth!=='deep')for(const rule of rules.rules){
+   if(when.task&&when.task!==rule.task)continue;
+   yield rule;
+   if(includeFallback&&rule.model==='small')yield rules.fallback;
+  }
+ }
+ if(config.classifiers.length)yield {keys:config.classifiers,effort:candidate(config.classifiers[0]).billing==='paid'?'high':'medium'};
+ for(const selection of [...rules.rules,rules.fallback,deep]){
+  const keys=fixed?[fixed]:tierKeys(selection.model);
+  if(!keys.length)continue;
+  yield {keys,effort:fixedEffort??selection.effort,execution:true};
+ }
+ for(const {enabled,when,use} of rules.executionRules??[]){
+  if(!enabled||cwd!==undefined&&!matchesWorkspace(when.workspace,cwd)||!use.model&&!use.effort)continue;
+  const effort=fixedEffort??use.effort;
+  if(fixed){
+   if(effort)yield {keys:[fixed],effort,execution:true};
+  }else if(use.model){
+   const keys=tiers.includes(use.model)?tierKeys(use.model):
+    tiers.some(tier=>tierKeys(tier).includes(use.model))?[use.model]:[];
+   if(!keys.length)throw Error('Execution rule requires a model in the configured tier billing channel');
+   const levels=effort?[effort]:new Set(Array.from(ruleDefaults(when),selection=>selection.effort));
+   for(const level of levels)yield {keys,effort:level,execution:true};
+  }else if(!fixedEffort){
+   const applicable=new Set(Array.from(ruleDefaults(when,effort!=='medium'),selection=>selection.model));
+   for(const tier of applicable){
+    const keys=tierKeys(tier);
+    if(keys.length)yield {keys,effort,execution:true};
+   }
+  }
+ }
+}
+
+export function codexModelRequirements(config,cwd){
+ const requirements=new Map();
+ for(const {keys,effort} of modelRequirements(config,cwd)){
+  for(const key of keys){
+   const efforts=requirements.get(key)??new Set();
+   efforts.add(effort);
+   requirements.set(key,efforts);
+  }
  }
  return requirements;
 }
 
-export function validateCodexModelCatalog(config,models,checkedConnections){
- const requirements=codexModelRequirements(config);
- for(const [key,efforts] of requirements){
-  const model=models.find(row=>row.key===key);
-  if(!model){
-   const name=key.split('/',1)[0];
-   if(checkedConnections&&!checkedConnections.includes(name))throw Error('Codex model catalog unavailable: '+name);
-   throw Error('Codex model unavailable: '+key);
-  }
-  for(const effort of efforts)if(!model.levels.includes(effort))throw Error(`${key}: unsupported reasoning ${effort}`);
+export function validateCodexModelCatalog(config,models,checkedConnections,usableExecutionConnections,cwd){
+ const catalog=new Map(models.map(model=>[model.key,model]));
+ for(const {keys,effort,execution} of modelRequirements(config,cwd)){
+  const usable=execution&&usableExecutionConnections?keys.filter(key=>usableExecutionConnections.includes(key.split('/',1)[0])):keys;
+  if(!usable.length)throw Error('This strategy requires another Codex connection; start a new session');
+  if(usable.some(key=>catalog.get(key)?.levels.includes(effort)))continue;
+  const [key]=usable, name=key.split('/',1)[0];
+  if(catalog.has(key))throw Error(`${key}: unsupported reasoning ${effort}`);
+  if(checkedConnections&&!checkedConnections.includes(name))throw Error('Codex model catalog unavailable: '+name);
+  throw Error('Codex model unavailable: '+key);
  }
 }

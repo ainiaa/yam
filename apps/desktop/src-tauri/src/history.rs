@@ -573,6 +573,38 @@ pub(crate) struct Overview {
 pub(crate) struct InboxItem {
     pub session: HistoryItem,
     pub receipt: agent_events::AgentReceipt,
+    #[serde(default)]
+    pub current: bool,
+}
+
+pub(super) fn current_inbox_receipt(record: &SessionRecord, receipt: &agent_events::AgentReceipt) -> bool {
+    let agent = &record.agent;
+    if receipt.read
+        || !matches!(record.status.as_str(), "starting" | "running")
+        || agent.integration != "connected"
+        || agent.route_pending
+        || agent.generation.is_empty()
+        || receipt.turn_id.is_empty()
+        || agent.turn_id.as_deref() != Some(receipt.turn_id.as_str())
+        || receipt.kind != agent.phase
+        || !receipt.id.starts_with(&format!("{}:{}:", agent.generation, receipt.turn_id))
+        || receipt.revision == 0
+        || receipt.revision > agent.revision
+    {
+        return false;
+    }
+    if receipt.kind == "needs_permission" {
+        return receipt.permission_key.as_ref().map_or(
+            receipt.revision == agent.revision,
+            |key| {
+                agent.permission_keys.contains(key)
+                    && !agent.inbox.iter().rev()
+                        .take_while(|newer| newer.revision > receipt.revision)
+                        .any(|newer| newer.turn_id == receipt.turn_id && newer.permission_key.as_ref() == Some(key))
+            },
+        );
+    }
+    matches!(receipt.kind.as_str(), "response_finished" | "needs_attention" | "failed" | "interrupted")
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(deny_unknown_fields)]
@@ -837,7 +869,19 @@ impl HistoryStore {
             self.revision.load(Ordering::Acquire)
         );
         let offset = request.offset(&revision, &context)?;
-        let mut items = records
+        let mut priority: Vec<_> = records
+            .iter()
+            .rev()
+            .flat_map(|record| record.agent.inbox.iter().rev().filter_map(move |receipt| {
+                (matches!(receipt.kind.as_str(), "needs_permission" | "failed")
+                    && current_inbox_receipt(record, receipt)).then_some((record, receipt))
+            }))
+            .collect();
+        priority.sort_by_key(|(_, receipt)| receipt.kind != "needs_permission");
+        let prioritized: std::collections::HashSet<_> = priority.iter().map(|(record, receipt)| {
+            (record.summary.session_id.as_str(), receipt.id.as_str())
+        }).collect();
+        let ordinary = records
             .iter()
             .rev()
             .flat_map(|record| {
@@ -847,12 +891,17 @@ impl HistoryStore {
                     .iter()
                     .filter(|entry| !entry.read)
                     .map(move |receipt| (record, receipt))
-            })
+            }).filter(|(record, receipt)| {
+                !prioritized.contains(&(record.summary.session_id.as_str(), receipt.id.as_str()))
+            });
+        let mut items = priority.into_iter().map(|(record, receipt)| (record, receipt, true))
+            .chain(ordinary.map(|(record, receipt)| (record, receipt, current_inbox_receipt(record, receipt))))
             .skip(offset)
             .take(size + 1)
-            .map(|(record, receipt)| InboxItem {
+            .map(|(record, receipt, current)| InboxItem {
                 session: item(record),
                 receipt: receipt.clone(),
+                current,
             })
             .collect::<Vec<_>>();
         let next_cursor = (items.len() > size).then(|| PageCursor {
@@ -3163,6 +3212,7 @@ mod tests {
                 (3, "failed", true),
             ] {
                 records[index].agent.inbox.push(agent_events::AgentReceipt {
+                    permission_key: None,
                     id: format!("r-{index}"),
                     revision: 1,
                     turn_id: "turn".into(),
@@ -3299,6 +3349,7 @@ mod tests {
                     record.notification_pending = true;
                 } else {
                     record.agent.inbox.push(agent_events::AgentReceipt {
+                        permission_key: None,
                         id: "r-race".into(),
                         revision: 1,
                         turn_id: "turn".into(),
@@ -4195,6 +4246,7 @@ mod tests {
         for (delivery, read) in [("sent", false), ("pending", true), ("failed", true)] {
             let mut record = original.clone();
             record.agent.inbox.push(agent_events::AgentReceipt {
+                permission_key: None,
                 id: "receipt".into(),
                 revision: 1,
                 turn_id: "turn".into(),
@@ -5271,6 +5323,7 @@ mod tests {
             let mut records = store.records.lock().unwrap();
             records[0].agent.inbox = (0..101)
                 .map(|index| agent_events::AgentReceipt {
+                    permission_key: None,
                     id: format!("r-{index}"),
                     revision: 1,
                     turn_id: "turn".into(),
@@ -5301,6 +5354,7 @@ mod tests {
             record.agent.integration = "connected".into();
             record.agent.phase = "needs_permission".into();
             record.agent.inbox.push(agent_events::AgentReceipt {
+                permission_key: None,
                 id: "permission".into(),
                 revision: 1,
                 turn_id: "turn".into(),
@@ -5338,6 +5392,39 @@ mod tests {
         fs::remove_dir_all(store.root).unwrap();
     }
     #[test]
+    fn project_deletion_flow_removes_records_and_unread_receipts_durably() {
+        let history = archive_fixture(2);
+        {
+            let mut records = history.records.lock().unwrap();
+            for record in records.iter_mut() {
+                record.agent.inbox.push(agent_events::AgentReceipt {
+                    permission_key: None, id: "response".into(), revision: 1,
+                    turn_id: "turn".into(), kind: "response_finished".into(),
+                    delivery: "accepted".into(), read: false, error: None,
+                });
+            }
+            records[0].notification_pending = true;
+            history.save_locked(&records).unwrap();
+        }
+        assert_eq!(history.overview().unwrap().unread_receipts, 2);
+        assert!(archive_one(&history, "s-00000").is_err());
+        history.acknowledge_notification("s-00000", "succeeded").unwrap();
+        history.read_agent_receipt("s-00000", "response", 1).unwrap();
+        archive_one(&history, "s-00000").unwrap();
+        let preview = deletion_preview(&history, &["s-00000"]);
+        let result = history.delete_result(preview["preview_id"].as_str().unwrap(), &Default::default(), &Default::default()).unwrap();
+        assert!(result.complete);
+        assert_eq!(result.deleted_ids, vec!["s-00000"]);
+        let reopened = HistoryStore::open(history.root.clone()).unwrap();
+        assert!(reopened.get("s-00000").is_err());
+        assert!(reopened.archive_page(Default::default()).unwrap().items.is_empty());
+        assert_eq!(reopened.overview().unwrap().unread_receipts, 1);
+        let inbox = reopened.inbox(Default::default()).unwrap();
+        assert_eq!(inbox.items.len(), 1);
+        assert_eq!(inbox.items[0].session.summary.session_id, "s-00001");
+        fs::remove_dir_all(history.root).unwrap();
+    }
+    #[test]
     fn history_read_current_permission_precedes_unread_response() {
         let store = store(2);
         {
@@ -5346,6 +5433,7 @@ mod tests {
             records[0].agent.integration = "connected".into();
             records[0].agent.phase = "needs_permission".into();
             records[1].agent.inbox.push(agent_events::AgentReceipt {
+                permission_key: None,
                 id: "response".into(),
                 revision: 1,
                 turn_id: "turn".into(),
@@ -5363,6 +5451,117 @@ mod tests {
         fs::remove_dir_all(store.root).unwrap();
     }
     #[test]
+    fn inbox_current_receipt_excludes_previous_turn_and_read_current_receipt() {
+        let store = store(1);
+        {
+            let mut records = store.records.lock().unwrap();
+            let record = &mut records[0];
+            record.status = "running".into();
+            record.agent.generation = "generation".into();
+            record.agent.phase = "needs_permission".into();
+            record.agent.integration = "connected".into();
+            record.agent.turn_id = Some("new".into());
+            record.agent.revision = 2;
+            for (turn, revision) in [("old", 1), ("new", 2)] {
+                record.agent.inbox.push(agent_events::AgentReceipt {
+                    permission_key: None,
+                    id: format!("generation:{turn}:PermissionRequest:{revision}"),
+                    turn_id: turn.into(),
+                    revision,
+                    kind: "needs_permission".into(),
+                    delivery: "accepted".into(),
+                    read: false,
+                    error: None,
+                });
+            }
+        }
+        let page = serde_json::to_value(store.inbox(Default::default()).unwrap()).unwrap();
+        assert_eq!(page["items"][0]["receipt"]["turn_id"], "new");
+        assert_eq!(page["items"][0]["current"], true);
+        assert_eq!(page["items"][1]["current"], false);
+        store.records.lock().unwrap()[0].agent.inbox[1].read = true;
+        let page = serde_json::to_value(store.inbox(Default::default()).unwrap()).unwrap();
+        assert_eq!(page["items"].as_array().unwrap().len(), 1);
+        assert_eq!(page["items"][0]["current"], false);
+        fs::remove_dir_all(store.root).unwrap();
+    }
+    #[test]
+    fn inbox_current_receipt_uses_latest_permission_and_prioritizes_before_paging() {
+        let store = store(2);
+        let notice = |revision, kind: &str| agent_events::AgentReceipt {
+            permission_key: None,
+            id: format!("generation:turn:{kind}:{revision}"),
+            turn_id: "turn".into(),
+            revision,
+            kind: kind.into(),
+            delivery: "accepted".into(),
+            read: false,
+            error: None,
+        };
+        {
+            let mut records = store.records.lock().unwrap();
+            let record = &mut records[0];
+            record.status = "running".into();
+            record.agent.generation = "generation".into();
+            record.agent.phase = "needs_permission".into();
+            record.agent.integration = "connected".into();
+            record.agent.turn_id = Some("turn".into());
+            record.agent.revision = 2;
+            record.agent.inbox = vec![notice(1, "needs_permission"), notice(2, "needs_permission")];
+            records[1].agent.inbox = (1..=100).map(|revision| notice(revision, "response_finished")).collect();
+        }
+        let first = store.inbox(Default::default()).unwrap();
+        assert_eq!(first.items[0].receipt.revision, 2);
+        let last = store.inbox(PageRequest { cursor: first.next_cursor, ..Default::default() }).unwrap();
+        assert_eq!(last.items.len(), 2);
+        store.records.lock().unwrap()[0].agent.inbox[1].read = true;
+        let first = store.inbox(Default::default()).unwrap();
+        let last = store.inbox(PageRequest { cursor: first.next_cursor, ..Default::default() }).unwrap();
+        assert_eq!(last.items.len(), 1);
+        let value = serde_json::to_value(last).unwrap();
+        assert_eq!(value["items"][0]["current"], false);
+        fs::remove_dir_all(store.root).unwrap();
+    }
+    #[test]
+    fn inbox_current_receipt_tracks_each_live_approval_and_keeps_completion_current() {
+        let store = store(1);
+        let event = |kind: &str, key: Option<&str>| agent_events::AgentEvent {
+            kind: kind.into(),
+            agent_session_id: "native".into(),
+            turn_id: (kind != "SessionStart").then(|| "turn".into()),
+            permission_key: key.map(str::to_string),
+            source: None,
+        };
+        {
+            let mut records = store.records.lock().unwrap();
+            let record = &mut records[0];
+            record.status = "running".into();
+            record.agent.generation = "generation".into();
+            for (kind, key) in [("SessionStart", None), ("UserPromptSubmit", None),
+                ("PermissionRequest", Some("first")), ("PermissionRequest", Some("second")),
+                ("ToolProgress", Some("second"))] {
+                record.agent.apply(&event(kind, key)).unwrap();
+            }
+        }
+        let page = store.inbox(Default::default()).unwrap();
+        assert_eq!(page.items[0].receipt.revision, 3);
+        assert!(page.items[0].current);
+        assert!(!page.items[1].current);
+        let resolved = &page.items[1].receipt;
+        store.read_current_agent_receipt("s-00000", &resolved.id, resolved.revision).unwrap();
+        let unchanged = store.inbox(Default::default()).unwrap();
+        assert!(unchanged.items.iter().any(|item| item.receipt.id == resolved.id));
+        let pending = &page.items[0].receipt;
+        store.read_current_agent_receipt("s-00000", &pending.id, pending.revision).unwrap();
+        let read = store.inbox(Default::default()).unwrap();
+        assert!(!read.items.iter().any(|item| item.receipt.id == pending.id));
+        store.records.lock().unwrap()[0].agent.apply(&event("TurnComplete", None)).unwrap();
+        let page = store.inbox(Default::default()).unwrap();
+        assert_eq!(page.items.iter().filter(|item| item.current).count(), 1);
+        assert!(page.items.iter().any(|item| item.current && item.receipt.kind == "response_finished"));
+        fs::remove_dir_all(store.root).unwrap();
+    }
+    #[test]
     fn history_global_inbox_attention_and_agent_writes_are_independent_of_loaded_page() {
         let store = store(201);
         {
@@ -5371,6 +5570,7 @@ mod tests {
             record.status = "running".into();
             record.agent.inbox = (0..101)
                 .map(|index| agent_events::AgentReceipt {
+                    permission_key: None,
                     id: format!("r-{index}"),
                     revision: 1,
                     turn_id: "turn".into(),

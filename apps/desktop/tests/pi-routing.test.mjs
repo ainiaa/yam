@@ -76,6 +76,73 @@ function fixture({answer={intent:'new',difficulty:'simple',uncertain:false,readO
 async function tierFixture(options={}){
  const f=fixture(options);f.flags['yam-medium']='p/medium';f.models.medium={...f.models.strong,id:'medium'};await f.ready;await f.handlers.session_start({},f.ctx);return f;
 }
+test('Pi execution rules use the first matching workspace rule and honor manual reasoning',async()=>{
+ const f=fixture(),api=await f.ready;
+ f.ctx.cwd='/tmp/a';
+ await f.handlers.session_start({},f.ctx);
+ await api.control({action:'rules',revision:api.snapshot().revision,data:{...defaultRules,executionRules:[
+  {enabled:true,when:{task:'answer',workspace:'/tmp/a'},use:{model:'p/strong',effort:'max'}},
+  {enabled:true,when:{task:'answer'},use:{effort:'medium'}},
+ ]}});
+ const routed=await f.route();
+ assert.equal(routed.model.id,'strong');
+ assert.equal(routed.thinkingLevel,'max');
+ assert.equal(api.snapshot().decision.executionRule,1);
+ await api.control({action:'set',revision:api.snapshot().revision,data:{model:'auto',effort:'high'}});
+ assert.equal((await f.route()).thinkingLevel,'high');
+ f.ctx.cwd='/tmp/b';
+ await api.control({action:'set',revision:api.snapshot().revision,data:{model:'auto',effort:'auto'}});
+ const other=await f.route();
+ assert.equal(other.model.id,'small');
+ assert.equal(other.thinkingLevel,'medium');
+});
+
+test('unrelated workflow rules do not classify fixed Pi turns or their previews',async()=>{
+ const f=fixture({answer:Error('classifier unavailable')}),api=await f.ready;
+ f.ctx.cwd='/project';
+ await f.handlers.session_start({},f.ctx);
+ const rules={...defaultRules,executionRules:[{enabled:true,when:{workspace:'/other'},use:{workflow:'deep-review'}}]};
+ await api.control({action:'rules',revision:api.snapshot().revision,data:rules});
+ await api.control({action:'set',revision:api.snapshot().revision,data:{model:'p/small',effort:'high'}});
+ const result=await f.route();
+ assert.equal(result.model.id,'small');
+ await api.control({action:'preview',revision:api.snapshot().revision,data:{text:'Explain the issue',rules}});
+ assert.equal(api.snapshot().preview.classificationSource,'fixed');
+ assert.equal(f.calls,0);
+});
+
+test('Pi can start an explicit workflow while its unrelated default execution model is unavailable',async()=>{
+ const f=fixture(),api=await f.ready,chosen={id:'workflow-result'};
+ const choice={model:'p/small',effort:'high',runner:'model',billing:'api'};
+ f.flags['yam-rules']=JSON.stringify({...defaultRules,workflows:[
+  {id:'review',name:'Review',preset:'review',paths:['src'],roles:{review:[choice],audit:[choice]}},
+ ]});
+ api.installWorkflow({needsInspection:()=>false,resumeWorkflow:()=>null,prepare:()=>chosen});
+ delete f.models.strong;
+ await f.handlers.session_start({},f.ctx);
+ const message={role:'user',content:'yam:flow:review Review the scoped change'};
+ assert.equal((await f.route({messages:[message]})).model,chosen);
+ const calls=f.calls;
+ await assert.rejects(f.route(),/unavailable/);
+ assert.equal(f.calls,calls);
+});
+
+test('Pi validates a fixed reasoning level against the workflow role rather than the default model',async()=>{
+ const f=fixture(),api=await f.ready,chosen={id:'workflow-result'};
+ const choice={model:'p/small',effort:'high',runner:'model',billing:'api'};
+ f.flags['yam-rules']=JSON.stringify({...defaultRules,workflows:[
+  {id:'review',name:'Review',preset:'review',paths:['src'],roles:{review:[choice],audit:[choice]}},
+ ]});
+ f.flags['yam-effort']='xhigh';
+ f.models.strong.thinkingLevelMap={high:'high'};
+ let observed;
+ api.installWorkflow({needsInspection:()=>false,resumeWorkflow:()=>null,prepare:params=>{observed=params;return chosen;}});
+ await f.handlers.session_start({},f.ctx);
+ const message={role:'user',content:'yam:flow:review Review the scoped change'};
+ assert.equal((await f.route({messages:[message]})).model,chosen);
+ assert.equal(observed.effort,'xhigh');
+ assert.equal(observed.effortLocked,true);
+});
 test('Pi starts and restores automatic routing with a missing classifier, then uses local policy',async()=>{
  const f=fixture(),api=await f.ready;
  f.flags['yam-classifier']='p/offline';
@@ -105,6 +172,21 @@ function classifierChain(options={}){
  f.flags['yam-classifier']='p/a';f.flags['yam-classifier-fallbacks']='["p/b","p/c"]';
  return f;
 }
+test('Pi subscription classifiers share 45 seconds without changing the API budget',async()=>{
+ for(const [subscriptionOnly,backupCount,expected] of [
+  [true,0,[45000,45000]],[true,2,[45000,15000,15000,15000]],[false,2,[15000,5000,5000,5000]],
+ ]){
+  const timers=[],f=classifierChain({answer:Error('offline'),budget:{classifierTimeout:ms=>{timers.push(ms);return new AbortController().signal;}}});
+  if(subscriptionOnly){
+   subscription(f);
+   for(const key of ['a','b','c'])f.models[key].provider='openai';
+   f.flags['yam-classifier']='openai/a';
+  }
+  f.flags['yam-classifier-fallbacks']=JSON.stringify(['b','c'].slice(0,backupCount).map(key=>(subscriptionOnly?'openai/':'p/')+key));
+  assert.equal((await f.route()).model.id,'strong');
+  assert.deepEqual(timers,expected);
+ }
+});
 test('Pi classification times out A, rejects malformed B, and uses C exactly once',async()=>{
  const timers=[],f=classifierChain({budget:{classifierTimeout:ms=>{const timer=new AbortController();timers.push({ms,timer});return timer.signal;}}});
  const calls=[];let resolveLate;
@@ -1942,4 +2024,26 @@ test('tree navigation reloads the target branch mode and its gateway instead of 
   assert.equal(f.ctx.model.id,'small');
   assert.equal(providers.has('yam-gateway'),false);
  }finally{globalThis.fetch=originalFetch;}
+});
+
+test('new Pi turns retain completed collaboration history and a new collaboration replaces it',async()=>{
+ const f=fixture(),routing=await f.ready;
+ routing.observeWorkflow({id:'old',workflow:'review',name:'Review',version:'v1',status:'completed',roles:{}});
+ assert.equal(routing.snapshot().workflowReceipt.id,'old');
+ await f.handlers.before_agent_start({},f.ctx);
+ assert.equal(routing.snapshot().workflowReceipt.id,'old');
+ assert.equal(routing.snapshot().workflowReceipt.current,false);
+ routing.observeWorkflow({id:'new',workflow:'review',name:'Review',version:'v1',status:'running',roles:{}});
+ assert.equal(routing.snapshot().workflowReceipt.id,'new');
+ assert.equal(routing.snapshot().workflowReceipt.current,true);
+});
+
+test('a previous collaboration that needs inspection stays visible without becoming the new turn',async()=>{
+ const f=fixture(),routing=await f.ready;
+ await f.handlers.before_agent_start({},f.ctx);
+ routing.observeWorkflow({id:'inspect',workflow:'review',name:'Review',version:'v1',status:'needs-inspection',roles:{}});
+ assert.equal(routing.snapshot().workflowReceipt.current,true);
+ await f.handlers.before_agent_start({},f.ctx);
+ assert.equal(routing.snapshot().workflowReceipt.id,'inspect');
+ assert.equal(routing.snapshot().workflowReceipt.current,false);
 });

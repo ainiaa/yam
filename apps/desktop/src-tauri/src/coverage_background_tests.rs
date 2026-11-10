@@ -186,7 +186,8 @@ fn closure_t20_owned_session_crosses_wire_move_agent_finish_archive_and_real_reo
         1,
         generation,
         id.clone(),
-        "FORBIDDEN\n".into()
+        "FORBIDDEN\n".into(),
+        None,
     )
     .is_err());
     allocated
@@ -241,6 +242,7 @@ fn closure_t20_owned_session_crosses_wire_move_agent_finish_archive_and_real_reo
         target_generation,
         id.clone(),
         "finish\n".into(),
+        None,
     )
     .unwrap();
     crate::tests::closure_t02_wait_workers(workers);
@@ -287,6 +289,7 @@ fn closure_t20_owned_session_crosses_wire_move_agent_finish_archive_and_real_reo
         id.clone(),
         receipt.id.clone(),
         receipt.revision,
+        None,
     )
     .unwrap();
     allocated
@@ -1153,7 +1156,8 @@ fn rust85_owner_history_commands_preserve_policy_paging_and_notification_fences(
         manager.clone(),
         id.clone(),
         "missing".into(),
-        1
+        1,
+        None,
     )
     .is_err());
     fixture
@@ -1519,7 +1523,8 @@ fn rust85_owner_history_proxy_propagates_authenticated_failure_without_local_mut
             manager.clone(),
             id.clone(),
             "receipt".into(),
-            1
+            1,
+            None,
         )
         .err()
         .as_deref(),
@@ -1582,4 +1587,95 @@ fn rust85_owner_history_proxy_propagates_authenticated_failure_without_local_mut
         false
     );
     assert!(manager.sessions.lock().unwrap().contains_key(&fixture.id()));
+}
+
+#[test]
+fn draft_input_guard_checks_owner_state_before_pty_write() {
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex};
+
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+    impl Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let fixture = crate::tests::Rust85Session::new("read line");
+    let app = fixture.app();
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    *fixture.session.writer.lock().unwrap() = Box::new(Capture(captured.clone()));
+    let history = &fixture.session.history;
+    let id = fixture.id();
+    {
+        let mut records = history.records.lock().unwrap();
+        let record = records
+            .iter_mut()
+            .find(|r| r.summary.session_id == id)
+            .unwrap();
+        record.summary.launch = Some(
+            serde_json::from_value(serde_json::json!({
+                "adapter":"pi","mode":"interactive","extra_args":"","prompt":null
+            }))
+            .unwrap(),
+        );
+        record.agent.generation = "generation".into();
+        record.agent.agent_session_id = Some("native".into());
+        record.agent.turn_id = Some("turn-2".into());
+        record.agent.revision = 10;
+        record.agent.integration = "connected".into();
+        record.agent.phase = "working".into();
+    }
+    let payload = "\x1b[200~excerpt\x1b[201~";
+    let mut args = serde_json::json!({
+        "session_id":id,"data":payload,"expected_agent":{
+            "generation":"generation","nativeSessionId":"native","turnId":"turn-1",
+            "revision":9,"cwd":fixture.session.summary.cwd,"managedCodex":false
+        }
+    });
+    let dispatch = |value| rust85_dispatch(&app, "write_session", value, 'c');
+    let error=dispatch(args.clone()).unwrap_err();
+    assert!(error.contains("target changed"), "{error}");
+    args["expected_agent"]["turnId"] = "turn-2".into();
+    args["expected_agent"]["revision"] = 10.into();
+    let error=dispatch(args.clone()).unwrap_err();
+    assert!(error.contains("target changed"), "{error}");
+    assert!(captured.lock().unwrap().is_empty());
+    history.records.lock().unwrap()[0].agent.phase = "response_finished".into();
+    let mut unsafe_args = args.clone();
+    unsafe_args["data"] = "\x1b[200~excerpt\x1b[201~\r".into();
+    assert!(dispatch(unsafe_args).is_err());
+    assert!(captured.lock().unwrap().is_empty());
+    let routing_event = |kind: &str| crate::agent_events::AgentEvent {
+        kind: kind.into(),
+        agent_session_id: "native".into(),
+        turn_id: None,
+        permission_key: None,
+        source: None,
+    };
+    {
+        let mut records = history.records.lock().unwrap();
+        let agent = &mut records[0].agent;
+        agent.apply(&routing_event("RoutingStarted")).unwrap();
+        assert_eq!(agent.phase, "response_finished");
+        args["expected_agent"]["revision"] = agent.revision.into();
+    }
+    assert!(dispatch(args.clone()).unwrap_err().contains("target changed"));
+    assert!(captured.lock().unwrap().is_empty());
+    {
+        let mut records = history.records.lock().unwrap();
+        let agent = &mut records[0].agent;
+        agent.apply(&routing_event("RoutingCancelled")).unwrap();
+        args["expected_agent"]["revision"] = agent.revision.into();
+    }
+    dispatch(args.clone()).unwrap();
+    assert_eq!(*captured.lock().unwrap(), payload.as_bytes());
+    args.as_object_mut().unwrap().remove("expected_agent");
+    args["data"] = "ordinary".into();
+    dispatch(args).unwrap();
+    assert!(captured.lock().unwrap().ends_with(b"ordinary"));
 }

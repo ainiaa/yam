@@ -7,6 +7,8 @@ import {homedir,tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {fileURLToPath,pathToFileURL} from 'node:url';
 import install from '../src-tauri/pi/router.mjs';
+import {installAgents} from '../src-tauri/pi/agent-orchestrator.mjs';
+import {defaultRules} from '../src-tauri/pi/task-rules.mjs';
 const sdk=process.env.YAM_PI_SDK_DIR??join(homedir(),'.npm-global/lib/node_modules/@earendil-works/pi-coding-agent');
 const piCli=join(sdk,'dist/bundle/cli.js');
 test('Pi CLI loads the routing extension and confirms its local runtime without credentials',{skip:!existsSync(piCli)},()=>{
@@ -22,8 +24,9 @@ test('Pi CLI loads the routing extension and confirms its local runtime without 
 });
 test('Pi native replacement persists the upgraded answer, physical model, label and continuation floor together', {skip:!existsSync(join(sdk,'dist/index.js'))},async()=>{
  const {createAgentSession,DefaultResourceLoader,SessionManager,SettingsManager}=await import(pathToFileURL(join(sdk,'dist/index.js')));
+ const {createAssistantMessageEventStream}=await import(pathToFileURL(join(sdk,'node_modules/@earendil-works/pi-ai/dist/index.js')));
  const cwd=mkdtempSync(join(tmpdir(),'yam-feedback-native-')),agentDir=join(cwd,'agent');
- let session,route,ctx,calls=0;const requests=[];
+ let session,route,ctx,runtime,calls=0;const requests=[];
  const models=['small','strong'].map(id=>({id,name:id,reasoning:true,input:['text'],contextWindow:128000,maxTokens:1000,cost:{input:1,output:1,cacheRead:.1,cacheWrite:1},thinkingLevelMap:{medium:'medium',high:'high',max:'max'}}));
  const settingsManager=SettingsManager.inMemory({packages:[],extensions:[],skills:[],prompts:[],themes:[],retry:{enabled:false},compaction:{enabled:false}},{projectTrusted:false});
  try{
@@ -31,17 +34,26 @@ test('Pi native replacement persists the upgraded answer, physical model, label 
    pi.registerProvider('fixture',{baseUrl:'http://127.0.0.1:1',api:'openai-responses',apiKey:'test-only',models});
    pi.on('session_start',(_event,context)=>ctx=context);
    const observed=new Proxy(pi,{get(target,key){return key==='registerVirtualModel'?definition=>{route=definition.route;target.registerVirtualModel(definition);}:Reflect.get(target,key);}});
-   await install(observed,m=>Object.keys(m.thinkingLevelMap??{}),class Text{});
+   runtime=await install(observed,m=>Object.keys(m.thinkingLevelMap??{}),class Text{});
+   installAgents(observed,runtime,{createStream:createAssistantMessageEventStream,snapshot:async()=>'+ reviewed code'});
   }]});
   await loader.reload();assert.deepEqual(loader.getExtensions().errors,[]);
   const manager=SessionManager.create(cwd,join(cwd,'sessions'));manager.appendCustomEntry('yam.routing.config.v1',{small:'fixture/small',strong:'fixture/strong',classifier:'fixture/small'});
   ({session}=await createAgentSession({cwd,agentDir,settingsManager,sessionManager:manager,resourceLoader:loader,model:{provider:'yam',id:'auto',api:'pi-virtual',reasoning:true,input:['text'],contextWindow:128000,maxTokens:1000,cost:{input:0,output:0,cacheRead:0,cacheWrite:0}} ,tools:[]}));
   await session.bindExtensions({});assert.ok(ctx);assert.ok(route);
+  const stream=ctx.modelRegistry.streamSimple.bind(ctx.modelRegistry);
   ctx.modelRegistry.complete=async(model,context)=>{
    calls++;requests.push(context);
    return {role:'assistant',provider:'fixture',api:'openai-responses',model:model.id,content:[{type:'text',text:model.id==='small'?JSON.stringify({intent:'new',task:'answer',context:'independent',action:'none',depth:'normal',uncertain:false,readOnly:true,requires:['text']}):'HTTP 404 means the requested resource was not found.'}],stopReason:'stop',timestamp:Date.now(),usage:{input:12,output:15,cacheRead:0,cacheWrite:0,totalTokens:27,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}}};
   };
   ctx.modelRegistry.streamSimple=(...args)=>({result:()=>ctx.modelRegistry.complete(...args)});
+  await runtime.control({action:'rules',revision:runtime.snapshot().revision,data:{...defaultRules,classificationRules:[
+   {prefix:'yam:review',task:'review',enabled:true},
+  ]}});
+  const local=await route({reason:'user',thinkingLevel:'off',messages:[{role:'user',content:'yam:review Check concurrency'}]},ctx);
+  assert.equal(local.model.id,'strong');
+  assert.equal(runtime.snapshot().decision.classificationSource,'rule');
+  assert.equal(calls,0);
   const user={role:'user',content:'What does HTTP 404 mean?',timestamp:Date.now()};await session._handleAgentEvent({type:'message_end',message:user});
   await route({reason:'user',thinkingLevel:'off',messages:[{role:'system',content:'Answer accurately.',toolsAdded:[{name:'write'}],timestamp:Date.now()},user]},ctx);
   const message={role:'assistant',provider:'fixture',model:'small',api:'openai-responses',thinkingLevel:'medium',content:[{type:'text',text:'I need a stronger model to answer this.'}],stopReason:'stop',timestamp:Date.now(),usage:{input:1,output:1,cacheRead:0,cacheWrite:0,totalTokens:2,cost:{total:0}}};
@@ -51,6 +63,34 @@ test('Pi native replacement persists the upgraded answer, physical model, label 
   assert.equal(saved.message.model,'strong');assert.match(saved.message.content[0].text,/404/);assert.equal(label.data.messageId,saved.id);assert.equal(label.data.model,'fixture/strong');assert.equal(label.data.effort,'high');
   const state=entries.findLast(e=>e.type==='custom'&&e.customType==='pi.virtual-model-state').data.state;assert.equal(state.model,'strong');assert.equal(state.effort,'high');
   assert.equal(entries.filter(e=>e.type==='message'&&e.message.role==='assistant').length,1,'no duplicate weak reply in saved history');
+  const readonlyCalls=[];
+  ctx.modelRegistry.streamSimple=(model,context,options)=>{
+   if(model.provider==='yam-workflow')return stream(model,context,options);
+   readonlyCalls.push({context,options});
+   return {result:async()=>({role:'assistant',stopReason:'stop',content:[{type:'text',text:'{"summary":"reviewed","findings":[]}'}]})};
+  };
+  const reviewer={model:'fixture/strong',effort:'high',runner:'model',billing:'api'};
+  await runtime.control({action:'rules',revision:runtime.snapshot().revision,data:{...runtime.snapshot().rules,
+   executionRules:[{enabled:true,when:{task:'review'},use:{workflow:'deep-review'}}],
+   workflows:[{id:'deep-review',name:'Deep review',preset:'review',roles:{review:[reviewer],audit:[reviewer]}}],
+  }});
+  const review={role:'user',content:'yam:review Check the staged change',timestamp:Date.now()};
+  const chosen=await route({reason:'user',thinkingLevel:'off',messages:[review]},ctx);
+  assert.equal(chosen.model.provider,'yam-workflow');
+  const reviewed=await ctx.modelRegistry.streamSimple(chosen.model,{messages:[review]}).result();
+  assert.equal(reviewed.stopReason,'stop',reviewed.errorMessage);
+  assert.match(reviewed.content[0].text,/Deep review/);
+  assert.equal(readonlyCalls.length,2);
+  assert.ok(readonlyCalls.every(call=>call.options.toolChoice==='none'&&call.context.messages[0].content[0].text.includes('reviewed code')));
+  assert.equal(runtime.snapshot().workflowReceipt.roles.audit.attempts[0].model,'fixture/strong');
+  readonlyCalls.length=0;
+  const followup={role:'user',content:'yam:flow:deep-review Check the current text change',timestamp:Date.now()};
+  const oldImage={role:'user',content:[{type:'image',mimeType:'image/png',data:'AA=='}],timestamp:Date.now()-1000};
+  const fresh=await route({reason:'user',thinkingLevel:'off',messages:[oldImage,followup]},ctx);
+  assert.equal(fresh.model.provider,'yam-workflow');
+  const currentReview=await ctx.modelRegistry.streamSimple(fresh.model,{messages:[followup]}).result();
+  assert.equal(currentReview.stopReason,'stop',currentReview.errorMessage);
+  assert.equal(readonlyCalls.filter(call=>call.options.maxTokens!==512).length,2);
  }finally{session?.dispose();rmSync(cwd,{recursive:true,force:true});}
 });
 

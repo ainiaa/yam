@@ -27,8 +27,13 @@ export function captureAttention(record:AttentionSession,entry:AgentReceipt,agen
 }
 export function isCurrentAttention(action:AttentionAction,record:AttentionSession&{agent?:AgentState}):boolean {
   const agent=record.agent,entry=action.receipt;
-  if(action.state!=="current"||record.summary.session_id!==action.sessionId||!["starting","running"].includes(record.status)||!agent||agent.integration!=="connected"||!receiptValid(entry))return false;
+  if(action.state!=="current"||record.summary.session_id!==action.sessionId||!["starting","running"].includes(record.status)||!agent||agent.integration!=="connected"||agent.route_pending||!receiptValid(entry))return false;
   if(!text(action.generation)||!text(action.turnId)||agent.generation!==action.generation||agent.turn_id!==action.turnId||entry.turn_id!==action.turnId||agent.phase!==entry.kind||!Number.isSafeInteger(agent.revision)||agent.revision!<entry.revision)return false;
+  if(entry.kind==="needs_permission"){
+    if(entry.permission_key&&!agent.permission_keys?.includes(entry.permission_key))return false;
+    if(agent.inbox.some(candidate=>candidate.turn_id===entry.turn_id&&candidate.kind===entry.kind
+      &&(!entry.permission_key||candidate.permission_key===entry.permission_key)&&candidate.revision>entry.revision))return false;
+  }
   const matching=agent.inbox.filter(candidate=>candidate.id===entry.id);
-  return matching.length===1&&matching[0].revision===entry.revision&&matching[0].turn_id===entry.turn_id&&matching[0].kind===entry.kind&&!matching[0].read;
+  return matching.length===1&&matching[0].revision===entry.revision&&matching[0].turn_id===entry.turn_id&&matching[0].kind===entry.kind&&matching[0].permission_key===entry.permission_key&&!matching[0].read;
 }

@@ -76,7 +76,7 @@ test('nonselected stale receipt is not read after attachment',async()=>{const h=
 test('nonselected receipt rejects a fresh record from a different session',async()=>{let reads=0;const h=harness({invoke:async command=>{if(command==='get_session'){const r=record();if(++reads===2)r.summary.session_id='s-other';return r;}}}),r=record();await h.openReceipt(r,receipt());assert.equal(h.calls.filter(c=>c.command==='read_agent_receipt').length,0);});
 test('nonselected receipt is not read when selection changes during fresh lookup',async()=>{const gate=deferred();let reads=0;const h=harness({invoke:async command=>command==='get_session'?(++reads===2?gate.promise:record()):undefined}),r=record();const pending=h.openReceipt(r,receipt());await tick();h.detailVersion.current++;gate.resolve(r);await pending;assert.equal(h.calls.filter(c=>c.command==='read_agent_receipt').length,0);});
 test('F5 actual App historical card navigates without any receipt ACK',async()=>{const h=harness(),r=record();await h.openReceipt(r,receipt(),{...r.agent,phase:'working'});assert.equal(h.sessionId.current,'s-one');assert.deepEqual(h.calls.filter(c=>c.command==='read_agent_receipt'),[])});
-test('F5 actual App current card requires postattachment fresh get_session before exact ACK',async()=>{const h=harness();const r=record();await h.openReceipt(r,receipt(),r.agent);assert.deepEqual(h.calls.map(c=>c.command),['get_session','get_session','read_agent_receipt']);assert.deepEqual(h.calls[2].args,{sessionId:'s-one',receipt:receipt().id,revision:3});assert.deepEqual(h.writes,['refresh']);});
+test('F5 actual App current card requires postattachment fresh get_session before exact ACK',async()=>{const h=harness();const r=record();await h.openReceipt(r,receipt(),r.agent);assert.deepEqual(h.calls.map(c=>c.command),['get_session','get_session','read_agent_receipt']);assert.deepEqual(h.calls[2].args,{sessionId:'s-one',receipt:receipt().id,revision:3,onlyCurrent:true});assert.deepEqual(h.writes,['refresh']);});
 test('F5 actual App fresh phase advancement preserves original and newer unread',async()=>{let n=0;const h=harness({invoke:async command=>{if(command==='get_session'){const r=record();if(++n===2){r.agent.phase='working';r.agent.turn_id='new';r.agent.inbox.push({...receipt(),id:'generation:new:TurnComplete',revision:4,turn_id:'new'});}return r;}}});const r=record();await h.openReceipt(r,receipt(),r.agent);assert.equal(n,2);assert.equal(h.calls.filter(c=>c.command==='read_agent_receipt').length,0);});
 for(const transition of ['away-back','same-id-attach','owner-error','unmount','disposed'])test('F5 actual App pending freshness fences '+transition,async()=>{
  const gate=deferred();let n=0;const h=harness({invoke:async command=>command==='claim_terminal_view'?1:command==='get_session'?(++n===2?gate.promise:record()):undefined});const r=record();const running=h.openReceipt(r,receipt(),r.agent);await tick();
@@ -146,6 +146,18 @@ test('F5 actual App grouped inbox retains selected proof and the real openReceip
  const card=()=>exports.SessionInbox(widget().props).props.children[0].props.children[1];
  assert.equal(widget().type,args.SessionInbox);assert.equal(card().type,Card);assert.equal(card().props.agent,r.agent);assert.equal(card().props.entry.id,receipt().id);card().props.onOpen();await tick();assert.equal(h.calls.filter(c=>c.command==='read_agent_receipt').length,1);
  h.sessionId.current='other';assert.equal(card().props.agent,undefined);
+ inbox[0].current=false;card().props.onOpen();await tick();
+ assert.equal(h.calls.filter(c=>c.command==='read_agent_receipt').length,1);
+});
+test('owner-certified historical approval opens without marking an old same-turn receipt read',async()=>{
+ const r=record(),old=receipt(),latest={...old,id:'generation:turn:PermissionRequest:2',revision:4,read:true};
+ r.agent.inbox=[old,latest];r.agent.revision=4;
+ for(const ownerCurrent of [false,undefined,true]){
+  const h=harness({invoke:async command=>command==='get_session'?r:undefined});
+  await h.openReceipt(r,old,undefined,ownerCurrent);
+  assert.equal(h.sessionId.current,'s-one');
+  assert.equal(h.calls.filter(call=>call.command==='read_agent_receipt').length,0);
+ }
 });
 
 test('F5 fresh reply from before terminal end cannot acknowledge the ended attachment',async()=>{

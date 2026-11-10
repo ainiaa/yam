@@ -4,8 +4,8 @@ import {useEffect,useRef,useState} from 'react';
 import {Select} from './Select';
 import {t} from './i18n';
 import {appThemes,backgroundObjectUrl} from './app-themes';
-import {defaultAppPreferences,type AppPreferences} from './app-preferences';
-export function AppAppearance({value,error,onSave,onClose,onTerminalSettings,navigation}:{value:AppPreferences;error:string|null;onSave:(value:AppPreferences)=>void;onClose:()=>void;onTerminalSettings:()=>void;navigation?:SettingsNavigationRenderer}){
+import {defaultAppPreferences,type AppPreferences,type AppTheme} from './app-preferences';
+export function AppAppearance({value,error,onSave,onClose,onTerminalSettings,onPreviewTheme,navigation}:{value:AppPreferences;error:string|null;onSave:(value:AppPreferences)=>void;onClose:()=>void;onTerminalSettings:()=>void;onPreviewTheme:(theme:AppTheme|null)=>void;navigation?:SettingsNavigationRenderer}){
  const language=useRef<HTMLButtonElement>(null);
  const dialog=useRef<HTMLDialogElement>(null),[draft,setDraft]=useState({...value}),[failure,setFailure]=useState<string|null>(null);
  const active=useRef(true),loadRevision=useRef(0),pendingUrl=useRef<string|null>(null),[reading,setReading]=useState(false);
@@ -13,6 +13,7 @@ export function AppAppearance({value,error,onSave,onClose,onTerminalSettings,nav
  function cancelRead(){loadRevision.current++;setReading(false);if(pendingUrl.current)URL.revokeObjectURL(pendingUrl.current);pendingUrl.current=null;}
  useEffect(()=>{dialog.current?.showModal();language.current?.focus();active.current=true;return()=>{active.current=false;loadRevision.current++;if(pendingUrl.current)URL.revokeObjectURL(pendingUrl.current);pendingUrl.current=null;};},[]);
  useEffect(()=>{if(!draft.background){setPreview(null);return;}try{const url=backgroundObjectUrl(draft.background);setPreview({raw:draft.background,url});return()=>URL.revokeObjectURL(url);}catch{setPreview(null);setFailure('The background image could not be read.');}},[draft.background]);
+ useEffect(()=>{onPreviewTheme(draft.theme);return()=>onPreviewTheme(null);},[draft.theme,onPreviewTheme]);
  function background(file:File|undefined){
   cancelRead();const revision=loadRevision.current;if(!file)return;
   if(!['image/png','image/jpeg','image/webp'].includes(file.type)||file.size>500000){setFailure('Choose a PNG, JPEG or WebP image smaller than 500 KB.');return;}
