@@ -125,6 +125,19 @@ pub(super) fn process_tree() -> Result<Vec<(u32, u32, u32, bool)>, String> {
     platform::process_tree()
 }
 
+#[cfg(unix)]
+pub(super) fn process_membership(pid: u32) -> Option<(u32, u32, u64)> {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        platform::membership(pid)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
 pub(super) fn sample(owner: &OwnerProcesses) -> Result<Sample, String> {
     sample_for_desktop(owner, std::process::id())
 }
@@ -243,6 +256,17 @@ mod platform {
         info.pbi_start_tvsec
             .checked_mul(1_000_000)?
             .checked_add(info.pbi_start_tvusec)
+    }
+    pub(super) fn membership(pid: u32) -> Option<(u32, u32, u64)> {
+        let info = process_info(pid.try_into().ok()?)?;
+        if info.pbi_uid != unsafe { libc::geteuid() } {
+            return None;
+        }
+        let stamp = info
+            .pbi_start_tvsec
+            .checked_mul(1_000_000)?
+            .checked_add(info.pbi_start_tvusec)?;
+        Some((info.pbi_ppid, info.pbi_pgid, stamp))
     }
 
     fn process_ids() -> Result<Vec<i32>, String> {
@@ -427,6 +451,20 @@ mod platform {
         }
         parse_stat(&std::fs::read_to_string(directory.join("stat")).ok()?, 1)
             .map(|row| row.identity)
+    }
+    pub(super) fn membership(pid: u32) -> Option<(u32, u32, u64)> {
+        use std::os::unix::fs::MetadataExt;
+        let directory = std::path::PathBuf::from(format!("/proc/{pid}"));
+        if std::fs::metadata(&directory).ok()?.uid() != unsafe { libc::geteuid() } {
+            return None;
+        }
+        let text = std::fs::read_to_string(directory.join("stat")).ok()?;
+        let fields: Vec<_> = text.rsplit_once(')')?.1.split_whitespace().collect();
+        Some((
+            fields.get(1)?.parse().ok()?,
+            fields.get(2)?.parse().ok()?,
+            fields.get(19)?.parse().ok()?,
+        ))
     }
     pub(super) fn snapshot() -> Result<HashMap<u32, Process>, String> {
         let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };

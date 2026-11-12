@@ -1150,6 +1150,10 @@ input::placeholder {
 /* xterm 6 paints its live scroll layer; the legacy viewport must not expose its black default. */
 .terminal-view .xterm-viewport { background-color:transparent; }
 .terminal-view .xterm-scrollable-element { min-height:100%; }
+.terminal-view[data-scrollback="true"] .xterm .xterm-scrollable-element > .scrollbar.vertical { opacity:1; pointer-events:auto; transition:none; z-index:11; }
+.terminal-view .xterm .xterm-scrollable-element > .scrollbar > .slider { background:color-mix(in srgb,var(--muted) 65%,transparent); border-radius:4px; }
+.terminal-view .xterm .xterm-scrollable-element > .scrollbar > .slider:hover,
+.terminal-view .xterm .xterm-scrollable-element > .scrollbar > .slider.active { background:var(--muted); }
 .appearance-dialog[open] { width:min(600px,calc(100vw - 32px)); max-height:min(720px,calc(100dvh - 48px)); }
 .appearance-dialog > form { max-height:inherit; }
 .appearance-dialog .dialog-header { padding:20px 24px; }

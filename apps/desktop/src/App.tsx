@@ -2283,6 +2283,7 @@ function App() {
   function refreshTerminalScroll(view:TerminalView,endOffset?:number) {
     if(view.disposed||view.moving||view.projecting)return;
     const buffer=view.instance.buffer?.active;if(!buffer)return;
+    view.element.dataset.scrollback=String(buffer.type==="normal"&&buffer.baseY>0);
     const state=view.scroll??(view.scroll=createTerminalScroll());
     if(updateTerminalScroll(state,buffer,endOffset)&&sessionId.current===view.element.dataset.sessionId)setRecoveryRevision(revision=>revision+1);
   }

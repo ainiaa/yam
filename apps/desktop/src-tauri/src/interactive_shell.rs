@@ -579,39 +579,186 @@ fn process_rows() -> Result<Vec<(u32, u32, u32, bool)>, String> {
     }
 }
 #[cfg(unix)]
+fn can_claim_process_group_candidate(
+    pid: u32,
+    group: u32,
+    root: u32,
+    owns_group: bool,
+    owned: &BTreeMap<u32, u64>,
+    identity: Option<u64>,
+) -> bool {
+    owns_group
+        && group == root
+        && !owned
+            .get(&pid)
+            .is_some_and(|stamp| *stamp != 0 && identity != Some(*stamp))
+}
+#[cfg(unix)]
+fn verified_candidate_identity(
+    expected: Option<u64>,
+    observed: Option<u64>,
+    current: Option<u64>,
+) -> Option<u64> {
+    observed.filter(|identity| {
+        current == Some(*identity) && expected.is_none_or(|stamp| stamp == *identity)
+    })
+}
+#[cfg(unix)]
+fn find_untrusted_descendants(
+    rows: &[(u32, u32, u32, bool)],
+    candidates: &[u32],
+    unidentified: &std::collections::BTreeSet<u32>,
+) -> std::collections::BTreeSet<u32> {
+    let mut descendants = std::collections::BTreeSet::new();
+    loop {
+        let newly_untrusted = candidates
+            .iter()
+            .filter(|pid| !unidentified.contains(*pid) && !descendants.contains(*pid))
+            .filter(|pid| {
+                rows.iter().find(|row| row.0 == **pid).is_some_and(|row| {
+                    unidentified.contains(&row.1) || descendants.contains(&row.1)
+                })
+            })
+            .copied()
+            .collect::<Vec<_>>();
+        if newly_untrusted.is_empty() {
+            break;
+        }
+        descendants.extend(newly_untrusted);
+    }
+    descendants
+}
+#[cfg(unix)]
+fn candidate_parent_identity_matches(observed: Option<u64>, current: Option<u64>) -> bool {
+    observed.is_some() && observed == current
+}
+#[cfg(unix)]
 fn run_members(root: u32, owned: &mut BTreeMap<u32, u64>) -> Result<Vec<u32>, String> {
+    run_members_with(
+        root,
+        owned,
+        process_rows,
+        super::memory::process_identity,
+        super::memory::process_membership,
+    )
+}
+#[cfg(unix)]
+fn run_members_with(
+    root: u32,
+    owned: &mut BTreeMap<u32, u64>,
+    mut read_rows: impl FnMut() -> Result<Vec<(u32, u32, u32, bool)>, String>,
+    mut read_identity: impl FnMut(u32) -> Option<u64>,
+    mut read_membership: impl FnMut(u32) -> Option<(u32, u32, u64)>,
+) -> Result<Vec<u32>, String> {
+    let rows = read_rows()?;
+    owned.retain(|pid, stamp| *stamp != 0 || process_exists(*pid));
     let mut unidentified = owned
         .iter()
         .filter_map(|(pid, stamp)| (*stamp == 0).then_some(*pid))
         .collect::<std::collections::BTreeSet<_>>();
-    let rows = process_rows()?;
     let owns_group = unsafe { libc::getpgrp() } == root as i32;
     let mut selected = vec![root];
+    let mut observed = BTreeMap::new();
+    if let Some(identity) = read_identity(root) {
+        observed.insert(root, identity);
+    }
     for (pid, _, group, zombie) in &rows {
         if *zombie {
             continue;
         }
         let tracked = match owned.get(pid).copied() {
-            Some(0) => true,
-            Some(stamp) => match super::memory::process_identity(*pid) {
+            Some(0) => false,
+            Some(stamp) => match read_identity(*pid) {
                 Some(current) => current == stamp,
                 None => {
                     owned.insert(*pid, 0);
                     unidentified.insert(*pid);
-                    true
+                    false
                 }
             },
             None => false,
         };
-        if ((owns_group && *group == root) || tracked) && !selected.contains(pid) {
-            selected.push(*pid);
+        // Identity and relationship must come from the same native process record.
+        let membership = read_membership(*pid);
+        let identity = membership.map(|(_, _, stamp)| stamp);
+        if owned
+            .get(pid)
+            .is_some_and(|stamp| *stamp != 0 && identity != Some(*stamp))
+        {
+            owned.insert(*pid, 0);
+            unidentified.insert(*pid);
+            continue;
+        }
+        if !unidentified.contains(pid)
+            && (can_claim_process_group_candidate(
+                *pid,
+                membership.map_or(*group, |(_, group, _)| group),
+                root,
+                owns_group,
+                owned,
+                identity,
+            ) || tracked)
+        {
+            if let Some(identity) = identity {
+                observed.insert(*pid, identity);
+                if !selected.contains(pid) {
+                    owned.entry(*pid).or_insert(identity);
+                    selected.push(*pid);
+                }
+            } else {
+                owned.insert(*pid, 0);
+                unidentified.insert(*pid);
+            }
         }
     }
+    let mut lineage_rows = Vec::new();
     let mut index = 0;
     while index < selected.len() {
-        for (pid, parent, _, zombie) in &rows {
+        // An unknown or reused PID cannot prove ownership of any descendants.
+        if unidentified.contains(&selected[index]) {
+            index += 1;
+            continue;
+        }
+        let parent = selected[index];
+        if !candidate_parent_identity_matches(observed.get(&parent).copied(), read_identity(parent))
+        {
+            owned.insert(parent, 0);
+            unidentified.insert(parent);
+            index += 1;
+            continue;
+        }
+        let current_rows = read_rows()?;
+        if !candidate_parent_identity_matches(observed.get(&parent).copied(), read_identity(parent))
+        {
+            owned.insert(parent, 0);
+            unidentified.insert(parent);
+            index += 1;
+            continue;
+        }
+        if let Some(parent_row) = current_rows.iter().find(|row| row.0 == parent) {
+            lineage_rows.push(*parent_row);
+        }
+        for (pid, parent, _, zombie) in &current_rows {
             if !*zombie && *parent == selected[index] && !selected.contains(pid) {
-                selected.push(*pid);
+                if let Some((current_parent, group, identity)) = read_membership(*pid) {
+                    if current_parent == selected[index] {
+                        if !candidate_parent_identity_matches(
+                            observed.get(parent).copied(),
+                            read_identity(*parent),
+                        ) {
+                            owned.insert(*parent, 0);
+                            unidentified.insert(*parent);
+                            break;
+                        }
+                        observed.insert(*pid, identity);
+                        lineage_rows.push((*pid, current_parent, group, false));
+                        owned.entry(*pid).or_insert(identity);
+                        selected.push(*pid);
+                    }
+                } else {
+                    owned.insert(*pid, 0);
+                    unidentified.insert(*pid);
+                }
             }
         }
         index += 1;
@@ -621,30 +768,54 @@ fn run_members(root: u32, owned: &mut BTreeMap<u32, u64>) -> Result<Vec<u32>, St
         .into_iter()
         .filter(|p| *p != root)
         .collect::<Vec<_>>();
+    let untrusted = find_untrusted_descendants(&lineage_rows, &candidates, &unidentified);
     // Reserve every discovered PID before inspection can fail or a parent can disappear.
     for pid in &candidates {
-        owned.entry(*pid).or_insert(0);
+        if untrusted.contains(pid) {
+            owned.insert(*pid, 0);
+            unidentified.insert(*pid);
+        } else {
+            owned.entry(*pid).or_insert(0);
+        }
     }
-    for pid in candidates {
+    for pid in &candidates {
+        let pid = *pid;
         if unidentified.contains(&pid) {
-            if process_exists(pid) {
-                return Err("An unidentified observed Agent PID is still present".into());
+            if !process_exists(pid) {
+                owned.remove(&pid);
             }
-            owned.remove(&pid);
             continue;
         }
-        if let Some(stamp) = super::memory::process_identity(pid) {
+        let expected = owned.get(&pid).copied().filter(|stamp| *stamp != 0);
+        if let Some(stamp) =
+            verified_candidate_identity(expected, observed.get(&pid).copied(), read_identity(pid))
+        {
             owned.insert(pid, stamp);
             live.push(pid);
         } else if process_exists(pid) {
-            owned.insert(pid, 0);
-            if process_rows()?.iter().any(|r| r.0 == pid && !r.3) {
-                return Err("An Agent child is live but its identity cannot be verified".into());
+            if expected.is_some() {
+                owned.insert(pid, 0);
+                continue;
             }
-            owned.remove(&pid);
+            if read_rows()?.iter().any(|row| row.0 == pid && !row.3) {
+                // Permission-restricted or exiting children must not interrupt the Agent or be signalled.
+                owned.insert(pid, 0);
+            } else {
+                owned.remove(&pid);
+            }
         } else {
             owned.remove(&pid);
         }
+    }
+    unidentified.extend(
+        owned
+            .iter()
+            .filter_map(|(pid, stamp)| (*stamp == 0).then_some(*pid)),
+    );
+    let untrusted = find_untrusted_descendants(&lineage_rows, &candidates, &unidentified);
+    for pid in untrusted {
+        owned.insert(pid, 0);
+        live.retain(|member| *member != pid);
     }
     Ok(live)
 }
@@ -655,7 +826,7 @@ fn cleanup_run(root: u32, owned: &mut BTreeMap<u32, u64>) -> Result<(), String> 
         loop {
             let members = run_members(root, owned)?;
             if members.is_empty() {
-                return Ok(());
+                break;
             }
             for pid in members {
                 if owned
@@ -671,7 +842,10 @@ fn cleanup_run(root: u32, owned: &mut BTreeMap<u32, u64>) -> Result<(), String> 
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
     }
-    if run_members(root, owned)?.is_empty() {
+    let members = run_members(root, owned)?;
+    if owned.values().any(|stamp| *stamp == 0) {
+        Err("An unidentified observed Agent PID is still present".into())
+    } else if members.is_empty() {
         Ok(())
     } else {
         Err("Agent children did not stop".into())
@@ -780,7 +954,10 @@ fn run(manifest: Manifest, mode: &str, extra: &[String]) -> Result<i32, String> 
     }
     if unsafe { libc::isatty(libc::STDOUT_FILENO) } == 1 {
         use std::io::Write;
-        let _ = std::io::stdout().write_all(b"\x1b[?1049l\x1b[?25h\x1b[0m");
+        let mut stdout = std::io::stdout().lock();
+        let _ = stdout
+            .write_all(b"\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l\x1b[?1049l\x1b[?2004l\x1b[?25h\x1b[!p\x1b[0m");
+        let _ = stdout.flush();
     }
     let save_recovery = || {
         write_recovery(
@@ -1069,11 +1246,13 @@ mod lifecycle_tests {
             "Run this check as the normal desktop user"
         );
         let mut owned = BTreeMap::from([(1, 123)]);
-        assert!(run_members(std::process::id(), &mut owned).is_err());
+        assert!(!run_members(std::process::id(), &mut owned)
+            .unwrap()
+            .contains(&1));
         assert_eq!(owned.get(&1), Some(&0));
     }
     #[test]
-    fn interactive_shell_failed_scan_remembers_all_discovered_children() {
+    fn interactive_shell_unidentified_child_does_not_interrupt_tracking_or_verified_cleanup() {
         let mut first = std::process::Command::new("/bin/sleep")
             .arg("30")
             .spawn()
@@ -1084,14 +1263,29 @@ mod lifecycle_tests {
             .unwrap();
         let mut owned = BTreeMap::from([(first.id(), 0)]);
         let result = run_members(std::process::id(), &mut owned);
+        let cleanup = cleanup_run(std::process::id(), &mut owned);
+        let first_alive = first.try_wait().unwrap().is_none();
+        let second_stopped = second.try_wait().unwrap().is_some();
         first.kill().unwrap();
         first.wait().unwrap();
-        second.kill().unwrap();
+        if !second_stopped {
+            second.kill().unwrap();
+        }
         second.wait().unwrap();
-        assert!(result.is_err());
+        let members = result.expect("An unidentified child must not interrupt the Agent");
+        assert!(!members.contains(&first.id()));
+        assert!(members.contains(&second.id()));
         assert!(
-            owned.contains_key(&second.id()),
-            "A failed inspection must not forget another discovered child"
+            cleanup.is_err(),
+            "A live unidentified child must block clean exit"
+        );
+        assert!(
+            first_alive,
+            "Never signal a child whose identity is unknown"
+        );
+        assert!(
+            second_stopped,
+            "Still clean up verified children in the same run"
         );
     }
     #[test]
@@ -1107,20 +1301,306 @@ mod lifecycle_tests {
         let pid = child.id();
         let mut owned = BTreeMap::from([(pid, 0)]);
         let result = run_members(root.id(), &mut owned);
+        let stamp = owned[&pid];
         child.kill().unwrap();
         child.wait().unwrap();
         let after = run_members(root.id(), &mut owned);
         root.kill().unwrap();
         root.wait().unwrap();
-        assert!(
-            result.is_err(),
-            "An unidentified observed PID must stay blocked even if a readable process now uses it"
-        );
+        assert!(!result.unwrap().contains(&pid));
         assert_eq!(
-            owned[&pid], 0,
+            stamp, 0,
             "Never adopt a new identity for an unidentified observed PID"
         );
         assert!(!after.unwrap().contains(&pid));
+    }
+    #[test]
+    fn interactive_shell_retains_unknown_zombie_until_reaped() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let zombie = loop {
+            let zombie = process_rows()
+                .unwrap()
+                .iter()
+                .any(|row| row.0 == pid && row.3);
+            if zombie || std::time::Instant::now() >= deadline {
+                break zombie;
+            }
+            std::thread::yield_now();
+        };
+        let mut owned = BTreeMap::from([(pid, 0)]);
+        let members = run_members(std::process::id(), &mut owned).unwrap();
+        let reserved = owned.get(&pid).copied();
+        child.wait().unwrap();
+        run_members(std::process::id(), &mut owned).unwrap();
+        assert_eq!(reserved, Some(0));
+        assert!(
+            zombie,
+            "Fixture must be observed as a zombie before reaping"
+        );
+        assert!(!members.contains(&pid));
+        assert!(
+            !owned.contains_key(&pid),
+            "An absent, reaped PID releases its reservation"
+        );
+    }
+    #[test]
+    fn interactive_shell_cleanup_does_not_signal_a_reused_pid() {
+        let mut root = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let mut unrelated = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let identity = crate::memory::process_identity(unrelated.id()).unwrap();
+        let mut owned = BTreeMap::from([(unrelated.id(), identity + 1)]);
+        let cleanup = cleanup_run(root.id(), &mut owned);
+        let untouched = unrelated.try_wait().unwrap().is_none();
+        unrelated.kill().unwrap();
+        unrelated.wait().unwrap();
+        root.kill().unwrap();
+        root.wait().unwrap();
+        assert!(
+            cleanup.is_err(),
+            "An unidentified live PID blocks confirmation"
+        );
+        assert!(
+            untouched,
+            "A reused PID is not a member of the previous run"
+        );
+    }
+    #[test]
+    fn interactive_shell_parent_recheck_failure_persists_unknown_ownership() {
+        let root = u32::MAX;
+        let parent = std::process::id();
+        let child = u32::MAX - 1;
+        for failed_read in [2, 3, 4] {
+            for failure in [None, Some(21)] {
+                let mut reads = 0;
+                let mut owned = BTreeMap::from([(parent, 20)]);
+                let members = run_members_with(
+                    root,
+                    &mut owned,
+                    || Ok(vec![(parent, root, 1, false), (child, parent, 1, false)]),
+                    |pid| {
+                        if pid == parent {
+                            reads += 1;
+                            if reads == failed_read {
+                                return failure;
+                            }
+                        }
+                        Some(20)
+                    },
+                    |pid| {
+                        if pid == parent {
+                            Some((root, 1, 20))
+                        } else {
+                            Some((parent, 1, 30))
+                        }
+                    },
+                )
+                .unwrap();
+                assert!(members.is_empty());
+                assert_eq!(
+                    owned.get(&parent),
+                    Some(&0),
+                    "parent check {failed_read}: {failure:?}"
+                );
+            }
+        }
+    }
+    #[test]
+    fn interactive_shell_stale_zombie_cannot_release_a_live_unknown_pid() {
+        let pid = std::process::id();
+        let mut owned = BTreeMap::from([(pid, 0)]);
+        let members = run_members_with(
+            u32::MAX,
+            &mut owned,
+            || Ok(vec![(pid, 1, 1, true)]),
+            |_| Some(20),
+            |_| None,
+        )
+        .unwrap();
+        assert!(members.is_empty());
+        assert_eq!(owned.get(&pid), Some(&0));
+    }
+    #[test]
+    fn interactive_shell_scan_failure_keeps_every_previously_discovered_pid() {
+        let root = unsafe { libc::getpgrp() } as u32;
+        let candidate = u32::MAX - 1;
+        for group in [1, root] {
+            let mut owned = BTreeMap::new();
+            let mut scans = 0;
+            let result = run_members_with(
+                root,
+                &mut owned,
+                || {
+                    scans += 1;
+                    if scans == if group == root { 2 } else { 3 } {
+                        return Err("fixture scan failed".into());
+                    }
+                    Ok(vec![(candidate, root, group, false)])
+                },
+                |_| Some(20),
+                |pid| (pid == candidate).then_some((root, group, 20)),
+            );
+            assert!(result.is_err());
+            assert_eq!(owned.get(&candidate), Some(&20));
+        }
+    }
+    #[test]
+    fn interactive_shell_membership_snapshot_cannot_claim_reused_candidates() {
+        let root = unsafe { libc::getpgrp() } as u32;
+        let candidate = u32::MAX - 1;
+        for group_candidate in [true, false] {
+            let mut owned = BTreeMap::new();
+            let members = run_members_with(
+                root,
+                &mut owned,
+                || {
+                    Ok(vec![(
+                        candidate,
+                        root,
+                        if group_candidate { root } else { 1 },
+                        false,
+                    )])
+                },
+                |_| Some(20),
+                |pid| (pid == candidate).then_some((1, 1, 20)),
+            )
+            .unwrap();
+            assert!(
+                !members.contains(&candidate),
+                "A reused PID outside the live group/lineage must never be claimed"
+            );
+        }
+    }
+    #[test]
+    fn interactive_shell_membership_snapshot_preserves_live_and_unreadable_children() {
+        let root = unsafe { libc::getpgrp() } as u32;
+        let candidate = u32::MAX - 1;
+        for (group, stamp) in [(1, Some(20)), (1, None), (root, Some(20)), (root, None)] {
+            let parent = if group == root { 1 } else { root };
+            let mut owned = BTreeMap::new();
+            let members = run_members_with(
+                root,
+                &mut owned,
+                || Ok(vec![(candidate, parent, group, false)]),
+                |_| Some(20),
+                |pid| {
+                    if pid == candidate {
+                        stamp.map(|stamp| (parent, group, stamp))
+                    } else {
+                        None
+                    }
+                },
+            )
+            .unwrap();
+            assert_eq!(members.contains(&candidate), stamp.is_some());
+            assert_eq!(owned.get(&candidate), Some(&stamp.unwrap_or(0)));
+        }
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn interactive_shell_membership_identity_matches_native_process() {
+        assert_eq!(
+            crate::memory::process_membership(std::process::id()),
+            Some((
+                unsafe { libc::getppid() } as u32,
+                unsafe { libc::getpgrp() } as u32,
+                crate::memory::process_identity(std::process::id()).unwrap(),
+            ))
+        );
+        assert_eq!(crate::memory::process_membership(u32::MAX), None);
+    }
+    #[test]
+    fn interactive_shell_identity_mismatch_disqualifies_group_candidate() {
+        let identity = crate::memory::process_identity(std::process::id()).unwrap();
+        let owned = BTreeMap::from([(std::process::id(), identity.wrapping_add(1))]);
+        assert!(!can_claim_process_group_candidate(
+            std::process::id(),
+            std::process::id(),
+            std::process::id(),
+            true,
+            &owned,
+            Some(identity - 1)
+        ));
+    }
+    #[test]
+    fn interactive_shell_candidate_identity_must_match_both_observations() {
+        assert_eq!(
+            verified_candidate_identity(Some(10), Some(10), Some(10)),
+            Some(10)
+        );
+        assert_eq!(
+            verified_candidate_identity(Some(10), Some(10), Some(11)),
+            None
+        );
+        assert_eq!(verified_candidate_identity(None, Some(10), Some(11)), None);
+        assert_eq!(
+            verified_candidate_identity(None, Some(11), Some(11)),
+            Some(11)
+        );
+    }
+    #[test]
+    fn interactive_shell_final_identity_failure_invalidates_snapshot_descendants() {
+        let rows = [(10, 1, 10, false), (11, 10, 10, false), (12, 11, 10, false)];
+        let candidates = [10, 11, 12];
+        let unidentified = std::collections::BTreeSet::from([10]);
+        assert_eq!(
+            find_untrusted_descendants(&rows, &candidates, &unidentified),
+            std::collections::BTreeSet::from([11, 12])
+        );
+    }
+    #[test]
+    fn interactive_shell_candidate_requires_current_parent_identity() {
+        assert!(!candidate_parent_identity_matches(Some(20), Some(21)));
+        assert!(candidate_parent_identity_matches(Some(20), Some(20)));
+    }
+    #[test]
+    fn interactive_shell_unknown_pid_cannot_claim_unrelated_descendants() {
+        use std::io::BufRead;
+        let mut root = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let mut unrelated = std::process::Command::new("/bin/sh")
+            .args(["-c", "sleep 30 & echo $!; wait"])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(unrelated.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let descendant: u32 = line.trim().parse().unwrap();
+        let identity = crate::memory::process_identity(descendant).unwrap();
+        let mut owned = BTreeMap::from([(unrelated.id(), 0)]);
+        let members = run_members(root.id(), &mut owned);
+        let cleanup = cleanup_run(root.id(), &mut owned);
+        let untouched = crate::memory::process_identity(descendant) == Some(identity);
+        if untouched {
+            crate::signal_process(descendant, libc::SIGTERM).unwrap();
+        }
+        unrelated.wait().unwrap();
+        root.kill().unwrap();
+        root.wait().unwrap();
+        assert!(
+            !members.unwrap().contains(&descendant),
+            "Unknown PIDs cannot establish ownership of descendants"
+        );
+        assert!(cleanup.is_err());
+        assert!(
+            untouched,
+            "Never signal descendants attributed only through an unknown PID"
+        );
     }
     #[test]
     fn interactive_shell_fallback_snapshot_refuses_partial_or_empty_rows() {
@@ -1956,7 +2436,7 @@ mod wire_tests {
             argv: vec![
                 "/bin/sh".into(),
                 "-c".into(),
-                "test \"$ONLY_AGENT_VALUE\" = scoped || exit 91; sleep 30 </dev/null >/dev/null 2>&1 & echo $! > \"$CHILD_PID_FILE\"; if test -n \"$YAM_SHELL_TEST_SIGNAL\"; then kill -\"$YAM_SHELL_TEST_SIGNAL\" $$; fi; exit \"$YAM_SHELL_TEST_EXIT\"".into(),
+                "test \"$ONLY_AGENT_VALUE\" = scoped || exit 91; printf '\\033[?9h\\033[?1000h\\033[?1002h\\033[?1003h\\033[?1004h\\033[?1005h\\033[?1006h\\033[?1015h\\033[?1016h\\033[?1049h\\033[?2004h'; if test -n \"$YAM_SHELL_TEST_PS\"; then i=0; while test $i -lt 200; do /bin/ps -p $$ -o pid= | head -1 >/dev/null; i=$((i+1)); done; fi; sleep 30 </dev/null >/dev/null 2>&1 & echo $! > \"$CHILD_PID_FILE\"; if test -n \"$YAM_SHELL_TEST_SIGNAL\"; then kill -\"$YAM_SHELL_TEST_SIGNAL\" $$; fi; exit \"$YAM_SHELL_TEST_EXIT\"".into(),
             ],
             env: BTreeMap::from([
                 ("YAM_AGENT_ADDRESS".into(), bridge.address.to_string()),
@@ -2016,6 +2496,14 @@ mod wire_tests {
             builder.env("YAM_SHELL_TEST_MANIFEST", &path);
             builder.env("YAM_SHELL_TEST_SIGNAL", signal);
             builder.env("YAM_SHELL_TEST_EXIT", expected.to_string());
+            builder.env(
+                "YAM_SHELL_TEST_PS",
+                if program.ends_with("zsh") && expected == 0 {
+                    "1"
+                } else {
+                    ""
+                },
+            );
             builder.cwd(&root);
             let pair = portable_pty::native_pty_system()
                 .openpty(portable_pty::PtySize {
@@ -2067,6 +2555,16 @@ mod wire_tests {
                 "real initial helper failed for {program}: {output}"
             );
             assert!(output.contains("AFTER_REAL_HELPER"));
+            let returned = output.find("Agent exited (").unwrap();
+            for mode in [
+                9, 1000, 1002, 1003, 1004, 1005, 1006, 1015, 1016, 1049, 2004,
+            ] {
+                let enabled = output.find(&format!("\x1b[?{mode}h")).unwrap();
+                assert!(
+                    output[enabled..returned].contains(&format!("\x1b[?{mode}l")),
+                    "Mouse mode {mode} must be disabled before returning to {program}: {output}"
+                );
+            }
         }
         let record = history.get("s-1-1").unwrap();
         assert_eq!(record.status, "running");

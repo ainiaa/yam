@@ -69,7 +69,7 @@ function codexConnectionLabels(connections:CodexConnections,models:PiModel[]=[])
  }));
 }
 function RoutingModelPicker({label,models,value,connections,catalogChecked=true,checkedConnections,emptyValue='',emptyLabel='Choose a model',disabled,onChange,onBrowse}:{label:string;models:PiModel[];value:string;connections?:CodexConnections|null;catalogChecked?:boolean;checkedConnections?:readonly string[];emptyValue?:string;emptyLabel?:string;disabled?:boolean;onChange:React.ChangeEventHandler<HTMLSelectElement>;onBrowse?:()=>void}){
- const connectionOf=(key:string)=>key.split('/',1)[0];
+ const connectionOf=(key:string)=>!connections&&(key.startsWith('magpie/')||key.startsWith('yam-gateway/')&&models.some(model=>model.key===key&&model.source==='magpie'))?'magpie':key.split('/',1)[0];
  const saved=value!==emptyValue?value:'';
  const savedConnection=saved?connectionOf(saved):'';
  const [browsing,setBrowsing]=useState<{saved:string;connection:string}|null>(null);
@@ -77,7 +77,7 @@ function RoutingModelPicker({label,models,value,connections,catalogChecked=true,
  if(!connections)for(const model of models){
   if(model.legacy_alias&&model.key!==saved)continue;
   const key=connectionOf(model.key),source=piModelCatalogSource(model.key);
-  const kind=source==='magpie-direct'?model.source==='magpie'?'Magpie direct':'Local gateway':source==='magpie-pi'?'Magpie via Pi':key==='yam-codex'&&model.billing!=='api'?'Native Codex login':model.billing==='subscription'||model.source==='chatgpt-subscription'?'Pi native subscription':model.billing==='api'?'Pi native API':'Pi native';
+  const kind=key==='magpie'?'Magpie':source==='magpie-direct'?'Local gateway':key==='yam-codex'&&model.billing!=='api'?'Native Codex login':model.billing==='subscription'||model.source==='chatgpt-subscription'?'Pi native subscription':model.billing==='api'?'Pi native API':'Pi native';
   const identity=['yam-codex','yam-gateway','magpie'].includes(key)?'':key;
   if(!options.has(key))options.set(key,[t(kind),identity].filter(Boolean).join(' · '));
  }

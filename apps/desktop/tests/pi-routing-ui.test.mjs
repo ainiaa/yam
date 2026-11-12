@@ -620,9 +620,33 @@ test('routing model picker separates connections, preserves model paths and wait
  assert.match(render(gateway,[],{native:config.connections.native},false).text,/Saved connection unavailable.*Saved model unavailable/);
  assert.match(render(gateway,catalog,{native:config.connections.native}).text,/Saved model unavailable.*auto\/deepseek-v4-flash/);
  const pi=render('magpie/auto/deepseek-v4-flash',[{...models[0],key:'magpie/auto/deepseek-v4-flash'},{...models[0],key:'p/deepseek-v4-flash',billing:'api'}],null);
- assert.match(pi.text,/Magpie via Pi.*Pi native API/);
+ assert.match(pi.text,/Magpie.*Pi native API/);
  assert.equal(pi.model.props.value,'magpie/auto/deepseek-v4-flash');
  assert.equal(options(pi.model).find(node=>node.props.value===pi.model.props.value).children.join(''),'Magpie · Automatic routing · deepseek-v4-flash');
+ const magpieModels=[
+  {...models[0],key:'magpie/auto/native',source:'magpie'},
+  {...models[0],key:'yam-gateway/auto/direct',source:'magpie'},
+  {...models[0],key:'yam-gateway/other/model',source:'other'},
+ ];
+ for(const selected of magpieModels.slice(0,2)){
+  state=undefined;
+  const picker=render(selected.key,magpieModels,null);
+  assert.equal(picker.source.props.value,'magpie');
+  assert.deepEqual(options(picker.source).map(node=>node.children.join('')),['Choose a connection','Magpie','Local gateway']);
+  assert.deepEqual(options(picker.model).map(node=>node.props.value),['',...magpieModels.slice(0,2).map(model=>model.key)]);
+  assert.equal(picker.model.props.value,selected.key,'saved provider identities stay unchanged');
+  picker.source.props.onChange({target:{value:'yam-gateway'}});
+  const other=render(selected.key,magpieModels,null);
+  assert.deepEqual(options(other.model).map(node=>node.props.value),['pending','',magpieModels[2].key]);
+ }
+ for(const available of [magpieModels.slice(0,1),magpieModels.slice(1,2)]){
+  state=undefined;
+  const picker=render(available[0].key,available,null);
+  assert.deepEqual(options(picker.source).map(node=>node.children.join('')),['Choose a connection','Magpie']);
+  assert.equal(picker.model.props.value,available[0].key);
+ }
+ state=undefined;
+ assert.equal(options(render('',[],null).source).length,1);
  const native=render('yam-codex/gpt-6.1-sol',[{...models[0],key:'yam-codex/gpt-6.1-sol',billing:'subscription'}],null);
  assert.equal(options(native.model).find(node=>node.props.value===native.model.props.value).children.join(''),'Pi native · ChatGPT subscription · gpt-6.1-sol');
  const deepseek='magpie/deepseek/namespace/deepseek-v4-flash';
