@@ -41,9 +41,11 @@ export function applyTerminalSettings<T extends {instance:{options:{fontFamily?:
  for(const view of views){view.instance.options.fontFamily=options.fontFamily;view.instance.options.fontSize=options.fontSize;view.instance.options.theme={...options.theme};view.viewportRevision++;view.fit.fit();sync(view);}
 }
 
-export type TerminalResizeView={instance:{cols:number;rows:number};cursor:number|null;resizePending?:{cols:number;rows:number}|null;resizing?:boolean;disposed?:boolean;writable?:boolean;dirty?:boolean;frameInstance?:string|null;lifecycleRevision?:number};
+export type TerminalResizeView={instance:{cols:number;rows:number};cursor:number|null;resizePending?:{cols:number;rows:number}|null;resizing?:boolean;disposed?:boolean;writable?:boolean;dirty?:boolean;updating?:boolean;frameSize?:{cols:number;rows:number};frameInstance?:string|null;lifecycleRevision?:number};
 export async function queueTerminalResize(view:TerminalResizeView,resize:(cols:number,rows:number)=>Promise<unknown>,error:(reason:unknown)=>void):Promise<void>{
  if(view.disposed||!view.writable||view.cursor===null||view.instance.cols<=0||view.instance.rows<=0)return;
+ // Only a clean applied frame confirms owner geometry; dirty/read/resize-in-flight state must still synchronize.
+ if(view.dirty===false&&!view.updating&&!view.resizing&&view.frameSize?.cols===view.instance.cols&&view.frameSize.rows===view.instance.rows)return;
  view.resizePending={cols:view.instance.cols,rows:view.instance.rows};if(view.resizing)return;
  const owner=view.frameInstance,lifecycle=view.lifecycleRevision;
  const attached=()=>!view.disposed&&view.writable===true&&view.cursor!==null&&view.frameInstance===owner&&view.lifecycleRevision===lifecycle;

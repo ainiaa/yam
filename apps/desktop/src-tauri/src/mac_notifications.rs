@@ -6,7 +6,7 @@ use objc2::{
     AnyThread, DefinedClass,
 };
 use objc2_foundation::{
-    MainThreadMarker, NSBundle, NSError, NSObject, NSObjectProtocol, NSString, NSUUID,
+    MainThreadMarker, NSBundle, NSDictionary, NSError, NSObject, NSObjectProtocol, NSString, NSUUID,
 };
 use objc2_user_notifications::{
     UNAuthorizationOptions, UNErrorCode, UNMutableNotificationContent, UNNotification,
@@ -25,6 +25,7 @@ use std::{
 };
 
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(30);
+const SESSION_URL_KEY: &str = "yam_session_url";
 
 #[cfg(test)]
 #[test]
@@ -230,6 +231,17 @@ fn require_app_bundle() -> Result<(), String> {
 }
 
 fn notification_link(request: &UNNotificationRequest) -> String {
+    if let Some(value) = request
+        .content()
+        .userInfo()
+        .objectForKey(&NSString::from_str(SESSION_URL_KEY))
+    {
+        // An explicit malformed payload must not redirect to a different legacy target.
+        return value
+            .downcast::<NSString>()
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+    }
     if let Some(link) = request
         .content()
         .targetContentIdentifier()
@@ -267,6 +279,13 @@ fn notification_request(
     }
     let content = UNMutableNotificationContent::new();
     content.setTargetContentIdentifier(Some(&NSString::from_str(&identifier)));
+    let payload = NSDictionary::<NSString, NSString>::from_slices(
+        &[&*NSString::from_str(SESSION_URL_KEY)],
+        &[&*NSString::from_str(&identifier)],
+    );
+    // Both keys and values are property-list strings; erase only the dictionary's generic types.
+    // Persist routing separately: macOS can omit the presentation-only scene target on delivery.
+    unsafe { content.setUserInfo(&Retained::cast_unchecked(payload)) };
     let (request_id, thread_id, trigger) = if let Some((project, lane, now)) = grouping {
         if project.is_empty() {
             return Err("Invalid notification project".into());
@@ -514,6 +533,98 @@ mod tests {
 }
 
 #[cfg(test)]
+#[test]
+fn activation_payload_survives_missing_presentation_target_and_grouping() {
+    autoreleasepool(|_| {
+        for grouping in [None, Some(("/project", "failure", 100))] {
+            let request = notification_request("s-current", "title", "body", grouping).unwrap();
+            let delivered = UNMutableNotificationContent::new();
+            delivered.setThreadIdentifier(&request.content().threadIdentifier());
+            // macOS may omit the scene target from the delivered content.
+            unsafe { delivered.setUserInfo(&request.content().userInfo()) };
+            let response_request = UNNotificationRequest::requestWithIdentifier_content_trigger(
+                &request.identifier(),
+                &delivered,
+                None,
+            );
+            assert_eq!(
+                notification_link(&response_request),
+                "yam://session/s-current"
+            );
+        }
+    });
+}
+
+#[test]
+fn activation_payload_wins_over_scene_target_and_rejects_malformed_values() {
+    autoreleasepool(|_| {
+        for link in ["yam://session/s-current", "../invalid"] {
+            let content = UNMutableNotificationContent::new();
+            content.setTargetContentIdentifier(Some(&NSString::from_str("yam://session/s-old")));
+            let payload = objc2_foundation::NSDictionary::<NSString, NSString>::from_slices(
+                &[&*NSString::from_str("yam_session_url")],
+                &[&*NSString::from_str(link)],
+            );
+            // Erase only the dictionary's generic key/value types for the SDK setter.
+            unsafe { content.setUserInfo(&Retained::cast_unchecked(payload)) };
+            let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
+                &NSString::from_str("grouped-request"),
+                &content,
+                None,
+            );
+            assert_eq!(notification_link(&request), link);
+            assert_eq!(
+                crate::session_id_from_link(&notification_link(&request)).is_some(),
+                link.starts_with("yam://")
+            );
+        }
+        let content = UNMutableNotificationContent::new();
+        content.setTargetContentIdentifier(Some(&NSString::from_str("yam://session/s-old")));
+        let payload =
+            objc2_foundation::NSDictionary::<NSString, objc2_foundation::NSNumber>::from_slices(
+                &[&*NSString::from_str("yam_session_url")],
+                &[&*objc2_foundation::NSNumber::new_i32(1)],
+            );
+        unsafe { content.setUserInfo(&Retained::cast_unchecked(payload)) };
+        let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
+            &NSString::from_str("grouped-request"),
+            &content,
+            None,
+        );
+        assert!(crate::session_id_from_link(&notification_link(&request)).is_none());
+    });
+}
+
+#[test]
+fn activation_without_payload_keeps_legacy_routes_but_never_guesses_group_ids() {
+    autoreleasepool(|_| {
+        for (target, thread, identifier, expected) in [
+            (
+                Some("yam://session/s-target"),
+                "yam.project.group",
+                "grouped",
+                Some("s-target"),
+            ),
+            (None, "yam://session/s-thread", "legacy", Some("s-thread")),
+            (None, "", "yam://session/s-identifier", Some("s-identifier")),
+            (None, "yam.project.group", "grouped", None),
+        ] {
+            let content = UNMutableNotificationContent::new();
+            content.setTargetContentIdentifier(target.map(NSString::from_str).as_deref());
+            content.setThreadIdentifier(&NSString::from_str(thread));
+            let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
+                &NSString::from_str(identifier),
+                &content,
+                None,
+            );
+            assert_eq!(
+                crate::session_id_from_link(&notification_link(&request)).as_deref(),
+                expected
+            );
+        }
+    });
+}
+
 #[test]
 fn foreground_presentation_requests_banner_list_and_sound_on_supported_macos() {
     let options = presentation_options();

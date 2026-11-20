@@ -660,14 +660,18 @@ test('native routing bar renders planned and dispatched models and switches Code
  const saved=JSON.stringify(routingPolicy);
  const render=(next=state,launchConfig)=>{at=0;slots[0]=next;return component({sessionId:'s',generation:'g',active:true,available:true,launchConfig,invoke:async(command,args)=>{calls.push({command,args});return {state};},policies:[{id:'c',name:'Codex policy',adapter:'codex',setup:saved},{id:'p',name:'Pi policy',adapter:'pi',setup:'{}'}]});};
  const tree=render();
+ const visible=n=>!n||typeof n!=='object'?typeof n==='string'?n:'':(n.type==='details'&&!n.props.open?n.children.filter(c=>c?.type==='summary'):n.children).map(visible).join(' ');
  const all=n=>[n,...(n?.children??[]).filter(x=>x&&typeof x==='object').flatMap(all)];
  assert.match(JSON.stringify(tree),/Dispatched model: native\/light/);assert.doesNotMatch(JSON.stringify(tree),/Pi policy/);
  const gateway='yam-codex/auto/deepseek-v4-flash',launchConfig=JSON.stringify({...mixedPolicy,connections:{native:routingPolicy.connections.native,'yam-codex':mixedPolicy.connections.local},executionGroups:[{small:gateway,medium:gateway,strong:'native/deep'}]});
  const dispatched=JSON.stringify(render({...state,dispatched:{model:gateway,effort:'high'}},launchConfig));
  assert.match(dispatched,/Dispatched model: Local gateway · Automatic routing · deepseek-v4-flash · high/);
  assert.doesNotMatch(dispatched,/yam-codex/);
- const finished=JSON.stringify(render({...state,phase:'completed',target:{...state.target,selection:{model:'small',effort:'medium'}},
-  dispatched:{model:'native/deep',effort:'unknown',rerouted:true,original:state.dispatched}}));
+ const finishedTree=render({...state,phase:'completed',target:{...state.target,selection:{model:'small',effort:'medium'}},
+  dispatched:{model:'native/deep',effort:'unknown',rerouted:true,original:state.dispatched}});
+ const finished=JSON.stringify(finishedTree);
+ assert.match(visible(finishedTree),/Dispatched model: native\/light.*Rerouted model: native\/deep/);
+ assert.doesNotMatch(visible(finishedTree),/Planned route:|Selected for this turn:/);
  assert.match(finished,/Turn completed/);
  assert.match(finished,/Planned route: small · medium/);
  assert.match(finished,/Selected for this turn: native\/light · medium/);
@@ -680,7 +684,9 @@ test('native routing bar renders planned and dispatched models and switches Code
  assert.match(disabled,/Dispatched model: native\/light/);
 
  assert.doesNotMatch(JSON.stringify(render({...state,phase:'classifying'})),/Dispatched model|Selected for this turn/);
- const planned=JSON.stringify(render({...state,policyId:'c',dispatched:null}));
+ const plannedTree=render({...state,policyId:'c',dispatched:null}),planned=JSON.stringify(plannedTree);
+ assert.doesNotMatch(visible(tree),/Selected for this turn:|Planned route:/);
+ assert.match(visible(plannedTree),/Selected for this turn:/);assert.doesNotMatch(visible(plannedTree),/Dispatched model:/);
  assert.match(planned,/Selected for this turn: Codex native · ChatGPT subscription · light · medium/);
  await all(tree).find(n=>n.type==='select').props.onChange({target:{value:'c'}});
  assert.equal(calls[0].args.request.revision,8);assert.deepEqual(calls[0].args.request.data,{policy:{id:'c',name:'Codex policy',config:saved}});

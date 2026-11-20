@@ -41,5 +41,10 @@
     "@vitejs/plugin-react": "^6.0.2",
     "typescript": "~6.0.3",
     "vite": "^8.0.16"
+  },
+  "pnpm": {
+    "patchedDependencies": {
+      "@xterm/xterm@6.0.0": "patches/@xterm__xterm@6.0.0.patch"
+    }
   }
 }

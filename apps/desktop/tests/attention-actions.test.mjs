@@ -1,3 +1,4 @@
+import {beginTerminalReplay,parseTerminalReplay} from '../src/terminal-view-lifecycle.ts';
 import {englishUiRead} from './fixtures/english-ui-source.mjs';
 const readFileSync=(...args)=>englishUiRead(rawReadFileSync,...args);
 import './fixtures/i18n-test-init.mjs';
@@ -58,7 +59,7 @@ function harness(options={}){
   delete bindings.openHistory;
   if(options.realFocus){delete bindings.focusTerminalPane;Object.assign(bindings,{selectionVersion:{current:0},previousSession:{current:null},terminal:{current:null},fitAddon:{current:null},setSession:()=>{},setSelectedAgent:()=>{},setActiveProject:()=>{},setTerminalNotice:()=>{},syncNotificationContext:()=>{}});}
   if(options.realFrame){delete bindings.renderFrame;Object.assign(bindings,{validateTerminalFrame,applyTerminalFrame:()=>options.attach.promise,setTerminalNotice:()=>writes.push('notice'),terminalStatuses:new Set(['succeeded','failed','stopped'])});}
-  if(options.realRaw){Object.assign(view,{cursor:null,ready:false,projection:false,replayVersion:0,instance:{reset(){writes.push('reset')},write(_data,done){parserCallbacks.push(done)},focus(){}}});Object.assign(bindings,{replayOutput,setTerminalNotice:()=>writes.push('notice'),terminalStatuses:new Set(['succeeded','failed','stopped']),setAgentPhase:value=>writes.push({phase:value}),agentOutputWindow:{current:''},updateAgentPhase:()=>writes.push('parsed-phase')});bindings.pendingOutput.current.drain=()=>[];}
+  if(options.realRaw){Object.assign(view,{cursor:null,ready:false,projection:false,replayVersion:0,instance:{reset(){writes.push('reset')},write(_data,done){parserCallbacks.push(done)},focus(){}}});Object.assign(bindings,{beginTerminalReplay,parseTerminalReplay,replayOutput,setTerminalNotice:()=>writes.push('notice'),terminalStatuses:new Set(['succeeded','failed','stopped']),setAgentPhase:value=>writes.push({phase:value}),agentOutputWindow:{current:''},updateAgentPhase:()=>writes.push('parsed-phase')});bindings.pendingOutput.current.drain=()=>[];}
  }
  Object.assign(h,new Function(...Object.keys(bindings),functions(options.realAttach?[...(options.realFocus?['focusTerminalPane']:[]),...(options.realFrame?['renderFrame']:[]),'claimWindowView','openHistory','openTerminal','openSession','openReceipt']:['openTerminal','openSession','openReceipt'])+';return {openSession,openReceipt}')(...Object.values(bindings)));
  return h;
@@ -138,11 +139,11 @@ test('F5 actual App grouped inbox retains selected proof and the real openReceip
  const require=createRequire(import.meta.url),runtime=require('react/jsx-runtime');
  const code=ts.transpileModule('const widget='+expression+';', {compilerOptions:{target:ts.ScriptTarget.ESNext,module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX}}).outputText;
  const h=harness(),r=record(),inbox=[{session:r,receipt:receipt()}];h.sessionId.current='s-one';
- const args={inbox,sessionId:h.sessionId,currentAgent:r.agent,titleFor:()=>r.summary.title,SessionInbox:()=>{},openReceipt:h.openReceipt};
+ const args={currentProject:null,activeProject:'',inboxProjectOnly:false,inboxActionableOnly:false,inbox,sessionId:h.sessionId,currentAgent:r.agent,titleFor:()=>r.summary.title,SessionInbox:()=>{},openReceipt:h.openReceipt};
  const widget=()=>new Function('require','exports',...Object.keys(args),code+';return widget')(id=>id==='react/jsx-runtime'?runtime:require(id),{},...Object.values(args));
  const groupSource=readFileSync(new URL('../src/SessionInbox.tsx',import.meta.url),'utf8'),groupCode=ts.transpileModule(groupSource,{compilerOptions:{target:ts.ScriptTarget.ESNext,module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX}}).outputText;
  const history=await import('../src/history.ts'),exports={},Card=()=>{};
- new Function('require','exports',groupCode)(id=>id==='react/jsx-runtime'?runtime:id==='./history'?history:id==='./AttentionCard'?{AttentionCard:Card}:id==='./i18n'?{t:x=>x}:require(id),exports);
+ new Function('require','exports',groupCode)(id=>id==='react/jsx-runtime'?runtime:id==='./workspaces'?{projectKey:p=>p.trim().replace(/[\\/]+$/, '')||'/'}:id==='./history'?history:id==='./AttentionCard'?{AttentionCard:Card}:id==='./i18n'?{t:x=>x}:require(id),exports);
  const card=()=>exports.SessionInbox(widget().props).props.children[0].props.children[1];
  assert.equal(widget().type,args.SessionInbox);assert.equal(card().type,Card);assert.equal(card().props.agent,r.agent);assert.equal(card().props.entry.id,receipt().id);card().props.onOpen();await tick();assert.equal(h.calls.filter(c=>c.command==='read_agent_receipt').length,1);
  h.sessionId.current='other';assert.equal(card().props.agent,undefined);

@@ -52,6 +52,6 @@ export function TerminalProfiles({fonts=["SFMono-Regular","Menlo","Monaco","Cons
     <button type="button" disabled={starting||!selected} onClick={onStart}>{t("Start selected profile")}</button>
     <button type="button" disabled={starting} onClick={onWithoutProfile}>{t("Start without profile")}</button>
    </div>
-  </section><footer className="dialog-actions"><button type="button" onClick={onClose}>{t("Close")}</button></footer>
+  </section><footer className="dialog-actions"><button type="button" data-settings-close onClick={onClose}>{t("Close")}</button></footer>
  </dialog>;
 }

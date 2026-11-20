@@ -5,6 +5,7 @@ import './fixtures/i18n-test-init.mjs';
 import test from 'node:test';import assert from 'node:assert/strict';import {readFileSync as rawReadFileSync} from 'node:fs';import ts from 'typescript';
 import {LaunchTemplateCollection,projectLaunchFields} from '../src/launch-templates.ts';import {connectionDetails} from '../src/provider-config.ts';import {TerminalViews} from '../src/terminal-views.ts';import * as layout from '../src/terminal-layout.ts';
 import {ConversationController} from '../src/conversation-view.ts';
+import {sessionRuntimeInfo} from '../src/session-runtime-info.ts';
 const app=ts.createSourceFile('App.tsx',readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
 function callbacks(names,bindings){const bodies=[];const visit=node=>{if(ts.isFunctionDeclaration(node)&&names.includes(node.name?.text))bodies.push(node.getText(app));ts.forEachChild(node,visit);};visit(app);assert.equal(bodies.length,names.length);return new Function(...Object.keys(bindings),ts.transpile(bodies.join('\n'),{target:ts.ScriptTarget.ES2022})+`;return {${names.join(',')}};`)(...Object.values(bindings));}
 const provider={id:'custom',model:'gateway/model',base_url:'http://127.0.0.1:3425/v1',api_key_env:'GATEWAY_API_KEY'};
@@ -21,7 +22,7 @@ test('T6 corrupt templates stay protected through cancel, then explicit recovery
  let confirmed=false;const errors=[];const args={isMainWindow:true,invoke:async name=>{assert.equal(name,'confirm_template_reset');return confirmed;},launchTemplateCollection:c.value,setLaunchTemplateActionError(){},refreshLaunchTemplateUi(){},handleLaunchTemplateError:error=>errors.push(error)};
  const {resetLaunchTemplates}=callbacks(['resetLaunchTemplates'],args);await resetLaunchTemplates();assert.equal(c.storage.value,'{broken');confirmed=true;await resetLaunchTemplates();assert.equal(c.value.loadError,null);
  c.value.save('Magpie',{...fields,env:{GATEWAY_API_KEY:'SECRET_SENTINEL'}});c.value.select(c.value.templates[0].id);const saved=c.value.apply();assert.ok(saved);assert.equal(c.storage.value.includes('SECRET_SENTINEL'),false);
- const form={},launchEdits={current:{}};const setters={projectLaunchFields,formLaunch:form,launchSettingsDialog:{current:null},launchDialog:{current:null},setLaunchDraft:fn=>Object.assign(form,fn()),setProjectLaunchEdits:fn=>launchEdits.current=fn(launchEdits.current)};
+ const form={},launchEdits={current:{}};const setters={projectLaunchFields,formLaunch:form,launchSettingsDialog:{current:null},launchDialog:{current:null},setRoutingPolicySelection(){},setLaunchDraft:fn=>Object.assign(form,fn()),setProjectLaunchEdits:fn=>launchEdits.current=fn(launchEdits.current)};
  callbacks(['editLaunch','applyLaunchTemplate'],setters).applyLaunchTemplate(saved);callbacks(['editLaunch','applyLaunchTemplate'],setters).applyLaunchTemplate(saved);
  assert.deepEqual(form.provider,provider);assert.deepEqual(launchEdits.current.provider,provider);assert.deepEqual(connectionDetails(form),{cli:'codex',source:'YAM isolated API configuration',model:'gateway/model',endpoint:'http://127.0.0.1:3425/v1'});assert.deepEqual(errors,[]);
 });
@@ -39,7 +40,9 @@ test('T6 saved connection and custom name survive two actual continuations, then
 
 test('T6 tray owner initializes the installed dialog plugin before invoking shared stop confirmation',()=>{
  const background=readFileSync(new URL('../src-tauri/src/background.rs',import.meta.url),'utf8');
- const builder=background.slice(background.indexOf('pub(super) fn run()'));
+ assert.match(background,/mod owner;[\s\S]*pub\(super\) use owner::run;/);
+ const owner=readFileSync(new URL('../src-tauri/src/background_owner.rs',import.meta.url),'utf8');
+ const builder=owner.slice(owner.indexOf('pub(crate) fn run()'));
  assert.match(builder.split('.setup(')[0],/\.plugin\(tauri_plugin_dialog::init\(\)\)/);
 });
 
@@ -62,4 +65,24 @@ test('I1 latest authenticated agent identity stays in the warm terminal cache ac
   const refreshing=callbacks(['refreshHistory','refreshSelectedAgent'],bindings).refreshHistory();await new Promise(r=>setImmediate(r));if(stale==='owner')ownerConnectionAvailable.current.version++;if(stale==='view')terminalViews.current={get:()=>({...view})};if(stale==='attachment')view.attachVersion++;
   finish(updated);await refreshing;if(stale===null){assert.equal(view.record.agent.agent_session_id,'native');assert.deepEqual(selected,[updated.agent]);}else{assert.equal(view.record.agent.agent_session_id,null);assert.deepEqual(selected,[]);}
  }
+});
+
+test('reconnect then failed-save retry preserves both pane identities and never starts a process',async()=>{
+ const calls=[],errors=[],attached=[],records=new Map(['s-a','s-b'].map(id=>[id,{summary:{session_id:id},status:'stopped'}]));let reconnect,save,failSave=false;
+ const bindings={reconnectPending:{current:false},ownerConnectionAvailable:{current:{available:false,version:4}},layoutRestore:{current:{version:2}},terminalMounted:{current:true},terminalLayoutRef:{current:{panes:['s-a','s-b']}},sessionId:{current:'s-a'},detailVersion:{current:1},finishQueries:{current:new Map()},finishPending:{current:new Set(['s-a'])},finishRetries:{current:new Set()},setReconnecting(){},setRecoveryRevision(){},setError:value=>errors.push(value),refreshHistory:async()=>calls.push('refresh'),refreshSessionFinish:()=>calls.push('finish-status'),openHistory:async(record)=>attached.push(record.summary.session_id),invoke:async(command,args)=>{
+  calls.push(command);if(command==='reconnect_background')return new Promise(resolve=>reconnect=resolve);if(command==='get_session')return records.get(args.sessionId);if(command==='retry_session_finish'){await new Promise(resolve=>save=resolve);if(failSave)throw Error('disk unavailable');return;}assert.fail('Unexpected mutation: '+command);
+ }};
+ const actions=callbacks(['reconnectBackground','retrySessionSave'],bindings);
+ assert.equal(sessionRuntimeInfo({adapter:'codex'},{integration:'connected'},'running',false).stage.reconnect,true);
+ const first=actions.reconnectBackground();await actions.reconnectBackground();assert.equal(calls.filter(x=>x==='reconnect_background').length,1);reconnect();await first;
+ assert.deepEqual(attached,['s-a','s-b']);assert.equal(bindings.ownerConnectionAvailable.current.version,5);assert.equal(bindings.sessionId.current,'s-a');
+ failSave=true;let pending=actions.retrySessionSave();await actions.retrySessionSave();save();await pending;assert.ok(bindings.finishPending.current.has('s-a'));assert.equal(errors.at(-1),'Error: disk unavailable');
+ failSave=false;pending=actions.retrySessionSave();save();await pending;assert.equal(bindings.finishPending.current.size,0);assert.equal(bindings.finishRetries.current.size,0);assert.equal(calls.filter(x=>x==='retry_session_finish').length,2);assert.ok(!calls.some(x=>/create_session|start_session|write_session|stop_session/.test(x)));
+ assert.equal(records.get('s-b').status,'stopped');
+});
+
+test('a second owner generation invalidates delayed reconnect before any pane attaches',async()=>{
+ let release;const calls=[],ownerConnectionAvailable={current:{available:false,version:7}};
+ const bindings={reconnectPending:{current:false},ownerConnectionAvailable,layoutRestore:{current:{version:1}},terminalMounted:{current:true},terminalLayoutRef:{current:{panes:['s-a']}},sessionId:{current:'s-a'},setReconnecting(){},setRecoveryRevision:assert.fail,setError:assert.fail,refreshHistory:async()=>assert.fail('stale refresh'),refreshSessionFinish:assert.fail,openHistory:assert.fail,invoke:async command=>{calls.push(command);return new Promise(resolve=>release=resolve);}};
+ const pending=callbacks(['reconnectBackground'],bindings).reconnectBackground();ownerConnectionAvailable.current={available:false,version:8};release();await pending;assert.deepEqual(calls,['reconnect_background']);assert.equal(ownerConnectionAvailable.current.available,false);assert.equal(bindings.reconnectPending.current,false);
 });

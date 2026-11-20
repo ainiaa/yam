@@ -15,7 +15,7 @@ export function ZshCommandReporting({enabled,error,onApply,onClose,navigation}:{
    <label className="log-checkbox"><input type="checkbox" aria-label={t("Enable experimental Zsh command status reporting")} checked={draft} onChange={event=>setDraft(event.target.checked)}/>{t("Enable Zsh command status reporting")}</label>
    {saveError&&<p role="alert">{t(saveError)}</p>}
   </section>
-   <div className="dialog-actions"><button type="button" onClick={onClose}>{t("Cancel")}</button><button type="submit">{t("Save command status reporting settings")}</button></div>
+   <div className="dialog-actions"><button type="button" data-settings-close onClick={onClose}>{t("Cancel")}</button><button type="submit">{t("Save command status reporting settings")}</button></div>
   </form>
  </dialog>;
 }

@@ -42,6 +42,7 @@ export function duplicateSessionDraft(source:unknown,saved?:SessionLaunchSetting
     }
    }
   }
+  if(launch.adapter==='omp'&&object(launch.omp))draft.omp={policy:launch.omp.policy as string|null,auth:launch.omp.auth==='yam'?'yam':'pi'};
   if(launch.env_refs!==undefined){if(!refs(launch.env_refs))throw Error('Invalid saved environment references.');settings.envRefs={...launch.env_refs};}
   if(launch.extra_args.trim())warning='CLI arguments were cleared, including any prompt or resume options. Review Advanced options to add the arguments you need.';
   if(launch.adapter==='pi'&&hasPiLaunchRouting(launch.extra_args)){

@@ -34,6 +34,7 @@ test('attention navigation wraps through separate sessions without swallowing la
 });
 const source=ts.createSourceFile('App.tsx',readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
 test('primary Agent connection disclosure makes native round receipt limits visible',()=>{
+ const source=ts.createSourceFile('SessionConnection.tsx',readFileSync(new URL('../src/SessionConnection.tsx',import.meta.url),'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
  let code;const visit=node=>{if(ts.isFunctionDeclaration(node)&&node.name?.text==='SessionConnection')code=node.getText(source);ts.forEachChild(node,visit);};visit(source);assert.ok(code);
  const React={createElement:(type,props,...children)=>({type,props:props??{},children})};
  const Component=new Function('React','connectionDetails','ChevronDown','sessionRuntimeInfo',ts.transpile(code,{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2022})+';return SessionConnection;')(React,connectionDetails,()=>null,sessionRuntimeInfo);
@@ -124,11 +125,12 @@ test('unknown or disconnected integration cannot advertise a ready or working CL
 });
 
 
-test('ended sidebar tooltips qualify historical events while rows keep only titles',()=>{
+test('ended sidebar tooltips qualify historical events and current phases stay limited to active rows',()=>{
  let row;function visit(n){if(ts.isJsxElement(n)&&n.openingElement.attributes.getText(source).includes('className={`session-row'))row=n;ts.forEachChild(n,visit);}visit(source);assert.ok(row);
  const title=row.openingElement.attributes.properties.find(n=>n.name?.getText(source)==='title').initializer.expression;
  const render=new Function('t','agentLabel','record','titleFor','statusLabels',ts.transpileModule('return ('+title.getText(source)+');',{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText);
  for(const status of ['stopped','failed','succeeded'])assert.match(render(s=>s,agentLabel,{status,summary:{mode:'interactive'},agent:{phase:'needs_permission',integration:'connected'}},()=> 'Task',{stopped:'Stopped',failed:'Failed',succeeded:'Completed'}),/Last event: Permission required$/);
  assert.doesNotMatch(render(s=>s,agentLabel,{status:'running',summary:{mode:'interactive'},agent:{phase:'needs_permission',integration:'connected'}},()=> 'Task',{running:'Running'}),/Last event/);
- assert.doesNotMatch(row.getText(source),/<small|<time/);
+ assert.doesNotMatch(row.getText(source),/<time/);
+ assert.match(row.getText(source),/interactive.*starting.*running.*needs_attention.*<small/);
 });

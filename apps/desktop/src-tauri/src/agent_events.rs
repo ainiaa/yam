@@ -30,12 +30,98 @@ pub struct AgentState {
     pub integration: String,
     pub revision: u64,
     #[serde(default)]
+    pub last_state_at: Option<u64>,
+    #[serde(default)]
     pub route_pending: bool,
     pub turns: Vec<String>,
     pub seen: Vec<String>,
     pub inbox: Vec<AgentReceipt>,
     #[serde(default)]
     pub permission_keys: Vec<String>,
+}
+
+pub(super) fn read_receipt(
+    history: &crate::HistoryStore,
+    id: &str,
+    receipt: &str,
+    revision: u64,
+    only_current: Option<bool>,
+) -> Result<(), String> {
+    if only_current == Some(true) {
+        history.read_current_agent_receipt(id, receipt, revision)
+    } else {
+        history.read_agent_receipt(id, receipt, revision)
+    }
+}
+
+#[cfg(test)]
+mod receipt_command_tests {
+    use super::*;
+
+    fn store() -> (crate::HistoryStore, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "yam-agent-receipt-command-{}",
+            crate::next_session_id()
+        ));
+        (crate::HistoryStore::open(root.clone()).unwrap(), root)
+    }
+
+    fn start_with_receipt(history: &crate::HistoryStore) -> AgentReceipt {
+        history
+            .start(&crate::SessionSummary {
+                ssh: None,
+                session_id: "s-one".into(),
+                cwd: "/tmp".into(),
+                command: None,
+                status: "running".into(),
+                launch: None,
+            })
+            .unwrap();
+        history.configure_agent("s-one", "generation").unwrap();
+        for kind in ["SessionStart", "UserPromptSubmit", "TurnComplete"] {
+            history
+                .ingest_agent(
+                    "s-one",
+                    "generation",
+                    &AgentEvent {
+                        kind: kind.into(),
+                        agent_session_id: "native".into(),
+                        turn_id: Some("turn".into()),
+                        source: None,
+                        permission_key: None,
+                    },
+                )
+                .unwrap();
+        }
+        history.get("s-one").unwrap().agent.inbox[0].clone()
+    }
+
+    #[test]
+    fn receipt_command_preserves_legacy_and_current_only_behavior() {
+        let (history, root) = store();
+        let receipt = start_with_receipt(&history);
+        history
+            .ingest_agent(
+                "s-one",
+                "generation",
+                &AgentEvent {
+                    kind: "UserPromptSubmit".into(),
+                    agent_session_id: "native".into(),
+                    turn_id: Some("next-turn".into()),
+                    source: None,
+                    permission_key: None,
+                },
+            )
+            .unwrap();
+        read_receipt(&history, "s-one", &receipt.id, receipt.revision, Some(true)).unwrap();
+        let stale = history.get("s-one").unwrap();
+        assert!(!stale.agent.inbox[0].read);
+
+        read_receipt(&history, "s-one", &receipt.id, receipt.revision, None).unwrap();
+        let legacy = history.get("s-one").unwrap();
+        assert!(legacy.agent.inbox[0].read);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 impl Default for AgentState {
     fn default() -> Self {
@@ -51,6 +137,7 @@ impl Default for AgentState {
             background: "unknown".into(),
             integration: "unavailable".into(),
             revision: 0,
+            last_state_at: None,
             route_pending: false,
             turns: vec![],
             seen: vec![],
@@ -72,8 +159,25 @@ pub struct AgentEvent {
 }
 impl AgentState {
     pub fn apply(&mut self, event: &AgentEvent) -> Result<Option<String>, String> {
+        self.apply_at(event, crate::unix_timestamp())
+    }
+    fn apply_at(&mut self, event: &AgentEvent, now: u64) -> Result<Option<String>, String> {
         let mut next = self.clone();
         let result = next.apply_inner(event)?;
+        let current = matches!(
+            event.kind.as_str(),
+            "SessionStart" | "ProcessStart" | "ProcessExit" | "RoutingStarted" | "RoutingCancelled"
+        ) || event.turn_id.is_some() && event.turn_id == next.turn_id;
+        let changed = self.phase != next.phase
+            || self.integration != next.integration
+            || self.agent_session_id != next.agent_session_id
+            || self.turn_id != next.turn_id
+            || self.process_run != next.process_run
+            || self.route_pending != next.route_pending
+            || self.permission_keys != next.permission_keys;
+        if current && changed && next.revision != self.revision {
+            next.last_state_at = (now > 0).then_some(now);
+        }
         *self = next;
         Ok(result)
     }
@@ -186,7 +290,10 @@ impl AgentState {
             let pending = event.kind == "RoutingStarted";
             if self.route_pending != pending {
                 self.route_pending = pending;
-                self.revision = self.revision.checked_add(1).ok_or("Agent revision exhausted")?;
+                self.revision = self
+                    .revision
+                    .checked_add(1)
+                    .ok_or("Agent revision exhausted")?;
             }
             return Ok(None);
         }
@@ -363,8 +470,13 @@ impl AgentState {
                 revision: self.revision,
                 turn_id: turn.into(),
                 kind: phase.into(),
-                permission_key: (event.kind == "PermissionRequest")
-                    .then(|| event.permission_key.as_deref().unwrap_or("unknown").to_string()),
+                permission_key: (event.kind == "PermissionRequest").then(|| {
+                    event
+                        .permission_key
+                        .as_deref()
+                        .unwrap_or("unknown")
+                        .to_string()
+                }),
                 delivery: "pending".into(),
                 read: false,
                 error: None,
@@ -538,7 +650,8 @@ impl super::HistoryStore {
         let resume_outcome = event.source.as_deref() == Some("codex-resume");
         if matches!(event.kind.as_str(), "RoutingStarted" | "RoutingCancelled")
             && (managed_state.is_none()
-                || record.agent.agent_session_id.as_deref() != Some(event.agent_session_id.as_str()))
+                || record.agent.agent_session_id.as_deref()
+                    != Some(event.agent_session_id.as_str()))
         {
             return Err("Routing admission requires the managed Codex session".into());
         }
@@ -614,7 +727,8 @@ impl super::HistoryStore {
     ) -> Result<(), String> {
         self.edit_agent_record(id, |record| {
             if record.agent.inbox.iter().any(|entry| {
-                entry.id == receipt && entry.revision == revision
+                entry.id == receipt
+                    && entry.revision == revision
                     && super::history::current_inbox_receipt(record, entry)
             }) {
                 record.agent.read(receipt, revision)?;
@@ -696,6 +810,13 @@ impl super::HistoryStore {
             }
         };
         if !eligible {
+            return Ok(false);
+        }
+        let kind = match source {
+            NativeSource::Lifecycle(status) => status,
+            NativeSource::Round(receipt) => &receipt.kind,
+        };
+        if !crate::project_notifications::allows(self, &record.summary.cwd, kind)? {
             return Ok(false);
         }
         send(&record)?;
@@ -855,6 +976,73 @@ fn permanent_delivery_error(error: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn trusted_state_time_ignores_duplicates_old_round_receipts_and_reads() {
+        let mut state = AgentState {
+            generation: "launch-one".into(),
+            integration: "connecting".into(),
+            ..Default::default()
+        };
+        state.apply_at(&event("SessionStart", None), 100).unwrap();
+        assert_eq!(state.last_state_at, Some(100));
+        state
+            .apply_at(&event("UserPromptSubmit", Some("one")), 101)
+            .unwrap();
+        assert_eq!(state.last_state_at, Some(101));
+        state
+            .apply_at(&event("UserPromptSubmit", Some("one")), 102)
+            .unwrap();
+        assert_eq!(state.last_state_at, Some(101));
+        state
+            .apply_at(&event("UserPromptSubmit", Some("two")), 103)
+            .unwrap();
+        state
+            .apply_at(&event("TurnComplete", Some("one")), 104)
+            .unwrap();
+        assert_eq!(state.last_state_at, Some(103));
+        let old = state.inbox[0].clone();
+        state.read(&old.id, old.revision).unwrap();
+        assert_eq!(state.last_state_at, Some(103));
+        state
+            .apply_at(&event("PermissionRequest", Some("two")), 105)
+            .unwrap();
+        assert_eq!(state.last_state_at, Some(105));
+        state
+            .apply_at(&event("PermissionRequest", Some("two")), 106)
+            .unwrap();
+        assert_eq!(state.last_state_at, Some(105));
+        state
+            .apply_at(&event("TurnFailed", Some("two")), 107)
+            .unwrap();
+        assert_eq!(state.last_state_at, Some(107));
+        let before = state.clone();
+        let mut invalid = event("Unknown", Some("two"));
+        assert!(state.apply_at(&invalid, 108).is_err());
+        assert_eq!(state, before);
+        invalid = event("TurnComplete", Some("other"));
+        invalid.agent_session_id = "other-session".into();
+        state.apply_at(&invalid, 109).unwrap();
+        assert_eq!(state.last_state_at, Some(107));
+    }
+    #[test]
+    fn legacy_state_has_no_time_and_roundtrip_retains_utc_seconds() {
+        let state = state();
+        let mut json = serde_json::to_value(&state).unwrap();
+        json.as_object_mut().unwrap().remove("last_state_at");
+        let mut legacy: AgentState = serde_json::from_value(json).unwrap();
+        assert_eq!(legacy.last_state_at, None);
+        legacy.integration = "connecting".into();
+        legacy
+            .apply_at(&event("SessionStart", None), 1794484800)
+            .unwrap();
+        assert_eq!(
+            serde_json::from_value::<AgentState>(serde_json::to_value(&legacy).unwrap())
+                .unwrap()
+                .last_state_at,
+            Some(1794484800)
+        );
+    }
+
     #[test]
     fn opencode_native_source_retains_strict_turn_identity() {
         let mut state = AgentState {
@@ -2281,6 +2469,7 @@ mod tests {
                 command: None,
                 status: "starting".into(),
                 launch: Some(super::super::AgentLaunch {
+                    omp: None,
                     adapter: adapter.into(),
                     mode: mode.into(),
                     extra_args: String::new(),

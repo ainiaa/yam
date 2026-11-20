@@ -1,5 +1,6 @@
 """Author: Jeff.Liu. Keep project gates explicit and prevent coverage dilution."""
 import json
+import importlib.util
 from pathlib import Path
 import shlex
 import unittest
@@ -8,6 +9,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ProjectQualityTests(unittest.TestCase):
+    def test_frozen_mutation_campaign_is_bound_to_current_repository_sources(self):
+        script = ROOT / "scripts/project_mutation.py"
+        spec = importlib.util.spec_from_file_location("project_mutation_quality", script)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        campaign = module.load_campaign(ROOT, ROOT / "docs/00_standards/rust-mutations.json")
+        self.assertEqual(campaign["tool_version"], "27.1.0")
+
     def test_native_policy_collects_the_whole_crate_and_enforces_85(self):
         path = ROOT / "docs/00_standards/test-commands.yml"
         content = path.read_text() if path.exists() else ""

@@ -2,6 +2,8 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {duplicateSessionDraft,readSessionLaunchSettings,saveSessionLaunchSettings} from '../src/session-actions.ts';
+import {buildNativeModelArgs} from '../src/pi-routing.ts';
+import {codexRoutingConfig} from '../src/routing-policies.ts';
 test('copying a routed Codex session retains policy but removes conversation state',()=>{
  const route={name:'native policy',config:JSON.stringify({connections:{native:{billing:'subscription',native:true}},classifiers:[],executionGroups:[{small:'native/a',medium:'native/b',strong:'native/c'}]}),state:'old-session'};
  const copy=duplicateSessionDraft({cwd:'/tmp',launch:{adapter:'codex',mode:'interactive',extra_args:'',prompt:null,codex:{image_mode:'native',route}}});
@@ -50,7 +52,7 @@ test('manual name is saved before use, reset overrides legacy automatic names, b
 import fs from 'node:fs';
 import ts from 'typescript';
 const appTree=ts.createSourceFile('App.tsx',fs.readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
-function actual(name,bindings){bindings={launchWorkspace:null,ordinaryLaunchSnapshot:{current:undefined},...bindings};let found;function visit(n){if(ts.isFunctionDeclaration(n)&&n.name?.text===name)found=n;ts.forEachChild(n,visit);}visit(appTree);assert.ok(found,`missing ${name}`);return new Function(...Object.keys(bindings),ts.transpile(found.getText(appTree),{target:ts.ScriptTarget.ES2022})+`;return ${name}`)(...Object.values(bindings));}
+function actual(name,bindings){bindings={buildNativeModelArgs,codexRoutingConfig,launchWorkspace:null,ordinaryLaunchSnapshot:{current:undefined},...bindings};let found;function visit(n){if(ts.isFunctionDeclaration(n)&&n.name?.text===name)found=n;ts.forEachChild(n,visit);}visit(appTree);assert.ok(found,`missing ${name}`);return new Function(...Object.keys(bindings),ts.transpile(found.getText(appTree),{target:ts.ScriptTarget.ES2022})+`;return ${name}`)(...Object.values(bindings));}
 test('duplicate action captures the clicked session, prepares the unified dialog, and never starts a process',async()=>{
  const calls=[],state={},storage={getItem:()=>null};const bindings={terminalViews:{current:{get:()=>null}},setCopyName(){},titlesRef:{current:{}},t:s=>s,sessionCopyIntent:{current:0},starting:false,creatingSession:{current:false},terminalMounted:{current:true},invoke:async(name,args)=>{calls.push([name,args]);return {summary:source};},duplicateSessionDraft,readSessionLaunchSettings,localStorage:storage,newSession:cwd=>calls.push(['dialog',cwd]),setLaunchDraft:v=>state.draft=v,setCwd:v=>state.cwd=v,setSessionCopy:v=>state.copy=v,setSessionTerminal:v=>state.terminal=v,setError:v=>state.error=v,launchDialog:{current:{querySelector:()=>null}}};
  await actual('duplicateSession',bindings)(source.session_id);assert.deepEqual(calls,[['get_session',{sessionId:source.session_id}],['dialog',source.cwd]]);assert.equal(state.draft.prompt,null);assert.equal(state.copy.settings.terminal,'yam');

@@ -138,6 +138,9 @@ impl Default for Table {
     }
 }
 impl Table {
+    pub(super) fn observes_output(&self, id: &str) -> bool {
+        !self.initialized || self.claims.contains_key(id) || self.pending_move(id)
+    }
     fn pending_move(&self, id: &str) -> bool {
         self.moves
             .iter()
@@ -1609,7 +1612,7 @@ pub(super) fn write_session<R: tauri::Runtime>(
     desktop_generation: u64,
     session_id: String,
     data: String,
-    expected_agent: Option<super::DraftInputGuard>,
+    expected_agent: Option<super::terminal_input::DraftInputGuard>,
 ) -> Result<(), String> {
     trusted_slot(&window)?;
     let mut ticket = Ticket::begin(
@@ -1624,7 +1627,12 @@ pub(super) fn write_session<R: tauri::Runtime>(
         args["expected_agent"] = serde_json::to_value(guard).map_err(|e| e.to_string())?;
     }
     ticket.call(&manager, "write_session", args, || {
-        super::write_session_guarded(manager.clone(), session_id, data, expected_agent)
+        super::terminal_input::write_session_guarded(
+            manager.clone(),
+            session_id,
+            data,
+            expected_agent,
+        )
     })
 }
 #[tauri::command(async)]
@@ -1859,7 +1867,7 @@ fn create_secondary<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<(), String>
     .title("YAM — second terminal window")
     .theme(Some(tauri::Theme::Dark))
     .inner_size(1180.0, 768.0)
-    .min_inner_size(1024.0, 768.0)
+    .min_inner_size(720.0, 600.0)
     .initialization_script(native_ready_script(epoch))
     .on_page_load(move |handle, payload| {
         let webview: &tauri::Webview<R> = handle.as_ref();
@@ -2968,6 +2976,28 @@ mod b05b_tests {
         receipt
     }
     #[test]
+    fn output_delivery_observes_every_existing_move_handoff_phase() {
+        let (mut t, g) = source();
+        assert!(t.observes_output("s-1-1"));
+        let r = prepared(&mut t, g);
+        assert!(t.observes_output("s-1-1"));
+        assert!(matches!(
+            t.ack_move(Slot::Main, 1, "s-1-1", g, r.token),
+            MoveReply::Pending { .. }
+        ));
+        assert!(t.observes_output("s-1-1"));
+        assert!(matches!(
+            t.accept_move(Slot::Secondary, 1, r.token),
+            MoveReply::Pending { .. }
+        ));
+        assert!(t.observes_output("s-1-1"));
+        assert!(matches!(
+            t.complete_move(Slot::Secondary, 1, r.token),
+            MoveReply::Completed { .. }
+        ));
+        assert!(t.observes_output("s-1-1"));
+    }
+    #[test]
     fn b05b_disposal_ack_accept_complete_idempotent_and_old_release_safe() {
         let (mut t, g) = source();
         let r = prepared(&mut t, g);
@@ -3690,5 +3720,162 @@ mod native_identity_acl_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod output_delivery_tests {
+    use super::*;
+    use tauri::{Listener, Manager};
+
+    #[test]
+    fn output_delivery_claims_recover_unopened_scenes_without_forwarding_their_bytes() {
+        let mut table = Table::default();
+        assert!(table.observes_output("s-1-1"));
+        table.bootstrap(&[], &[], &[]).unwrap();
+        assert!(!table.observes_output("s-1-1"));
+        let ticket = table.reserve(Slot::Main, 1).unwrap();
+        table.created(ticket, "s-1-1").unwrap();
+        assert!(
+            table.observes_output("s-1-1"),
+            "creation already reserves a claim for immediate output"
+        );
+        let generation = table.attach(Slot::Main, 1, "s-1-1").unwrap();
+        assert!(table.observes_output("s-1-1"));
+        table.note_status("s-1-1", "stopped");
+        assert!(table.observes_output("s-1-1"));
+        table
+            .release_view(Slot::Main, 1, "s-1-1", generation)
+            .unwrap();
+        assert!(!table.observes_output("s-1-1"));
+    }
+
+    #[test]
+    fn output_delivery_actual_emitter_filters_only_unobserved_raw_output() {
+        let app = tauri::test::mock_app();
+        app.manage(crate::SessionManager::default());
+        let events = Arc::new(Mutex::new(Vec::<(String, serde_json::Value)>::new()));
+        for name in [
+            "session-output",
+            "session-state",
+            "session-error",
+            "terminal-frame-invalidated",
+        ] {
+            let events = events.clone();
+            app.listen(name, move |event| {
+                events
+                    .lock()
+                    .unwrap()
+                    .push((name.into(), serde_json::from_str(event.payload()).unwrap()))
+            });
+        }
+        let output = serde_json::json!({"session_id":"s-1-1","offset":0,"end_offset":5,"data":"one\r\n","parser":{"instance":"a".repeat(64),"control_revision":0}});
+        crate::background_events::emit_desktop_event(
+            app.handle(),
+            "session-output",
+            output.clone(),
+        );
+        assert_eq!(
+            events.lock().unwrap().len(),
+            1,
+            "startup compatibility must keep raw bytes"
+        );
+        app.state::<crate::SessionManager>()
+            .desktop_windows
+            .lock()
+            .unwrap()
+            .bootstrap(&[], &[], &[])
+            .unwrap();
+        crate::background_events::emit_desktop_event(
+            app.handle(),
+            "session-output",
+            output.clone(),
+        );
+        assert_eq!(events.lock().unwrap().len(), 1);
+        for (name, payload) in [
+            (
+                "session-state",
+                serde_json::json!({"session_id":"s-1-1","status":"stopped"}),
+            ),
+            (
+                "session-error",
+                serde_json::json!({"session_id":"s-1-1","data":"failure"}),
+            ),
+            (
+                "terminal-frame-invalidated",
+                serde_json::json!({"session_id":"s-1-1"}),
+            ),
+        ] {
+            crate::background_events::emit_desktop_event(app.handle(), name, payload.clone());
+            assert_eq!(events.lock().unwrap().last(), Some(&(name.into(), payload)));
+        }
+        let generation = {
+            let manager = app.state::<crate::SessionManager>();
+            let mut table = manager.desktop_windows.lock().unwrap();
+            let ticket = table.reserve(Slot::Main, 1).unwrap();
+            table.created(ticket, "s-1-1").unwrap();
+            table.attach(Slot::Main, 1, "s-1-1").unwrap()
+        };
+        crate::background_events::emit_desktop_event(
+            app.handle(),
+            "session-output",
+            output.clone(),
+        );
+        assert_eq!(
+            events.lock().unwrap().last(),
+            Some(&("session-output".into(), output.clone()))
+        );
+        app.state::<crate::SessionManager>()
+            .desktop_windows
+            .lock()
+            .unwrap()
+            .release_view(Slot::Main, 1, "s-1-1", generation)
+            .unwrap();
+        let count = events.lock().unwrap().len();
+        crate::background_events::emit_desktop_event(
+            app.handle(),
+            "session-output",
+            output.clone(),
+        );
+        assert_eq!(events.lock().unwrap().len(), count);
+        let unknown = serde_json::json!({"legacy":true});
+        crate::background_events::emit_desktop_event(
+            app.handle(),
+            "session-output",
+            unknown.clone(),
+        );
+        assert_eq!(
+            events.lock().unwrap().last(),
+            Some(&("session-output".into(), unknown))
+        );
+    }
+
+    #[test]
+    fn output_delivery_poisoned_registry_preserves_existing_error_fallback() {
+        let app = tauri::test::mock_app();
+        app.manage(crate::SessionManager::default());
+        let table = app.state::<crate::SessionManager>().desktop_windows.clone();
+        assert!(std::thread::spawn(move || {
+            let _guard = table.lock().unwrap();
+            panic!("fixture registry unavailable")
+        })
+        .join()
+        .is_err());
+        let events = Arc::new(Mutex::new(Vec::<String>::new()));
+        let captured = events.clone();
+        app.listen("session-output", move |event| {
+            captured.lock().unwrap().push(event.payload().into())
+        });
+        let payload = serde_json::json!({"session_id":"s-1-1","data":"retained"});
+        crate::background_events::emit_desktop_event(
+            app.handle(),
+            "session-output",
+            payload.clone(),
+        );
+        assert_eq!(events.lock().unwrap().len(), 1);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&events.lock().unwrap()[0]).unwrap(),
+            payload
+        );
     }
 }

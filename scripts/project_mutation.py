@@ -66,16 +66,20 @@ def scope_text(root, campaign):
             raise ValueError("mutation location is outside the frozen source")
         if name != previous:
             text.extend([f"--- a/{name}", f"+++ b/{name}"])
-        text.extend([f"@@ -{line} +{line} @@", "-" + lines[line - 1], "+" + lines[line - 1]])
+        marker = "__YAM_MUTATION_SCOPE__"
+        if marker in lines[line - 1]:
+            raise ValueError("mutation source contains the frozen line-filter marker")
+        text.extend([f"@@ -{line} +{line} @@", "-" + marker, "+" + lines[line - 1]])
         previous = name
     return "\n".join(text) + "\n"
 
 
-def command(campaign, output):
-    pattern = "^(?:" + "|".join(re.escape(row["name"]) for row in campaign["mutants"]) + ")$"
-    return ["cargo", "mutants", "--manifest-path", campaign["manifest"], "--no-config",
+def command(campaign, output, manifest=None, scope_diff=None):
+    prefix = f"{Path(manifest).parent}/" if manifest else ""
+    pattern = "^(?:" + "|".join(re.escape(prefix + row["name"]) for row in campaign["mutants"]) + ")$"
+    return ["cargo", "mutants", "--manifest-path", manifest or campaign["manifest"], "--no-config",
             "--baseline", "run", "--no-shuffle", "--all-logs", "--caught", "--jobs", "1",
-            "--timeout", "180", "--re", pattern, "--in-diff", str(SCOPE_DIFF),
+            "--timeout", "180", "--re", pattern, "--in-diff", str(Path(scope_diff or SCOPE_DIFF).resolve()),
             "--output", str(Path(output).resolve()),
             "--cargo-arg=--locked", "--cargo-arg=--offline", "--", "--lib", campaign["selector"],
             "--", "--test-threads=2"]
@@ -117,7 +121,8 @@ def check_report(directory, report, campaign):
                 raise ValueError("baseline must contain passing tests")
             tests = int(passed)
         else:
-            name = row["scenario"].get("Mutant", {}).get("name")
+            name = row["scenario"].get("Mutant", {}).get("name", "")
+            name = name.removeprefix(f"{Path(campaign['manifest']).parent}/")
             if (row.get("summary") != "CaughtMutant" or result != "FAILED" or int(failed) <= 0
                     or name not in names or name in observed):
                 raise ValueError("required mutation was not caught by its tests")
@@ -125,19 +130,30 @@ def check_report(directory, report, campaign):
     return {"selector": campaign["selector"], "generated": count, "killed": count, "tests": tests}
 
 
-def run_command(argv, timeout):
+def run_command(argv, timeout, cwd=ROOT):
     if os.name != "posix":
         raise ValueError("mutation execution requires POSIX process-group cleanup")
     with tempfile.TemporaryDirectory(prefix="yam-mutation-") as directory:
-        # cargo-mutants copies the crate one level below TMPDIR; preserve its sibling include_bytes! inputs.
-        shutil.copytree(ROOT / "apps/desktop/tests/fixtures", Path(directory) / "tests/fixtures")
+        scratch = Path(directory)
+        fixtures = ROOT / "apps/desktop/tests/fixtures"
+        if fixtures.is_dir():
+            shutil.copytree(fixtures, scratch / "tests/fixtures")
+        for relative in [
+            "scripts/codex-auto-route.mjs",
+            "scripts/codex-route-app-server.mjs",
+            "scripts/codex-native-routing.mjs",
+            "scripts/node-runtime-checksums.json",
+        ]:
+            target = scratch / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / relative, target)
         environment = os.environ.copy()
         environment["TMPDIR"] = directory
         environment["CARGO_TARGET_DIR"] = str(Path(directory) / "target")
         environment["CARGO_BUILD_JOBS"] = "2"
         # Unit tests do not package the ignored terminal-runtime binary in the disposable source copy.
         environment["TAURI_CONFIG"] = json.dumps({"bundle": {"resources": []}})
-        process = subprocess.Popen(argv, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        process = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                    start_new_session=True, env=environment)
         try:
             stdout, stderr = process.communicate(timeout=timeout)
@@ -149,6 +165,47 @@ def run_command(argv, timeout):
             process.communicate(timeout=5)
             raise
         return process.returncode, stdout, stderr
+
+
+def disposable_workspace(root, output, campaign):
+    root = Path(root).resolve()
+    workspace = Path(output).resolve() / "workspace"
+    package_relative = Path(campaign["manifest"]).parent
+    package = workspace / package_relative
+    shutil.copytree(root / package.relative_to(workspace), package,
+                    ignore=shutil.ignore_patterns("target"))
+    fixtures = root / "apps/desktop/tests/fixtures"
+    if fixtures.is_dir():
+        shutil.copytree(fixtures, workspace / "apps/desktop/tests/fixtures")
+    for relative in [
+        ".cargo/config.toml",
+        "scripts/codex-auto-route.mjs", "scripts/codex-route-app-server.mjs",
+        "scripts/codex-native-routing.mjs", "scripts/node-runtime-checksums.json",
+    ]:
+        source = root / relative
+        if source.is_file():
+            target = workspace / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+    # OMP embeds these sibling sources with include_str! during native compilation.
+    for source in (root / "extensions/omp-chatgpt").glob("*.mjs"):
+        target = workspace / "extensions/omp-chatgpt" / source.name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+    if (package / "Cargo.lock").is_file():
+        shutil.copy2(package / "Cargo.lock", workspace / "Cargo.lock")
+    (workspace / "Cargo.toml").write_text(
+        f'[workspace]\nmembers = ["{package_relative.as_posix()}"]\nresolver = "2"\n',
+        encoding="utf-8",
+    )
+    diff = workspace / "mutation.diff"
+    prefix = Path(campaign["manifest"]).parent
+    text = scope_text(root, campaign)
+    for name in {row["name"].split(":", 1)[0] for row in campaign["mutants"]}:
+        text = text.replace(f"--- a/{name}", f"--- a/{prefix}/{name}")
+        text = text.replace(f"+++ b/{name}", f"+++ b/{prefix}/{name}")
+    diff.write_text(text, encoding="utf-8")
+    return workspace, diff
 
 
 def main():
@@ -164,7 +221,10 @@ def main():
         if code or version.strip() != b"cargo-mutants 27.1.0":
             raise ValueError("install cargo-mutants 27.1.0 before running the campaign")
         output.mkdir(parents=True)
-        code, stdout, stderr = run_command(command(campaign, output), 1200)
+        workspace, diff = disposable_workspace(ROOT, output, campaign)
+        code, stdout, stderr = run_command(
+            command(campaign, output, campaign["manifest"], diff), 1200, cwd=workspace
+        )
         (output / "stdout.log").write_bytes(stdout)
         (output / "stderr.log").write_bytes(stderr)
         if code:

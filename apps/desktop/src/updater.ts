@@ -36,6 +36,35 @@ export function loadUpdaterPreference(read:()=>string|null):{automatic:boolean;e
 export function saveUpdaterPreference(write:(raw:string)=>void,automatic:boolean):string|null {
  try{write(JSON.stringify({version:1,automatic_checks:automatic}));return null;}catch{return "updater_preference_unavailable";}
 }
+export async function runUpdaterAction({controller,action,invoke,intent,currentIntent,mounted,setBusy,setSnapshot,setError}:{
+ controller:UpdaterController;action:"check"|"download"|"cancel"|"install";invoke:UpdaterInvoke;intent:number;
+ currentIntent:()=>number;mounted:()=>boolean;setBusy:(value:boolean)=>void;
+ setSnapshot:(value:UpdaterSnapshot)=>void;setError:(value:string|null)=>void;
+}):Promise<void>{
+ setBusy(true);
+ try{
+  const next=await controller.action(invoke,action);
+  if(mounted()&&intent===currentIntent()&&next){setSnapshot(next);setError(null);}
+ }catch{
+  if(mounted()&&intent===currentIntent())setError("updater_operation_failed");
+ }finally{if(mounted()&&intent===currentIntent())setBusy(false);}
+}
+export async function changeUpdaterAutomatic({enabled,write,invoke,snapshot,intent,currentIntent,mounted,controller,setAutomatic,setError,setBusy,setSnapshot}:{
+ enabled:boolean;write:(raw:string)=>void;invoke:UpdaterInvoke;snapshot:UpdaterSnapshot|null;intent:number;
+ currentIntent:()=>number;mounted:()=>boolean;controller:UpdaterController;
+ setAutomatic:(value:boolean)=>void;setError:(value:string|null)=>void;setBusy:(value:boolean)=>void;
+ setSnapshot:(value:UpdaterSnapshot)=>void;
+}):Promise<void>{
+ const error=saveUpdaterPreference(write,enabled),automatic=error?false:enabled;
+ setAutomatic(automatic);setError(error);
+ if(!snapshot)return;
+ setBusy(true);
+ try{
+  const next=await invoke("updater_set_automatic_checks",{expected_generation:snapshot.generation,enabled:automatic});
+  if(mounted()&&intent===currentIntent()){controller.accept(next);if(controller.snapshot)setSnapshot(controller.snapshot);}
+ }catch{if(mounted()&&intent===currentIntent())setError("updater_preference_unavailable");}
+ finally{if(mounted()&&intent===currentIntent())setBusy(false);}
+}
 export class UpdaterController {
  snapshot:UpdaterSnapshot|null=null;
  private version=0;

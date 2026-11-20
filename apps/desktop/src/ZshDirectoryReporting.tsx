@@ -14,7 +14,7 @@ export function ZshDirectoryReporting({enabled,error,onApply,onClose,navigation}
    <label className="log-checkbox"><input type="checkbox" aria-label={t("Enable experimental Zsh directory reporting")} checked={draft} onChange={event=>setDraft(event.target.checked)}/>{t("Enable Zsh directory reporting")}</label>
    {saveError&&<p role="alert">{t(saveError)}</p>}
   </section>
-   <div className="dialog-actions"><button type="button" onClick={onClose}>{t("Cancel")}</button><button type="submit">{t("Save directory reporting settings")}</button></div>
+   <div className="dialog-actions"><button type="button" data-settings-close onClick={onClose}>{t("Cancel")}</button><button type="submit">{t("Save directory reporting settings")}</button></div>
   </form>
  </dialog>;
 }

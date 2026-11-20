@@ -1,3 +1,4 @@
+use super::commands::{dispatch_session_read, dispatch_with};
 // Author: Jeff.Liu. Commands operate only on test-owned state, PTYs and history files.
 static RUST85_OWNER_SEARCH_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -1200,8 +1201,13 @@ fn rust85_owner_history_commands_preserve_policy_paging_and_notification_fences(
             .len(),
         1
     );
-    let preview =
-        crate::preview_archive_deletion(handle.clone(), manager.clone(), vec![id.clone()]).unwrap();
+    let preview = crate::preview_archive_deletion(
+        handle.clone(),
+        manager.clone(),
+        vec![id.clone()],
+        None,
+    )
+    .unwrap();
     let preview_id = preview["preview_id"].as_str().unwrap().to_owned();
     crate::cancel_archive_deletion_preview(handle.clone(), manager.clone(), preview_id.clone())
         .unwrap();
@@ -1215,8 +1221,13 @@ fn rust85_owner_history_commands_preserve_policy_paging_and_notification_fences(
         1
     );
     crate::archive_session(handle.clone(), manager.clone(), id.clone()).unwrap();
-    let preview =
-        crate::preview_archive_deletion(handle.clone(), manager.clone(), vec![id.clone()]).unwrap();
+    let preview = crate::preview_archive_deletion(
+        handle.clone(),
+        manager.clone(),
+        vec![id.clone()],
+        None,
+    )
+    .unwrap();
     let deleted = crate::confirm_archive_deletion(
         handle,
         manager,
@@ -1464,7 +1475,7 @@ fn rust85_owner_history_proxy_propagates_authenticated_failure_without_local_mut
         Some("owned-proxy-refusal")
     );
     assert_eq!(
-        crate::preview_archive_deletion(handle.clone(), manager.clone(), vec![id.clone()])
+        crate::preview_archive_deletion(handle.clone(), manager.clone(), vec![id.clone()], None)
             .err()
             .as_deref(),
         Some("owned-proxy-refusal")

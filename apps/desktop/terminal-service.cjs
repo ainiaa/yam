@@ -8,6 +8,19 @@ const write=(term,data)=>new Promise(resolve=>term.write(data,resolve));
 function dimensions(cols,rows){
  if(!Number.isSafeInteger(cols)||cols<2||cols>500||!Number.isSafeInteger(rows)||rows<2||rows>200)throw Error('Invalid terminal dimensions');
 }
+function advanceControl(entry){
+ const current=entry.controlRevision;
+ entry.controlRevision=Number.isSafeInteger(current)&&current>=0?Math.min(current+1,Number.MAX_SAFE_INTEGER):Number.MAX_SAFE_INTEGER;
+}
+function plainAppendReady(term){
+ try{
+  const h=term._core._inputHandler,m=term.modes,b=term.buffer.active,buffer=h._activeBuffer;
+  return term.unicode.activeVersion==='6'&&h._parser?.currentState===0&&h._utf8Decoder?.interim?.[0]===0&&h._stringDecoder?._interim===0
+   &&h._charsetService?.glevel===0&&h._charsetService.charset===undefined&&h._curAttrData?.extended?.urlId===0
+   &&b.type==='normal'&&b.cursorX===0&&Number.isSafeInteger(b.viewportY)&&Number.isSafeInteger(b.baseY)&&b.viewportY>=0&&b.viewportY<=b.baseY&&buffer.scrollTop===0&&buffer.scrollBottom===term.rows-1
+   &&m.insertMode===false&&m.originMode===false&&m.synchronizedOutputMode===false&&m.wraparoundMode===true;
+ }catch{return false;}
+}
 function projection(term,addon){
  const buffer=term._core?._inputHandler?._activeBuffer,service=term._core?.coreService;
  if(!buffer||!service?.decPrivateModes||!term._core.coreMouseService||!Number.isSafeInteger(buffer.x))throw Error('Terminal version contract unavailable');
@@ -20,7 +33,7 @@ function projection(term,addon){
  const margin=(term.modes.originMode||buffer.scrollTop!==0||buffer.scrollBottom!==term.rows-1)?`\x1b[${buffer.scrollTop+1};${buffer.scrollBottom+1}r`+(term.modes.originMode?'\x1b[?6h':'')+`\x1b[${row};${term.buffer.active.cursorX+1}H`:'';
  const data=addon.serialize()+mouse+visibility+style+margin;
  if(Buffer.byteLength(data)>MAX_FRAME)throw Error('Terminal snapshot exceeds retained frame budget');
- return {retained_lines:term.options.scrollback,data,cols:term.cols,rows:term.rows,cursorX:term.buffer.active.cursorX,viewport:term.buffer.active.viewportY,buffer:term.buffer.active.type};
+ return {retained_lines:term.options.scrollback,plain_append:plainAppendReady(term),data,cols:term.cols,rows:term.rows,cursorX:term.buffer.active.cursorX,viewport:term.buffer.active.viewportY,buffer:term.buffer.active.type};
 }
 function nextCwdReport(previous,uri){
  const sequence=Math.min(Number.MAX_SAFE_INTEGER,previous.sequence+1);
@@ -48,7 +61,7 @@ function clearDisplay(entry,expected,instance){
  if(expected!==instance)return {status:'stale'};
  if(entry.term.buffer.active.type!=='normal')return {status:'unavailable'};
  if(!Number.isSafeInteger(entry.revision)||entry.revision<0||entry.revision===Number.MAX_SAFE_INTEGER)throw Error('Terminal revision unavailable');
- entry.clearPrompts();entry.term.clear();entry.term.scrollToBottom();entry.revision++;return {status:'cleared'};
+ entry.clearPrompts();entry.term.clear();entry.term.scrollToBottom();entry.revision++;advanceControl(entry);return {status:'cleared'};
 }
 async function run(){
  const instance=process.env.YAM_TERMINAL_INSTANCE;
@@ -72,7 +85,7 @@ async function run(){
     const term=new Terminal({cols:request.cols,rows:request.rows,scrollback:retained,allowProposedApi:true});
     const addon=new SerializeAddon();term.loadAddon(addon);projection(term,addon);
     term.onData(value=>{void emit({type:'input',instance,session:request.session,data:value}).catch(()=>{process.exitCode=1;process.stdin.destroy();});});
-    entry={term,addon,revision:0,cwd_report:{uri:null,sequence:0},command_report:{sequence:0,phase:'unknown',last_exit:null}};
+    entry={term,addon,revision:0,controlRevision:0,cwd_report:{uri:null,sequence:0},command_report:{sequence:0,phase:'unknown',last_exit:null}};
     term.parser.registerOscHandler(7,uri=>{entry.cwd_report=nextCwdReport(entry.cwd_report,uri);return true;});
     entry.promptMarkers=[];
     const prunePrompts=()=>{entry.promptMarkers=entry.promptMarkers.filter(marker=>!marker.isDisposed&&marker.line>=0);};
@@ -102,26 +115,26 @@ async function run(){
       if(request.final!==false){
        let text;
        try{const buffer=previous.buffer.active,lines=[];for(let line=0;line<buffer.length;line++)lines.push(buffer.getLine(line).translateToString(true));while(lines.at(-1)==='')lines.pop();text=lines.join('\r\n')+'\r\n── Terminal reopened ──\r\n';}finally{previous.dispose();entry.restoring=null;}
-       await write(entry.term,text);data={text};entry.revision++;
+       await write(entry.term,text);data={text};entry.revision++;advanceControl(entry);
       }
-     }else{if(entry.restoring)throw Error('Terminal history restoration is pending');await write(entry.term,bytes);entry.revision++;}
+     }else{if(entry.restoring)throw Error('Terminal history restoration is pending');await write(entry.term,bytes);entry.revision++;data={version:1,instance,session:request.session,control_revision:entry.controlRevision};}
     }else if(request.op==='resize'){
      dimensions(request.cols,request.rows);
      if(allocated()-cells(entry.term.cols,entry.term.rows)+cells(request.cols,request.rows)>MAX_CELLS)throw Error('Terminal memory budget reached');
-     entry.term.resize(request.cols,request.rows);entry.revision++;
+     entry.term.resize(request.cols,request.rows);entry.revision++;advanceControl(entry);
     }else if(request.op==='viewport'){
      if(!Number.isSafeInteger(request.line)||request.line<0||request.line>0xffffffff||(request.bottom!==undefined&&typeof request.bottom!=='boolean')||(!request.bottom&&request.line>entry.term.buffer.active.baseY))throw Error('Invalid terminal viewport');
-     if(request.bottom)entry.term.scrollToBottom();else entry.term.scrollToLine(request.line);entry.revision++;
+     if(request.bottom)entry.term.scrollToBottom();else entry.term.scrollToLine(request.line);entry.revision++;advanceControl(entry);
     }else if(request.op==='navigate_prompt'){
      if(!['previous','next'].includes(request.direction)||typeof request.expected_instance!=='string'||! /^[a-f0-9]{64}$/.test(request.expected_instance))throw Error('Invalid prompt navigation');
-     const status=request.expected_instance!==instance?'stale':entry.navigatePrompt(request.direction)?'moved':'unavailable';if(status==='moved')entry.revision++;data={status};
+     const status=request.expected_instance!==instance?'stale':entry.navigatePrompt(request.direction)?'moved':'unavailable';if(status==='moved'){entry.revision++;advanceControl(entry);}data={status};
     }else if(request.op==='clear_display'){data=clearDisplay(entry,request.expected_instance,instance);
     }else if(request.op==='snapshot'||request.op==='stream_snapshot'){
      if(request.op==='stream_snapshot'){
       const handler=entry.term._core?._inputHandler;
       if(handler?._parser?.currentState!==0||handler?._utf8Decoder?.interim?.[0]!==0)throw Error('Terminal output token incomplete; reconnect from YAM after output resumes');
      }
-     data={version:1,instance,session:request.session,terminal_version:'6.0.0',serialize_version:'0.14.0',revision:entry.revision,clear_display_version:1,cwd_report:entry.cwd_report,command_report:entry.command_report,prompt_navigation:entry.promptNavigation(),...projection(entry.term,entry.addon)};
+     data={version:1,instance,session:request.session,terminal_version:'6.0.0',serialize_version:'0.14.0',revision:entry.revision,control_revision:entry.controlRevision,clear_display_version:1,cwd_report:entry.cwd_report,command_report:entry.command_report,prompt_navigation:entry.promptNavigation(),...projection(entry.term,entry.addon)};
     }else if(request.op==='close'){entry.restoring?.dispose();entry.clearPrompts();entry.term.dispose();sessions.delete(request.session);}
    }
    await emit({id,ok:true,data});
@@ -143,5 +156,5 @@ async function run(){
   if(pending.length)throw Error('Truncated terminal request');
  }finally{for(const entry of sessions.values()){entry.restoring?.dispose();entry.clearPrompts();entry.term.dispose();}}
 }
-module.exports={clearDisplay,projection,run,nextCwdReport,nextCommandReport};
+module.exports={advanceControl,clearDisplay,projection,run,nextCwdReport,nextCommandReport};
 if(require.main===module||require('node:sea').isSea())run().catch(error=>{console.error('[YAM terminal] '+error.message);process.exitCode=1;process.stdin.destroy();});

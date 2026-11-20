@@ -1,0 +1,571 @@
+{
+  "schema_version": 6,
+  "plan_id": "plan-yam-responsibility-20261112",
+  "requirement_fingerprint": "9b1bdfcf5e4fab0e284885de721eaccedc313823b01ff312904c0e83f246b425",
+  "planner": {
+    "name": "native-plan-v1",
+    "source_path": null,
+    "source_fingerprint": null
+  },
+  "context": "long",
+  "baseline": {
+    "commit": "b1a7b9d4d05c7af7d6929591dab13f4edabf9a0c",
+    "source": {
+      "schema_version": 2,
+      "baseline_commit": "b1a7b9d4d05c7af7d6929591dab13f4edabf9a0c",
+      "commit_id": "b1a7b9d4d05c7af7d6929591dab13f4edabf9a0c",
+      "tree_hash": "a5639e00c414aaa6655c51cb8a35df1eff577791",
+      "diff_fingerprint": "47f4d0d122cced84cdee3010581eb6a1a5eb026cc2c64eecf3302629b5d8ea58",
+      "changed_paths": [
+        "apps/desktop/src-tauri/src/agent_events.rs",
+        "apps/desktop/src-tauri/src/app_lifecycle.rs",
+        "apps/desktop/src-tauri/src/background.rs",
+        "apps/desktop/src-tauri/src/background_contract.rs",
+        "apps/desktop/src-tauri/src/background_dispatch.rs",
+        "apps/desktop/src-tauri/src/background_events.rs",
+        "apps/desktop/src-tauri/src/background_events_tests.rs",
+        "apps/desktop/src-tauri/src/background_owner.rs",
+        "apps/desktop/src-tauri/src/background_relay.rs",
+        "apps/desktop/src-tauri/src/background_wire.rs",
+        "apps/desktop/src-tauri/src/coverage_background_tests.rs",
+        "apps/desktop/src-tauri/src/desktop_windows.rs",
+        "apps/desktop/src-tauri/src/input_leases.rs",
+        "apps/desktop/src-tauri/src/input_leases_tests.rs",
+        "apps/desktop/src-tauri/src/lib.rs",
+        "apps/desktop/src-tauri/src/session_manager.rs",
+        "apps/desktop/src-tauri/src/system_entry.rs",
+        "apps/desktop/src-tauri/src/terminal_input.rs",
+        "apps/desktop/src-tauri/src/terminal_input_tests.rs",
+        "apps/desktop/src-tauri/src/updater.rs",
+        "apps/desktop/src/App.tsx",
+        "apps/desktop/src/DataSettings.tsx",
+        "apps/desktop/src/preferences-backup.ts",
+        "apps/desktop/src/terminal-selection-context.ts",
+        "apps/desktop/src/terminal-view-lifecycle.ts",
+        "apps/desktop/src/translations.zh.ts",
+        "apps/desktop/src/updater.ts",
+        "apps/desktop/src/use-updater.ts",
+        "apps/desktop/tests/attention-actions.test.mjs",
+        "apps/desktop/tests/data-settings.test.mjs",
+        "apps/desktop/tests/desktop-optimization-workflows.test.mjs",
+        "apps/desktop/tests/launch-templates.test.mjs",
+        "apps/desktop/tests/preferences-backup.test.mjs",
+        "apps/desktop/tests/session-recovery.test.mjs",
+        "apps/desktop/tests/terminal-clear-ui.test.mjs",
+        "apps/desktop/tests/terminal-cursor-ui.test.mjs",
+        "apps/desktop/tests/terminal-layout-restore.test.mjs",
+        "apps/desktop/tests/terminal-layout.test.mjs",
+        "apps/desktop/tests/terminal-line-height-ui.test.mjs",
+        "apps/desktop/tests/terminal-links-ui.test.mjs",
+        "apps/desktop/tests/terminal-paste-ui.test.mjs",
+        "apps/desktop/tests/terminal-projection-capacity.test.mjs",
+        "apps/desktop/tests/terminal-reopen-ui.test.mjs",
+        "apps/desktop/tests/terminal-selection-context.test.mjs",
+        "apps/desktop/tests/terminal-settings.test.mjs",
+        "apps/desktop/tests/terminal-view-lifecycle.test.mjs",
+        "apps/desktop/tests/terminal-views.test.mjs",
+        "apps/desktop/tests/updater.test.mjs",
+        "apps/desktop/tests/window-context.test.mjs",
+        "docs/00_standards/rust-mutations.diff",
+        "docs/00_standards/rust-mutations.json",
+        "docs/plans/2026-11-10-architecture-refactor-plan.md",
+        "scripts/project_mutation.py",
+        "scripts/test_project_mutation.py",
+        "scripts/test_project_quality.py"
+      ],
+      "changed_entries": [
+        {
+          "path": "apps/desktop/src-tauri/src/agent_events.rs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "b368e1b9465d51202a132c34d83903560043c5b4faa1b9f381252264b269e904"
+        },
+        {
+          "path": "apps/desktop/src-tauri/src/app_lifecycle.rs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "c3cf8c54145e2c020fd7171b88b9e9d0e535eec2c4e891c5dbaf81fc21cd312b"
+        },
+        {
+          "path": "apps/desktop/src-tauri/src/background.rs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "0c4eb4adec6d5fb5d78a4727d70d71cd6ef921db057ad0c13cfac231b2d8cf63"
+        },
+        {
+          "path": "apps/desktop/src-tauri/src/background_contract.rs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "b9e58bc2b757b254a729eacfb496605f52a44b239f49b985060929e8d683b6f2"
+        },
+        {
+          "path": "apps/desktop/src-tauri/src/background_dispatch.rs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "2b09b838efc10e9d9d006e8407c480190fb859aaddb74191f6d8e57e546e7b23"
+        },
+        {
+          "path": "apps/desktop/src-tauri/src/background_events.rs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "1030f9d81c58b137ef0c3edee8a4f92876b8d8fb083438c345e3ef89494238f2"
+        },
+        {
+          "path": "apps/desktop/src-tauri/src/background_events_tests.rs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "0aa948232b5ffcd801d3b35e1b55084725c5b1f51c309df858223a4b3742c91e"
+        },
+        {
+          "path": "apps/desktop/src-tauri/src/background_owner.rs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "94e88357dbbe54ee9bd2d7b68608fcd6d21ddad67ac31568431e84274db8fc51"
+        },
+        {
+          "path": "apps/desktop/src-tauri/src/background_relay.rs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "3c140a68520a62adba0b628fb40e2fe85a236867ea88255e16352c5b0772307a"
+        },
+        {
+          "path": "apps/desktop/src-tauri/src/background_wire.rs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "671ec2128d2b7f043e5e6c1291417874641ab2809d3b3959c40327f04c97a91c"
+        },
+        {
+          "path": "apps/desktop/src-tauri/src/coverage_background_tests.rs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "d35c079376024cffd13294075c1bcf0c0146c7434db2493120a8d571700b8df6"
+        },
+        {
+          "path": "apps/desktop/src-tauri/src/desktop_windows.rs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "92f4c1d06c0ee44860dc5516733f640fe8770ffdd50ba60442730eb16da2e257"
+        },
+        {
+          "path": "apps/desktop/src-tauri/src/input_leases.rs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "d71f1a1d64e8423421fbd3708f34cd5f521faf2f8091ca9c13d65740ef7c66ad"
+        },
+        {
+          "path": "apps/desktop/src-tauri/src/input_leases_tests.rs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "12ef0a5dc449e2ab68e2f15a34fc3478a2fdccfbb46e9430986cad306f2bdf2b"
+        },
+        {
+          "path": "apps/desktop/src-tauri/src/lib.rs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "6fa6ae6e8bf7a3542a4d51428a861ebc3243c6b1a793e27c8e52f8e65cea6b3d"
+        },
+        {
+          "path": "apps/desktop/src-tauri/src/session_manager.rs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "acd009c9bb740680ccd1a7dfd6dc59b3224272ddabd61fa7dcfc3825a2a8dbfb"
+        },
+        {
+          "path": "apps/desktop/src-tauri/src/system_entry.rs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "9ae1d1d7e1826c751dd6c4325a16744ddd97cba80945e99f57855e2ef732fe19"
+        },
+        {
+          "path": "apps/desktop/src-tauri/src/terminal_input.rs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "21bad8131d75244f284c9c049973d810574f7ff98355966460b49cd4f816f746"
+        },
+        {
+          "path": "apps/desktop/src-tauri/src/terminal_input_tests.rs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "af61c6211fb531221ef2c8f43e94644ad5143267c8b970ee4140f9731dde406d"
+        },
+        {
+          "path": "apps/desktop/src-tauri/src/updater.rs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "e1720af035c59cbe355e3ada4415b9d40f39aba5f9cf697cef111dee19936fb8"
+        },
+        {
+          "path": "apps/desktop/src/App.tsx",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "a99b8e6dff5b2a0dbeb56f3bb4185fea013b72d6a0769942ffee3c629bbff80f"
+        },
+        {
+          "path": "apps/desktop/src/DataSettings.tsx",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "e0cbe200f987772f358224682e74435ed24ba49a3c2a72851434e825d3e0309c"
+        },
+        {
+          "path": "apps/desktop/src/preferences-backup.ts",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "ac36ed168bcb8fa7eb4856ac6640206362be201e03695dffe5feec8a3745696c"
+        },
+        {
+          "path": "apps/desktop/src/terminal-selection-context.ts",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "568202927dd2578cc061b2eb928d196185bac069ad460a593e2d1c3f7d99a019"
+        },
+        {
+          "path": "apps/desktop/src/terminal-view-lifecycle.ts",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "d0f8c60c17670755cb908635352440accf1bb14b6481e16b3e8fcd2aada02b8e"
+        },
+        {
+          "path": "apps/desktop/src/translations.zh.ts",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "99f9625558e9417c224c012bb856d0497845c3c68ef8107bc7ecf4b54af49498"
+        },
+        {
+          "path": "apps/desktop/src/updater.ts",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "451eed63360595824536fc129e638e93b81fbde32cee6489d136ef4fae04c0a1"
+        },
+        {
+          "path": "apps/desktop/src/use-updater.ts",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "64756b550528b33b676b9d62cd91f460f834189f1ce14a68362c68b87d6c854f"
+        },
+        {
+          "path": "apps/desktop/tests/attention-actions.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "16445206d1d00df4c2d239bf9e6337c6079b4144bf397e33256095d37354bfb3"
+        },
+        {
+          "path": "apps/desktop/tests/data-settings.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "c2e69e4017eec92e63dc4d2c27f9a3308983cef508a0fd241b09c2de562a517e"
+        },
+        {
+          "path": "apps/desktop/tests/desktop-optimization-workflows.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "5e20e2169941bc9fcabb8edaaee607cbc6614732454e6bb85354ce4302675167"
+        },
+        {
+          "path": "apps/desktop/tests/launch-templates.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "d7283b7d06f903826bbfdda5d57237362178ff4bccf34074bdee953ad6f93b1f"
+        },
+        {
+          "path": "apps/desktop/tests/preferences-backup.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "0a5edbb62c5354a53f4a3ae0f086101eb23b735ac0db44b34f1fe7e059c297d2"
+        },
+        {
+          "path": "apps/desktop/tests/session-recovery.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "af1d33dfeb00f1426df5e6aa7a37ba04ca2a2aa02607206981467b385405c3d0"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-clear-ui.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "0bac7c8c1aa1b6cd6fac6dfde9242adffddc33e009f784792606c1c389d09fb7"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-cursor-ui.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "d0431f8bfe6a22b5887e5453035b92fac3cfb7f1668564195470d0341987fa2d"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-layout-restore.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "22c16ac5ca18c984c64dfd94c8a39ed72d61817e35a653cb3a5d2fe1a9a8524d"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-layout.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "ae3bc78a4725792be2fb2ddd1dc6f6f2b8477a38c068e9e95f3c579b5503326d"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-line-height-ui.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "48537a601214fb1647238fbecb0a948224cfe9fd5c54359c82d5966d6e40a1eb"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-links-ui.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "a989beee22be5cf1ce4657b72f8ce346e10b793b98b6e29d098e4514d23bb09a"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-paste-ui.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "89ba67d4e05e7cf9ed5d6995b5a20a5c2687a42ad67c60ccb80e4dec874cf7b0"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-projection-capacity.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "36cc0ee2fa1452e5210a18810077e130d1a4aa85b38782a3ed4bbab68bad9ec0"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-reopen-ui.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "44c291acc4880cc463a8d7b9703fbef08a7dbb8013391d700821a2cfe65b5468"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-selection-context.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "4f178048f4c37e17cd3f744d2fe56992167494f6915e1dd418028de79ac59e51"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-settings.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "d5db4856666cdd8dfd10f685753d38f60f0c487b4a00e328b42fdc8c428381e7"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-view-lifecycle.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "ff6aa35a31def30abd31d4bf4e2bb8fa645ca50afa689b97d91f8a7b60bbf8e1"
+        },
+        {
+          "path": "apps/desktop/tests/terminal-views.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "49cc8bf7ef4b6f606d375ec327e9b240b08a6ac492b00bc952ef5430df2aba8f"
+        },
+        {
+          "path": "apps/desktop/tests/updater.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "156538b78b62bb37384eac19e51e9a3535d281cdf729bad8464bfb1c138946a8"
+        },
+        {
+          "path": "apps/desktop/tests/window-context.test.mjs",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "f4ff877f9b1f4fd093c7c04b7beb37ac735e32ee322cf28ba42ad98290723d32"
+        },
+        {
+          "path": "docs/00_standards/rust-mutations.diff",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "6b069e2fc5df3e6a78241217b1d7af06ef7d9019b687b7fd0d26e8826bc20193"
+        },
+        {
+          "path": "docs/00_standards/rust-mutations.json",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "0ccb0be6afec51602e233e91e78a4ed2b4b6e6383d8266020c9e087b10e890af"
+        },
+        {
+          "path": "docs/plans/2026-11-10-architecture-refactor-plan.md",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "891c09adcc60f6e17b29aa986211c8bfc6c485e5b12d999941b4f819d492e68b"
+        },
+        {
+          "path": "scripts/project_mutation.py",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "3435c4ecaf142ecf57cc6a7667f40a9c9834728e0f40dfe592c21cb5c22c6d6d"
+        },
+        {
+          "path": "scripts/test_project_mutation.py",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "1ee885adb4e74f142a9ac130c3787f7b40ac11719c919786516724cb8c2ce6b3"
+        },
+        {
+          "path": "scripts/test_project_quality.py",
+          "kind": "file",
+          "mode": "100644",
+          "content_fingerprint": "27883e9c50c0277551d0b50010a1c055ec34b4ef1d07f69d8969986ada6f0650"
+        }
+      ],
+      "source_fingerprint": "d7a85a16f96ca1042d32ae35a51d84d83de3d4139806ccde4c4e21643417f494"
+    }
+  },
+  "checkpoint": "same_session",
+  "tasks": [
+    {
+      "task_id": "T1",
+      "task_kind": "wide_refactor",
+      "outcomes": [
+        "连接详情和端口检查组件各自拥有显示与交互实现，App 通过导入组装"
+      ],
+      "goal": "迁移连接组件而保持外部行为不变",
+      "owned_paths": [
+        "apps/desktop/src/App.tsx",
+        "apps/desktop/src/SessionConnection.tsx",
+        "apps/desktop/src/ProviderPortCheck.tsx",
+        "apps/desktop/tests/connection-details-ui.test.mjs",
+        "apps/desktop/tests/provider-probe.test.mjs",
+        "apps/desktop/tests/header-layout.test.mjs",
+        "apps/desktop/tests/agent-events.test.mjs",
+        "apps/desktop/tests/codex-inheritance.test.mjs"
+      ],
+      "depends_on": [],
+      "steps": [
+        "先把现有组件行为回归绑定到新组件入口并观察失败",
+        "搬迁组件并更新 App 导入与依赖注入",
+        "运行组件与 App 调用方回归"
+      ],
+      "acceptance": [
+        "外部行为不变：连接信息取当前会话快照，Escape/IME 规则保持",
+        "端口检查继续只发送原 RPC，保留并发拒绝、状态映射与错误语义"
+      ],
+      "verification": [
+        "node --test apps/desktop/tests/connection-details-ui.test.mjs apps/desktop/tests/provider-probe.test.mjs apps/desktop/tests/header-layout.test.mjs apps/desktop/tests/agent-events.test.mjs"
+      ],
+      "execution": "auto",
+      "status": "pending",
+      "provider_run": {
+        "scope": "task",
+        "recursive_planning": false
+      },
+      "provider_binding": {
+        "binding": {
+          "controller": "converge",
+          "stage_providers": {},
+          "workflow_provider": {
+            "contract": {
+              "closure": [],
+              "entrypoint": "references/execution-protocol.md",
+              "preserve_external_behavior": true
+            },
+            "contract_fingerprint": "36630ab70e23678f1799b0c1a1301269554f0030e0e1f9fa2bd182085e7610d1",
+            "id": "native-v1",
+            "manifest": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/providers/native-v1.json",
+            "manifest_fingerprint": "da79b6af45fa1e1a94b5ce9b4b0cf84d5f43a798e57f5e1c50b510f6b7e954ee",
+            "role": "workflow",
+            "source_root": "/Users/liuwenyuan/www/tools/skills-convergent-delivery",
+            "sources": [
+              {
+                "fingerprint": "48aed34b355935525fd4e19416ebb63e5ff09c5ab74c4c63b3b9d317b1802037",
+                "kind": "entrypoint",
+                "path": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/references/execution-protocol.md",
+                "relative_path": "references/execution-protocol.md"
+              }
+            ],
+            "task_kind": "refactor",
+            "version": "1"
+          }
+        },
+        "binding_fingerprint": "f1c9d7a6ef3506fd49342c4055fb9923011f7973c0da8d6abc6e2a407de47152",
+        "reason": "native engine was selected",
+        "selection": "explicit",
+        "task_kind": "refactor"
+      }
+    },
+    {
+      "task_id": "T2",
+      "task_kind": "wide_refactor",
+      "outcomes": [
+        "终端 Profile 编辑状态和管理动作由专用 React hook 所有，App 使用其输出"
+      ],
+      "goal": "迁移 Profile 编辑控制流程而保持外部行为不变",
+      "owned_paths": [
+        "apps/desktop/src/App.tsx",
+        "apps/desktop/src/use-terminal-profiles.ts",
+        "apps/desktop/tests/terminal-profiles-ui.test.mjs"
+      ],
+      "depends_on": [
+        "T1"
+      ],
+      "steps": [
+        "先将现有动作回归绑定到 hook 并观察失败",
+        "搬迁 Profile 状态与动作并替换 App 的闭包实现",
+        "运行 Profile 管理和终端启动回归"
+      ],
+      "acceptance": [
+        "外部行为不变：CRUD/默认项/草稿拷贝与持久化失败保留行为保持",
+        "加载错误保持可见，管理动作不启动进程，启动继续使用同一个 collection"
+      ],
+      "verification": [
+        "node --test apps/desktop/tests/terminal-profiles-ui.test.mjs apps/desktop/tests/terminal-profiles.test.mjs apps/desktop/tests/terminal-launch.test.mjs apps/desktop/tests/settings-surface.test.mjs"
+      ],
+      "execution": "auto",
+      "status": "pending",
+      "provider_run": {
+        "scope": "task",
+        "recursive_planning": false
+      },
+      "provider_binding": {
+        "binding": {
+          "controller": "converge",
+          "stage_providers": {},
+          "workflow_provider": {
+            "contract": {
+              "closure": [],
+              "entrypoint": "references/execution-protocol.md",
+              "preserve_external_behavior": true
+            },
+            "contract_fingerprint": "36630ab70e23678f1799b0c1a1301269554f0030e0e1f9fa2bd182085e7610d1",
+            "id": "native-v1",
+            "manifest": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/providers/native-v1.json",
+            "manifest_fingerprint": "da79b6af45fa1e1a94b5ce9b4b0cf84d5f43a798e57f5e1c50b510f6b7e954ee",
+            "role": "workflow",
+            "source_root": "/Users/liuwenyuan/www/tools/skills-convergent-delivery",
+            "sources": [
+              {
+                "fingerprint": "48aed34b355935525fd4e19416ebb63e5ff09c5ab74c4c63b3b9d317b1802037",
+                "kind": "entrypoint",
+                "path": "/Users/liuwenyuan/www/tools/skills-convergent-delivery/references/execution-protocol.md",
+                "relative_path": "references/execution-protocol.md"
+              }
+            ],
+            "task_kind": "refactor",
+            "version": "1"
+          }
+        },
+        "binding_fingerprint": "f1c9d7a6ef3506fd49342c4055fb9923011f7973c0da8d6abc6e2a407de47152",
+        "reason": "native engine was selected",
+        "selection": "explicit",
+        "task_kind": "refactor"
+      }
+    }
+  ],
+  "final_acceptance": [
+    "前端全量无界面覆盖率和构建通过，当前调用链复核无已知同范围问题",
+    "固定 YAM.app 构建和签名校验通过，安装后新 GUI 单实例 ready，活动会话保持"
+  ],
+  "decisions": [
+    {
+      "id": "D1",
+      "status": "resolved",
+      "question": "本轮拆分哪些职责",
+      "resolution": "连接显示/端口检查组件与终端 Profile 编辑 hook；保持外部行为，不扩大 Rust 运行时改动",
+      "source": "code"
+    },
+    {
+      "id": "D2",
+      "status": "resolved",
+      "question": "安装与重启目标",
+      "resolution": "复用固定 debug/bundle/macos/YAM.app 安装至 /Applications/YAM.app；单实例优雅退出和重启",
+      "source": "user"
+    }
+  ]
+}

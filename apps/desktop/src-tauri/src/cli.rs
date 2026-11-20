@@ -262,6 +262,7 @@ pub(super) fn owner_start(
         .filter(|path| path.is_absolute())
         .ok_or("cli_missing_agent")?;
     let launch = super::AgentLaunch {
+        omp: None,
         claude_context: None,
         codex: (adapter == "codex").then(Default::default),
         provider: None,

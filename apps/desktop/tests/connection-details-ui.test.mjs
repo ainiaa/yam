@@ -32,10 +32,16 @@ test('Pi version refresh follows a new run and retries a focus that arrived duri
 });
 function nodes(tree){const all=[];const visit=node=>{if(node&&typeof node==='object'){all.push(node);for(const child of node.children??[])if(Array.isArray(child))child.forEach(visit);else visit(child);}};visit(tree);return all;}
 function text(node){return (node?.children??[]).map(child=>typeof child==='string'?child:Array.isArray(child)?child.map(text).join(''):text(child)).join('');}
-function renderConnection(launch,agent){
- let component;const visit=node=>{if(ts.isFunctionDeclaration(node)&&node.name?.text==='SessionConnection')component=node.getText(source);ts.forEachChild(node,visit);};visit(source);assert.ok(component,'actual session connection disclosure exists');
- return new Function('React','connectionDetails','ChevronDown','sessionRuntimeInfo',ts.transpile(component,{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2022})+';return SessionConnection;')(React,providers.connectionDetails,()=>null,sessionRuntimeInfo)({launch,agent});
+const connectionSource=ts.createSourceFile('SessionConnection.tsx',readFileSync(new URL('../src/SessionConnection.tsx',import.meta.url),'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
+function renderConnection(launch,agent,extra={}){
+ let component;const visit=node=>{if(ts.isFunctionDeclaration(node)&&node.name?.text==='SessionConnection')component=node.getText(connectionSource);ts.forEachChild(node,visit);};visit(connectionSource);assert.ok(component,'actual session connection disclosure exists');
+ return new Function('React','connectionDetails','ChevronDown','sessionRuntimeInfo',ts.transpile(component,{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2022})+';return SessionConnection;')(React,providers.connectionDetails,()=>null,sessionRuntimeInfo)({launch,agent,...extra});
 }
+test('connection disclosure shows explicit stages and only offers safe reconnect while disconnected',()=>{
+ const calls=[],view=renderConnection({adapter:'codex'}, {integration:'connected'},{status:'running',available:false,onReconnect:()=>calls.push('reconnect')});
+ assert.match(text(view),/Background connection unavailable/);const button=nodes(view).find(n=>n.type==='button'&&text(n)==='Reconnect background');assert.ok(button);button.props.onClick();assert.deepEqual(calls,['reconnect']);
+ const live=renderConnection({adapter:'codex'},{integration:'connecting'},{status:'running',available:true});assert.match(text(live),/waiting for a trusted callback/);assert.ok(!nodes(live).some(n=>n.type==='button'));
+});
 test('T3 real connection disclosure shows the selected launch snapshot and unverified runtime boundary',()=>{
  const launch={adapter:'codex',provider:{id:'custom',model:'gateway/model',base_url:'http://127.0.0.1:3425',api_key_env:null}};
  const tree=renderConnection(launch),all=nodes(tree);
@@ -93,8 +99,10 @@ test('capability disclosure receives current session agent metadata',()=>{
  const agent=connection.attributes.properties.find(attr=>attr.name?.getText(source)==='agent');assert.ok(agent,'current session metadata is passed');assert.equal(agent.initializer.expression.getText(source),'currentAgent');
  const bindings=ts.transpile('return ('+connection.getText(source)+');',{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2022});
  const currentAgent={cli_version:'codex-cli 0.162.1',cli_platform:'macos',integration:'connected'};
- const rendered=new Function('React','SessionConnection','session','currentAgent','installedPiVersion',bindings)(React,()=>{}, {launch:{adapter:'codex',mode:'interactive'}},currentAgent,null);
+ const values={React,SessionConnection:()=>{},session:{launch:{adapter:'codex',mode:'interactive'}},currentAgent,installedPiVersion:null,sessionStatus:'running',ownerConnectionAvailable:{current:{available:false}},reconnecting:false,reconnectBackground(){}};
+ const rendered=new Function(...Object.keys(values),bindings)(...Object.values(values));
  assert.equal(rendered.props.agent,currentAgent);
+ assert.equal(rendered.props.available,false);assert.equal(rendered.props.status,'running');
 });
 test('Codex fallback eligibility follows connected platform capability, not exact CLI versions',()=>{
  const launch={adapter:'codex',mode:'interactive'};

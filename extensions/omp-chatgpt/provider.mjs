@@ -9,7 +9,7 @@ export function validateCredential(c) {
       typeof c.clientId !== 'string' || !c.clientId ||
       !Array.isArray(c.scopes) || !c.scopes.includes('chatgpt.tokens.use.direct') ||
       !Number.isFinite(c.expires) || c.expires <= Date.now()) {
-    throw Error('ChatGPT subscription login is missing or expired; sign in through Pi.');
+    throw Error('ChatGPT subscription login is missing or expired; reconnect the selected authentication source.');
   }
   return c;
 }
@@ -82,7 +82,7 @@ export function createChatgptProvider({readCredential,fetch:fetchRequest,stream,
   return {
     async models(){const c=validateCredential(await readCredential());return catalog(c);},
     stream(model,context,options={}) {
-      const output=createStream();
+      const output=createStream();let partial;
       void (async()=>{
         try {
           options.signal?.throwIfAborted();
@@ -111,13 +111,18 @@ export function createChatgptProvider({readCredential,fetch:fetchRequest,stream,
           });
           let terminal=false;
           for await(const event of inner) {
+            const current=event.partial??event.message??event.error;
+            if(current)partial={...partial,...current,
+              content:current.content?.length?current.content:partial?.content??current.content,
+              usage:current.usage&&['input','output','cacheRead','cacheWrite','totalTokens'].some(k=>current.usage[k]>0)?current.usage:partial?.usage??current.usage,
+            };
             if(event.type==='error'){
-              output.push(failure(model,options.signal,new Error(event.error?.errorMessage),event.error));
+              output.push(failure(model,options.signal,new Error(event.error?.errorMessage),partial));
               terminal=true;break;
             }
             if(event.type==='done'){
               if(!['stop','toolUse'].includes(event.reason)){
-                output.push(failure(model,options.signal,new Error('ChatGPT response incomplete.'),event.message));
+                output.push(failure(model,options.signal,new Error('ChatGPT response incomplete.'),partial));
                 terminal=true;break;
               }
               terminal=true;
@@ -125,7 +130,7 @@ export function createChatgptProvider({readCredential,fetch:fetchRequest,stream,
             output.push(event);
           }
           if(!terminal)throw Error('ChatGPT stream ended without completion.');
-        } catch(e){output.push(failure(model,options.signal,e));}
+        } catch(e){output.push(failure(model,options.signal,e,partial));}
         finally{output.end();}
       })();
       return output;

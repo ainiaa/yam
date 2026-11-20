@@ -29,11 +29,36 @@ view.configuration.userContentController.addUserScript(WKUserScript(source:boots
 view.load(URLRequest(url:URL(string:CommandLine.arguments[1])!))
 var lastDiagnostic="No JavaScript snapshot"
 func check() {
- view.evaluateJavaScript("JSON.stringify({text:document.body.innerText,memory:document.querySelector('.memory-usage')?.textContent,diagnostics:!!document.querySelector('.diagnostics-details'),pending:window.__yamPending,errors:window.__yamErrors.concat(Array.from(document.querySelectorAll('.error-banner')).map(node=>node.textContent))})") { result,error in
+ view.evaluateJavaScript(#"""
+(() => {
+ const memory=document.querySelector('.memory-usage')?.textContent,diagnostics=!!document.querySelector('.diagnostics-details');
+ const dialog=document.querySelector('.appearance-dialog[open]');
+ const step=window.__yamSettingsStep??0;
+ try {
+  if(step===0&&diagnostics&&window.__yamPending===0&&memory?.includes('YAM 100.0 MiB')){
+   const button=document.querySelector('.sidebar-settings');if(!button)throw Error('Settings entry is missing');
+   window.__yamSavedAppearance=localStorage.getItem('yam.appAppearance.v1');button.click();window.__yamSettingsStep=1;
+  }else if(step===1&&dialog){
+   const button=Array.from(dialog.querySelectorAll('.theme-card')).find(node=>node.getAttribute('aria-pressed')==='false');if(!button)throw Error('Editable theme is missing');button.click();window.__yamSettingsStep=2;
+  }else if(step===2&&dialog){dialog.querySelector('[data-settings-close]').click();window.__yamSettingsStep=3;
+  }else if(step===3){
+   if(!dialog)throw Error('Dirty settings closed without confirmation');
+   const keep=dialog.querySelector('.settings-discard button');if(keep){keep.click();window.__yamSettingsStep=4;}
+  }else if(step===4&&dialog&&!dialog.querySelector('.settings-discard')){dialog.dispatchEvent(new Event('cancel',{cancelable:true}));window.__yamSettingsStep=5;
+  }else if(step===5){
+   if(!dialog)throw Error('Dirty settings Escape bypassed confirmation');
+   const discard=dialog.querySelector('.settings-discard button:last-of-type');if(discard){discard.click();window.__yamSettingsStep=6;}
+  }else if(step===6&&!dialog){
+   if(localStorage.getItem('yam.appAppearance.v1')!==window.__yamSavedAppearance)throw Error('Discard wrote appearance settings');window.__yamSettingsStep=7;
+  }
+ }catch(error){window.__yamErrors.push(String(error));}
+ return JSON.stringify({memory,diagnostics,pending:window.__yamPending,settings_step:window.__yamSettingsStep,settings_verified:window.__yamSettingsStep===7,errors:window.__yamErrors.concat(Array.from(document.querySelectorAll('.error-banner')).map(node=>node.textContent))});
+})()
+"""#) { result,error in
   if let text=result as? String { lastDiagnostic=text }
   if let text=result as? String,let data=text.data(using:.utf8),let value=try? JSONSerialization.jsonObject(with:data) as? [String:Any],value["diagnostics"] as? Bool == true {
    if (value["errors"] as? [String])?.isEmpty == false { print(text); exit(1) }
-   if value["pending"] as? Int == 0, (value["memory"] as? String)?.contains("YAM 100.0 MiB") == true { print(text); exit(0) }
+   if value["settings_verified"] as? Bool == true, value["pending"] as? Int == 0, (value["memory"] as? String)?.contains("YAM 100.0 MiB") == true { print(text); exit(0) }
   }
   if let error=error {print(error)}
   DispatchQueue.main.asyncAfter(deadline:.now()+0.2,execute:check)

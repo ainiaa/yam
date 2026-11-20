@@ -488,7 +488,7 @@ export async function classifyNativeTurn({policy,prompt,previousPrompt,previous,
  return classifyCandidates({keys:prompt.length<=16000?policy.classifiers:[],channel:policy.classifiers.length?candidate(policy.classifiers[0]).billing:undefined,rules,requestSignal:signal,
   classificationBudget:135000,maxAttemptBudget:45000,timeout,resolve:candidate,readResult:text=>typeof text==='string'?{text}:text,
   run:async(entry,attemptSignal)=>{
-   try{return await classify({executable:codex,model:entry.model,connection:entry.connection,prompt:input,env:await profileEnvironment(entry.connection,connections,[cwd],session),signal:attemptSignal,respectSystemProxy:policy.respectSystemProxy});}
+   try{return await classify({executable:codex,model:entry.model,effort:policy.classifierEffort??(entry.billing==='paid'?'high':'medium'),connection:entry.connection,prompt:input,env:await profileEnvironment(entry.connection,connections,[cwd],session),signal:attemptSignal,respectSystemProxy:policy.respectSystemProxy});}
    catch(error){if(attemptSignal.aborted&&!error.mayBeRunning)return {failure:failureOf(error,{dispatch:'not-started'})};throw error;}
   }});
 }
@@ -499,12 +499,12 @@ async function classifierFeatures(executable,env,respectSystemProxy){
  return native?.runtimeFeatures;
 }
 
-async function classifyCodex({executable,model,connection,prompt,env,signal,respectSystemProxy}){
+async function classifyCodex({executable,model,effort,connection,prompt,env,signal,respectSystemProxy}){
  if(connection?.billing==='paid'){
   const thread=await openCodexThread({executable,model,connection,env,signal,readOnly:true,outputSchema:factsSchema,respectSystemProxy});
-  try{const turn=await thread.run(prompt,'high');if(turn.status!=='completed')throw Error('Gateway classification failed');return turn.text;}finally{await thread.close();}
+  try{const turn=await thread.run(prompt,effort);if(turn.status!=='completed')throw Error('Gateway classification failed');return turn.text;}finally{await thread.close();}
  }
- const result=await executeAgent({kind:'codex',auth:'subscription',executable,model,thinking:'medium',
+ const result=await executeAgent({kind:'codex',auth:'subscription',executable,model,thinking:effort,
   runtimeFeatures:await classifierFeatures(executable,env,respectSystemProxy)},
   {prompt,mode:'readonly',readonlySchema:factsSchema,signal},(file,args,options)=>runProcess(file,
    args,{...options,env}));
@@ -734,7 +734,7 @@ async function acquireNativeLock(session){
 }
 
 export async function runNativeCodex({codex,cwd,session,config,prompt}){
- config=readCodexPolicy(JSON.stringify(config));codex=await realpath(codex);cwd=await realpath(cwd);
+ config=readCodexPolicy(JSON.stringify(config),{automatic:true});codex=await realpath(codex);cwd=await realpath(cwd);
  if(!isAbsolute(session??''))throw Error('Native routing requires an absolute session directory');
  await mkdir(session,{mode:0o700}).catch(error=>{if(error.code!=='EEXIST')throw error;});session=await privateDirectory(session);
  const lock=await acquireNativeLock(session);
@@ -749,7 +749,8 @@ export async function runNativeCodex({codex,cwd,session,config,prompt}){
   const prior=info?JSON.parse(await readFile(path,'utf8')):null;
   if(prior&&![1,2].includes(prior.v))throw Error('Unsupported native routing state');
   if(prior&&((prior.threadId? !isNativeSessionId(prior.threadId):prior.status!=='idle')||!['idle','completed','interrupted','failed','pending','working','unknown','classifying'].includes(prior.status)))throw Error('Invalid native routing state identity');
-  if(prior?.config)config=readCodexPolicy(JSON.stringify(prior.config));
+  if(prior?.config)config=readCodexPolicy(JSON.stringify(prior.config),{automatic:true});
+  if(prior?.pendingPolicy?.config)prior.pendingPolicy.config=JSON.stringify(readCodexPolicy(prior.pendingPolicy.config,{automatic:true}));
   const {candidate,connections,rules}=validateCodexPolicy(config);
   const key=prior?.previous?.identity??prior?.model??(config.model&&config.model!=='auto'?config.model:config.executionGroups.map(group=>group[rules.fallback.model]).find(Boolean));
   const catalog=await codexCatalog({config,codex,cwd,session,signal:controller.signal});

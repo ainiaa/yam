@@ -1251,6 +1251,38 @@ test('Pi classification uses native provider-neutral reasoning and a tool-free r
  f.ctx.modelRegistry.streamSimple=(...args)=>{calls.push(args);return native(...args);};
  const result=await f.route();assert.equal(result.model.id,'small');assert.equal(calls.length,1);assert.equal(calls[0][2].reasoning,'medium');assert.equal(calls[0][2].toolChoice,'none');assert.equal(calls[0][2].maxTokens,512);assert.ok(calls[0][2].signal instanceof AbortSignal);
 });
+test('Pi classifier reasoning is independent from execution rules',async()=>{
+ const f=fixture(),calls=[],stream=f.ctx.modelRegistry.streamSimple;
+ f.flags['yam-classifier-effort']='high';
+ f.ctx.modelRegistry.streamSimple=(...args)=>{calls.push(args);return stream(...args);};
+ const result=await f.route();
+ assert.equal(calls[0][2].reasoning,'high');assert.equal(result.thinkingLevel,'medium');
+});
+test('managed Pi restores legacy fixed preferences as automatic routing',async t=>{
+ const previous=process.env.YAM_AGENT_ADDRESS;
+ process.env.YAM_AGENT_ADDRESS='/tmp/mock-yam-owner';
+ t.after(()=>{if(previous===undefined)delete process.env.YAM_AGENT_ADDRESS;else process.env.YAM_AGENT_ADDRESS=previous;});
+ const f=fixture(),api=await f.ready;
+ f.flags['yam-fixed-model']='p/strong';f.flags['yam-effort']='max';
+ await f.handlers.session_start({},f.ctx);
+ assert.deepEqual(api.snapshot().preferences,{model:'auto',effort:'auto'});
+ const result=await f.route();assert.equal(result.model.id,'small');assert.equal(result.thinkingLevel,'medium');
+});
+test('managed Pi native choices cannot keep fixed overrides inside automatic routing',async t=>{
+ const previous=process.env.YAM_AGENT_ADDRESS;process.env.YAM_AGENT_ADDRESS='/tmp/mock-yam-owner';
+ t.after(()=>{if(previous===undefined)delete process.env.YAM_AGENT_ADDRESS;else process.env.YAM_AGENT_ADDRESS=previous;});
+ const f=fixture(),api=await f.ready;
+ await f.handlers.session_start({},f.ctx);
+ f.pi.setThinkingLevel('max');
+ await f.handlers.thinking_level_select({level:'max',previousLevel:'off'},f.ctx);
+ assert.deepEqual(api.snapshot().preferences,{model:'auto',effort:'auto'});
+ assert.equal((await f.route()).thinkingLevel,'medium');
+ f.ctx.model=f.models.strong;f.pi.setThinkingLevel('high');f.pi.setModel=async model=>{f.ctx.model=model;return true;};
+ await f.handlers.model_select({source:'interactive',model:f.models.strong,previousModel:f.models.auto},f.ctx);
+ assert.equal(api.snapshot().mode.enabled,false);
+ assert.equal(f.ctx.model.id,'strong');assert.equal(f.pi.getThinkingLevel(),'high');
+ assert.equal(f.entries.findLast(entry=>entry.customType==='yam.routing.mode.v1').data.native.effort,'high');
+});
 test('Pi translating or repeating a capacity statement does not trigger an unnecessary correction',async()=>{
  for(const prompt of ['请翻译成英文：我需要更强的模型。','Repeat exactly: I need a stronger model.','引用这句话并原样回复：I need a stronger model.']){
   const f=feedbackFixture();await f.handlers.before_agent_start({},f.ctx);await f.route({messages:[{role:'user',content:prompt}]});await f.handlers.message_end({message:{...f.weak,content:[{type:'text',text:'I need a stronger model.'}]}},f.ctx);assert.equal(f.completions.length,0,prompt);

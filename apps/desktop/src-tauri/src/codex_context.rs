@@ -27,6 +27,12 @@ pub struct Options {
 }
 
 pub(crate) fn validate(launch: &crate::AgentLaunch) -> Result<(), String> {
+    if let Some(options) = &launch.omp {
+        if launch.adapter != "omp" {
+            return Err("OMP options require the OMP launcher".into());
+        }
+        options.validate()?;
+    }
     if launch.adapter == "claude"
         && launch.provider.is_some()
         && launch.claude_context.as_ref().is_some_and(|id| {

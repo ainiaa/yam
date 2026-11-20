@@ -16538,5 +16538,87 @@
         ]
       }
     ]
+  },
+  "xterm_empty_selection_patch_20261116": {
+    "author": "Jeff.Liu",
+    "purpose": "Pinned xterm 6.0.0 empty-selection scroll redraw fix; no new dependency, version, source archive or license body. Exact input binding updated; tamper gates unchanged.",
+    "inputs": {
+      "cargo_lock": "7869a6bf6c43211bdc8b7e6bf434478d74a1dbeba92e8e88ad3c2df54ffcf7b0",
+      "declarations": "dd2e50921eb8f0275863b35f3b954149dbf62c9d6aac20b70dec85e8f8c51925",
+      "pnpm_lock": "a61ae265abfdf319cded4059d364568353313ff9a56f88dacd672221d4b918ce",
+      "production_graph": "e6f1a111635fcebc3a8c96ed553d17ebfc1cc5605a202a36ca1b79d2fc812919"
+    },
+    "manifest_sha256": "322129cc9197a037e577041e960fe0fc344b7c2cfa2a0ee530b104096b32d5c6",
+    "old_manifest_sha256": "8438c5b9ea7070ecb57f75b8aacdfe8b2fbb9fbb77d53a28b57cd6442daf3a47",
+    "patch_sha256": "b3d84f0817c6a7ee8169ab6f99665d36583cf981f1ec36303778fd29b46a9050",
+    "installed_license_sha256": "b569f629d00f2626a8100df2a1798210535621e42164dfd426a6fe5aac7b0ccd",
+    "records_unchanged": true,
+    "additional_unchanged": true,
+    "independent_review": "Clipping finding resolved; no actionable findings in .artifacts/jit-source-20261115/re-review.stdout and .stderr at source 622a1530f43fe97f344b29f78e9b60d0b8f7553f87c9a784a8b46f0ed39c36b5; later style review confirms earlier scroll/trim fixes retained. Not legal/release approval.",
+    "selection_clip_correction": "Independent source review found a collapsed-selection overlay boundary. Actual ESM/CJS model and service tests reproduced it. Clipping now requests a final redraw, with empty-scroll optimization retained."
+  },
+  "xterm_cssom_style_patch_20261116": {
+    "author": "Jeff.Liu",
+    "purpose": "Pinned xterm 6.0.0 color/background-color property setters; exact lock/manifest rebinding only, no new dependency/version/source/license body. Prior scroll and selection-clip fixes retained.",
+    "inputs": {
+      "cargo_lock": "7869a6bf6c43211bdc8b7e6bf434478d74a1dbeba92e8e88ad3c2df54ffcf7b0",
+      "declarations": "dd2e50921eb8f0275863b35f3b954149dbf62c9d6aac20b70dec85e8f8c51925",
+      "pnpm_lock": "fd70386aa9842e429ded897df96b054ec3fe7784ca7f88c37b5607f23c203b8d",
+      "production_graph": "e6f1a111635fcebc3a8c96ed553d17ebfc1cc5605a202a36ca1b79d2fc812919"
+    },
+    "manifest_sha256": "e04480b08fe87f3b7c58deed99de25efaa573c22baebd4998ae4a4740476acd8",
+    "old_manifest_sha256": "322129cc9197a037e577041e960fe0fc344b7c2cfa2a0ee530b104096b32d5c6",
+    "patch_sha256": "8b72c0ae6f0bb08b401b09b4775f1f619afd9ad7c311bff5cccbbccb0ff95c3e",
+    "installed_license_sha256": "b569f629d00f2626a8100df2a1798210535621e42164dfd426a6fe5aac7b0ccd",
+    "records_unchanged": true,
+    "additional_unchanged": true,
+    "independent_source_review": "No actionable correctness findings; .artifacts/jit-source-20261115/review-style.stdout and .stderr, source 083f7c7369edc6063aaaa343df6424346393d4d2b62d2564691e38cf03b1810e. Tests/GUI not rerun by reviewer; desktop/physical acceptance pending; not legal/release approval."
+  },
+  "xterm_row_reuse_patch_20261117": {
+    "author": "Jeff.Liu",
+    "purpose": "Pinned xterm6 bounded detached row span reuse. Exact lock/manifest rebinding; all 571 source/license records and additional entries byte-equivalent. Prior scroll/selection/CSSOM changes retained.",
+    "inputs": {
+      "cargo_lock": "7869a6bf6c43211bdc8b7e6bf434478d74a1dbeba92e8e88ad3c2df54ffcf7b0",
+      "declarations": "dd2e50921eb8f0275863b35f3b954149dbf62c9d6aac20b70dec85e8f8c51925",
+      "pnpm_lock": "2e264cced5ef8b150c09bd77291e8bf2f8b46118bc093ebe91e336b672a5ed87",
+      "production_graph": "e6f1a111635fcebc3a8c96ed553d17ebfc1cc5605a202a36ca1b79d2fc812919"
+    },
+    "manifest_sha256": "6d567a785ae82706f335f84fd4f750f83c92e44a875b9520d8dd5d99979ee65c",
+    "old_manifest_sha256": "e04480b08fe87f3b7c58deed99de25efaa573c22baebd4998ae4a4740476acd8",
+    "patch_sha256": "3960cfcf1f5c12af4a806ec080b9bbf16cb3126c9c6876ec6bd36f131f951009",
+    "records_unchanged": true,
+    "additional_unchanged": true,
+    "independent_source_review": "Pending; no approval or release claimed."
+  },
+  "xterm_row_reuse_reentrant_guard_20261117": {
+    "author": "Jeff.Liu",
+    "purpose": "Same bounded span reuse; parentless and no-duplicate guard fixes independent-review finding. All source/license identities and bodies unchanged.",
+    "inputs": {
+      "cargo_lock": "7869a6bf6c43211bdc8b7e6bf434478d74a1dbeba92e8e88ad3c2df54ffcf7b0",
+      "declarations": "dd2e50921eb8f0275863b35f3b954149dbf62c9d6aac20b70dec85e8f8c51925",
+      "pnpm_lock": "3d1fb254fcb187eb314a32ecb5a026ebaa228eed58048760f86fa37a4d525a89",
+      "production_graph": "e6f1a111635fcebc3a8c96ed553d17ebfc1cc5605a202a36ca1b79d2fc812919"
+    },
+    "manifest_sha256": "4806d166db4ff2268793fa385869b8d92a4f9dc980d031f4109eb76f9da3161b",
+    "old_manifest_sha256": "6d567a785ae82706f335f84fd4f750f83c92e44a875b9520d8dd5d99979ee65c",
+    "patch_sha256": "3ae060940c4bfb38479a6b08e101b867c2098255a81db4e17b3f09ec365521b1",
+    "records_unchanged": true,
+    "additional_unchanged": true,
+    "review_evidence": ".artifacts/jit-source-20261115/comparability-20261117/re-review-last.txt; see actual result, no legal/release approval implied"
+  },
+  "xterm_pnpm10_lock_rebinding_20261120": {
+    "author": "Jeff.Liu",
+    "purpose": "Rebind the xterm lock metadata to CI pnpm 10's SHA-256 patch hash. Dependency resolutions, patch bytes, source identities and license bodies are unchanged.",
+    "inputs": {
+      "cargo_lock": "7869a6bf6c43211bdc8b7e6bf434478d74a1dbeba92e8e88ad3c2df54ffcf7b0",
+      "declarations": "dd2e50921eb8f0275863b35f3b954149dbf62c9d6aac20b70dec85e8f8c51925",
+      "pnpm_lock": "3ff56cc27dca73c33d9e5c51eefd5e2cf3b202807ff097b4a9ca678a65749a8d",
+      "production_graph": "e6f1a111635fcebc3a8c96ed553d17ebfc1cc5605a202a36ca1b79d2fc812919"
+    },
+    "manifest_sha256": "b15f9583ac026cabd25d4c6e3e996a96b5f38b18c4fe364061c13632be2c5e2f",
+    "old_manifest_sha256": "4806d166db4ff2268793fa385869b8d92a4f9dc980d031f4109eb76f9da3161b",
+    "patch_sha256": "3ae060940c4bfb38479a6b08e101b867c2098255a81db4e17b3f09ec365521b1",
+    "records_unchanged": true,
+    "additional_unchanged": true
   }
 }

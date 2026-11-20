@@ -13,7 +13,7 @@ test('Codex uses the shared editable roles without losing sparse groups or conne
  assert.deepEqual(updated.connections,original.connections);
  assert.deepEqual(updated.executionGroups,original.executionGroups);
  assert.deepEqual(updated.classifiers,original.classifiers);
- assert.equal(updated.effort,'high');
+ assert.equal(updated.effort,undefined);assert.equal(updated.model,undefined);
  const empty=routingPolicies.codexRoutingDraft('');
  assert.equal(JSON.parse(empty.rules).v,2);
 });
@@ -39,14 +39,12 @@ test('Codex strategy tolerates unavailable backups but requires a compatible can
  config.executionGroups[1].medium='native/offline';
  assert.match(issue(),/unsupported reasoning high/);
 });
-test('Codex catalog validation distinguishes failed and successfully empty connections',()=>{
- const config={connections:{native:{billing:'subscription',native:true},local:{billing:'paid',gateway:true,baseUrl:'http://127.0.0.1:3425'}},classifiers:[],executionGroups:[{}],model:'local/flash',effort:'high'};
+test('Codex automatic catalog validation uses execution tiers despite obsolete fixed overrides',()=>{
+ const config={connections:{native:{billing:'subscription',native:true},local:{billing:'paid',gateway:true,baseUrl:'http://127.0.0.1:3425'}},classifiers:[],executionGroups:[{small:'local/flash',medium:'local/flash',strong:'local/flash'}],model:'native/ignored',effort:'high'};
  assert.match(routingPolicies.validateCodexDraft(JSON.stringify(config),[],['native']),/Codex model catalog unavailable: local/);
  assert.match(routingPolicies.validateCodexDraft(JSON.stringify(config),[],['native','local']),/Codex model unavailable: local\/flash/);
- const available=[{...models[0],key:'native/ready'}];
- assert.equal(routingPolicies.validateCodexDraft(JSON.stringify({...config,model:'native/ready'}),available,['native']),null);
- assert.equal(routingPolicies.validateCodexDraft(JSON.stringify({...config,model:'native/ready'}),available,[]),null);
- assert.equal(routingPolicies.validateCodexDraft(JSON.stringify({...config,model:'native/ready',classifiers:['local/offline']}),available,['native']),null);
+ const rows=[{key:'local/flash',levels:['medium','high']}];
+ assert.equal(routingPolicies.validateCodexDraft(JSON.stringify(config),rows,['local']),null);
 });
 test('Pi legacy classifier remains A and ordered B/C survive settings and launch args',()=>{
  const saved=JSON.stringify({gateway:null,small:'p/small',strong:'p/strong',classifier:'p/a'});
@@ -121,7 +119,7 @@ test('Pi exposes an explicit billing choice when backup classifiers are configur
 test('Pi fixed execution with automatic reasoning can launch without a classifier',()=>{
  const fixed={...draft,model:'p/strong',small:'',strong:'',classifier:''};
  assert.equal(validatePiDraft(fixed,models),null);
- assert.equal(parsePiDraft(restorePiSetup('',JSON.stringify(piSetupMapping(fixed,'')))).model,'p/strong');
+ assert.throws(()=>piSetupMapping(fixed,''),/Invalid Pi routing policy/);
  assert.match(validatePiDraft({...fixed,classifierFallbacks:['p/b']},models),/classifier/i);
 });
 test('Pi setup chooses an available high-capability default and never overwrites explicit selections',()=>{
@@ -158,9 +156,9 @@ test('Pi setup accepts only a verified current model and never falls back on pro
  await assert.rejects(()=>verifyPiSetup('','/tmp/project','p/missing',invoke));
  await assert.rejects(()=>verifyPiSetup('','/tmp/project','p/strong',async()=>{throw Error('offline');}));
 });
-test('saved Pi setup retains custom task rules and fixed choices while legacy mappings remain readable',()=>{
+test('saved Pi setup retains custom task rules and removes obsolete fixed overrides',()=>{
  const rules=structuredClone(defaultRules);rules.rules.find(r=>r.task==='review').effort='max';const saved=piSetupMapping({...draft,model:'p/strong',effort:'max',rules:JSON.stringify(rules)},'');
- const restored=parsePiDraft(restorePiSetup('',JSON.stringify(saved)));assert.equal(restored.model,'p/strong');assert.equal(restored.effort,'max');assert.deepEqual(JSON.parse(restored.rules),rules);
+ const restored=parsePiDraft(restorePiSetup('',JSON.stringify(saved)));assert.equal(restored.model,'auto');assert.equal(restored.effort,'auto');assert.deepEqual(JSON.parse(restored.rules),rules);
 });
 test('explicitly applying imported defaults preserves unrelated arguments and the stricter billing policy',()=>{
  const saved=JSON.stringify(piSetupMapping({...draft,small:'yam-codex/sol',strong:'yam-codex/sol',classifier:'yam-codex/sol',rules:JSON.stringify(defaultRules)},'--yam-billing subscription'));
@@ -242,7 +240,7 @@ test('Pi setup reports installed tools separately from discovered models and pro
  assert.deepEqual(all(tree).find(n=>n.props.label==='Lightweight model').props.models,[]);
  assert.equal(all(tree).find(n=>n.type==='button'&&n.children.includes('Verify model')).props.disabled,true);assert.match(JSON.stringify(tree),/Models were scanned using the local Pi configuration/);
  cwd='/tmp/other';tree=render([]);assert.doesNotMatch(JSON.stringify(tree),/No discovered model supports high reasoning|Magpie setup guide/);
- args=buildPiArgs('--yam-billing subscription',{...draft,small:'yam-codex/a',strong:'yam-codex/b',model:'openai/gpt-4'});
+ args=buildPiArgs('--yam-billing subscription',{...draft,small:'openai/gpt-4',strong:'yam-codex/b',model:'openai/gpt-4'});
  result={models:[{...models[0],key:'openai/gpt-4',billing:'api'}]};
  const button=label=>all(render([])).find(n=>n.type==='button'&&n.children.includes(label));
  button('Check connection and models').props.onClick();await new Promise(r=>setImmediate(r));
@@ -263,27 +261,25 @@ test('Pi setup reports installed tools separately from discovered models and pro
  all(groups()[2]).find(n=>n.props.label==='Execution group C · Strong model').props.onChange({target:{value:'p/standby'}});
  assert.deepEqual(parsePiDraft(args).executionFallbacks,{strong:['','p/standby']});
  adapter='codex';failed=false;
- const config={connections:{native:{billing:'subscription',native:true},local:{billing:'paid',gateway:true,baseUrl:'http://127.0.0.1:3425'}},classifiers:[],executionGroups:[{}],model:'native/saved',effort:'high'};
+ const config={connections:{native:{billing:'subscription',native:true},local:{billing:'paid',gateway:true,baseUrl:'http://127.0.0.1:3425'}},classifiers:[],executionGroups:[{small:'native/saved',medium:'native/saved',strong:'native/saved'}],model:'native/obsolete',effort:'high'};
  args=JSON.stringify(config);result={models:[{...models[0],key:'native/available'}],warning:'local: Offline'};
  await button('Check connection and models').props.onClick();
  assert.match(JSON.stringify(render([])),/Codex model unavailable: native\/saved/);
- args=JSON.stringify({...config,model:'local/saved'});
+ args=JSON.stringify({...config,executionGroups:[{small:'local/saved',medium:'local/saved',strong:'local/saved'}]});
  assert.match(JSON.stringify(render([])),/Codex model catalog unavailable: local/);
  for(adapter of ['pi','codex']){
   const codex=adapter==='codex';
-  args=codex?JSON.stringify({...config,model:'native/available',effort:undefined}):buildPiArgs('',draft);
+  args=codex?JSON.stringify({...config,executionGroups:[{small:'native/available',medium:'native/available',strong:'native/available'}]}):buildPiArgs('',draft);
   result={models:codex?[{...models[0],key:'native/available'}]:models};
   const saves=[],current=()=>all(render([],(_args,policy)=>saves.push(policy)));
-  const section=()=>current().find(n=>n.type==='fieldset'&&n.props['aria-label']==='Routing preferences');
-  assert.ok(section(),`${adapter} exposes model and reasoning without expanding a section`);
-  assert.ok(all(section()).some(n=>n.props.label==='Model selection'));
-  const reasoning=()=>all(section()).find(n=>n.props['aria-label']==='Reasoning selection');
-  assert.equal(reasoning().props.value,'auto');
+  assert.equal(current().find(n=>n.props['aria-label']==='Routing preferences'),undefined);
+  const reasoning=()=>current().find(n=>n.props['aria-label']==='Classifier reasoning');
+  assert.equal(reasoning().props.value,'');
   reasoning().props.onChange({target:{value:'high'}});
   assert.equal(reasoning().props.value,'high');
   await current().find(n=>n.type==='button'&&n.children.includes('Check connection and models')).props.onClick();
   current().find(n=>n.type==='button'&&n.children.includes('Save routing roles on this device')).props.onClick();
-  assert.equal(JSON.parse(saves[0]).effort,'high');
+  assert.equal(JSON.parse(saves[0]).classifierEffort,'high');assert.ok(!JSON.parse(saves[0]).effort||JSON.parse(saves[0]).effort==='auto');
  }
 });
 test('Pi quick setup verifies before saving and ignores stale completion',async()=>{
@@ -425,9 +421,9 @@ async function routingBarFixture(invoke,options={}){
  const all=node=>!node||typeof node!=='object'?[]:[node,...(node.children??[]).flat(Infinity).flatMap(all)];
  const tick=()=>new Promise(r=>setImmediate(r));
  const flush=async()=>{for(let i=0;i<3;i++){render();for(const effect of pending.splice(0))effect();await tick();}render();};
- await flush();return {visible:value=>env.document.visibilityState=value,flush,poll:async()=>{timers.shift()?.();await flush();},select:label=>all(tree).find(n=>(n.props['aria-label']??n.props.label)===label),button:text=>all(tree).find(n=>n.type==='button'&&n.children.includes(text)),catalogModels:()=>all(tree).find(n=>n.type===env.RoutingModelPicker)?.props.models,rules:()=>all(tree).find(n=>n.type==='task-rules'),tree:()=>tree,text:()=>all(tree).flatMap(n=>n.children).filter(v=>typeof v==='string').join(' ')};
+ await flush();return {visible:value=>env.document.visibilityState=value,flush,poll:async()=>{timers.shift()?.();await flush();},select:label=>all(tree).find(n=>(n.props['aria-label']??n.props.label)===label),button:text=>all(tree).find(n=>n.type==='button'&&n.children.includes(text)),catalogModels:()=>all(tree).find(n=>n.type==='task-rules')?.props.models,rules:()=>all(tree).find(n=>n.type==='task-rules'),tree:()=>tree,text:()=>all(tree).flatMap(n=>n.children).filter(v=>typeof v==='string').join(' ')};
 }
-const barState=()=>({revision:1,generation:'g',phase:'idle',config:{small:'p/small',strong:'p/strong',classifier:'p/small',gateway:null},preferences:{model:'p/small',effort:'high'},target:null,actual:null,error:null,pendingInput:false});
+const barState=()=>({revision:1,generation:'g',phase:'idle',config:{small:'p/small',strong:'p/strong',classifier:'p/small',gateway:null},preferences:{model:'auto',effort:'auto'},rules:defaultRules,target:null,actual:null,error:null,pendingInput:false});
 test('Pi routing separates installed and session launch versions',async()=>{
  const stopped=async(cliVersion,installedPiVersion)=>routingBarFixture(async()=>({active:false,state:barState()}),{cliVersion,installedPiVersion,active:false});
  const old=await stopped('1.4.0','1.5.0');
@@ -445,29 +441,27 @@ test('long context diagnostics explain full handoff and recommend explicit compa
  const f=await routingBarFixture(async(name)=>{if(name==='get_pi_routing')return {active:true,state};writes++;return {models:[]};});const before=writes;
  assert.match(f.text(),/Full context/);assert.match(f.text(),/Native identity changed/);assert.ok(JSON.stringify(f.tree()).includes('130001'));assert.ok(JSON.stringify(f.tree()).includes('128000'));assert.match(f.text(),/\/compact/);assert.equal(writes,before);
 });
-test('Pi model/effort transitions apply together without sending an incompatible intermediate selection',async()=>{
- let state=barState();const writes=[];
- const f=await routingBarFixture(async(name,args)=>{if(name==='get_pi_routing')return {active:true,state};if(args.request.action==='catalog')return {models:[]};writes.push(args.request);state={...state,revision:state.revision+1,preferences:args.request.data};return {state};});
- f.select('Pi model selection').props.onChange({target:{value:'p/strong'}});await f.flush();f.select('Pi reasoning selection').props.onChange({target:{value:'max'}});await f.flush();assert.equal(writes.length,0);
- assert.ok(f.button('Apply routing selection'));assert.equal(f.button('Apply routing selection').props.disabled,false);f.button('Apply routing selection').props.onClick();await f.flush();assert.equal(writes.length,1);assert.deepEqual(writes[0].data,{model:'p/strong',effort:'max'});
- f.select('Pi reasoning selection').props.onChange({target:{value:'off'}});await f.flush();f.button('Cancel selection').props.onClick();await f.flush();assert.equal(writes.length,1);assert.equal(f.select('Pi reasoning selection').props.value,'max');
+test('Pi automatic routing exposes rules without a second fixed-model selection',async()=>{
+ const state=barState(),writes=[];
+ const f=await routingBarFixture(async(name,args)=>{if(name==='get_pi_routing')return {active:true,state};if(args.request.action==='catalog')return {models:[]};writes.push(args.request);return {state};});
+ assert.equal(f.select('Pi model selection'),undefined);assert.equal(f.select('Pi reasoning selection'),undefined);
+ assert.equal(f.button('Apply routing selection'),undefined);assert.equal(f.button('Reset both to automatic'),undefined);
+ const next=structuredClone(defaultRules);next.rules[0].effort='high';
+ await f.rules().props.onApply(next);await f.flush();assert.equal(writes.length,1);assert.equal(writes[0].action,'rules');assert.deepEqual(writes[0].data,next);
 });
-test('Pi an older in-flight status read cannot revert a newly applied selection',async()=>{
- let state=barState(),release;const f=await routingBarFixture(async(name,args)=>{if(name==='get_pi_routing'){if(release===undefined&&state.revision===2)return new Promise(r=>release=r);return {active:true,state};}if(args.request.action==='catalog')return {models:[]};state={...state,revision:state.revision+1,preferences:args.request.data};return {state};});
- f.select('Pi reasoning selection').props.onChange({target:{value:'max'}});await f.flush();if(f.button('Apply routing selection')){f.button('Apply routing selection').props.onClick();await f.flush();}
+
+test('Pi an older in-flight status read cannot revert newly applied rules',async()=>{
+ let state=barState(),release;const f=await routingBarFixture(async(name,args)=>{if(name==='get_pi_routing'){if(release===undefined&&state.revision===2)return new Promise(r=>release=r);return {active:true,state};}if(args.request.action==='catalog')return {models:[]};state={...state,revision:state.revision+1,rules:args.request.data};return {state};});
+ const first=structuredClone(defaultRules);first.rules[0].effort='max';await f.rules().props.onApply(first);await f.flush();
  const old=structuredClone(state);await f.poll();assert.ok(release);
- f.select('Pi reasoning selection').props.onChange({target:{value:'off'}});await f.flush();if(f.button('Apply routing selection')){f.button('Apply routing selection').props.onClick();await f.flush();}
- release({active:true,state:old});await f.flush();assert.equal(f.select('Pi reasoning selection').props.value,'off');
-});
-test('Pi stale unsaved choices are not silently submitted over a native settings change',async()=>{
- let state=barState(),writes=0;const f=await routingBarFixture(async(name,args)=>{if(name==='get_pi_routing')return {active:true,state};if(args.request.action==='catalog')return {models:[]};writes++;return {state};});
- f.select('Pi reasoning selection').props.onChange({target:{value:'max'}});await f.flush();state={...state,revision:2,preferences:{model:'auto',effort:'off'}};await f.poll();assert.ok(f.button('Apply routing selection')?.props.disabled);assert.equal(writes,0);f.button('Cancel selection').props.onClick();await f.flush();assert.equal(f.select('Pi reasoning selection').props.value,'off');
+ const next=structuredClone(defaultRules);next.rules[0].effort='high';await f.rules().props.onApply(next);await f.flush();
+ release({active:true,state:old});await f.flush();assert.equal(f.rules().props.rules.rules[0].effort,'high');
 });
 
 test('Pi routing starts with a compact policy summary and expansion never submits a preference',async()=>{
  let writes=0;const state={...barState(),preferences:{model:'auto',effort:'high'},phase:'working',target:{model:'p/strong',effort:'high',reason:'complex'},actual:{model:'p/small',effort:'medium',at:1}};
  const f=await routingBarFixture(async(name,args)=>{if(name==='get_pi_routing')return {active:true,state};if(args.request.action==='catalog')return {models:[]};writes++;return {state};});
- const adjust=f.button('Adjust routing');assert.ok(adjust);assert.equal(adjust.props['aria-expanded'],false);assert.match(f.text(),/Automatic model/);assert.match(f.text(),/Fixed reasoning/);
+ const adjust=f.button('Adjust routing');assert.ok(adjust);assert.equal(adjust.props['aria-expanded'],false);assert.match(f.text(),/Automatic model/);assert.match(f.text(),/Reasoning follows execution rules/);
  adjust.props.onClick();await f.flush();assert.equal(f.button('Adjust routing').props['aria-expanded'],true);assert.equal(writes,0);
  f.button('Adjust routing').props.onClick();await f.flush();assert.equal(f.button('Adjust routing').props['aria-expanded'],false);assert.equal(writes,0);
 });
@@ -479,20 +473,20 @@ test('Pi graphical routing uses Tauri camelCase argument names for reads, catalo
   if(name==='get_pi_routing')return {active:true,state};if(args.request.action==='catalog')return {models:[]};
   state={...state,revision:state.revision+1,preferences:args.request.data??state.preferences};return {state};
  });
- assert.ok(calls.length);assert.equal(calls[0].args.sessionId,'s-pi');assert.ok(f.select('Pi reasoning selection'));
- f.select('Pi reasoning selection').props.onChange({target:{value:'max'}});await f.flush();f.button('Apply routing selection').props.onClick();await f.flush();
- assert.equal(calls.find(v=>v.args.request?.action==='set')?.args.sessionId,'s-pi');assert.equal(calls.find(v=>v.args.request?.action==='catalog')?.args.sessionId,'s-pi');
+ assert.ok(calls.length);assert.equal(calls[0].args.sessionId,'s-pi');assert.ok(f.rules());
+ await f.rules().props.onApply(defaultRules);await f.flush();
+ assert.equal(calls.find(v=>v.args.request?.action==='rules')?.args.sessionId,'s-pi');assert.equal(calls.find(v=>v.args.request?.action==='catalog')?.args.sessionId,'s-pi');
 });
 
 test('ended Pi summaries recover after an initial hidden document or transient read failure',async()=>{
  for(const hidden of [true,false]){let reads=0;const state=barState();
   const f=await routingBarFixture(async(name,args)=>{if(name==='get_pi_routing'){reads++;if(!hidden&&reads===1)throw Error('temporary read');return {active:false,state};}return {models:[]};},{active:false,visibility:hidden?'hidden':'visible'});
-  f.visible('visible');await f.poll();assert.ok(f.select('Pi reasoning selection'),'ended conversation must eventually show saved reasoning');assert.ok(reads>=1);
+  f.visible('visible');await f.poll();assert.ok(f.rules(),'ended conversation must eventually show saved rules');assert.ok(reads>=1);
  }
 });
 test('Pi model catalogue failure is visible and existing reconnect recovers without sending a task',async()=>{
  let fail=true;const actions=[],state=barState();const f=await routingBarFixture(async(name,args)=>{if(name==='get_pi_routing')return {active:true,state};actions.push(args.request.action);if(args.request.action==='catalog'){if(fail)throw Error('catalogue temporarily unavailable');return {models:[]};}return {state};});
- assert.match(f.text(),/catalogue temporarily unavailable/);f.select('Pi reasoning selection').props.onChange({target:{value:'max'}});await f.flush();f.button('Apply routing selection').props.onClick();await f.flush();assert.match(f.text(),/catalogue temporarily unavailable/,'saving an unrelated preference cannot hide the missing catalogue');fail=false;f.button('Refresh connection').props.onClick();await f.flush();assert.doesNotMatch(f.text(),/catalogue temporarily unavailable/);assert.deepEqual(actions,['catalog','set','retry','catalog']);
+ assert.match(f.text(),/catalogue temporarily unavailable/);await f.rules().props.onApply(defaultRules);await f.flush();assert.match(f.text(),/catalogue temporarily unavailable/);fail=false;f.button('Refresh connection').props.onClick();await f.flush();assert.doesNotMatch(f.text(),/catalogue temporarily unavailable/);assert.deepEqual(actions,['catalog','rules','retry','catalog']);
 });
 
 function visibleRoutingText(node){
@@ -504,7 +498,7 @@ function visibleRoutingText(node){
 test('Pi default bar shows native model and effort while configuration details stay collapsed',async()=>{
  let writes=0;const state={...barState(),preferences:{model:'auto',effort:'high'},phase:'working',target:{model:'p/strong',effort:'high',reason:'complex'},actual:{model:'p/small',effort:'medium',at:1}};
  const f=await routingBarFixture(async(name,args)=>{if(name==='get_pi_routing')return {active:true,state};if(args.request.action==='catalog')return {models:[]};writes++;return {state};});
- assert.match(visibleRoutingText(f.tree()),/Automatic model/);assert.match(visibleRoutingText(f.tree()),/Actual model: p\/small · medium/);assert.doesNotMatch(visibleRoutingText(f.tree()),/Fixed reasoning|Latest reply used|Selected for this turn/);
+ assert.doesNotMatch(visibleRoutingText(f.tree()),/Automatic model/);assert.match(visibleRoutingText(f.tree()),/Actual model: p\/small · medium/);assert.doesNotMatch(visibleRoutingText(f.tree()),/Fixed reasoning|Latest reply used|Selected for this turn/);
  f.button('Adjust routing').props.onClick();await f.flush();assert.match(visibleRoutingText(f.tree()),/Latest reply used/);assert.match(visibleRoutingText(f.tree()),/Selected for this turn/);assert.equal(writes,0);
  f.button('Adjust routing').props.onClick();await f.flush();state.phase='error';state.error='routing failed';await f.poll();assert.match(visibleRoutingText(f.tree()),/routing failed/);assert.ok(f.button('Refresh connection'));assert.equal(writes,0);
 });
@@ -532,7 +526,7 @@ test('Pi live model labels match the picker for subscription and gateway roles',
  const f=await routingBarFixture(async name=>name==='get_pi_routing'?{state}:{models:[{...models[0],key:rejected,source:'magpie',billing:'gateway'}]});
  const visible=()=>visibleRoutingText(f.tree());
  assert.match(visible(),/Selected for this turn: Magpie · Automatic routing · deepseek-v4-flash · high/);
- assert.match(visible(),/Fixed model: Pi native · ChatGPT subscription · gpt-6\.1-sol/);
+ assert.doesNotMatch(visible(),/Automatic model/);
  f.button('Adjust routing').props.onClick();await f.flush();
  assert.match(visible(),/Magpie · deepseek · other\s*:\s*Reasoning level unsupported/);
  assert.match(visible(),/Latest reply used: Pi native · ChatGPT subscription · gpt-6\.1-sol · medium/);
@@ -792,10 +786,10 @@ test('T2 control result unknown keeps state and refreshes it read-only without r
    if(rejects)throw Error('Pi control worker failed');
    return {controlFailure:{category:'unknown',stage:'control',code:'control-result-unknown',dispatch:'unknown',nextAction:'refresh-state'}};
   });
-  f.select('Pi reasoning selection').props.onChange({target:{value:'max'}});await f.flush();f.button('Apply routing selection').props.onClick();await f.flush();
-  assert.match(f.text(),/Control result is unconfirmed/);assert.ok(f.select('Pi reasoning selection'));assert.equal(writes,1);
+  await assert.rejects(()=>f.rules().props.onApply(defaultRules));await f.flush();
+  assert.match(f.text(),/Control result is unconfirmed/);assert.ok(f.rules());assert.equal(writes,1);
   const before=reads,refresh=f.button('Refresh current state');assert.ok(refresh);refresh.props.onClick();await f.flush();
-  assert.equal(reads,before+1);assert.equal(writes,1);assert.match(f.text(),/Current state refreshed/);assert.doesNotMatch(f.text(),/Task block cleared/);assert.ok(f.button('Apply routing selection').props.disabled);
+  assert.equal(reads,before+1);assert.equal(writes,1);assert.match(f.text(),/Current state refreshed/);assert.doesNotMatch(f.text(),/Task block cleared/);assert.equal(f.button('Apply routing selection'),undefined);
  }
 });
 
@@ -915,7 +909,7 @@ for(const mode of ['not-started','unknown','rejected'])test(`T2 quality repair i
  assert.match(f.text(),mode==='not-started'?/Control connection unavailable/:/Failure cause unconfirmed/);
  assert.match(f.text(),mode==='not-started'?/Control request not sent/:/Control result is unconfirmed/);
  assert.deepEqual(f.catalogModels(),[]);assert.equal(catalogs,1);
- assert.equal(f.select('Pi model selection').props.disabled,true);
+ assert.equal(f.rules().props.disabled,true);
  const before=reads;f.button('Refresh current state').props.onClick();await f.flush();
  assert.equal(reads,before+1);assert.equal(catalogs,1);assert.match(f.text(),/Current state refreshed/);
  await f.poll();assert.equal(catalogs,1);assert.match(f.text(),/Refresh current state/);
@@ -968,7 +962,7 @@ test('explicit routing off preserves native Pi options and removes previous rout
  assert.match(off,/--theme minimal/);
  assert.doesNotMatch(off,/--yam-small|--yam-strong/);
  assert.equal(routingPolicyArgs('codex','--model codex-model','',[]),'--model codex-model');
- assert.equal(routingPolicyArgs('pi',args,'launch-config',[]),args);
+ const automatic=parsePiDraft(routingPolicyArgs('pi',args,'launch-config',[]));assert.equal(automatic.model,'auto');assert.equal(automatic.effort,'auto');
 });
 
 test('new session strategy selector offers saved Pi and Codex strategies and gates OpenCode',async()=>{
@@ -1062,7 +1056,7 @@ test('Codex gateway quick setup fills every tier and uses supported reasoning',a
  const raw=JSON.stringify({connections:{'yam-codex':{billing:'paid',gateway:true,baseUrl:'http://127.0.0.1:3425'}},classifiers:[],executionGroups:[{},{},{}]});
  const verified=await verifyPiSetup('', '/tmp', model.key,async()=>({models:[model],probe:{ok:true}}));
  const setup=routingPolicies.codexQuickSetupConfig(raw,verified.args,[model]);
- const config=JSON.parse(setup.args);assert.equal(config.executionGroups[0].medium,model.key);assert.equal(config.effort,'high');assert.equal(routingPolicies.validateCodexDraft(setup.args,[model]),null);
+ const config=JSON.parse(setup.args);assert.equal(config.executionGroups[0].medium,model.key);assert.equal(config.effort,undefined);assert.ok(config.rules.rules.every(rule=>rule.effort==='high'));assert.equal(config.rules.fallback.effort,'high');assert.equal(routingPolicies.validateCodexDraft(setup.args,[model]),null);
 });
 
 test('verifying a Codex gateway model preserves configured roles and reasoning on reload',async()=>{
@@ -1123,7 +1117,7 @@ test('session routing shows classification provenance and workflow fallback with
   executionRule:2,classificationMs:12,workflow:workflow.id};
  let state={...barState(),phase:'working',decision,actual:{model:'p/old',effort:'medium',at:1}};
  const f=await routingBarFixture(async name=>name==='get_pi_routing'?{state}:{models:[]});
- assert.match(visibleRoutingText(f.tree()),/Local rule matched; model classified remaining details/);
+ assert.doesNotMatch(visibleRoutingText(f.tree()),/Local rule matched; model classified remaining details/);assert.match(f.text(),/Local rule matched; model classified remaining details/);
  const runner=createWorkflowRunner({
   resolve:async candidate=>candidate,snapshot:async()=>'git diff',append(){},
   execute:async candidate=>{if(candidate.model==='p/sol')throw nativeError('native-reported-error','rate limit',{stage:'execution',dispatch:'started'});return {text:'{"summary":"reviewed","findings":[]}'};},
@@ -1147,7 +1141,7 @@ test('session routing shows classification provenance and workflow fallback with
  assert.match(visibleRoutingText(f.tree()),/Reviewer.*p\/glm.*high/s);
  state={...state,phase:'selected',workflowReceipt:null,decision:{...decision,classificationSource:'rule',workflow:'single'}};
  await f.poll();
- assert.match(visibleRoutingText(f.tree()),/Classified by local rule/);
+ assert.doesNotMatch(visibleRoutingText(f.tree()),/Classified by local rule/);assert.match(f.text(),/Classified by local rule/);
  assert.doesNotMatch(visibleRoutingText(f.tree()),/Deep review|p\/glm/);
 });
 
@@ -1159,4 +1153,12 @@ test('Pi routing details distinguish a planned tier from the selected model',asy
  assert.match(detail,/Planned route: strong · high/);
  assert.match(detail,/Selected for this turn: p\/sol · max/);
  assert.doesNotMatch(detail,/Selected for this turn: strong/);
+});
+
+test('Pi compact bar keeps versions and classifier provenance inside readable details',async()=>{
+ const state={...barState(),phase:'working',actual:{model:'p/actual',effort:'high',at:1},decision:{rule:'answer',ruleVersion:'v2',classificationSource:'local',classificationRule:'read-only',executionRule:'answer',planned:{model:'strong',effort:'high'}}};
+ const f=await routingBarFixture(async name=>name==='get_pi_routing'?{state}:{models:[]},{cliVersion:'1.0',installedPiVersion:'2.0'});
+ assert.match(visibleRoutingText(f.tree()),/Actual model: p\/actual · high/);
+ assert.doesNotMatch(visibleRoutingText(f.tree()),/Local Pi 2.0|Session launched with Pi|Local routing rules|Classification rule|Automatic model/);
+ assert.match(f.text(),/Local Pi 2.0/);assert.match(f.text(),/Session launched with Pi 1.0/);assert.match(f.text(),/Classification rule.*read-only/);assert.match(f.text(),/Planned route/);
 });

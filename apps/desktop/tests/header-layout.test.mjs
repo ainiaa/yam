@@ -1,4 +1,5 @@
 import {sidebarSessions} from '../src/workspaces.ts';
+import {canArchiveSession} from '../src/history.ts';
 import {sessionRuntimeInfo} from '../src/session-runtime-info.ts';
 import {englishUiRead} from './fixtures/english-ui-source.mjs';
 const readFileSync=(...args)=>englishUiRead(rawReadFileSync,...args);
@@ -41,9 +42,10 @@ function visit(node) {
 visit(source);
 assert.ok(header, 'actual application header');
 const code = transpile('return (' + header.getText(source) + ');');
-const connectionDeclaration=source.statements.find(node=>ts.isFunctionDeclaration(node)&&node.name?.text==='SessionConnection');
+const connectionSource=ts.createSourceFile('SessionConnection.tsx',readFileSync(new URL('../src/SessionConnection.tsx',import.meta.url),'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
+const connectionDeclaration=connectionSource.statements.find(node=>ts.isFunctionDeclaration(node)&&node.name?.text==='SessionConnection');
 assert.ok(connectionDeclaration,'actual connection disclosure');
-const connectionCode=transpile(connectionDeclaration.getText(source));
+const connectionCode=transpile(connectionDeclaration.getText(connectionSource));
 const SessionConnection=componentFunction('React','connectionDetails','sessionRuntimeInfo',connectionCode+';return SessionConnection;')(React,connectionDetails,sessionRuntimeInfo);
 const css = readFileSync(new URL('../src/App.css', import.meta.url), 'utf8');
 
@@ -56,10 +58,10 @@ function layoutElement() {
  return component({layout:{mode:'single',panes:['fixture'],focused:0,revision:0},labels:['Terminal'],splitPercent:50,swapDisabled:false,canReopen:true,onHost(){},onMode(){},onFocus(){},onClose(){}});
 }
 const piConnection={integration:'connected',cli_path:'/Users/example-user/.npm-global/bin/pi',agent_session_id:'c349ad0b-9961-410c-aba5-61d4bea0458e',cli_version:'1.4.0'};
-function markup(interactive, collapsed, longPath, stopped=false, pi=false, terminalAvailability=null, moving=false) {
+function markup(interactive, collapsed, longPath, stopped=false, pi=false, terminalAvailability=null, moving=false, records=null) {
   const bindings = {React, SessionConnection, installedPiVersion:pi?'1.5.0':null, ...Object.fromEntries(Object.entries(icons).filter(([name]) => /^[A-Z]/.test(name))), gitProjectPath:'/work',sidebarOpen: !collapsed, currentProject: {name: 'YAM'},
-    sidebarSessions,searchInput:{current:null},historyQuery:'',statusFilter:'all',unreadTotal:0,inboxOpen:false,shortcutError:null,history:[],historyCursor:null,historyLoading:false,capacityOpen:false,capacity:null,capacityError:null,capacityBusy:false,scanCapacity(){},jumpToAttention(){},addProject(){},endProjectDrag(){},
-    visibleProjects:[{path:'/work',name:'Project',sessions:[{summary:{session_id:'fixture',mode:'command'},status:'stopped',started_at:0}]}],projectKey:path=>path,collapsedProjects:new Set(),normalizedQuery:'',projectColor:()=>'',canRenameProject:()=>true,canMoveProject:()=>false,pinnedSessions:[],
+    adapters:[{id:'codex',label:'Codex'},{id:'pi',label:'Pi'}],sidebarSessions,searchInput:{current:null},historyQuery:'',statusFilter:'all',unreadTotal:0,inboxOpen:false,shortcutError:null,history:[],historyCursor:null,historyLoading:false,capacityOpen:false,capacity:null,capacityError:null,capacityBusy:false,scanCapacity(){},jumpToAttention(){},addProject(){},endProjectDrag(){},
+    visibleProjects:[{path:'/work',name:'Project',sessions:records??[{summary:{session_id:'fixture',mode:'command'},status:'stopped',started_at:0}]}],projectKey:path=>path,collapsedProjects:new Set(),normalizedQuery:'',projectColor:()=>'',canRenameProject:()=>true,canMoveProject:()=>false,canArchiveSession,pinnedSessions:[],
     session: {session_id: 'fixture', cwd:'/work', launch: pi ? {mode:'interactive',adapter:'pi'} : interactive ? {mode: 'interactive',adapter:'codex'} : null},
     setLayoutMenuHost(){},conversationOpen:false,showConversation(){},openTerminalFind(){},
     starting:false, titleFor: () => 'Codex interactive session', visibleGitContext: longPath ? {kind: 'repository', branch: 'feature/' + 'long-branch-'.repeat(30), dirty: true, root: '/work/' + 'long-directory/'.repeat(30), common_dir: '/repo/.git'} : {kind: 'unavailable'},
@@ -67,8 +69,8 @@ function markup(interactive, collapsed, longPath, stopped=false, pi=false, termi
     agentPhase:"idle",sessionStatus: stopped?'stopped':'running', statusLabels: {running:'Running',stopped:'Stopped'}, notificationsPaused: false,
     historyOverview: {failed_receipts: 1,attention_sessions:0,total:1,active:1}, canNavigateReportedPrompt: () => false,
     shortcutMac: true, fileBusy: false, filePreview: null, canMoveTerminalTab: () => false,
-    moveBusy: false, movePending: false, isMainWindow: true, stopAllBusy:false,
-    updaterSnapshot:null,isMainWindow:true,health:{status:'ready',version:'0.1.0'}, memory:null, memoryLabel:()=> '100 MB', notificationTestBusy:{current:false},notificationTestStatus:null,openCommandPalette(){},diagnosticsExporting:false,diagnosticsMessage:null, notificationError:null,scrollView:terminalAvailability?{ready:true,availability:terminalAvailability,moving}:null, ownerConnectionAvailable:{current:{available:true}},terminalPaneVisible:()=>true,canClearTerminalDisplay:()=>false, shortcuts: {}, shortcutHint: () => '',
+    moveBusy: false, movePending: false, isMainWindow: true, stopAllBusy:false,reconnecting:false,reconnectBackground(){},
+    engineStatus:{label:'Local engine ready',ready:true},updaterSnapshot:null,isMainWindow:true,health:{status:'ready',version:'0.1.0'}, memory:null, memoryLabel:()=> '100 MB', notificationTestBusy:{current:false},notificationTestStatus:null,openCommandPalette(){},diagnosticsExporting:false,diagnosticsMessage:null, notificationError:null,scrollView:terminalAvailability?{ready:true,availability:terminalAvailability,moving}:null, ownerConnectionAvailable:{current:{available:true}},terminalPaneVisible:()=>true,canClearTerminalDisplay:()=>false, shortcuts: {}, shortcutHint: () => '',
     terminalViews: {current: new Map()}, recovery: {canRunAgain: false}, canContinue: false,
     closeEndedView() {}, rerunSelectedSession() {}, resumeSelectedSession() {}};
   assert.ok(creation,'actual shared new-session control');
@@ -251,4 +253,19 @@ test('the workspace Git lookup follows the actual local session directory and ex
  assert.equal(getRequestedPath({directory:'/repo/one',owner:2,path:'/repo/one'},'/repo/two',2),'');
  assert.equal(getRequestedPath({directory:'/repo/two',owner:1,path:'/repo/two'},'/repo/two',2),'');
  assert.equal(getRequestedPath({directory:'/repo/two',owner:2,path:'/repo/two'},'/repo/two',2),'/repo/two');
+});
+
+test('sidebar shows the current Agent phase in text and keeps ended phases historical',()=>{
+ const render=(status,phase='working',integration='connected')=>markup(true,false,false,false,false,null,false,[{summary:{session_id:'fixture',mode:'interactive',adapter:'codex'},status,agent:{phase,integration,unread_count:2},started_at:0}]);
+ for(const [status,phase,label] of [['running','working','Working'],['starting','idle','Ready'],['running','needs_permission','Permission required'],['needs_attention','needs_attention','Response ready · may continue'],['running','unknown','Round status unknown']]){
+  const html=render(status,phase);assert.match(html,new RegExp('<small[^>]*>Codex · '+label+'</small>'));assert.match(html,/2 unread/);
+ }
+ assert.match(render('running','working','connecting'),/<small[^>]*>Codex · Awaiting trusted hook<\/small>/);
+ assert.match(render('running','working','unavailable'),/<small[^>]*>Codex · Integration unavailable<\/small>/);
+ for(const status of ['stopped','failed','succeeded'])assert.doesNotMatch(render(status),/<small[^>]*>Codex · Working<\/small>/);
+});
+
+test('both native windows admit a 720 by 600 side-by-side workspace',()=>{
+ const config=JSON.parse(rawReadFileSync(new URL('../src-tauri/tauri.conf.json',import.meta.url),'utf8'));assert.equal(config.app.windows[0].minWidth,720);assert.equal(config.app.windows[0].minHeight,600);
+ const windows=rawReadFileSync(new URL('../src-tauri/src/desktop_windows.rs',import.meta.url),'utf8');assert.match(windows,/\.min_inner_size\(720\.0, 600\.0\)/);
 });

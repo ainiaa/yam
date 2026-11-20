@@ -9,13 +9,15 @@ import assert from 'node:assert/strict';
 import {readFileSync as rawReadFileSync} from 'node:fs';
 import ts from 'typescript';
 const appSource=readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8');
-const source=ts.createSourceFile('App.tsx',appSource,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
-const app=source.statements.find(n=>ts.isFunctionDeclaration(n)&&n.name?.text==='App');
+const updaterSource=readFileSync(new URL('../src/use-updater.ts',import.meta.url),'utf8');
+const source=ts.createSourceFile('use-updater.ts',updaterSource,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
+const app=source.statements.find(n=>ts.isFunctionDeclaration(n)&&n.name?.text==='useUpdater');
 const compile=text=>ts.transpileModule(text,{compilerOptions:{target:ts.ScriptTarget.ESNext,module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.React}}).outputText;
 function allNodes(node,result=[]){result.push(node);ts.forEachChild(node,child=>{allNodes(child,result);});return result;}
 test('T20 native Updates entry opens the existing guarded updater panel',()=>{const h=nativeSettings();h.run('updates');assert.deepEqual(h.calls,[['updates',true]]);const native=readFileSync(new URL('../src-tauri/src/native_menu.rs',import.meta.url),'utf8');assert.match(native,/\("updates", "Check for updates…"\)/);});
 
 async function module(){return import('../src/updater.ts');}
+const {runUpdaterAction:performUpdaterAction,changeUpdaterAutomatic:persistUpdaterAutomatic}=await module();
 const snapshot=(state='idle',generation=0)=>({generation,state,current_version:'0.1.0',configured:true,automatic_checks:true,release:['available','downloading','verified'].includes(state)?{version:'0.2.0',notes:'plain <notes>',published:null}:null,progress:null,reason:null,install_allowed:false,install_blocked_reason:'not_ready'});
 const deferred=()=>{let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return {promise,resolve,reject};};
 test('T20 DTO whitelist rejects secrets and inconsistent state without echo',async()=>{
@@ -55,7 +57,48 @@ test('T20 actual settings renders finite controls/plain notes and idle-only expl
  }
 });
 
-function appFunction(name,args){args={updaterAutomaticAction:()=>null,updaterAutomaticRef:{current:false},isMainWindow:true,desktopWindow:{slot:"main",epoch:1,main_epoch:1,restore_blocked:false},windowPreferenceKey:name=>windowContext.windowPreferenceKey("main",name),...args};const declaration=app.body.statements.find(n=>ts.isFunctionDeclaration(n)&&n.name?.text===name);assert.ok(declaration,`actual App ${name} callback must be connected`);return new Function(...Object.keys(args),compile(declaration.getText(source))+`;return ${name};`)(...Object.values(args));}
+test('updater action helper applies current success and failure callbacks only',async()=>{
+ const {runUpdaterAction}=await module();assert.equal(typeof runUpdaterAction,'function');
+ const writes=[],snapshotValue=snapshot('verified',2),controller={action:async()=>snapshotValue};
+ await runUpdaterAction({controller,action:'download',invoke:async()=>null,intent:3,currentIntent:()=>3,mounted:()=>true,
+  setBusy:value=>writes.push(['busy',value]),setSnapshot:value=>writes.push(['snapshot',value]),setError:value=>writes.push(['error',value])});
+ assert.deepEqual(writes,[['busy',true],['snapshot',snapshotValue],['error',null],['busy',false]]);
+ const stale=[];
+ await runUpdaterAction({controller:{action:async()=>snapshotValue},action:'check',invoke:async()=>null,intent:4,currentIntent:()=>5,mounted:()=>true,
+  setBusy:value=>stale.push(['busy',value]),setSnapshot:value=>stale.push(['snapshot',value]),setError:value=>stale.push(['error',value])});
+ assert.deepEqual(stale,[['busy',true]]);
+});
+test('updater action helper reports operation failure without exposing raw errors',async()=>{
+ const {runUpdaterAction}=await module(),writes=[];
+ await runUpdaterAction({controller:{action:async()=>{throw Error('SECRET');}},action:'install',invoke:async()=>null,intent:1,currentIntent:()=>1,mounted:()=>true,
+  setBusy:value=>writes.push(['busy',value]),setSnapshot:value=>writes.push(['snapshot',value]),setError:value=>writes.push(['error',value])});
+ assert.deepEqual(writes,[['busy',true],['error','updater_operation_failed'],['busy',false]]);
+});
+test('updater preference helper saves first and fences stale acknowledgements',async()=>{
+ const {changeUpdaterAutomatic}=await module();assert.equal(typeof changeUpdaterAutomatic,'function');
+ const writes=[],calls=[];
+ await changeUpdaterAutomatic({enabled:true,write:()=>{},invoke:async(name,args)=>{calls.push([name,args]);return snapshot('idle',1);},
+  snapshot:snapshot(),intent:2,currentIntent:()=>2,mounted:()=>true,controller:{snapshot:snapshot(),accept(value){this.snapshot=value;}},
+  setAutomatic:value=>writes.push(['automatic',value]),setError:value=>writes.push(['error',value]),
+  setBusy:value=>writes.push(['busy',value]),setSnapshot:value=>writes.push(['snapshot',value])});
+ assert.deepEqual(calls,[['updater_set_automatic_checks',{expected_generation:0,enabled:true}]]);
+ assert.deepEqual(writes,[['automatic',true],['error',null],['busy',true],['snapshot',snapshot('idle',1)],['busy',false]]);
+ const stale=[];
+ await changeUpdaterAutomatic({enabled:false,write:()=>{},invoke:async()=>snapshot('idle',2),snapshot:snapshot(),intent:3,currentIntent:()=>4,mounted:()=>true,
+  controller:{snapshot:snapshot(),accept(value){this.snapshot=value;}},setAutomatic:value=>stale.push(['automatic',value]),setError:value=>stale.push(['error',value]),
+  setBusy:value=>stale.push(['busy',value]),setSnapshot:value=>stale.push(['snapshot',value])});
+ assert.deepEqual(stale,[['automatic',false],['error',null],['busy',true]]);
+});
+test('updater preference helper opts out when storage fails and preserves the safe IPC path',async()=>{
+ const {changeUpdaterAutomatic}=await module(),writes=[],calls=[];
+ await changeUpdaterAutomatic({enabled:true,write:()=>{throw Error('SECRET');},invoke:async(name,args)=>{calls.push([name,args]);return snapshot('idle',1);},
+  snapshot:snapshot(),intent:1,currentIntent:()=>1,mounted:()=>true,controller:{snapshot:snapshot(),accept(value){this.snapshot=value;}},
+  setAutomatic:value=>writes.push(['automatic',value]),setError:value=>writes.push(['error',value]),
+  setBusy:value=>writes.push(['busy',value]),setSnapshot:value=>writes.push(['snapshot',value])});
+ assert.deepEqual(calls,[['updater_set_automatic_checks',{expected_generation:0,enabled:false}]]);
+ assert.deepEqual(writes,[['automatic',false],['error','updater_preference_unavailable'],['busy',true],['snapshot',snapshot('idle',1)],['busy',false]]);
+});
+function appFunction(name,args){args={updaterAutomaticAction:()=>null,updaterAutomaticRef:{current:false},performUpdaterAction,persistUpdaterAutomatic,isMainWindow:true,desktopWindow:{slot:"main",epoch:1,main_epoch:1,restore_blocked:false},windowPreferenceKey:name=>windowContext.windowPreferenceKey("main",name),...args};const declaration=app.body.statements.find(n=>ts.isFunctionDeclaration(n)&&n.name?.text===name);assert.ok(declaration,`actual App ${name} callback must be connected`);return new Function(...Object.keys(args),compile(declaration.getText(source))+`;return ${name};`)(...Object.values(args));}
 function updaterEffect(){const effect=app.body.statements.find(n=>ts.isExpressionStatement(n)&&ts.isCallExpression(n.expression)&&n.expression.expression.getText(source)==='useEffect'&&n.expression.arguments[1]?.getText(source)==='[]'&&n.expression.arguments[0].getText(source).includes('updaterController'));assert.ok(effect,'actual App must initialize updater through mounted startup effect');return effect.expression.arguments[0];}
 test('T20 actual App startup effect reads persisted opt-out and StrictMode replay checks at most once',async()=>{
  const {UpdaterController}=await module();for(const automatic of [true,false]){
@@ -143,4 +186,8 @@ test('pending status survives closing Updates while automatic mode is enabled',a
 test('six-hour checks discover newer releases even when a prior release is waiting to install',async()=>{
  const {updaterBusy}=await module();const effect=app.body.statements.find(n=>ts.isExpressionStatement(n)&&ts.isCallExpression(n.expression)&&n.expression.expression.getText(source)==='useEffect'&&n.expression.arguments[0]?.getText(source).includes('setInterval')&&n.expression.arguments[0]?.getText(source).includes('UPDATE_CHECK_INTERVAL_MS'));
  assert.ok(effect);for(const state of ['idle','upToDate','available','verified','checking','downloading','installing','restarting']){const calls=[],bindings={isMainWindow:true,updaterAutomatic:true,updaterController:{current:{snapshot:{configured:true,state}}},updaterBusy,runUpdaterAction:action=>calls.push(action),UPDATE_CHECK_INTERVAL_MS:21600000,window:{setInterval:fn=>{fn();return 1;},clearInterval(){}}};const setup=new Function(...Object.keys(bindings),compile('const setup='+effect.expression.arguments[0].getText(source))+';return setup;')(...Object.values(bindings));setup()();assert.deepEqual(calls,['checking','downloading','installing','restarting'].includes(state)?[]:['check'],state);}
+});
+
+test('App delegates updater lifecycle to its dedicated hook',()=>{
+ assert.match(appSource,/useUpdater\(\{isMainWindow,localStorage,invoke,openMainSettings\}\)/);
 });

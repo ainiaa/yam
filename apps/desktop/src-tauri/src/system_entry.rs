@@ -1372,7 +1372,7 @@ fn stop_native(app: &tauri::AppHandle) -> Result<(), String> {
     let manager = app.state::<super::SessionManager>();
     owner_stop(
         &manager,
-        || manager.shutdown_for(app, super::background::notify_lifecycle),
+        || manager.shutdown_for(app, super::background_events::notify_lifecycle),
         || {
             if let Ok(mut relay) = manager.relay.lock() {
                 relay.push("desktop-owner-quit", "{}".into());

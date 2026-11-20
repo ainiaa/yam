@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import re
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -32,7 +33,7 @@ class ProjectMutationTests(unittest.TestCase):
         self.path.write_text(json.dumps(self.campaign))
         scope = self.root / "docs/00_standards/rust-mutations.diff"
         scope.parent.mkdir(parents=True)
-        scope.write_text("--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-pub fn allowed() -> bool { true }\n+pub fn allowed() -> bool { true }\n")
+        scope.write_text(self.module.scope_text(self.root, self.campaign))
 
     def test_command_preserves_the_frozen_scope_and_safe_execution(self):
         campaign = self.module.load_campaign(self.root, self.path)
@@ -47,7 +48,49 @@ class ProjectMutationTests(unittest.TestCase):
     def test_command_applies_the_frozen_line_filter_to_every_mutant_genre(self):
         argv = self.module.command(self.campaign, self.root / "output")
         self.assertIn("--in-diff", argv)
-        self.assertEqual(argv[argv.index("--in-diff") + 1], "docs/00_standards/rust-mutations.diff")
+        diff = Path(argv[argv.index("--in-diff") + 1])
+        self.assertTrue(diff.is_absolute())
+        self.assertEqual(diff.name, "rust-mutations.diff")
+
+    def test_workspace_command_and_report_use_package_relative_mutant_names(self):
+        name = "crate/" + self.name
+        argv = self.module.command(self.campaign, self.root / "output",
+                                   self.campaign["manifest"], self.root / "diff")
+        pattern = argv[argv.index("--re") + 1]
+        self.assertIsNotNone(re.fullmatch(pattern, name))
+        self.assertIsNone(re.fullmatch(pattern, "other/" + self.name))
+        report = self.report()
+        report["outcomes"][1]["scenario"]["Mutant"]["name"] = name
+        self.assertEqual(self.module.check_report(self.root, report, self.campaign)["killed"], 1)
+
+    def test_disposable_workspace_keeps_package_resources_and_uses_workspace_diff_paths(self):
+        package = self.root / "crate"
+        (package / "Cargo.lock").write_text("frozen lockfile")
+        for relative in ["codex-auto-route.mjs", "codex-route-app-server.mjs", "codex-native-routing.mjs",
+                         "node-runtime-checksums.json"]:
+            path = self.root / "scripts" / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(relative)
+        output = self.root / "out"
+        output.mkdir()
+        workspace, diff = self.module.disposable_workspace(self.root, output, self.campaign)
+        self.assertTrue((workspace / "crate/Cargo.toml").is_file())
+        self.assertEqual((workspace / "Cargo.lock").read_text(), "frozen lockfile")
+        self.assertIn("--- a/crate/src/lib.rs", diff.read_text())
+        self.assertEqual(diff.read_text(), self.module.scope_text(self.root, self.campaign).replace(
+            "--- a/src/lib.rs", "--- a/crate/src/lib.rs"
+        ).replace("+++ b/src/lib.rs", "+++ b/crate/src/lib.rs"))
+
+    def test_disposable_workspace_keeps_omp_compile_time_sources(self):
+        extension = self.root / "extensions/omp-chatgpt"
+        extension.mkdir(parents=True)
+        for name in ["run.mjs", "index.mjs", "auth.mjs", "yam-auth-helper.mjs"]:
+            (extension / name).write_text("// fixture " + name)
+        output = self.root / "output-with-extensions"
+        output.mkdir()
+        workspace, _ = self.module.disposable_workspace(self.root, output, self.campaign)
+        for source in extension.glob("*.mjs"):
+            self.assertEqual((workspace / "extensions/omp-chatgpt" / source.name).read_bytes(), source.read_bytes())
 
     def test_stale_empty_duplicate_and_escaping_campaigns_are_rejected(self):
         cases = []
@@ -66,6 +109,9 @@ class ProjectMutationTests(unittest.TestCase):
         (self.root / "docs/00_standards/rust-mutations.diff").write_text("unrelated diff\n")
         with self.assertRaisesRegex(ValueError, "line filter"):
             self.module.load_campaign(self.root, self.path)
+
+    def test_frozen_line_filter_marks_current_source_lines_as_changed(self):
+        self.assertIn("-__YAM_MUTATION_SCOPE__\n+pub fn allowed() -> bool { true }", self.module.scope_text(self.root, self.campaign))
 
     def report(self):
         log = self.root / "log"; log.mkdir()
@@ -111,16 +157,26 @@ class ProjectMutationTests(unittest.TestCase):
         fixture = self.root / "apps/desktop/tests/fixtures/fixture.png"
         fixture.parent.mkdir(parents=True)
         fixture.write_bytes(b"real compilation fixture")
+        for relative in ["codex-auto-route.mjs", "codex-route-app-server.mjs", "codex-native-routing.mjs",
+                         "node-runtime-checksums.json"]:
+            path = self.root / "scripts" / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(relative)
         observed = []
         process = Mock(returncode=0)
         def spawned(*args, **kwargs):
-            path = Path(kwargs.get("env", {}).get("TMPDIR", "/missing")) / "tests/fixtures/fixture.png"
-            observed.append(path.read_bytes() if path.is_file() else None)
+            scratch = Path(kwargs.get("env", {}).get("TMPDIR", "/missing"))
+            paths = [scratch / "tests/fixtures/fixture.png"] + [scratch / "scripts" / name for name in [
+                "codex-auto-route.mjs", "codex-route-app-server.mjs", "codex-native-routing.mjs",
+                "node-runtime-checksums.json"]]
+            observed.extend(path.read_bytes() if path.is_file() else None for path in paths)
             process.communicate.return_value = (b"done", b"")
             return process
         with patch.object(self.module, "ROOT", self.root), patch.object(self.module.subprocess, "Popen", side_effect=spawned):
             self.module.run_command(["cargo", "mutants", "--version"], 10)
-        self.assertEqual(observed, [b"real compilation fixture"])
+        self.assertEqual(observed, [b"real compilation fixture", b"codex-auto-route.mjs",
+                                    b"codex-route-app-server.mjs", b"codex-native-routing.mjs",
+                                    b"node-runtime-checksums.json"])
 
     def test_timeout_reaps_only_the_owned_child_process_group(self):
         process = Mock(returncode=-9, pid=12345)

@@ -1,5 +1,5 @@
 export type AgentReceipt = {id:string;revision:number;turn_id:string;kind:string;permission_key?:string;delivery:string;read:boolean;error:string|null};
-export type AgentState = {cli_path?:string|null;cli_version?:string|null;cli_platform?:string|null;generation?:string;process_run?:string|null;turn_id?:string|null;revision?:number;route_pending?:boolean;permission_keys?:string[];phase:string;integration:string;agent_session_id:string|null;inbox:AgentReceipt[]};
+export type AgentState = {last_state_at?:number|null;cli_path?:string|null;cli_version?:string|null;cli_platform?:string|null;generation?:string;process_run?:string|null;turn_id?:string|null;revision?:number;route_pending?:boolean;permission_keys?:string[];phase:string;integration:string;agent_session_id:string|null;inbox:AgentReceipt[]};
 export function unreadCount(agent?:AgentState):number{return agent?.inbox.filter(entry=>!entry.read).length??0;}
 export function taskDeliveryNotice(agent?:AgentState,status='running'):string|null{
  if(status==='succeeded')return 'Process ended. Tests and task acceptance are not verified by YAM.';

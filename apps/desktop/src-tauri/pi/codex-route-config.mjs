@@ -6,7 +6,7 @@ const keyPattern=/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.:/-]+$/;
 const shape=(value,keys)=>value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).every(key=>keys.includes(key));
 
 export function validateCodexPolicy(config){
- if(!shape(config,['connections','classifiers','executionGroups','rules','respectSystemProxy','model','effort'])||(config.respectSystemProxy!==undefined&&typeof config.respectSystemProxy!=='boolean')||
+ if(!shape(config,['connections','classifiers','classifierEffort','executionGroups','rules','respectSystemProxy','model','effort'])||(config.respectSystemProxy!==undefined&&typeof config.respectSystemProxy!=='boolean')||
   !config.connections||typeof config.connections!=='object'||Object.keys(config.connections).length>64||
   Array.isArray(config.connections)||!Array.isArray(config.classifiers)||config.classifiers.length>8||
   !Array.isArray(config.executionGroups)||!config.executionGroups.length||config.executionGroups.length>8)
@@ -42,6 +42,7 @@ export function validateCodexPolicy(config){
   if(!connection)throw Error('Routing model references an unknown connection');
   return {identity:key,model:key.slice(slash+1),connection,billing:connection.billing,waitForCleanup:true};
  };
+ if(config.classifierEffort!==undefined&&!['off','minimal','low','medium','high','xhigh','max'].includes(config.classifierEffort))throw Error('Invalid classifier reasoning level');
  const classifiers=config.classifiers.map(candidate);
  if(new Set(config.classifiers).size!==classifiers.length||classifiers.some(entry=>entry.billing!==classifiers[0].billing))
   throw Error('Codex classifier candidates must be distinct models in the same billing channel');
@@ -60,10 +61,11 @@ export function validateCodexPolicy(config){
  return {candidate,connections,rules};
 }
 
-export function readCodexPolicy(raw,{allowIncomplete=false}={}){
+export function readCodexPolicy(raw,{allowIncomplete=false,automatic=false}={}){
  if(typeof raw!=='string'||new TextEncoder().encode(raw).length>48000)throw Error('Invalid Codex routing configuration');
  const config=JSON.parse(raw);
  const {rules}=validateCodexPolicy(config);
+ if(automatic){delete config.model;delete config.effort;}
  if(!allowIncomplete&&(!config.model||config.model==='auto')){
   const reachable=new Set([...rules.rules.map(rule=>rule.model),rules.fallback.model,'strong']);
   for(const tier of reachable)if(!config.executionGroups.some(group=>group[tier]))throw Error('Configure an execution model for the '+tier+' tier');
@@ -91,7 +93,7 @@ function* modelRequirements(config,cwd){
    if(includeFallback&&rule.model==='small')yield rules.fallback;
   }
  }
- if(config.classifiers.length)yield {keys:config.classifiers,effort:candidate(config.classifiers[0]).billing==='paid'?'high':'medium'};
+ if(config.classifiers.length)yield {keys:config.classifiers,effort:config.classifierEffort??(candidate(config.classifiers[0]).billing==='paid'?'high':'medium')};
  for(const selection of [...rules.rules,rules.fallback,deep]){
   const keys=fixed?[fixed]:tierKeys(selection.model);
   if(!keys.length)continue;

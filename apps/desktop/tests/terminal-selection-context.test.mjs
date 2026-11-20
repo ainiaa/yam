@@ -11,14 +11,6 @@ const context=await import('../src/terminal-selection-context.ts').catch(error=>
 const record=()=>({summary:{session_id:'s-one',cwd:'/work/tree',launch:{adapter:'pi',mode:'interactive'}},status:'running',
  agent:{generation:'g1',agent_session_id:'native',turn_id:'turn1',revision:8,integration:'connected',phase:'response_finished'}});
 const source=ts.createSourceFile('App.tsx',readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
-function appFunction(name,bindings){
- let declaration;
- function visit(node){if(ts.isFunctionDeclaration(node)&&node.name?.text===name)declaration=node;ts.forEachChild(node,visit);}
- visit(source);
- assert.ok(declaration,name);
- const body=ts.transpileModule(declaration.getText(source),{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText;
- return new Function(...Object.keys(bindings),body+';return '+name)(...Object.values(bindings));
-}
 test('terminal selection is bounded, control-safe and carries the verified local origin',()=>{
  assert.equal(typeof context.terminalSelectionOrigin,'function');
  const origin=context.terminalSelectionOrigin(record());
@@ -44,31 +36,40 @@ test('managed Codex selection preserves the excerpt as a single plain line and f
  assert.equal(context.matchesTerminalSelection(r,origin),false);
 });
 
-function fixture(){
- const original=record(),origin=context.terminalSelectionOrigin?.(original);
- const pasted=[],guards=[],errors=[],notices=[],calls=[];
- const view={inputQueue:{write:null,version:1},writable:true};
- const instance={focus(){calls.push('focus');},paste(text){pasted.push(text);guards.push(view.draftInputGuard);view.inputQueue.write=Promise.resolve();}};
- const pending={target:{sessionId:'s-one',view,instance},selection:{...origin,title:'Build'},content:{text:'excerpt'}};
- let reply=async()=>original,valid=true,focused=true;
- const pastePending={current:pending},selectionFillBusy={current:false};
- const confirm=appFunction('fillTerminalSelectionContext',{...context,pastePending,selectionFillBusy,terminalSelectionCurrent:()=>valid,
-  terminalHasInputFocus:()=>focused,invoke:async(name,args)=>{calls.push([name,args]);return reply();},
-  cancelTerminalPaste:()=>{pastePending.current=null;},setError:error=>errors.push(error),setTerminalNotice:notice=>notices.push(notice)});
- return {confirm:()=>confirm(pending),reply:value=>{reply=value;},stale:()=>{valid=false;},noFocus:()=>{focused=false;},cancel:()=>{pastePending.current=null;},pasted,guards,errors,notices,calls};
-}
-test('selection confirmation fills only once using ordinary paste and a fresh agent identity',async()=>{
- const f=fixture();await Promise.all([f.confirm(),f.confirm()]);
- assert.deepEqual(f.pasted,['excerpt']);
- assert.deepEqual(f.guards,[{generation:'g1',nativeSessionId:'native',turnId:'turn1',revision:8,cwd:'/work/tree',managedCodex:false}]);
- assert.deepEqual(f.calls,[['get_session',{sessionId:'s-one'}],'focus']);
- assert.equal(f.notices.length,1);
+test('selection delivery requires a current writable terminal and matching agent target',()=>{
+ assert.equal(typeof context.terminalSelectionCanBeFilled,'function');
+ const ready={pending:true,mounted:true,ownerAvailable:true,conversationClosed:true,targetCurrent:true,
+  viewReady:true,live:true,available:true,moving:false,persisted:false,attaching:false,parsing:false,
+  projecting:false,resizing:false,clearPending:false,scrollReturnPending:false,bracketedPaste:true,
+  pasteAllowed:true,selectionMatches:true};
+ assert.equal(context.terminalSelectionCanBeFilled(ready),true);
+ const mustBeTrue=Object.keys(ready).filter(field=>!['moving','persisted','attaching','parsing','projecting',
+  'resizing','clearPending','scrollReturnPending'].includes(field));
+ const mustBeFalse=['moving','persisted','attaching','parsing','projecting','resizing','clearPending','scrollReturnPending'];
+ for(const field of mustBeTrue)assert.equal(context.terminalSelectionCanBeFilled({...ready,[field]:false}),false,field);
+ for(const field of mustBeFalse)assert.equal(context.terminalSelectionCanBeFilled({...ready,[field]:true}),false,field);
 });
-test('busy agent, changed turn, cancellation and failed focus all refuse selection delivery',async()=>{
- for(const mutate of [f=>f.reply(async()=>{const r=record();r.agent.phase='working';return r;}),
-  f=>f.reply(async()=>{const r=record();r.agent.turn_id='turn2';return r;}),
-  f=>f.reply(async()=>{f.stale();return record();}),
-  f=>f.reply(async()=>{f.cancel();return record();}),f=>f.noFocus()]){
-  const f=fixture();mutate(f);await f.confirm();assert.deepEqual(f.pasted,[]);assert.deepEqual(f.notices,[]);
- }
+
+test('selection fill claims once, refreshes agent identity and rejects stale post-write completion',async()=>{
+ assert.equal(typeof context.fillTerminalSelection,'function');
+ const events=[],view={inputQueue:{version:4,write:null,count:0,length:0},writable:true};
+ const target={sessionId:'s-one',view,instance:{focus(){events.push('focus');},paste(text){events.push(['paste',text]);view.inputQueue.write=Promise.resolve();}}};
+ const selection={...context.terminalSelectionOrigin(record()),cwd:'/work/tree'};
+ const pending={target,selection,content:{text:'excerpt'}};let current=true,cleared=0,notice=0,error=null;
+ const busy={current:false};const run=()=>context.fillTerminalSelection({pending,select:()=>pending,busy,clear:()=>{cleared++;},isCurrent:()=>current&&context.terminalSelectionCanBeFilled({pending:true,mounted:true,ownerAvailable:true,conversationClosed:true,targetCurrent:true,viewReady:true,live:true,available:true,moving:false,persisted:false,attaching:false,parsing:false,projecting:false,resizing:false,clearPending:false,scrollReturnPending:false,bracketedPaste:true,pasteAllowed:true,selectionMatches:context.matchesTerminalSelection(record(),selection)}),
+  readCurrent:async()=>record(),matches:context.matchesTerminalSelection,focus:()=>events.push('focus'),hasFocus:()=>true,
+  setGuard:value=>{view.draftInputGuard=value;},clearGuard:()=>{delete view.draftInputGuard;},paste:(_instance,text)=>target.instance.paste(text),
+  setNotice:()=>notice++,setError:value=>error=value});
+ await Promise.all([run(),run()]);
+ assert.equal(events.filter(value=>Array.isArray(value)&&value[0]==='paste').length,1,error??'paste was not sent');
+ assert.equal(cleared,1);assert.equal(notice,1);assert.equal(error,null);assert.equal(view.draftInputGuard,undefined);
+ current=false;const stale={...pending,target:{...target,view:{...view,inputQueue:{version:4,write:null,count:0,length:0},writable:true},instance:{...target.instance}}};
+ await context.fillTerminalSelection({pending:stale,select:()=>stale,busy:{current:false},clear(){},isCurrent:()=>false,readCurrent:async()=>record(),matches:context.matchesTerminalSelection,focus(){},
+  hasFocus:()=>true,setGuard(){},clearGuard(){},paste(){assert.fail('stale selection must not be pasted');},setNotice(){},setError:value=>{error=value;}});
+ assert.match(error,/cannot receive a draft/);
+});
+
+test('App paste confirmation is wired to the terminal selection module',()=>{
+ assert.match(source.text,/fillTerminalSelection\(\{pending,select:.*busy:selectionFillBusy/s);
+ assert.doesNotMatch(source.text,/function fillTerminalSelectionContext/);
 });

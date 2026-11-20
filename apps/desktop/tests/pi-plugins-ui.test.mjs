@@ -14,6 +14,10 @@ async function fixture(call){
  return{flush,button:label=>all(tree).find(n=>n.type==='button'&&(n.props['aria-label']===label||n.children.flat(Infinity).includes(label))),field:label=>all(tree).find(n=>n.props['aria-label']===label),text:()=>all(tree).flatMap(n=>n.children).filter(v=>typeof v==='string').join(' '),tree:()=>tree,nodes:()=>all(tree),busy,get closed(){return closed;}};
 }
 const result={packages:[{name:'pi-test',version:'1.0.0',source:'npm:pi-test@1.0.0',description:'Test plugin'}]};
+test('confirmed settings departure discards an unsubmitted plugin preview and closes without installing',async()=>{
+ const calls=[],f=await fixture(async(_name,{request})=>{calls.push(request.action);return request.action==='list'?snapshot():result;});
+ f.button('Install').props.onClick({currentTarget:{}});await f.flush();f.button('Close').props.onClick();await f.flush();assert.equal(f.closed,1);assert.ok(!calls.includes('install'));
+});
 test('Pi market requires confirmation and applies only its frozen pinned source once',async()=>{
  let state=snapshot();const calls=[];let release;
  const f=await fixture(async(_name,{request})=>{calls.push(request);if(request.action==='list')return state;if(request.action==='search')return result;await new Promise(r=>release=r);state={...state,revision:'b'.repeat(64),configured_names:['pi-test'],packages:[{name:'pi-test',source:request.source}]};return state;});

@@ -385,7 +385,7 @@ test('desktop cannot start while its process lock is held and can reopen after i
 test('desktop control refreshes a live strategy catalog before dispatching on the existing thread',async t=>{
  const {config,desktop,events,session,log}=await fixture(t);
  config.connections={native:{native:true,billing:'subscription'}};
- config.classifiers=[];config.executionGroups=[{}];config.model='native/fast';config.effort='high';
+ config.classifiers=[];config.executionGroups=[{small:'native/fast',medium:'native/fast',strong:'native/fast'}];
  const {codex,...policy}=config;
  await writeFile(log+'.models',JSON.stringify(['fast']));
  const result=await desktop(['Use newly discovered model','/exit'],'live-policy',async(controlFile,generation)=>{
@@ -401,7 +401,7 @@ test('desktop control refreshes a live strategy catalog before dispatching on th
    const {token,port,state}=await waitFor(state=>state.threadId===threadId&&!state.pending);
    const socket=connect({host:'127.0.0.1',port});socket.setTimeout(2000,()=>socket.destroy(Error('Routing control timed out')));
    await once(socket,'connect');
-   socket.end(JSON.stringify({token,generation,revision:state.revision,action:'mode',data:{policy:{id,name:id,config:JSON.stringify({...policy,model})}}}));
+   socket.end(JSON.stringify({token,generation,revision:state.revision,action:'mode',data:{policy:{id,name:id,config:JSON.stringify({...policy,executionGroups:[{small:model,medium:model,strong:model}]})}}}));
    socket.setEncoding('utf8');let raw='';for await(const chunk of socket)raw+=chunk;
    assert.equal(JSON.parse(raw).ok,true);
   }
@@ -414,7 +414,7 @@ test('desktop control refreshes a live strategy catalog before dispatching on th
  });
  assert.equal(result.code,0,result.stderr);assert.equal(result.stdout,'');
  const state=JSON.parse(await readFile(join(session,'state.json'),'utf8'));
- assert.equal(state.config.model,'native/fresh');assert.equal(state.policyId,'fresh');
+ assert.equal(state.config.executionGroups[0].strong,'native/fresh');assert.equal(state.config.model,undefined);assert.equal(state.policyId,'fresh');
  const turns=(await events()).filter(row=>row.method==='turn/start');
  assert.deepEqual(turns.map(row=>[row.params.threadId,row.params.model]),[[threadId,'fresh']]);
 });

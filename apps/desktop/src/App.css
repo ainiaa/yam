@@ -1308,7 +1308,7 @@ input::placeholder {
  .project-tools-open > .main-panel,.project-tools-open > .main-panel * { visibility:hidden !important; }
  .project-workspace-resizer { display:none; }
 }
-@media(max-width:700px){
+@media(max-width:900px){
  .project-workspace { grid-column:1/-1; }
  .project-tools-open > .sidebar { visibility:hidden; }
  .project-workspace-header { padding:16px; }
@@ -1516,3 +1516,14 @@ button {border-radius:var(--ui-radius-control);}
 .cli-setup button { flex:none; color:var(--accent); }
 .cli-setup summary { color:var(--muted); font-size:12px; cursor:pointer; }
 .cli-setup code { display:block; margin-top:8px; font-size:11px; line-height:1.5; white-space:pre-wrap; overflow-wrap:anywhere; }
+
+.project-backup { overflow-wrap:anywhere; }
+.project-backup ul {max-height:180px;overflow:auto;}
+.launch-preflight code {overflow-wrap:anywhere;}
+
+.error-recovery { flex:1;min-width:0; }
+.error-recovery p { margin:0 0 8px; }
+.error-recovery pre { white-space:pre-wrap;overflow-wrap:anywhere; }
+.error-recovery-actions { display:flex;flex-wrap:wrap;gap:8px;margin-top:8px; }
+
+.inbox-filters{border:0;padding:0;margin:0 0 12px;min-width:0}.inbox-filters label{display:flex;align-items:center;gap:6px;margin:6px 0}.inbox-filters p{font-size:11px;overflow-wrap:anywhere;color:var(--text-muted)}

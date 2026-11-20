@@ -7,7 +7,8 @@ import {t} from './i18n';
 import {codexQuickSetupConfig,codexRoutingConfig,codexRoutingDraft,buildCodexRoutingConfig,validateCodexDraft,compatibleRoutingPolicies,launchRoutingPolicy,routingPolicyPayload,supportsDesktopRouting,type LiveRoutingPolicy,type RoutingPolicy} from './routing-policies';
 import {defaultRules,defaultTierRules,validateRules,rulesVersion,workflowRoles,type TaskRules,type TaskRule,type ClassificationRule,type ExecutionRule,type CollaborationWorkflow,type WorkflowCandidate} from '../src-tauri/pi/task-rules.mjs';
 import {modelPresentation} from '../src-tauri/pi/model-label.mjs';
-import {buildPiArgs,hasPiRoutingSelection,knownClassifierBilling,maxPiBackupModels,parsePiDraft,piExecutionTiers,piLevels,piModelCatalogSource,piSetupMapping,piSetupStorageKey,portablePiRoutingPolicy,piSubscriptionCatalog,piSubscriptionOnly,probePiSetupModel,restorePiSetup,selectPiSetupModel,validatePiDraft,verifyPiSetup,type NativeFailure,type PiDraft,type PiModel,type PiRouteMatches,type PiRoutePreview,type PiRoutingState,type PiSessionRoutingMode,type PiSnapshot} from './pi-routing';
+import {connectionDetails,isProviderConfig} from './provider-config';
+import {buildNativeModelArgs,parseNativeModelDefaults,buildPiArgs,hasPiRoutingSelection,knownClassifierBilling,maxPiBackupModels,parsePiDraft,piExecutionTiers,piLevels,piModelCatalogSource,piSetupMapping,piSetupStorageKey,portablePiRoutingPolicy,piSubscriptionCatalog,piSubscriptionOnly,probePiSetupModel,restorePiSetup,selectPiSetupModel,validatePiDraft,verifyPiSetup,type NativeFailure,type PiDraft,type PiModel,type PiRouteMatches,type PiRoutePreview,type PiRoutingState,type PiSessionRoutingMode,type PiSnapshot} from './pi-routing';
 type Invoke=<T>(command:string,args?:Record<string,unknown>)=>Promise<T>;
 type CodexConnections=ReturnType<typeof codexRoutingConfig>['connections'];
 type RoutingModelMetadata=Pick<PiModel,'source'|'billing'|'legacy_alias'>;
@@ -41,7 +42,7 @@ function routePreviewText(preview:PiRoutePreview,modelLabel:(key:string)=>string
   ...Object.entries(preview.roles??{}).map(([role,choices])=>`${workflowRoleLabel(role)} · ${choices.map(choice=>`${modelLabel(choice.model)} / ${choice.effort}`).join(' → ')}`),
   preview.supported===false?t('The selected collaboration workflow is unavailable in this session.'):'',
   `${t('Classification time')}: ${preview.latencyMs} ms · ${t('Model-reported cost')}: ${preview.cost??t('Unknown cost')}`,
-  t('Policy preview only. Session locks, capacity and cache can change the final selection.')].filter(Boolean).join('\n');
+  t('Policy preview only. Model capabilities, capacity and cache can change the final selection.')].filter(Boolean).join('\n');
 }
 function routingModelOptions(models:PiModel[],connections?:CodexConnections|null){
  const groups=new Map<string,{model:PiModel;label:string}[]>();
@@ -139,7 +140,7 @@ function CodexRoutingConnections({raw,onChange}:{raw:string;onChange:(raw:string
 export function PiRoutingConfig({args,cwd,invoke,onChange,onValidity,onSaved,installedGateways=[],adapter='pi'}:{adapter?:'pi'|'codex';args:string;cwd:string;invoke:Invoke;onChange:(args:string)=>void;onValidity?:(state:{valid:boolean;scope:string})=>void;onSaved?:(args:string,raw:string)=>void;installedGateways?:string[]}){
  const defaultMagpieGateway='http://127.0.0.1:3425';
  const root=useRef<HTMLFieldSetElement>(null),version=useRef(0),[visible,setVisible]=useState(false),[models,setModels]=useState<PiModel[]>([]),[busy,setBusy]=useState(false),[error,setError]=useState<string|null>(null),[warning,setWarning]=useState<string|null>(null);
- let draft:PiDraft|null=null,parseError:string|null=null;try{draft=adapter==='codex'?codexRoutingDraft(args):parsePiDraft(args);}catch(e){parseError=String(e);}
+ let draft:PiDraft|null=null,parseError:string|null=null;try{draft=adapter==='codex'?codexRoutingDraft(args):{...parsePiDraft(args),model:'auto',effort:'auto'};}catch(e){parseError=String(e);}
  const [setupOpen,setSetupOpen]=useState(()=>!draft?.small&&!draft?.strong);
  let taskRules=null;try{taskRules=validateRules(draft?.rules?JSON.parse(draft.rules):draft?.medium?defaultTierRules:defaultRules);}catch{}
  const gateway=draft?.gateway??null,connections=adapter==='codex'&&draft?codexRoutingConfig(args).connections:null,scope=JSON.stringify([cwd,gateway,adapter,connections]);
@@ -182,7 +183,7 @@ export function PiRoutingConfig({args,cwd,invoke,onChange,onValidity,onSaved,ins
  useEffect(()=>{onValidity?.({valid:!issue&&visible,scope:JSON.stringify([cwd,args])});},[issue,visible,args,cwd,onValidity]);
  function change(fields:Partial<PiDraft>){
   if(!draft)return;
-  const next={...draft,...fields},primary=next.classifier||next.small,changedPrimary=primary!==(draft.classifier||draft.small);
+  const next={...draft,...fields,model:'auto',effort:'auto'},primary=next.classifier||next.small,changedPrimary=primary!==(draft.classifier||draft.small);
   if(changedPrimary&&next.classifierFallbacks)next.classifierFallbacks=next.classifierFallbacks.filter(key=>key!==primary);
   if(changedPrimary||!next.classifierBilling&&fields.classifierFallbacks?.length&&!primary.startsWith('openai/')){
    next.classifierBilling=verified===scope?knownClassifierBilling(models.find(model=>model.key===primary)):undefined;
@@ -228,14 +229,14 @@ export function PiRoutingConfig({args,cwd,invoke,onChange,onValidity,onSaved,ins
    if(adapter==='codex'){
     const setup=codexQuickSetupConfig(args,result.args,models);nextArgs=setup.args;fixedGateway=setup.fixedEffort;
    }
-   onChange(nextArgs);setSetupStatus(fixedGateway?'Model verified. High reasoning is fixed because this model does not support every default reasoning level.':result.warning??(adapter==='codex'||result.mapping.medium?'Model verified. Routing uses three execution tiers; you can change their models below.':'Model verified. The same model is selected for all three roles; you can change them below.'));
+   onChange(nextArgs);setSetupStatus(fixedGateway?'Model verified. Execution rules use high reasoning because this model does not support every default reasoning level.':result.warning??(adapter==='codex'||result.mapping.medium?'Model verified. Routing uses three execution tiers; you can change their models below.':'Model verified. The same model is selected for all three roles; you can change them below.'));
   }catch(e){if(current===version.current&&argsRef.current===original&&scopeRef.current===scope)setSetupStatus(e instanceof Error&&['Invalid billing policy','Subscription-only billing requires a Codex subscription model.'].includes(e.message)?e.message:'Model verification failed. Check login, access and connection, or choose another model.');}
   finally{if(current===version.current)setBusy(false);}
  }
  function saveSetup(){
   if(!draft||busy||issue||adapter==='codex'&&(!!catalogIssue||verified!==scope))return;
   setSetupStatusScope(scope);
-  try{const raw=adapter==='codex'?buildCodexRoutingConfig(args,draft):JSON.stringify(piSetupMapping(draft,args,models));if(onSaved)onSaved(args,raw);else localStorage.setItem(piSetupStorageKey,raw);setSetupStatus('Routing roles saved on this device.');}
+  try{const raw=adapter==='codex'?buildCodexRoutingConfig(args,draft):JSON.stringify(piSetupMapping(draft,args,models));if(onSaved)onSaved(adapter==='codex'?raw:buildPiArgs(args,{...draft,model:'auto',effort:'auto'}),raw);else localStorage.setItem(piSetupStorageKey,raw);setSetupStatus('Routing roles saved on this device.');}
   catch(e){setSetupStatus(e instanceof Error&&['Invalid billing policy','Subscription-only billing requires a Codex subscription model.'].includes(e.message)?e.message:'Could not save routing roles on this device.');}
  }
  function applySavedSetup(){
@@ -244,23 +245,12 @@ export function PiRoutingConfig({args,cwd,invoke,onChange,onValidity,onSaved,ins
   catch{setSetupStatus('Saved routing policy is unavailable or conflicts with the current billing policy.');}
  }
  return <fieldset className="pi-routing-config" ref={root}><legend>{t(adapter==='codex'?'Codex automatic routing':'Pi automatic routing')}</legend>
-  <p className="settings-help">{t(adapter==='codex'?'Codex keeps its native terminal, history, approvals, Skills and tools. Routing chooses the model and reasoning for each new task.':'Pi keeps this chat history. ChatGPT subscription tasks use the official Codex CLI with its default native Skills and tools. Model and reasoning can be automatic or fixed independently.')}</p>
-  {draft&&<fieldset className="pi-routing-config" aria-label={t('Routing preferences')}>
-   <legend>{t('Routing preferences')}</legend>
-   <div className="pi-routing-pair">
-    <RoutingModelPicker label={t('Model selection')} models={roleModels} value={draft.model} {...modelCatalog} emptyValue="auto" emptyLabel="Automatic by task" onChange={e=>change({model:e.target.value})}/>
-    <label><span>{t('Reasoning selection')}</span><Select aria-label={t('Reasoning selection')} value={draft.effort} onChange={e=>change({effort:e.target.value})}>
-     <option value="auto">{t('Automatic by task')}</option>
-     {['off','minimal',...piLevels].map(level=><option key={level} value={level}>{level==='off'?t('Reasoning off (fixed)'):level}</option>)}
-    </Select></label>
-   </div>
-   <p className="settings-help">{t('A fixed reasoning level is preserved exactly. Unsupported selections stop with an explanation.')}</p>
-  </fieldset>}
+  <p className="settings-help">{t(adapter==='codex'?'Codex keeps its native terminal, history, approvals, Skills and tools. Routing chooses the model and reasoning for each new task.':'Automatic routing classifies each task, then selects its execution model and reasoning using your rules.')}</p>
   <details className="pi-routing-advanced" open={setupOpen} onToggle={e=>setSetupOpen(e.currentTarget.open)}><summary>{t('Quick model setup')}</summary>
    <p className="settings-help">{t(adapter==='codex'?'Read the models available to the official Codex CLI. Verification sends a short request using the selected connection quota.':'Scan the providers available to Pi, the official Codex CLI, and the direct gateway when configured or detected. Verification sends a short test request and may use your selected connection quota.')}</p>
    <button type="button" disabled={busy} onClick={()=>void discoverSetup()}>{t('Find available models')}</button>
    {!onSaved&&<button type="button" disabled={busy} onClick={applySavedSetup}>{t('Use saved routing policy')}</button>}
-   {scanned&&setupSourceModels.length>0&&<p className="settings-help">{setupChoices.length?t('Quick setup shows {{available}} of {{total}} models with high reasoning.',{available:setupChoices.length,total:setupSourceModels.length}):t('No discovered model supports high reasoning. Select compatible models or configure fixed reasoning below.')}</p>}
+   {scanned&&setupSourceModels.length>0&&<p className="settings-help">{setupChoices.length?t('Quick setup shows {{available}} of {{total}} models with high reasoning.',{available:setupChoices.length,total:setupSourceModels.length}):t('No discovered model supports high reasoning. Choose compatible models or adjust execution rules.')}</p>}
    {scanned&&setupChoices.length>0&&<><RoutingModelPicker label={t('Model to verify')} models={setupChoices} value={setupSelection} connections={connections} disabled={busy} onChange={e=>setSetupModel(e.target.value)} onBrowse={()=>setSetupModel('')}/><button type="button" disabled={busy||!setupSelection||setupDefaultDirectory} onClick={()=>void verifySetup()}>{t(configured?'Verify model':'Verify and initialize routing roles')}</button></>}
    {setupStatus&&setupStatusScope===scope&&(!onSaved||setupStatus!=='Routing roles saved on this device.')&&<p role="status">{t(setupStatus)}</p>}
    {setupScope===scope&&setupGatewayWarning&&(gateway!==null||gateways.includes('magpie'))&&<p className="settings-help" role="status">{t('Magpie gateway model catalog unavailable. Check the gateway; Pi native models remain available.')}</p>}
@@ -278,6 +268,26 @@ export function PiRoutingConfig({args,cwd,invoke,onChange,onValidity,onSaved,ins
   {draft&&<>{adapter==='pi'&&<label><span>{t('Model connection')}</span><Select aria-label={t('Model connection')} value={gateway===null?'native':'gateway'} onChange={e=>change({gateway:e.target.value==='native'?null:defaultMagpieGateway})}><option value="native">{t('Pi connections')}</option><option value="gateway">{t('Pi with direct gateway')}</option></Select></label>}
    <p className="settings-help">{t('ChatGPT subscription tasks require the official Codex CLI login. Automatic setup detects routing tiers; you can override their models below. Classifier, preview and correction use their configured channels. Subscription failures never trigger a paid channel fallback.')}</p>
    {gateway!==null&&<label><span>{t('Gateway URL')}</span><input value={gateway} onChange={e=>change({gateway:e.target.value})} placeholder="http://127.0.0.1:3425" autoComplete="off" spellCheck={false}/></label>}
+   <fieldset className="pi-routing-config" aria-label={t('Classification models')}><legend>{t('Classification models')}</legend>
+   <label><span>{t('Classifier reasoning')}</span><Select aria-label={t('Classifier reasoning')} value={draft.classifierEffort??''} onChange={event=>change({classifierEffort:event.target.value||undefined})}>
+    <option value="">{t('Connection default')}</option>{['off','minimal',...piLevels].map(level=><option key={level} value={level}>{level}</option>)}
+   </Select></label>
+   <RoutingModelPicker label={t('Primary classifier A')} models={roleModels} value={draft.classifier} {...modelCatalog} emptyLabel="Same as lightweight model" onChange={e=>change({classifier:e.target.value})}/>
+   {Array.from({length:classifierSlotCount},(_,index)=>{
+    const label=t('Backup classifier {{value0}}',{value0:String.fromCharCode(66+index)});
+    return <RoutingModelPicker key={index} label={label} models={roleModels} value={classifierFallbacks[index]??''} {...modelCatalog} emptyLabel="No backup classifier" disabled={index>classifierFallbacks.length} onChange={event=>{
+     const next=[...classifierFallbacks];next[index]=event.target.value;change({classifierFallbacks:next.filter(Boolean)});
+    }}/>;
+   })}
+   {classifierSlotCount<maxPiBackupModels&&<button type="button" disabled={classifierFallbacks.length<classifierSlotCount} onClick={()=>setClassifierSlots(classifierSlotCount+1)}>{t('Add classifier backup')}</button>}
+   {adapter==='pi'&&!!draft.classifierFallbacks?.length&&<label><span>{t('Classifier billing channel')}</span>
+    <Select aria-label={t('Classifier billing channel')} value={draft.classifierBilling??''} onChange={event=>change({classifierBilling:(event.target.value||undefined) as PiDraft['classifierBilling']})}>
+     <option value="">{t('Detect from primary classifier')}</option><option value="subscription">{t('Subscription')}</option><option value="api">{t('Pi native API')}</option><option value="gateway">{t('Magpie gateway')}</option>
+    </Select>
+    <span className="settings-help">{t('When the primary classifier is missing from the catalog, choose its existing billing channel to enable backups.')}</span>
+   </label>}
+   <p className="settings-help">{t('If all configured classifiers fail, local routing rules are used.')}</p>
+   </fieldset>
    <fieldset className="pi-routing-config"><legend>{t('Execution models')}</legend>
    <p className="settings-help">{t('Group A sets the primary model for each tier. Empty backup slots are skipped.')}</p>
    {Array.from({length:visibleExecutionGroups},(_,group)=>{
@@ -302,23 +312,6 @@ export function PiRoutingConfig({args,cwd,invoke,onChange,onValidity,onSaved,ins
    })}
    {visibleExecutionGroups<=maxPiBackupModels&&<button type="button" onClick={()=>setExecutionGroupCount(visibleExecutionGroups+1)}>{t('Add execution group')}</button>}
    </fieldset>
-   <fieldset className="pi-routing-config" aria-label={t('Classification models')}><legend>{t('Classification models')}</legend>
-   <RoutingModelPicker label={t('Primary classifier A')} models={roleModels} value={draft.classifier} {...modelCatalog} emptyLabel="Same as lightweight model" onChange={e=>change({classifier:e.target.value})}/>
-   {Array.from({length:classifierSlotCount},(_,index)=>{
-    const label=t('Backup classifier {{value0}}',{value0:String.fromCharCode(66+index)});
-    return <RoutingModelPicker key={index} label={label} models={roleModels} value={classifierFallbacks[index]??''} {...modelCatalog} emptyLabel="No backup classifier" disabled={index>classifierFallbacks.length} onChange={event=>{
-     const next=[...classifierFallbacks];next[index]=event.target.value;change({classifierFallbacks:next.filter(Boolean)});
-    }}/>;
-   })}
-   {classifierSlotCount<maxPiBackupModels&&<button type="button" disabled={classifierFallbacks.length<classifierSlotCount} onClick={()=>setClassifierSlots(classifierSlotCount+1)}>{t('Add classifier backup')}</button>}
-   {adapter==='pi'&&!!draft.classifierFallbacks?.length&&<label><span>{t('Classifier billing channel')}</span>
-    <Select aria-label={t('Classifier billing channel')} value={draft.classifierBilling??''} onChange={event=>change({classifierBilling:(event.target.value||undefined) as PiDraft['classifierBilling']})}>
-     <option value="">{t('Detect from primary classifier')}</option><option value="subscription">{t('Subscription')}</option><option value="api">{t('Pi native API')}</option><option value="gateway">{t('Magpie gateway')}</option>
-    </Select>
-    <span className="settings-help">{t('When the primary classifier is missing from the catalog, choose its existing billing channel to enable backups.')}</span>
-   </label>}
-   <p className="settings-help">{t('If all configured classifiers fail, local routing rules are used.')}</p>
-   </fieldset>
    {onSaved&&<><button type="button" disabled={busy||!!issue||adapter==='codex'&&(!!catalogIssue||verified!==scope)} onClick={saveSetup}>{t('Save routing roles on this device')}</button>
    {setupStatusScope===scope&&setupStatus==='Routing roles saved on this device.'&&<p role="status">{t(setupStatus)}</p>}</>}
    {taskRules?<PiTaskRules rules={taskRules} disabled={busy} models={roleModels} adapter={adapter} connections={connections} onApply={rules=>change({rules:JSON.stringify(rules)})}/>:<button type="button" onClick={()=>change({rules:JSON.stringify(defaultRules)})}>{t('Restore default task rules')}</button>}
@@ -328,6 +321,56 @@ export function PiRoutingConfig({args,cwd,invoke,onChange,onValidity,onSaved,ins
   <div className="pi-routing-check"><button type="button" disabled={busy||!!parseError} onClick={()=>void check()}>{busy?t('Checking models…'):t('Check connection and models')}</button><span role="status">{issue?t(issue):busy?t('Reading model capabilities…'):error?t(error):catalogIssue?t(catalogIssue):verified===scope?t('Routing configuration checked'):t('Check the connection and available models.')}</span></div>
  </fieldset>;
 }
+export function LaunchConfigurationSummary({launch,label,routingName,routingConfig,invalid=false}:{launch:{adapter:string;extra_args:string;provider?:unknown};label:string;routingName?:string;routingConfig?:string;invalid?:boolean}){
+ const parts=[t('{{agent}} executes',{agent:label})];
+ try{
+  if(invalid)throw Error();
+  if(routingName){
+   parts.push(t('Automatic routing · {{name}}',{name:routingName}));
+   if(launch.adapter==='codex'){
+    if(!routingConfig)throw Error();
+    const config=codexRoutingConfig(routingConfig);
+    const used=[...config.classifiers,...config.executionGroups.flatMap(group=>Object.values(group))].filter((key):key is string=>!!key);
+    const channels=[...new Set(used.map(key=>{
+     const connection=config.connections[key.split('/',1)[0]];
+     if(!connection)throw Error();
+     return t('gateway' in connection&&connection.gateway?'Local gateway':connection.billing==='subscription'?'ChatGPT subscription':'API connection');
+    }))];
+    parts.push(t('Routing channels: {{channels}}',{channels:channels.join(' + ')||t('Configured channels')}));
+   }else parts.push(t(piSubscriptionOnly(launch.extra_args)?'Subscription only':'Configured channels'));
+  }else if(launch.adapter!=='shell'&&launch.adapter!=='custom'){
+   const selection=launch.adapter==='codex'||launch.adapter==='pi'?parseNativeModelDefaults(launch.adapter,launch.extra_args):null;
+   const model=isProviderConfig(launch.provider)?launch.provider.model:selection?.model;
+   if(model)parts.push(t('Fixed model: {{model}} · {{effort}}',{model,effort:selection?.effort||t('Use CLI defaults')}));
+   else if(selection)parts.push(selection.effort?t('Default reasoning: {{effort}}',{effort:selection.effort}):t('Use CLI defaults'));
+   const connection=connectionDetails(launch);
+   parts.push(t(isProviderConfig(launch.provider)&&['localhost','127.0.0.1','[::1]'].includes(new URL(launch.provider.base_url).hostname)?'Local gateway':connection.source));
+  }
+ }catch{parts.splice(1,parts.length,t('Launch configuration needs attention'));}
+ return <p className="settings-help launch-configuration-summary" role="status" aria-label={t('Effective launch configuration')}>{parts.join(' · ')}</p>;
+}
+
+export function NativeModelDefaults({adapter,args,cwd,invoke,onChange,modelLocked=false}:{adapter:'pi'|'codex';args:string;cwd:string;invoke:Invoke;onChange:(args:string)=>void;modelLocked?:boolean}){
+ const [models,setModels]=useState<PiModel[]>([]),[error,setError]=useState('');
+ let selection={model:'',effort:''},issue='';try{selection=parseNativeModelDefaults(adapter,args);}catch(error){issue=String(error);}
+ useEffect(()=>{
+  let stopped=false;setModels([]);setError('');
+  void invoke<{models:PiModel[]}>(adapter==='codex'?'codex_routing_catalog':'pi_routing_catalog',adapter==='codex'?{cwd,config:JSON.stringify(codexRoutingConfig(''))}:{cwd,gateway:null})
+   .then(result=>{if(!stopped)setModels(adapter==='pi'?result.models.filter(model=>!/^yam(?:-codex|-gateway)?\//.test(model.key)):result.models);}).catch(error=>{if(!stopped)setError(String(error));});
+  return()=>{stopped=true;};
+ },[adapter,cwd,invoke]);
+ const key=adapter==='codex'&&selection.model?`yam-codex/${selection.model}`:selection.model;
+ function change(fields:Partial<typeof selection>){try{onChange(buildNativeModelArgs(adapter,args,{...selection,...fields}));}catch(error){setError(String(error));}}
+ return <fieldset className="pi-routing-config"><legend>{t('Model when routing is off')}</legend>
+  <p className="settings-help">{t('Tasks use this model and reasoning directly. No classification or routing rules are applied.')}</p>
+  {!modelLocked&&<RoutingModelPicker label={t('Default model')} models={models} value={key} emptyLabel="Use CLI defaults" onChange={event=>change({model:adapter==='codex'?event.target.value.replace(/^yam-codex\//,''):event.target.value})}/>}
+  <label><span>{t('Default reasoning')}</span><Select aria-label={t('Default reasoning')} value={selection.effort} onChange={event=>change({effort:event.target.value})} disabled={!!issue}>
+   <option value="">{t('Use CLI defaults')}</option>{['off','minimal',...piLevels].map(level=><option key={level} value={level}>{level}</option>)}
+  </Select></label>
+  {(issue||error)&&<p role="status">{issue||error}</p>}
+ </fieldset>;
+}
+
 export function RoutingPolicyChoice({adapter,policies,choice,launchPolicy,invalid,onChange,onManage,codexAvailable=true}:{adapter:string;policies:RoutingPolicy[];choice:string;launchPolicy:boolean;invalid:boolean;onChange:(id:string)=>void;onManage:()=>void;codexAvailable?:boolean}){
  const supported=supportsDesktopRouting(adapter)&&(adapter!=='codex'||codexAvailable),available=supported?compatibleRoutingPolicies(policies,adapter):[],selected=available.find(row=>row.id===choice);
  const policy=selected?.adapter==='pi'?portablePiRoutingPolicy(selected.setup):null;
@@ -387,7 +430,7 @@ export function PiRoutingSettings({cwd,invoke,installedGateways,navigation,onClo
     <PiRoutingConfig key={selected+adapter} adapter={adapter} args={args} cwd={cwd} invoke={invoke} installedGateways={installedGateways} onChange={setArgs} onSaved={save}/>
    </>}
   </div>
-  <footer className="dialog-actions"><button type="button" onClick={onClose}>{t('Close')}</button></footer>
+  <footer className="dialog-actions"><button type="button" data-settings-close onClick={onClose}>{t('Close')}</button></footer>
  </dialog>;
 }
 type LiveRoutingChange={policy:LiveRoutingPolicy|null;nativeModel?:string}|{cancel:true};
@@ -425,7 +468,6 @@ export function LiveRoutingControls({mode,policies,models,disabled,onSwitch}:{mo
 export function PiRoutingBar({sessionId,generation,cliVersion,installedPiVersion,active,available,invoke,policies=[]}:{sessionId:string;generation:string;cliVersion?:string|null;installedPiVersion?:string|null;active:boolean;available:boolean;invoke:Invoke;policies?:RoutingPolicy[]}){
  const [state,setState]=useState<PiRoutingState|null>(null),[models,setModels]=useState<PiModel[]>([]);
  const [error,setError]=useState<string|null>(null),[readError,setReadError]=useState<string|null>(null),[busy,setBusy]=useState(false);
- const [draft,setDraft]=useState<{model:string;effort:string;revision:number}|null>(null);
  const [expanded,setExpanded]=useState(false),[catalogError,setCatalogError]=useState<string|null>(null);
  const [recoveryOpen,setRecoveryOpen]=useState(false),[recoveryConfirmation,setRecoveryConfirmation]=useState<{receiptId:string;revision:number;generation:string}|null>(null),[recoveryMessage,setRecoveryMessage]=useState(false);
  const [controlFailure,setControlFailure]=useState<NativeFailure|null>(null),[stateRefreshed,setStateRefreshed]=useState(false);
@@ -470,7 +512,7 @@ export function PiRoutingBar({sessionId,generation,cliVersion,installedPiVersion
    const result=await invoke<{state:PiRoutingState;controlFailure?:NativeFailure}>('pi_routing_control',{sessionId,generation,request:{action,revision,...(data?{data}:{})}});
    if(mounted.current&&scope===controlScope.current){
     if(result.controlFailure){setControlFailure(result.controlFailure);return null;}
-    setReadError(null);setState(result.state);if(action==='set'||action==='reset'||action==='mode')setDraft(null);
+    setReadError(null);setState(result.state);
     if(action==='native-reset'){setRecoveryConfirmation(null);setRecoveryMessage(true);}
     if(action==='retry'){
      const next=await invoke<{models:PiModel[];controlFailure?:NativeFailure}>('pi_routing_control',{sessionId,generation,request:{action:'catalog',revision:result.state.revision}});
@@ -483,10 +525,8 @@ export function PiRoutingBar({sessionId,generation,cliVersion,installedPiVersion
  }
  const routingOff=state?.mode?.enabled===false;
  const working=state&&['starting','classifying','selected','working'].includes(state.phase),disabled=!state||!active||!available||busy||!!working||!!controlFailure&&!stateRefreshed;
- const choice=draft??state?.preferences,dirty=!!(draft&&state&&(draft.model!==state.preferences.model||draft.effort!==state.preferences.effort));
  const subscriptionOnly=state?.diagnostics?.billing==='subscription';
  const roleModels=subscriptionOnly?piSubscriptionCatalog(models):models;
- const stale=!!(draft&&state&&draft.revision!==state.revision);
  const live=active&&available&&!readError;
  const execution=state?.diagnostics?.execution,recovery=state?.nativeRecovery;
  const failure=controlFailure??state?.failure??recovery?.failure;
@@ -514,18 +554,14 @@ export function PiRoutingBar({sessionId,generation,cliVersion,installedPiVersion
  const lastAttempt=runningAttempts?.[runningAttempts.length-1];
  const runningCandidate=lastAttempt?.status==='running'?lastAttempt:null;
  const classification=currentDecision?classificationSourceText(currentDecision.rule==='fixed'?{classificationSource:'fixed'}:currentDecision):'';
- function choose(fields:Partial<{model:string;effort:string}>){if(state&&choice)setDraft({...choice,revision:draft?.revision??state.revision,...fields});}
+
  return <section className="pi-routing-bar" aria-label={t('Pi automatic routing')}>
   <div className="pi-routing-status"><strong>{t('Pi routing')}</strong>
-   <span>{installedPiVersion?t('Local Pi {{version}}',{version:installedPiVersion}):t('Local Pi version unknown')}</span>
-   {cliVersion&&cliVersion!==installedPiVersion&&<span>{t('Session launched with Pi {{version}}',{version:cliVersion})}</span>}
    {routingOff&&<span>{t('Routing is off')}</span>}{(!available||!state||!active||state.phase==='error'||state.phase==='classifying')&&<span role="status">{!available?t('Background unavailable'):!state?t(active?'Waiting for Pi routing state…':'Routing state unavailable'):!active?t('Session ended'):t(state.phase==='classifying'?'Choosing a model…':'Routing needs attention')}</span>}
    {state&&!collaborating&&<span className="pi-routing-model" role="status" title={selected?t('Selected for this turn; waiting for a native model response'):t('Recorded by the native Pi assistant message')}>{selected?t('Selected for this turn: {{value0}} · {{value1}}',{value0:modelLabel(selected.model),value1:selected.effort}):state.actual?t(live&&state.phase==='working'?'Actual model: {{value0}} · {{value1}}':'Latest reply used: {{value0}} · {{value1}}',{value0:actualModel,value1:state.actual.effort==='unknown'?t('Reasoning not confirmed'):state.actual.effort}):t('No native model response recorded yet')}</span>}
    {!collaborating&&!selected&&state?.actual?.source==='pi-native'&&<span>{t(state.actual.billing==='subscription'?'Pi native subscription':'Pi native API')}</span>}
-   {classification&&<span>{classification}{currentDecision?.classificationRule&&` · ${t('Classification rule')} ${currentDecision.classificationRule}`}{currentDecision?.executionRule&&` · ${t('Execution rule')} ${currentDecision.executionRule}`}</span>}
    {collaborating&&<span className="pi-routing-model" role="status">{currentReceipt?`${currentReceipt.name} · ${t(currentReceipt.status)}`:t('Preparing collaboration…')}{runningRole&&` · ${workflowRoleLabel(runningRole[0])}`}{runningCandidate&&` · ${modelLabel(runningCandidate.model)} · ${runningCandidate.effort}`}</span>}
    {execution&&<span role="status">{t(executionStages[execution.stage])}</span>}
-   {state&&!routingOff&&<span className="pi-routing-policy">{state.preferences.model==='auto'?t('Automatic model'):t('Fixed model: {{value0}}',{value0:modelLabel(state.preferences.model)})}</span>}
    {!routingOff&&<button type="button" aria-expanded={expanded} aria-controls={`pi-routing-controls-${sessionId}`} onClick={()=>setExpanded(value=>!value)}>{t('Adjust routing')}</button>}
    {recovery&&<button type="button" disabled={!active||!available||busy} aria-expanded={recoveryOpen} onClick={()=>{setRecoveryOpen(true);void control('native-recovery');}}>{t('View recovery information')}</button>}
    {!routingOff&&(error||readError||catalogError||state?.error||state?.gatewayError)&&<button type="button" disabled={disabled} onClick={()=>void control('retry')}>{busy?t('Applying…'):t('Refresh connection')}</button>}
@@ -551,8 +587,11 @@ export function PiRoutingBar({sessionId,generation,cliVersion,installedPiVersion
     <button type="button" disabled={disabled||!!readError||recoveryStale||!recovery.needsInspection} onClick={()=>{if(!recoveryStale)void control('native-reset',{receiptId:recoveryConfirmation.receiptId,confirmed:true},recoveryConfirmation.revision);}}>{t('I checked the old task; clear the block')}</button>
    </section>}
   </div>}
-  {(currentDecision||receipt)&&<details key={receipt?.id??'route'} className="pi-routing-advanced" aria-label={t('Routing and collaboration details')}>
-   <summary>{t(currentDecision?'Routing and collaboration details':'Previous collaboration receipt')}</summary>
+  <details key={receipt?.id??'route'} className="pi-routing-advanced" aria-label={t('Routing and collaboration details')}>
+   <summary>{t(!currentDecision&&receipt?'Previous collaboration receipt':'Routing and collaboration details')}</summary>
+   <p className="settings-help">{installedPiVersion?t('Local Pi {{version}}',{version:installedPiVersion}):t('Local Pi version unknown')}{cliVersion&&cliVersion!==installedPiVersion&&` · ${t('Session launched with Pi {{version}}',{version:cliVersion})}`}</p>
+   {state&&!routingOff&&<p className="settings-help">{t('Automatic model')}</p>}
+   {classification&&<p className="settings-help">{classification}{currentDecision?.classificationRule&&` · ${t('Classification rule')} ${currentDecision.classificationRule}`}{currentDecision?.executionRule&&` · ${t('Execution rule')} ${currentDecision.executionRule}`}</p>}
    {currentDecision&&<p className="settings-help">{t('Matched task rule')}: {t(currentDecision.rule)} · {currentDecision.ruleVersion}
     {currentDecision.planned&&` · ${t('Planned route')}: ${t(currentDecision.planned.model)} · ${currentDecision.planned.effort}`}
     {currentDecision.selected&&state?.target&&` · ${t('Selected for this turn: {{value0}} · {{value1}}',{value0:modelLabel(state.target.model),value1:state.target.effort})}`}
@@ -566,13 +605,8 @@ export function PiRoutingBar({sessionId,generation,cliVersion,installedPiVersion
     </li>)}</ul>
     {receipt.error&&<p>{t(receipt.error)}</p>}
    </section>}
-  </details>}
-  {state&&choice&&<><div id={`pi-routing-controls-${sessionId}`} className="pi-routing-controls" hidden={!expanded}>
-   <RoutingModelPicker label={t('Pi model selection')} models={roleModels} value={choice.model} emptyValue="auto" emptyLabel="Automatic by task" disabled={disabled} onChange={e=>choose({model:e.target.value})}/>
-   <label><span>{t('Reasoning')}</span><Select aria-label={t('Pi reasoning selection')} value={choice.effort} disabled={disabled} onChange={e=>choose({effort:e.target.value})}><option value="auto">{t('Automatic by task')}</option>{['off','minimal',...piLevels].map(level=><option key={level} value={level}>{level==='off'?t('Reasoning off (fixed)'):level}</option>)}</Select></label>
-   <button type="button" disabled={disabled||!dirty||stale} onClick={()=>draft&&void control('set',{model:draft.model,effort:draft.effort},draft.revision)}>{t('Apply routing selection')}</button>
-   {draft&&<button type="button" disabled={busy} onClick={()=>setDraft(null)}>{t('Cancel selection')}</button>}
-   <button type="button" disabled={disabled||(!dirty&&state.preferences.model==='auto'&&state.preferences.effort==='auto')} onClick={()=>void control('reset')}>{t('Reset both to automatic')}</button>
+  </details>
+  {state&&<><div id={`pi-routing-controls-${sessionId}`} className="pi-routing-controls" hidden={!expanded}>
    <button type="button" disabled={disabled} onClick={()=>void control('retry')}>{busy?t('Applying…'):t('Refresh connection')}</button>
    {state.rules&&<PiTaskRules rules={state.rules} disabled={disabled} models={roleModels} onApply={async rules=>{if(!await control('rules',rules))throw Error(t('Control result is unconfirmed. It may have been applied.'));}} onPreview={async(text,rules)=>{const next=await control('preview',{text,rules}),p=next?.preview;if(!p)throw Error(t('Task rule preview failed'));return routePreviewText(p,modelLabel);}}/>}
    {state.decision&&<p className="settings-help">{t('Matched task rule')}: {t(state.decision.rule)} · {state.decision.ruleVersion}<br/>{state.decision.classificationSource&&<>{t('Classification source')}: {state.decision.classificationSource==='local'?t('Local routing rules'):state.decision.classificationSource} · </>}{t('Classification time')}: {state.decision.classificationMs} ms · {t('Model-reported cost so far')}: {state.decision.totalCost??t(state.actual?.billing==='subscription'?'Subscription usage; API cost unavailable':'Unknown cost')}</p>}
@@ -588,9 +622,8 @@ export function PiRoutingBar({sessionId,generation,cliVersion,installedPiVersion
     {execution.handoff&&<p>{t(execution.handoff.mode==='incremental'?'Incremental context':'Full context')} · {t(handoffReasons[execution.handoff.reason])} · {execution.handoff.characters} / {execution.handoff.budget} {t('characters')}</p>}
     {execution.failure==='context-budget'&&<p role="status">{t('Context was not sent. Use /compact in Pi or split the task, then explicitly retry. No task was replayed.')}</p>}
    </div>}
-   <div className="pi-routing-details"><p>{state.preferences.effort==='auto'?t('Automatic reasoning'):t('Fixed reasoning: {{value0}}',{value0:state.preferences.effort})}</p><p>{state.config.gateway?t('Gateway: {{value0}}',{value0:state.config.gateway}):t('Existing Pi configuration')}</p>{state.target&&<p>{t('Selected for this turn: {{value0}} · {{value1}}',{value0:modelLabel(state.target.model),value1:state.target.effort})}<br/>{state.target.reason}</p>}{state.actual?<p title={t('Recorded by the native Pi assistant message')}>{t('Latest reply used: {{value0}} · {{value1}}',{value0:actualModel,value1:state.actual.effort==='unknown'?t('Reasoning not confirmed'):state.actual.effort})}</p>:<p>{t('No native model response recorded yet')}</p>}<p className="settings-help">{t('Refreshing never resends a task. Review the terminal before explicitly retrying work.')}</p></div>
+   <div className="pi-routing-details"><p>{t(routingOff?'Use CLI defaults':'Reasoning follows execution rules')}</p><p>{state.config.gateway?t('Gateway: {{value0}}',{value0:state.config.gateway}):t('Existing Pi configuration')}</p>{state.target&&<p>{t('Selected for this turn: {{value0}} · {{value1}}',{value0:modelLabel(state.target.model),value1:state.target.effort})}<br/>{state.target.reason}</p>}{state.actual?<p title={t('Recorded by the native Pi assistant message')}>{t('Latest reply used: {{value0}} · {{value1}}',{value0:actualModel,value1:state.actual.effort==='unknown'?t('Reasoning not confirmed'):state.actual.effort})}</p>:<p>{t('No native model response recorded yet')}</p>}<p className="settings-help">{t('Refreshing never resends a task. Review the terminal before explicitly retrying work.')}</p></div>
   </div>
-  {dirty&&<p className="settings-help" role="status">{stale?t('Routing changed. Cancel this selection and choose again from the current state.'):t('Selection is not applied. Apply model and reasoning together when ready.')}</p>}
   {state.gatewayError&&<p className="settings-help" role="status">{t(state.gatewayError)}</p>}
   {state.pendingInput&&<p className="settings-help" role="status">{t('Unsent input is preserved in the Pi terminal.')}</p>}
   {(error||readError||catalogError||state.error)&&<p className="pi-routing-error" role="alert">{t(error??readError??catalogError??state.error!)}</p>}</>}
@@ -627,7 +660,7 @@ export function PiTaskRules({rules,disabled,onApply,onPreview,models=[],adapter=
  async function apply(){if(disabled||busy||stale||issue||!dirty)return;setBusy(true);setError('');try{const next=validateRules(draft.rules);await onApply(next);setDraft({rules:next,base:JSON.stringify(next)});setResult('');}catch(e){setError(String(e));}finally{setBusy(false);}}
  async function preview(){if(!onPreview||disabled||busy||issue||!text.trim())return;setBusy(true);setError('');setResult('');try{setResult(await onPreview(text,validateRules(draft.rules)));}catch(e){setError(String(e));}finally{setBusy(false);}}
  return <details className="pi-routing-advanced"><summary>{t('Task rules')} · {rulesVersion(rules)}</summary>
-  <p className="settings-help">{t('Rules describe task types. Model locks and capability checks always apply. Changes require Apply.')}</p>
+  <p className="settings-help">{t('Classification determines the task type. Execution rules select the model and reasoning. Changes require Apply.')}</p>
   <fieldset className="pi-routing-config" disabled={disabled||busy}><legend>{t('Local classification rules')}</legend>
    <p className="settings-help">{t('Rules match an exact prefix in order. Without a match, YAM uses the classification model.')}</p>
    {classifications.map((rule,index)=>{
@@ -761,13 +794,18 @@ export function NativeCodexRoutingBar({sessionId,generation,active,available,inv
   <div className="pi-routing-status"><strong>{t('Codex routing')}</strong>
    <span role="status">{t(!available?'Background unavailable':!state?active?'Waiting for routing state…':'Session ended':phaseLabels[state.phase]??(active?'Native Codex session':'Session ended'))}</span>
    {state&&!state.enabled&&<span>{t('Routing is off')}</span>}
-   {target?.selection&&<span>{`${t('Planned route')}: ${t(target.selection.model)} · ${target.selection.effort}`}</span>}
-   {target&&<span>{modelText('Selected for this turn: {{value0}} · {{value1}}',target)}</span>}
+   {!dispatched&&target&&<span>{modelText('Selected for this turn: {{value0}} · {{value1}}',target)}</span>}
    {originalDispatch&&<span>{modelText('Dispatched model: {{value0}} · {{value1}}',originalDispatch)}</span>}
    {dispatched?.rerouted&&<span>{modelText('Rerouted model: {{value0}} · {{value1}}',dispatched)}</span>}
-   {target&&(target.classificationSource||target.classificationRule||target.executionRule)&&<span>{[classificationSourceText(target),routeMatchText(target)].filter(Boolean).join(' · ')}</span>}
   </div>
-  <label><span>{t('Session routing strategy')}</span><Select aria-label={t('Session routing strategy')} value={current} disabled={!state||!active||!available||busy||!!error} onChange={event=>{const policy=choices.find(row=>row.id===event.target.value);return control({policy:policy?{id:policy.id,name:policy.name,config:policy.setup}:null});}}>
+  {(target||dispatched)&&<details className="pi-routing-advanced" aria-label={t('Routing details')}><summary>{t('Routing details')}</summary>
+   {target?.selection&&<p>{`${t('Planned route')}: ${t(target.selection.model)} · ${target.selection.effort}`}</p>}
+   {target&&<p>{modelText('Selected for this turn: {{value0}} · {{value1}}',target)}</p>}
+   {originalDispatch&&<p>{modelText('Dispatched model: {{value0}} · {{value1}}',originalDispatch)}</p>}
+   {dispatched?.rerouted&&<p>{modelText('Rerouted model: {{value0}} · {{value1}}',dispatched)}</p>}
+   {target&&(target.classificationSource||target.classificationRule||target.executionRule)&&<p>{[classificationSourceText(target),routeMatchText(target)].filter(Boolean).join(' · ')}</p>}
+  </details>}
+  <label><span>{t('Session routing strategy')}</span><Select aria-label={t('Session routing strategy')} value={current} disabled={!state||!active||!available||busy||!!error} onChange={event=>{const policy=choices.find(row=>row.id===event.target.value);return control({policy:policy?{id:policy.id,name:policy.name,config:JSON.stringify(codexRoutingConfig(policy.setup))}:null});}}>
    <option value="">{t('Do not enable routing')}</option>
    {current&&!choices.some(row=>row.id===current)&&<option value={current} disabled>{state?.pending?.name??state?.name??t('Current launch policy')}</option>}
    {choices.map(row=><option key={row.id} value={row.id}>{row.name}</option>)}

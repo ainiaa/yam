@@ -1308,7 +1308,7 @@ mod tests {
         let prevented = std::cell::Cell::new(0);
         let (exited, exit) = std::sync::mpsc::channel();
         let cleanup = std::cell::RefCell::new(None);
-        assert!(crate::handle_gui_exit_with(
+        assert!(crate::app_lifecycle::handle_gui_exit_with(
             &manager,
             Some(&controller),
             Some(7),
@@ -1322,7 +1322,7 @@ mod tests {
             }
         ));
         let early = exit.recv_timeout(Duration::from_millis(50));
-        assert!(crate::handle_gui_exit_with(
+        assert!(crate::app_lifecycle::handle_gui_exit_with(
             &manager,
             Some(&controller),
             Some(7),
@@ -1349,7 +1349,7 @@ mod tests {
                 |_, _| async { panic!("closed controller cannot start") }
             )
             .is_err());
-        assert!(crate::handle_gui_exit_with(
+        assert!(crate::app_lifecycle::handle_gui_exit_with(
             &manager,
             Some(&controller),
             Some(7),

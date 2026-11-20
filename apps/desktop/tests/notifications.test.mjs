@@ -111,6 +111,7 @@ function notificationHarness(options = {}) {
    sends.push(args);
    if (options.sendGate) await options.sendGate;
    if (options.sendError) throw options.sendError;
+   return options.sendResult;
   }
   if (command === 'acknowledge_notification') {
    receipts.push(args);
@@ -124,6 +125,23 @@ function notificationHarness(options = {}) {
  return {notify,q,pending,sends,receipts,errors};
 }
 const notificationEvent = status => ({session_id:'s-one',status,exit_code:null,reason:null});
+test('project-suppressed delivery preserves the receipt and can deliver after unmute',async()=>{
+ const options={sendResult:false};
+ const h=notificationHarness(options);
+ await h.notify(notificationEvent('succeeded'));
+ assert.equal(h.receipts.length,0);
+ assert.equal(h.errors.some(Boolean),false);
+ options.sendResult=true;
+ await h.notify(notificationEvent('succeeded'));
+ assert.equal(h.sends.length,2);
+ assert.equal(h.receipts.length,1);
+});
+test('legacy background owners can acknowledge notifications after reconnecting',async()=>{
+ const h=notificationHarness({sendResult:null});
+ await h.notify(notificationEvent('succeeded'));
+ assert.equal(h.receipts.length,1);
+ assert.equal(h.errors.some(Boolean),false);
+});
 test('pausing preserves required notifications, excludes unrelated statuses and resumes pending delivery',async()=>{
  const ref={current:null};const h=notificationHarness({paused:true,pauseRef:ref});
  await h.notify(notificationEvent('running'));assert.equal(h.pending.size,0);

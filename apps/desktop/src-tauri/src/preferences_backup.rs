@@ -227,6 +227,14 @@ fn portable_policy(value: &Value) -> bool {
                         && !backups[..index].contains(key))
             })
     };
+    if let Some(effort) = value.get("classifierEffort") {
+        keys.push("classifierEffort");
+        if !effort.as_str().is_some_and(|level| {
+            ["off", "minimal", "low", "medium", "high", "xhigh", "max"].contains(&level)
+        }) {
+            return false;
+        }
+    }
     if let Some(channel) = value.get("classifierBilling") {
         keys.push("classifierBilling");
         if !channel.as_str().is_some_and(|channel| {
@@ -427,6 +435,24 @@ mod tests {
             "model":"auto","effort":"auto","billing":"subscription",
             "rules":{"v":1,"rules":rules,"fallback":{"model":"strong","effort":"high"}}
         }})
+    }
+    #[test]
+    fn portable_pi_policy_export_keeps_classifier_reasoning_and_rejects_invalid_values() {
+        for level in ["off", "minimal", "low", "medium", "high", "xhigh", "max"] {
+            let mut value = portable_backup();
+            value["piRouting"]["classifierEffort"] = level.into();
+            let encoded = encode(&value.to_string()).unwrap();
+            assert_eq!(serde_json::from_slice::<Value>(&encoded).unwrap(), value);
+        }
+        for invalid in [
+            Value::Null,
+            serde_json::json!("auto"),
+            serde_json::json!(42),
+        ] {
+            let mut value = portable_backup();
+            value["piRouting"]["classifierEffort"] = invalid;
+            assert!(encode(&value.to_string()).is_err());
+        }
     }
     #[test]
     fn portable_pi_policy_export_accepts_v2_and_keeps_v1_compatible() {

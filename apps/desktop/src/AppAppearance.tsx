@@ -40,7 +40,7 @@ export function AppAppearance({value,error,onSave,onClose,onTerminalSettings,onP
     <button type="button" onClick={()=>{cancelRead();setFailure(null);setDraft({...defaultAppPreferences});}}>{t('Restore defaults')}</button>
    </section>
    {(failure||error)&&<p role="alert">{t(failure||error||'')}</p>}</div>
-   <footer className="dialog-actions"><button type="button" onClick={onClose}>{t('Cancel')}</button><button type="submit" disabled={reading} className="primary-button">{t('Save settings')}</button></footer>
+   <footer className="dialog-actions"><button type="button" data-settings-close onClick={onClose}>{t('Cancel')}</button><button type="submit" disabled={reading} className="primary-button">{t('Save settings')}</button></footer>
   </form>
  </dialog>;
 }

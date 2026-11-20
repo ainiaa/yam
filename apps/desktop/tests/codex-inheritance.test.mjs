@@ -29,5 +29,5 @@ test('New session offers native default and optional gateway images only for Cod
  assert.match(app,/<option value="gateway_api">Gateway image API/);
  assert.match(app,/formAdapter===['"]codex['"]&&formLaunch.provider/);
  assert.match(app,/formLaunch.codex\?\.image_mode\?\?"native"/);
- assert.match(app,/<dt>Image generation<\/dt>/);
+ assert.match(readFileSync(new URL('../src/SessionConnection.tsx',import.meta.url),'utf8'),/<dt>Image generation<\/dt>/);
 });

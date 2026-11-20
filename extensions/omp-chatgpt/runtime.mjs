@@ -6,6 +6,7 @@ import {readFile,realpath} from 'node:fs/promises';
 import {dirname,join,parse} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {validateCredential} from './provider.mjs';
+import {homedir} from 'node:os';
 
 export function createPiCredentialReader({store,oauth,refresh}) {
   return async(signal=AbortSignal.timeout(30000))=>{
@@ -35,15 +36,20 @@ export async function findPiPackage(executable) {
 }
 
 export async function loadPiCredentialReader(packageDir,authPath) {
-  const pkg=JSON.parse(await readFile(join(packageDir,'package.json'),'utf8'));
-  if(pkg.name!=='@earendil-works/pi-coding-agent'||pkg.version!=='1.5.0')throw Error('This bridge requires the verified Pi 1.5.0 installation.');
-  const load=p=>import(pathToFileURL(join(packageDir,p)).href);
-  const [{AuthStorage},{refreshStoredOAuthCredential},{openaiChatGPTOAuth}]=await Promise.all([
-    load('dist/core/auth-storage.js'),
-    load('node_modules/@earendil-works/pi-ai/dist/auth/resolve.js'),
-    load('node_modules/@earendil-works/pi-ai/dist/auth/oauth/openai-chatgpt.js'),
-  ]);
-  return createPiCredentialReader({store:AuthStorage.create(authPath),oauth:openaiChatGPTOAuth,refresh:refreshStoredOAuthCredential});
+  const incompatible=()=>Error('This bridge requires compatible Pi authentication interfaces (AuthStorage.create, refreshStoredOAuthCredential and ChatGPT OAuth).');
+  try {
+    const pkg=JSON.parse(await readFile(join(packageDir,'package.json'),'utf8'));
+    if(pkg.name!=='@earendil-works/pi-coding-agent')throw incompatible();
+    const load=p=>import(pathToFileURL(join(packageDir,p)).href);
+    const [{AuthStorage},{refreshStoredOAuthCredential},{openaiChatGPTOAuth}]=await Promise.all([
+      load('dist/core/auth-storage.js'),
+      load('node_modules/@earendil-works/pi-ai/dist/auth/resolve.js'),
+      load('node_modules/@earendil-works/pi-ai/dist/auth/oauth/openai-chatgpt.js'),
+    ]);
+    if(typeof AuthStorage?.create!=='function'||typeof refreshStoredOAuthCredential!=='function'
+      ||typeof openaiChatGPTOAuth?.refresh!=='function'||typeof openaiChatGPTOAuth?.toAuth!=='function')throw incompatible();
+    return createPiCredentialReader({store:AuthStorage.create(authPath),oauth:openaiChatGPTOAuth,refresh:refreshStoredOAuthCredential});
+  }catch{throw incompatible();}
 }
 
 export function parseSystemProxy(text) {
@@ -60,7 +66,21 @@ export function launchEnvironment(inherited,proxy,packageDir) {
   for(const key of Object.keys(env)){
     if(/(?:API_KEY|OAUTH_TOKEN|ACCESS_TOKEN)$/.test(key)||/^PI_PROXY(?:_|$)/.test(key)||/^(?:https?|all|no)_proxy$/i.test(key))delete env[key];
   }
-  return {...env,PI_PROXY:proxy,HTTP_PROXY:proxy,HTTPS_PROXY:proxy,NO_PROXY:'localhost,127.0.0.1,::1',YAM_PI_PACKAGE_DIR:packageDir};
+  delete env.YAM_PI_PACKAGE_DIR;
+  return {...env,PI_PROXY:proxy,HTTP_PROXY:proxy,HTTPS_PROXY:proxy,NO_PROXY:'localhost,127.0.0.1,::1',...packageDir?{YAM_PI_PACKAGE_DIR:packageDir}:{}};
+}
+
+export function yamAuthDirectory(env=process.env){return env.YAM_OMP_AUTH_DIR||join(homedir(),'Library','Application Support','com.yam.desktop','sessions','omp-auth');}
+export function createYamSubprocessCredentialReader({node,authDir,env=process.env}){
+ let pending;
+ return ()=>{
+  if(!pending)pending=promisify(execFile)(node,['--use-env-proxy',fileURLToPath(new URL('./yam-auth-helper.mjs',import.meta.url)),authDir],{env,detached:true,timeout:90000,maxBuffer:65536,encoding:'utf8'})
+   .then(({stdout})=>validateCredential(JSON.parse(stdout))).catch(e=>{
+    let failure;try{failure=JSON.parse(String(e.stderr).trim().split('\n').at(-1));}catch{}
+    throw Object.assign(Error(failure?.code?.startsWith('YAM_')?failure.message:'YAM ChatGPT authorization unavailable; reconnect YAM or explicitly choose Pi backup.'),{code:failure?.code});
+   }).finally(()=>{pending=undefined;});
+  return pending;
+ };
 }
 
 export function createSubprocessCredentialReader({node,packageDir,authPath}) {

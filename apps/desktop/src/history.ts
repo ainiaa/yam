@@ -11,6 +11,9 @@ export type HistoryCapacity={metadata_bytes:number;log_bytes:number;scene_bytes:
 export type HistoryPolicy={auto_archive_30_days:boolean;auto_delete:false};
 export type DeletionPreview={preview_id:string;session_ids:string[];count:number;earliest_ended_at:number|null;latest_ended_at:number|null;bytes:number;scope:string};
 export type DeletionResult={preview_id:string;deleted_ids:string[];complete:boolean;issues:string[]};
+export function canArchiveSession(record:{status:string;ended_at:number|null}){
+ return ["succeeded","failed","stopped"].includes(record.status)||record.status==="needs_attention"&&record.ended_at!=null;
+}
 export function historyRequest(query:string,status:string,titles:Record<string,string>,projects:Project[],cursor:HistoryCursor|null=null){
  const needle=query.trim().toLowerCase();
  const request={page_size:100,cursor,query,status,matched_session_ids:needle?Object.entries(titles).filter(([,title])=>title.toLowerCase().includes(needle)).map(([id])=>id):[],matched_project_paths:needle?projects.filter(project=>project.name.toLowerCase().includes(needle)).map(project=>project.path):[]};
@@ -41,7 +44,7 @@ export function groupInbox(items:readonly InboxItem[],selectedId:string|null=nul
   const recent=receipts[0];
   const phase=current?.kind;
   const priority=phase==='needs_permission'?0:phase==='failed'||session.status==='failed'&&recent.kind==='failed'?1:2;
-  return {session,unreadCount:Math.max(session.agent.unread_count,ordered.length),agent,priority,
+  return {session,unreadCount:Math.max(session.agent.unread_count,ordered.length),agent,priority,actionable:!!current,
     ownerCurrentIds:hasOwnerEvidence?currentIds:undefined,receipts:current?[current,...receipts.filter(entry=>entry!==current)]:receipts};
  }).sort((first,second)=>first.priority-second.priority);
 }

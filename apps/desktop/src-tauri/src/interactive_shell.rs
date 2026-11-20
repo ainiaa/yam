@@ -49,6 +49,7 @@ fn configured_launch(
         .filter(|l| l.adapter == adapter && l.mode == "interactive")
         .cloned()
         .unwrap_or(super::AgentLaunch {
+            omp: None,
             adapter: adapter.into(),
             mode: "interactive".into(),
             extra_args: String::new(),
@@ -216,13 +217,16 @@ fn shell(
     ),
     String,
 > {
-    if !matches!(adapter, "pi" | "codex" | "claude" | "gemini" | "opencode") {
+    if !matches!(
+        adapter,
+        "pi" | "codex" | "claude" | "gemini" | "opencode" | "omp"
+    ) {
         return Err("Unsupported interactive Agent".into());
     }
     let helper = quote(helper.to_str().ok_or("Invalid helper path")?);
     let manifest = quote(manifest.to_str().ok_or("Invalid Agent launch path")?);
     let mut startup=format!("function yam-agent {{ local mode=${{1:-new}}; if (( $# )); then shift; fi; case \"$mode\" in new|resume|recover) ;; *) printf \"Usage: yam-agent new|resume|recover\\n\"; return 2;; esac; {helper} --yam-interactive-agent {manifest} \"$mode\" last -- \"$@\"; }}\n");
-    for name in ["pi", "codex", "claude", "gemini", "opencode"] {
+    for name in ["pi", "codex", "claude", "gemini", "opencode", "omp"] {
         startup.push_str(&format!("function {name} {{ case \"${{1-}}\" in --help|-h|--version|-v|-V) command {name} \"$@\";; *) {helper} --yam-interactive-agent {manifest} new {name} -- \"$@\";; esac; }}\n"));
     }
     startup.push_str(&format!(
@@ -489,7 +493,21 @@ fn command(
     }
     let executable = Path::new(manifest.argv.first().ok_or("Missing Agent executable")?);
     super::provider_launch::validate_project(&launch, cwd)?;
-    let mut builder = if mode == "resume" {
+    let mut builder = if launch.adapter == "omp" {
+        super::omp_router::prepare_launch(&mut launch, true)?;
+        let file = if mode == "resume" {
+            Some(super::omp_router::validate_session(
+                &manifest.root,
+                &launch,
+                native.ok_or("Missing OMP native conversation")?,
+                cwd,
+            )?)
+        } else {
+            None
+        };
+        let omp = super::find_executable("omp").ok_or("OMP is not available")?;
+        super::omp_router::command(&omp, &launch, &manifest.root, file.as_deref())?
+    } else if mode == "resume" {
         super::resume_command(
             executable,
             &launch,
@@ -817,6 +835,8 @@ fn run_members_with(
         owned.insert(pid, 0);
         live.retain(|member| *member != pid);
     }
+    // Snapshot helpers or short-lived children may have exited during this scan.
+    owned.retain(|pid, stamp| *stamp != 0 || process_exists(*pid));
     Ok(live)
 }
 #[cfg(unix)]
@@ -905,6 +925,9 @@ fn run(manifest: Manifest, mode: &str, extra: &[String]) -> Result<i32, String> 
         .current_dir(&cwd)
         .envs(builder.iter_extra_env_as_str())
         .env("YAM_AGENT_RUN", &run);
+    if manifest.launch.adapter == "omp" {
+        super::omp_router::sanitize_process(&mut child);
+    }
     // The Shell owns job control. Only the waiting helper ignores interactive signals.
     unsafe {
         libc::signal(libc::SIGINT, libc::SIG_IGN);
@@ -1022,7 +1045,7 @@ pub(super) fn entry(argv: &[std::ffi::OsString]) -> Option<Result<i32, String>> 
                 .filter(|s| {
                     matches!(
                         *s,
-                        "pi" | "codex" | "claude" | "gemini" | "opencode" | "last"
+                        "pi" | "codex" | "claude" | "gemini" | "opencode" | "omp" | "last"
                     )
                 })
                 .ok_or("Invalid Agent adapter")?;
@@ -1253,6 +1276,38 @@ mod lifecycle_tests {
     }
     #[test]
     fn interactive_shell_unidentified_child_does_not_interrupt_tracking_or_verified_cleanup() {
+        use std::os::unix::process::CommandExt;
+        let mut sibling = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        // The shared libtest process also owns other tests' children.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "interactive_shell::lifecycle_tests::interactive_shell_cleanup_fixture_worker",
+                "--nocapture",
+            ])
+            .process_group(0)
+            .output()
+            .unwrap();
+        let sibling_alive = sibling.try_wait().unwrap().is_none();
+        let _ = sibling.kill();
+        sibling.wait().unwrap();
+        assert!(
+            sibling_alive,
+            "The cleanup fixture must not signal sibling test jobs"
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    #[test]
+    #[ignore = "isolated cleanup worker; called only by its parent regression test"]
+    fn interactive_shell_cleanup_fixture_worker() {
         let mut first = std::process::Command::new("/bin/sleep")
             .arg("30")
             .spawn()
@@ -1432,6 +1487,27 @@ mod lifecycle_tests {
         assert_eq!(owned.get(&pid), Some(&0));
     }
     #[test]
+    fn interactive_shell_exited_snapshot_candidate_does_not_block_clean_exit() {
+        let root = unsafe { libc::getpgrp() } as u32;
+        let exited = i32::MAX as u32;
+        for group in [root, 1] {
+            let mut owned = BTreeMap::new();
+            let members = run_members_with(
+                root,
+                &mut owned,
+                || Ok(vec![(exited, root, group, false)]),
+                |pid| (pid == root).then_some(20),
+                |_| None,
+            )
+            .unwrap();
+            assert!(members.is_empty());
+            assert!(
+                owned.is_empty(),
+                "An already absent snapshot child must not leave unknown ownership: {owned:?}"
+            );
+        }
+    }
+    #[test]
     fn interactive_shell_scan_failure_keeps_every_previously_discovered_pid() {
         let root = unsafe { libc::getpgrp() } as u32;
         let candidate = u32::MAX - 1;
@@ -1485,7 +1561,12 @@ mod lifecycle_tests {
     #[test]
     fn interactive_shell_membership_snapshot_preserves_live_and_unreadable_children() {
         let root = unsafe { libc::getpgrp() } as u32;
-        let candidate = u32::MAX - 1;
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let candidate = child.id();
+        let mut results = Vec::new();
         for (group, stamp) in [(1, Some(20)), (1, None), (root, Some(20)), (root, None)] {
             let parent = if group == root { 1 } else { root };
             let mut owned = BTreeMap::new();
@@ -1503,8 +1584,17 @@ mod lifecycle_tests {
                 },
             )
             .unwrap();
-            assert_eq!(members.contains(&candidate), stamp.is_some());
-            assert_eq!(owned.get(&candidate), Some(&stamp.unwrap_or(0)));
+            results.push((
+                members.contains(&candidate),
+                owned.get(&candidate).copied(),
+                stamp,
+            ));
+        }
+        child.kill().unwrap();
+        child.wait().unwrap();
+        for (selected, owned, stamp) in results {
+            assert_eq!(selected, stamp.is_some());
+            assert_eq!(owned, Some(stamp.unwrap_or(0)));
         }
     }
     #[cfg(target_os = "macos")]
@@ -1760,6 +1850,7 @@ mod lifecycle_tests {
     #[test]
     fn interactive_shell_invocations_keep_configuration_without_accumulating_arguments() {
         let template = crate::AgentLaunch {
+            omp: None,
             adapter: "pi".into(),
             mode: "interactive".into(),
             extra_args: "--yam-small p/small".into(),
@@ -1907,6 +1998,7 @@ mod lifecycle_tests {
         let prepared = crate::agent_bridge::Prepared::lifecycle().unwrap();
         let manifest = Manifest {
             launch: crate::AgentLaunch {
+                omp: None,
                 adapter: "pi".into(),
                 mode: "interactive".into(),
                 extra_args: "--yam-small p/small --yam-strong p/strong".into(),
@@ -1972,7 +2064,7 @@ pub(super) fn start(
     let _guard = super::worktree_manager::start_guard()?;
     if !matches!(
         adapter,
-        "pi" | "codex" | "claude" | "gemini" | "opencode" | "last"
+        "pi" | "codex" | "claude" | "gemini" | "opencode" | "omp" | "last"
     ) || !matches!(mode, "new" | "resume")
         || extra.len() > 250
         || extra.iter().any(|s| s.len() > 65536 || s.contains('\0'))
@@ -2014,7 +2106,7 @@ pub(super) fn start(
     }
     super::validate_working_directory(cwd.to_str().ok_or("Invalid Agent directory")?)?;
     super::worktree_manager::prepare_start(&history.root, &cwd, None)?;
-    let launch = configured_launch(
+    let mut launch = configured_launch(
         active
             ._interactive_assets
             .as_ref()
@@ -2051,6 +2143,14 @@ pub(super) fn start(
     } else {
         None
     };
+    if adapter == "omp" {
+        if mode == "resume" {
+            launch.omp = record.summary.launch.as_ref().and_then(|l| l.omp.clone());
+        } else if let Some(options) = launch.omp.as_mut() {
+            options.session = None;
+        }
+        super::omp_router::prepare_launch(&mut launch, mode == "resume")?;
+    }
     super::provider_launch::validate_project(&launch, &cwd)?;
     let executable = super::find_executable(adapter).ok_or("Agent executable is unavailable")?;
     let env =
@@ -2319,6 +2419,7 @@ mod wire_tests {
         let ran = root.join("ran");
         let manifest = Manifest {
             launch: crate::AgentLaunch {
+                omp: None,
                 adapter: "pi".into(),
                 mode: "interactive".into(),
                 extra_args: String::new(),
@@ -2424,6 +2525,7 @@ mod wire_tests {
         let path = dir.join("launch.json");
         let manifest = Manifest {
             launch: crate::AgentLaunch {
+                omp: None,
                 adapter: "pi".into(),
                 mode: "interactive".into(),
                 extra_args: String::new(),

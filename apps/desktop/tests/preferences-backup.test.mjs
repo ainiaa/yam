@@ -1,28 +1,51 @@
 // Author: Jeff.Liu. Backups cannot contain credentials, session state, paths or prompts.
 import test from 'node:test';import assert from 'node:assert/strict';import {createPreferencesBackup,parsePreferencesBackup,preferencesImportWrites,applyPreferencesImport} from '../src/preferences-backup.ts';
 import {piSetupMapping,piSetupStorageKey,restorePiSetup,parsePiDraft,validatePiDraft} from '../src/pi-routing.ts';
+import {decodeLaunchTemplates} from '../src/launch-templates.ts';
 import {defaultRules} from '../src-tauri/pi/task-rules.mjs';
 const appearance={language:'en',theme:'nord',background:null,backgroundStrength:12};
 const provider={id:'custom',model:'gateway/model',base_url:'http://127.0.0.1:3425',api_key_env:'GATEWAY_KEY'};
 const row={id:'11111111-1111-4111-8111-111111111111',name:'Magpie',adapter:'codex',mode:'interactive',extra_args:'',prompt:'PRIVATE_PROMPT',command:null,provider};
+test('import synchronization attempts every committed key and permits a complete explicit retry',async()=>{
+ const api=await import('../src/preferences-backup.ts');
+ assert.equal(typeof api.publishImportedPreferences,'function');
+ const writes={'yam.terminalCursor.v1':'cursor','yam.terminalLineHeight.v1':'height','yam.launchTemplates.v1':'connections'};
+ const calls=[];
+ await assert.rejects(api.publishImportedPreferences(writes,async(key,value)=>{
+  calls.push([key,value]);
+  if(key==='yam.terminalCursor.v1')throw Error('PRIVATE_TRANSPORT');
+ }),{message:'Preferences were imported locally, but window synchronization is incomplete. Confirm import again to retry synchronization.'});
+ assert.deepEqual(calls,Object.entries(writes));
+ calls.length=0;
+ await api.publishImportedPreferences(writes,async(key,value)=>{calls.push([key,value]);});
+ assert.deepEqual(calls,Object.entries(writes));
+ await api.publishImportedPreferences({},()=>assert.fail('empty import sends nothing'));
+});
+test('repeating a locally committed connection import does not duplicate connections',()=>{
+ const backup=parsePreferencesBackup(JSON.stringify({version:1,settings:{},connections:[{name:'Magpie',adapter:'codex',provider}]}),true);
+ const first=preferencesImportWrites(backup,[],()=>row.id);
+ const templates=decodeLaunchTemplates(first['yam.launchTemplates.v1']);
+ const second=preferencesImportWrites(backup,templates,()=>assert.fail('retry must reuse the imported connection'));
+ assert.deepEqual(decodeLaunchTemplates(second['yam.launchTemplates.v1']),templates);
+});
 test('Pi catalog model names survive policy save and backup with version suffixes and Unicode',()=>{
  for(const key of ['p/model@2026','p/模型','p/'+'字'.repeat(510)]){
   const draft={gateway:null,small:key,strong:key,classifier:key,model:key,effort:'high'},models=[{key,name:key,levels:['high'],context_window:128000}];
   assert.equal(validatePiDraft(draft,models),null);
   const setup=JSON.stringify(piSetupMapping(draft,'')),backup=parsePreferencesBackup(createPreferencesBackup(k=>k===piSetupStorageKey?setup:null,[],true),true),writes=preferencesImportWrites(backup,[]);
-  assert.equal(parsePiDraft(restorePiSetup('',writes[piSetupStorageKey])).model,key);
+  const restored=parsePiDraft(restorePiSetup('',writes[piSetupStorageKey]));assert.equal(restored.model,'auto');assert.equal(restored.small,key);assert.equal(restored.strong,key);
  }
 });
 test('Pi portable model names retain length, whitespace and control validation',()=>{
  for(const key of ['p/'+'字'.repeat(511),'p/two words','p/line\nfeed','p/NUL\0','p/control\u0085','p/space\ufeff'])assert.throws(()=>piSetupMapping({gateway:null,small:key,strong:key,classifier:key,model:'auto',effort:'auto'},''));
 });
-test('Pi policy backup migrates roles, fixed selection and rules without exporting its machine gateway',()=>{
+test('Pi policy backup migrates roles and rules without fixed overrides without exporting its machine gateway',()=>{
  const rules=structuredClone(defaultRules);rules.rules.find(r=>r.task==='review').effort='max';
  const mapping=piSetupMapping({gateway:'https://PRIVATE_HOST.example/v1',small:'yam-codex/sol',strong:'yam-codex/strong',classifier:'yam-codex/sol',model:'yam-codex/strong',effort:'high',rules:JSON.stringify(rules)},'--yam-billing subscription');
  const raw=createPreferencesBackup(k=>k===piSetupStorageKey?JSON.stringify(mapping):null,[],true);assert.ok(!raw.includes('PRIVATE_HOST'));const backup=parsePreferencesBackup(raw,true);
  assert.equal(backup.version,2);assert.equal(backup.piRouting.billing,'subscription');assert.equal(backup.piRouting.rules.rules.find(r=>r.task==='review').effort,'max');
  const current=JSON.stringify({gateway:'http://127.0.0.1:4123',small:'p/local',strong:'p/local',classifier:'p/local'}),writes=preferencesImportWrites(backup,[],undefined,null,null,current),saved=JSON.parse(writes[piSetupStorageKey]);
- assert.equal(saved.gateway,'http://127.0.0.1:4123');assert.equal(saved.small,'yam-codex/sol');const args=restorePiSetup('',writes[piSetupStorageKey]),draft=parsePiDraft(args);assert.equal(draft.model,'yam-codex/strong');assert.equal(draft.effort,'high');assert.match(args,/--yam-billing subscription/);assert.match(validatePiDraft(draft,[],args),/unavailable/);
+ assert.equal(saved.gateway,'http://127.0.0.1:4123');assert.equal(saved.small,'yam-codex/sol');const args=restorePiSetup('',writes[piSetupStorageKey]),draft=parsePiDraft(args);assert.equal(draft.model,'auto');assert.equal(draft.effort,'auto');assert.match(args,/--yam-billing subscription/);assert.match(validatePiDraft(draft,[],args),/unavailable/);
  assert.equal(JSON.parse(preferencesImportWrites(backup,[])[piSetupStorageKey]).gateway,null);
 });
 test('legacy backups preserve Pi defaults while unknown Pi fields and malformed policies fail before writing',()=>{

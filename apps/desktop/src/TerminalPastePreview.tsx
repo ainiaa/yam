@@ -20,6 +20,6 @@ export function TerminalPasteSettings({mode,error,onApply,onClose,navigation}:{m
   <header className="dialog-header"><h2 id="terminal-paste-settings-title">{t("Paste settings")}</h2></header>
   {navigation?.(draft!==mode)}
   <section className="dialog-fields"><label>{t("Paste preview")}<Select aria-label={t("Paste preview policy")} value={draft} onChange={event=>setDraft(event.target.value as TerminalPasteMode)}><option value="risky">{t("Line breaks or control characters")}</option><option value="always">{t("Every paste")}</option><option value="never">{t("No preview")}</option></Select></label><p>{t("The default previews any CR or LF, including a trailing newline, and control characters other than tabs. This does not detect every dangerous command. All modes reject text over 128 KiB or invalid Unicode.")}</p>{failure&&<p role="alert">{t(failure)}</p>}</section>
-  <footer className="dialog-actions"><button type="button" onClick={onClose}>{t("Cancel")}</button><button type="button" onClick={save}>{t("Save paste settings")}</button></footer>
+  <footer className="dialog-actions"><button type="button" data-settings-close onClick={onClose}>{t("Cancel")}</button><button type="button" onClick={save}>{t("Save paste settings")}</button></footer>
  </dialog>;
 }

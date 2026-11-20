@@ -1,17 +1,20 @@
 // Author: Jeff.Liu.
-import {disablePiRouting,hasPiLaunchRouting,hasPiRoutingSelection,isPiRoutingOff,parsePiDraft,portablePiRoutingPolicy,restorePiSetup,validatePiDraft,type PiRoutingPolicy,type PiDraft,type PiModel} from './pi-routing.ts';
+import {buildPiArgs,disablePiRouting,hasPiLaunchRouting,hasPiRoutingSelection,isPiRoutingOff,parsePiDraft,portablePiRoutingPolicy,restorePiSetup,validatePiDraft,type PiRoutingPolicy,type PiDraft,type PiModel} from './pi-routing.ts';
 import {readCodexPolicy,validateCodexModelCatalog,type CodexPolicy} from '../src-tauri/pi/codex-route-config.mjs';
 import {defaultTierRules} from '../src-tauri/pi/task-rules.mjs';
+import {readRoutingPolicy as readOmpRoutingPolicy} from '../../../extensions/omp-chatgpt/routing-policy.mjs';
 
 export function codexRoutingConfig(raw:string):CodexPolicy{
- return raw?JSON.parse(raw):{connections:{'yam-codex':{billing:'subscription',native:true}},classifiers:[],executionGroups:[{},{},{}],rules:defaultTierRules};
+ const config:CodexPolicy=raw?JSON.parse(raw):{connections:{'yam-codex':{billing:'subscription',native:true}},classifiers:[],executionGroups:[{},{},{}],rules:defaultTierRules};
+ // Legacy fixed selections belong to routing-off sessions, never to an automatic strategy.
+ delete config.model;delete config.effort;return config;
 }
 export function codexRoutingDraft(raw:string):PiDraft{
  const config=codexRoutingConfig(raw),primary=config.executionGroups[0]??{};
  return {gateway:null,small:primary.small??'',medium:primary.medium??'',strong:primary.strong??'',classifier:config.classifiers[0]??'',
   classifierFallbacks:config.classifiers.slice(1),classifierBilling:config.connections[config.classifiers[0]?.split('/')[0]]?.billing==='paid'?'api':'subscription',
   executionFallbacks:Object.fromEntries(['small','medium','strong'].map(tier=>[tier,config.executionGroups.slice(1).map(group=>group[tier]??'')])),
-  model:config.model??'auto',effort:config.effort??'auto',rules:JSON.stringify(config.rules??defaultTierRules)};
+  classifierEffort:config.classifierEffort,model:'auto',effort:'auto',rules:JSON.stringify(config.rules??defaultTierRules)};
 }
 export function buildCodexRoutingConfig(raw:string,draft:PiDraft):string{
  const config=codexRoutingConfig(raw),tiers=['small','medium','strong'] as const;
@@ -19,19 +22,23 @@ export function buildCodexRoutingConfig(raw:string,draft:PiDraft):string{
  return JSON.stringify({...config,classifiers:[draft.classifier||draft.small,...draft.classifierFallbacks??[]].filter(Boolean),
   executionGroups:Array.from({length:count},(_,index)=>Object.fromEntries(tiers.flatMap(tier=>{
    const value=index===0?draft[tier]:draft.executionFallbacks?.[tier]?.[index-1];return value?[[tier,value]]:[];
-  }))),model:draft.model,effort:draft.effort,rules:JSON.parse(draft.rules??JSON.stringify(defaultTierRules))});
+  }))),classifierEffort:draft.classifierEffort,rules:JSON.parse(draft.rules??JSON.stringify(defaultTierRules))});
 }
 export function codexQuickSetupConfig(raw:string,piArgs:string,models:PiModel[]){
  if(hasPiRoutingSelection(codexRoutingDraft(raw)))return {args:raw,fixedEffort:false};
  let draft=parsePiDraft(piArgs);draft={...draft,medium:draft.medium||draft.small,rules:JSON.stringify(codexRoutingConfig(raw).rules??defaultTierRules)};
  let args=buildCodexRoutingConfig(raw,draft),fixedEffort=false;
- if(validateCodexDraft(args,models)){draft={...draft,effort:'high'};args=buildCodexRoutingConfig(raw,draft);fixedEffort=true;}
+ if(validateCodexDraft(args,models)){
+  const rules=JSON.parse(draft.rules!);
+  rules.rules=rules.rules.map((rule:Record<string,unknown>)=>({...rule,effort:'high'}));rules.fallback.effort='high';
+  draft={...draft,rules:JSON.stringify(rules)};args=buildCodexRoutingConfig(raw,draft);fixedEffort=true;
+ }
  const issue=validateCodexDraft(args,models);if(issue)throw Error(issue);
  return {args,fixedEffort};
 }
 export function validateCodexDraft(raw:string,models?:PiModel[],checkedConnections?:readonly string[]):string|null{
  try{
-  const config=readCodexPolicy(raw);
+  const config=readCodexPolicy(JSON.stringify(codexRoutingConfig(raw)));
   if(models)validateCodexModelCatalog(config,models,checkedConnections);
   return null;
  }catch(error){return error instanceof Error?error.message:'Invalid Codex routing configuration';}
@@ -95,15 +102,22 @@ export type LiveRoutingPolicy=PiRoutingPolicy&{id:string;name:string;gateway:str
 export function routingPolicyPayload(row:RoutingPolicy):LiveRoutingPolicy{
  const policy=row.adapter==='pi'&&portablePiRoutingPolicy(row.setup);
  if(!policy)throw Error('Invalid saved routing policies.');
- return {...policy,id:row.id,name:row.name,gateway:JSON.parse(row.setup).gateway};
+ return {...policy,model:'auto',effort:'auto',id:row.id,name:row.name,gateway:JSON.parse(row.setup).gateway};
 }
-export function supportsDesktopRouting(adapter:string){return adapter==='pi'||adapter==='codex';}
+export function supportsDesktopRouting(adapter:string){return adapter==='pi'||adapter==='codex'||adapter==='omp';}
+
+export function compatibleOmpPolicy(policy:string|null){
+ if(policy===null)return true;
+ try{readOmpRoutingPolicy(policy);return true;}catch{return false;}
+}
 
 export function compatibleRoutingPolicies(rows:RoutingPolicy[],adapter:string){
+ if(adapter==='omp')return rows.filter(row=>row.adapter==='pi'&&compatibleOmpPolicy(row.setup));
  return supportsDesktopRouting(adapter)?rows.filter(row=>row.adapter===adapter):[];
 }
 
 export function initialRoutingPolicy(adapter:string,args:string,rows:RoutingPolicy[]=[]){
+ if(adapter==='omp')return compatibleRoutingPolicies(rows,adapter)[0]?.id??'';
  if(adapter!=='pi'||isPiRoutingOff(args))return '';
  if(hasPiLaunchRouting(args))return launchRoutingPolicy;
  const migrated=rows.find(row=>row.id===migratedId&&row.adapter==='pi');
@@ -114,14 +128,25 @@ export function routingPolicyArgs(adapter:string,args:string,choice:string,rows:
  if(adapter!=='pi')return choice?null:args;
  try{
   if(!choice)return disablePiRouting(args);
-  if(choice===launchRoutingPolicy)return hasPiLaunchRouting(args)&&!validatePiDraft(parsePiDraft(args),undefined,args)?args:null;
+  if(choice===launchRoutingPolicy){const draft={...parsePiDraft(args),model:'auto',effort:'auto'};return hasPiLaunchRouting(args)&&!validatePiDraft(draft,undefined,args)?buildPiArgs(args,draft):null;}
   const policy=compatibleRoutingPolicies(rows,adapter).find(row=>row.id===choice);
-  return policy?restorePiSetup(args,policy.setup,true):null;
+  const restored=policy?restorePiSetup(args,policy.setup,true):null;
+  if(restored===null)return null;
+  const draft={...parsePiDraft(restored),model:'auto',effort:'auto'};
+  return validatePiDraft(draft,undefined,restored)?null:buildPiArgs(restored,draft);
  }catch{return null;}
 }
 
 export function codexRoutingLaunch(choice:string,rows:RoutingPolicy[]):CodexRoutingLaunch|null|undefined{
  if(!choice)return undefined;
  const row=compatibleRoutingPolicies(rows,'codex').find(policy=>policy.id===choice);
- return row&&validSetup('codex',row.setup)?{name:row.name,config:row.setup}:null;
+ const config=row?JSON.stringify(codexRoutingConfig(row.setup)):'';
+ return row&&validSetup('codex',config)?{name:row.name,config}:null;
+}
+
+export type OmpRoutingLaunch={policy:string|null;auth?:'yam'|'pi'};
+export function ompRoutingLaunch(choice:string,rows:RoutingPolicy[],auth?:'yam'|'pi'):OmpRoutingLaunch|null{
+ if(!choice)return {policy:null,...auth?{auth}:{}};
+ const row=compatibleRoutingPolicies(rows,'omp').find(row=>row.id===choice);
+ return row&&portablePiRoutingPolicy(row.setup)?{policy:row.setup,...auth?{auth}:{}}:null;
 }

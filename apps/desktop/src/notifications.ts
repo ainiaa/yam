@@ -15,11 +15,15 @@ export class NotificationQueue {
   clearFailure(id: string) { this.failures.delete(id); }
   resetRetries() { this.failures.clear(); }
   suppress(id: string) { this.completed.add(id); }
-  async deliver(id: string, send: () => Promise<void>, scope = id) {
+  async deliver(id: string, send: () => Promise<void | boolean>, scope = id) {
     if (this.completed.has(id)) return true;
     if (this.inFlight.has(scope)) return false;
     this.inFlight.add(scope);
-    try { await send(); this.completed.add(id); return true; }
+    try {
+      if (await send() === false) return false;
+      this.completed.add(id);
+      return true;
+    }
     finally { this.inFlight.delete(scope); }
   }
 }

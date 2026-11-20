@@ -3,7 +3,7 @@ export const TERMINAL_SCROLLBACK_LINES=2000;
 export type ReportedPromptNavigation={version:1;previous:boolean;next:boolean};
 export type ReportedCommand={sequence:number;phase:"unknown"|"prompt"|"input"|"running"|"complete";last_exit:number|null};
 export type ReportedCwd={path:string|null;sequence:number};
-export type TerminalFrame = {clear_display_version?:1|null;projection: {version:number;instance:string;session:string;terminal_version:string;serialize_version:string;revision:number;data:string;cols:number;rows:number;cursorX:number;viewport:number;buffer:string;retained_lines?:number};end_offset:number;status:string;persisted?:boolean;reported_prompt_navigation?:ReportedPromptNavigation|null;reported_command?:ReportedCommand|null;reported_cwd?:ReportedCwd|null};
+export type TerminalFrame = {clear_display_version?:1|null;projection: {version:number;instance:string;session:string;terminal_version:string;serialize_version:string;revision:number;data:string;cols:number;rows:number;cursorX:number;viewport:number;buffer:string;retained_lines?:number;plain_append?:boolean;control_revision?:number};end_offset:number;status:string;persisted?:boolean;reported_prompt_navigation?:ReportedPromptNavigation|null;reported_command?:ReportedCommand|null;reported_cwd?:ReportedCwd|null};
 type Target = {options:{scrollback?:number};resize(cols:number,rows:number):void;write(data:string,callback:()=>void):void;scrollToLine(line:number):void};
 export function terminalFrameRetention(projection:TerminalFrame["projection"]):number{
  const descriptor=Object.getOwnPropertyDescriptor(projection,"retained_lines");if(!descriptor)return TERMINAL_SCROLLBACK_LINES;
@@ -41,6 +41,18 @@ export async function applyTerminalFrame(terminal:Target,frame:TerminalFrame,ses
   if(viewport){viewport._isSyncing=syncing!;viewport._sync();}
  }
  terminal.scrollToLine(p.viewport);
+}
+
+// A snapshot alone cannot restore a pending parser token; unknown internals retain full-frame replay.
+type AppendProbe={rows:number;unicode:{activeVersion:string};modes:{insertMode:boolean;originMode:boolean;synchronizedOutputMode:boolean;wraparoundMode:boolean};buffer:{active:{type:string;cursorX:number;viewportY:number;baseY:number}};_core:{_inputHandler:{_parser?:{currentState:number};_utf8Decoder?:{interim:ArrayLike<number>};_stringDecoder?:{_interim:number};_charsetService?:{glevel:number;charset:unknown};_curAttrData?:{extended?:{urlId:number}};_activeBuffer?:{scrollTop:number;scrollBottom:number}}}};
+export function terminalTextAppendReady(terminal:unknown):boolean {
+ try{
+  const t=terminal as AppendProbe,h=t._core._inputHandler,b=t.buffer.active,m=t.modes;
+  return t.unicode.activeVersion==="6"&&h._parser?.currentState===0&&h._utf8Decoder?.interim?.[0]===0&&h._stringDecoder?._interim===0
+   &&h._charsetService?.glevel===0&&h._charsetService.charset===undefined&&h._curAttrData?.extended?.urlId===0
+   &&b.type==="normal"&&Number.isSafeInteger(b.viewportY)&&Number.isSafeInteger(b.baseY)&&b.viewportY>=0&&b.viewportY<=b.baseY&&h._activeBuffer?.scrollTop===0&&h._activeBuffer.scrollBottom===t.rows-1
+   &&m.insertMode===false&&m.originMode===false&&m.synchronizedOutputMode===false&&m.wraparoundMode===true;
+ }catch{return false;}
 }
 
 // Optional stdout metadata cannot make a valid terminal scene unavailable.

@@ -232,3 +232,18 @@ test('native CLI indexed and truecolor output survives backend snapshots without
   assert.equal(line.getCell(3).getChars(),'N');assert.ok(line.getCell(3).isFgDefault());
  }finally{restored.dispose();}
 }));
+
+test('write receipts and snapshots bind the same parser identity and every successful control mutation',async()=>fixture(async({call,greeting})=>{
+ await greeting;await call({op:'create',session:'append',cols:100,rows:24});
+ let revision=0;
+ const check=async()=>{const reply=await call({op:'write',session:'append',data:data('中文🙂\r\n')});assert.deepEqual(reply.data,{version:1,instance:'d'.repeat(64),session:'append',control_revision:revision});const frame=(await call({op:'snapshot',session:'append'})).data;assert.equal(frame.control_revision,revision);assert.equal(frame.plain_append,true);};
+ await check();await call({op:'resize',session:'append',cols:101,rows:25});revision++;await check();
+ await call({op:'viewport',session:'append',line:0});revision++;await check();
+ await call({op:'clear_display',session:'append',expected_instance:'d'.repeat(64)});revision++;await check();
+ const before=(await call({op:'snapshot',session:'append'})).data.control_revision;await call({op:'resize',session:'append',cols:0,rows:0});assert.equal((await call({op:'snapshot',session:'append'})).data.control_revision,before);
+ await call({op:'create',session:'restore-append',cols:100,rows:24});await call({op:'restore',session:'restore-append',data:data('old\r\n')});assert.equal((await call({op:'snapshot',session:'restore-append'})).data.control_revision,1);
+}));
+test('control generation saturates rather than wrapping into a previously accepted stream',async()=>{
+ const service=(await import('../terminal-service.cjs')).default;assert.equal(typeof service.advanceControl,'function');
+ for(const [value,expected] of [[0,1],[Number.MAX_SAFE_INTEGER-1,Number.MAX_SAFE_INTEGER],[Number.MAX_SAFE_INTEGER,Number.MAX_SAFE_INTEGER],[undefined,Number.MAX_SAFE_INTEGER],[-1,Number.MAX_SAFE_INTEGER],[NaN,Number.MAX_SAFE_INTEGER]]){const entry={controlRevision:value};service.advanceControl(entry);assert.equal(entry.controlRevision,expected);}
+});

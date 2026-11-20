@@ -41,13 +41,22 @@ fn terminal_environment_advertises_yam_colors_without_inheriting_launcher_suppre
     builder.env("TERM_PROGRAM", "parent-automation");
     configure_terminal_environment(&mut builder);
     assert_eq!(builder.get_env("NO_COLOR"), None);
-    assert_eq!(builder.get_env("COLORTERM"), Some(std::ffi::OsStr::new("truecolor")));
-    assert_eq!(builder.get_env("TERM_PROGRAM"), Some(std::ffi::OsStr::new("YAM")));
+    assert_eq!(
+        builder.get_env("COLORTERM"),
+        Some(std::ffi::OsStr::new("truecolor"))
+    );
+    assert_eq!(
+        builder.get_env("TERM_PROGRAM"),
+        Some(std::ffi::OsStr::new("YAM"))
+    );
     // Explicit profile/session environment is applied after terminal defaults.
     builder.env("NO_COLOR", "1");
     builder.env("COLORTERM", "profile-color");
     assert_eq!(builder.get_env("NO_COLOR"), Some(std::ffi::OsStr::new("1")));
-    assert_eq!(builder.get_env("COLORTERM"), Some(std::ffi::OsStr::new("profile-color")));
+    assert_eq!(
+        builder.get_env("COLORTERM"),
+        Some(std::ffi::OsStr::new("profile-color"))
+    );
 }
 
 #[cfg(target_os = "macos")]
