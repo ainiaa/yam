@@ -6,6 +6,7 @@ import {once} from 'node:events';
 import {mkdir,mkdtemp,realpath,rm,symlink} from 'node:fs/promises';
 import {join} from 'node:path';
 import * as routes from '../../../scripts/codex-auto-route.mjs';
+import {defaultTierRules} from '../src-tauri/pi/task-rules.mjs';
 
 const routingPolicy={connections:{native:{billing:'subscription',native:true}},classifiers:['native/classifier'],executionGroups:[{small:'native/light',medium:'native/regular',strong:'native/deep'}]};
 const catalog=['classifier','light','regular','deep'].map(model=>({key:'native/'+model,levels:['medium','high','max'],input:['text','image']}));
@@ -16,6 +17,69 @@ const mixedCatalog=[...catalog,{key:flashKey,levels:['high'],input:['text']}];
 const coding={...newAnswer,task:'coding',action:'write',readOnly:false};
 const workspaceSandbox={type:'workspaceWrite',writableRoots:['/tmp/approved'],networkAccess:false,excludeTmpdirEnvVar:true,excludeSlashTmp:true};
 const nativeSettings={cwd:'/tmp/native',approvalPolicy:'on-request',approvalsReviewer:'user',sandbox:workspaceSandbox,runtimeWorkspaceRoots:['/tmp/native'],disabledPluginIds:['plugin-a']};
+
+test('native turn applies a local classification before a model call only when facts are sufficient',async()=>{
+ const marker={prefix:'yam:review',task:'review',enabled:true};
+ let calls=0;
+ const turn={id:1,method:'turn/start',params:{threadId:'main',input:[{type:'text',text:'yam:review Inspect the concurrency change'}]}};
+ const make=(enabled,initial={})=>routes.createCodexTurnRouter({config:{...routingPolicy,rules:{...defaultTierRules,classificationRules:[{...marker,enabled}]}},
+  connectionName:'native',models:catalog,initial:{threadId:'main',pendingAfterTurnId:null,...initial},
+  classify:async()=>{calls++;return {answer:newAnswer,source:'A'};}});
+ const local=make(true);
+ assert.equal((await local.request(turn)).params.model,'deep');
+ assert.equal(calls,0);
+ assert.equal(local.state.decision.classificationSource,'rule');
+ assert.equal((await make(false).request(turn)).params.model,'light');
+ assert.equal(calls,1);
+ assert.equal((await make(true,{turnId:'previous'}).request(turn)).params.model,'regular');
+ assert.equal(calls,2);
+});
+
+test('native execution rules select per workspace and refuse unavailable collaboration before dispatch',async()=>{
+ const executionRules=[
+  {enabled:true,when:{task:'answer',workspace:'/tmp/a'},use:{model:'native/deep',effort:'max'}},
+  {enabled:true,when:{task:'answer',workspace:'/tmp/b'},use:{workflow:'deep-review'}},
+ ];
+ const make=(overrides={})=>routes.createCodexTurnRouter({config:{...routingPolicy,...overrides,rules:{...defaultTierRules,executionRules}},
+  connectionName:'native',models:catalog,initial:{threadId:'main'},classify:async()=>({answer:newAnswer,source:'A'})});
+ const turn=cwd=>({id:1,method:'turn/start',params:{threadId:'main',cwd,input:[{type:'text',text:'Explain HTTP 404'}]}});
+ const router=make(),selected=await router.request(turn('/tmp/a'));
+ assert.equal(selected.params.model,'deep');
+ assert.equal(selected.params.effort,'max');
+ assert.equal(router.state.decision.executionRule,1);
+ const fixed=await make({model:'native/light',effort:'medium'}).request(turn('/tmp/a'));
+ assert.equal(fixed.params.model,'light');
+ assert.equal(fixed.params.effort,'medium');
+ const unsupported=make();
+ await assert.rejects(unsupported.request(turn('/tmp/b')),/collaboration.*Pi/i);
+ assert.equal(unsupported.state.status,'idle');
+});
+
+test('unrelated workflow rules do not classify or block a fixed native paid model',async()=>{
+ const rules={...defaultTierRules,executionRules:[{enabled:true,when:{workspace:'/other'},use:{workflow:'deep-review'}}]};
+ let calls=0;
+ const router=routes.createCodexTurnRouter({config:{...mixedPolicy,rules,model:flashKey,effort:'high'},cwd:'/project',
+  connectionName:'local',models:mixedCatalog,initial:{threadId:'main'},
+  classify:async()=>{calls++;return {answer:null,source:'local'};}});
+ const preview=await router.preview('Explain the issue');
+ assert.equal(preview.model,flashKey);
+ assert.equal(preview.classificationSource,'fixed');
+ const turn={id:1,method:'turn/start',params:{threadId:'main',input:[{type:'text',text:'Explain the issue'}]}};
+ assert.equal((await router.request(turn)).params.model,flashKey.split('/').slice(1).join('/'));
+ assert.equal(calls,0);
+});
+
+test('a named execution rule does not silently move to another billing channel or image model',async()=>{
+ const input=[{type:'text',text:'Explain HTTP 404'},{type:'image',url:'data:image/png;base64,AA=='}];
+ const turn={id:1,method:'turn/start',params:{threadId:'main',input}};
+ const make=(model,config,models)=>routes.createCodexTurnRouter({config:{...config,rules:{...defaultTierRules,executionRules:[
+  {enabled:true,when:{task:'answer'},use:{model}},
+ ]}},connectionName:'native',models,initial:{threadId:'main'},classify:async()=>({answer:newAnswer,source:'A'})});
+ const withoutImage=catalog.map(model=>model.key==='native/light'?{...model,input:['text']}:model);
+ await assert.rejects(make('native/light',routingPolicy,withoutImage).request(turn),/does not support image input/);
+ const mixed={...mixedPolicy,executionGroups:[routingPolicy.executionGroups[0],{small:flashKey}]};
+ await assert.rejects(make(flashKey,mixed,mixedCatalog).request(turn),/billing channel/);
+});
 
 for(const enabled of [true,false])test(`a transient pending write failure blocks only that turn (routing ${enabled?'on':'off'})`,async()=>{
  const saved=[];let failPending=true;
@@ -49,7 +113,7 @@ test('native null turn overrides preserve confirmed permissions before switching
    sandboxPolicy:null,permissions:null,disabledPluginIds:null,collaborationMode:null,serviceTier:null};
   const turn=id=>({id,method:'turn/start',params:{threadId:'main',input:[{type:'text',text:'independent task'}],...inherited}});
   await router.request(turn(2));
-  await router.event({method:'turn/started',params:{threadId:'main',turn:{id:'first'}}});
+  await router.event({id:2,result:{turn:{id:'first',status:'inProgress'}}});
   await router.event({method:'turn/completed',params:{threadId:'main',turn:{id:'first',status:'completed'}}});
   answer=newAnswer;
   const respond=()=>{};
@@ -138,7 +202,7 @@ test('native routing switches subscription to gateway and back on one thread aft
   const next=await router.request(request);
   assert.equal(next.id,id);assert.equal(next.params.input,input);
   requests.push(next.params);
-  await router.event({method:'turn/started',params:{threadId:'main',turn:{id:'turn-'+id}}});
+  await router.event({id,result:{turn:{id:'turn-'+id,status:'inProgress'}}});
   await router.event({method:'turn/completed',params:{threadId:'main',turn:{id:'turn-'+id,status:'completed'}}});
  };
  await send(2);answer=coding;await send(3,{cwd:'/tmp/explicit',approvalPolicy:'on-request'});answer=newAnswer;await send(4);
@@ -231,11 +295,12 @@ test('native per-turn routing shares Pi new/continue decisions and respects coll
  let request=await router.request(turn());
  assert.equal(request.params.model,'light');assert.equal(request.params.effort,'medium');
  assert.deepEqual(request.params.collaborationMode.settings,{model:'light',reasoning_effort:'medium',developer_instructions:'keep'});
- await router.event({method:'turn/started',params:{threadId:'business',turn:{id:'one'}}});
+ await router.event({id:3,result:{turn:{id:'one',status:'inProgress'}}});
  await router.event({method:'turn/completed',params:{threadId:'business',turn:{id:'one',status:'interrupted'}}});
  answer={...newAnswer,intent:'continue',task:'coding',action:'write',readOnly:false};
  request=await router.request(turn());assert.equal(request.params.model,'light');
  await router.event({method:'turn/completed',params:{threadId:'business',turn:{id:'two',status:'completed'}}});
+ await router.event({id:3,result:{turn:{id:'two',status:'inProgress'}}});
  answer={...answer,intent:'new'};request=await router.request(turn());assert.equal(request.params.model,'regular');
  assert.equal(calls,3);assert.equal(request.params.approvalPolicy,'on-request');assert.equal(states.at(-1).status,'pending');
 });
@@ -246,6 +311,57 @@ test('temporary native title tasks bypass routing and cannot overwrite the busin
  await router.request({id:2,method:'thread/start',params:{ephemeral:true}});await router.event({id:2,result:{thread:{id:'title'}}});
  const title={id:3,method:'turn/start',params:{threadId:'title',input:[]}};
  assert.equal(await router.request(title),title);assert.equal(calls,0);
+});
+test('new image tasks can promote within the original billing channel without changing a pinned route',async()=>{
+ const textOnly=catalog.map(row=>row.key==='native/light'?{...row,input:['text']}:row);
+ const turn={id:1,method:'turn/start',params:{threadId:'main',input:[{type:'text',text:'summarize'},{type:'localImage',path:'/fixture.png'}]}};
+ const make=(config,models,answer=newAnswer,previous)=>routes.createCodexTurnRouter({
+  config,models,connectionName:'native',initial:{threadId:'main',previous},
+  classify:async()=>({answer,source:'A'}),switchConnection:async()=>assert.fail('unauthorized connection switch')});
+ const promoted=make(routingPolicy,textOnly);
+ const request=await promoted.request(turn);
+ assert.equal(request.params.model,'regular');
+ assert.equal(request.params.effort,'high');
+ assert.deepEqual(promoted.state.pendingRoute.previous,{v:2,model:'medium',effort:'high',identity:'native/regular'});
+ assert.equal((await make(routingPolicy,catalog).request(turn)).params.model,'light');
+ const paidOnly={...mixedPolicy,executionGroups:[{...mixedPolicy.executionGroups[0],strong:flashKey}]};
+ const paidCatalog=textOnly.map(row=>({...row,input:['text']})).concat({key:flashKey,levels:['medium','high'],input:['image']});
+ await assert.rejects(make(paidOnly,paidCatalog).request(turn),/image input/);
+ await assert.rejects(make({...routingPolicy,model:'native/light',effort:'medium'},textOnly).request(turn),/image input/);
+ await assert.rejects(make(routingPolicy,textOnly,{...newAnswer,intent:'continue'},{v:2,model:'small',identity:'native/light',effort:'medium'}).request(turn),/image input/);
+});
+test('a restored image follow-up keeps the last confirmed model even when route metadata was lost',async()=>{
+ const textOnly=catalog.map(row=>row.key==='native/light'?{...row,input:['text']}:row);
+ const turn={id:1,method:'turn/start',params:{threadId:'main',input:[{type:'localImage',path:'/fixture.png'}]}};
+ const restore=(model,effort)=>routes.createCodexTurnRouter({config:routingPolicy,models:textOnly,connectionName:'native',
+  initial:{threadId:'main',turnId:'recovered',status:'completed',nativeModel:{model,effort}},
+  classify:async()=>({answer:{...newAnswer,intent:'continue'},source:'A'})});
+ await assert.rejects(restore('light','medium').request(turn),/image input/);
+ const request=await restore('deep','high').request(turn);
+ assert.equal(request.params.model,'deep');
+ assert.equal(request.params.effort,'high');
+});
+test('recovering an unacknowledged turn does not reuse an earlier native model without confirmation',async()=>{
+ const turn={id:2,method:'turn/start',params:{threadId:'main',input:[{type:'localImage',path:'/fixture.png'}]}};
+ for(const resumedModel of [undefined,'light','deep']){
+  const router=routes.createCodexTurnRouter({config:routingPolicy,models:catalog,connectionName:'native',
+   initial:{threadId:'main',status:'pending',turnId:null,pendingAfterTurnId:'old',
+    nativeModel:{model:'light',effort:'medium'},pendingRoute:{nativeModel:{model:'deep',effort:'high'}}},
+   classify:async()=>({answer:{...newAnswer,intent:'continue'},source:'A'})});
+  await router.request({id:1,method:'thread/resume',params:{threadId:'main'}});
+  await router.event({id:1,result:{thread:{id:'main',turns:[{id:'recovered',status:'completed'}]},
+   ...(resumedModel?{model:resumedModel,reasoningEffort:'high'}:{})}});
+  assert.equal(router.state.turnId,'recovered');
+  assert.equal(router.state.nativeModel.model,resumedModel??'light');
+  await assert.rejects(router.request(turn),/model or reasoning level is unknown/);
+  const legacy=router.state;delete legacy.turnModelUnconfirmed;
+  const reopened=routes.createCodexTurnRouter({config:routingPolicy,models:catalog,connectionName:'native',initial:legacy,
+   classify:async()=>({answer:{...newAnswer,intent:'continue'},source:'A'})});
+  await assert.rejects(reopened.request(turn),/model or reasoning level is unknown/);
+  await router.request({...turn,id:3,params:{...turn.params,input:[]}});
+  await router.event({id:3,result:{turn:{id:'confirmed',status:'completed'}}});
+  assert.equal(router.state.turnModelUnconfirmed,false);
+ }
 });
 test('native router refuses unsupported effort and cross-connection changes before dispatch',async()=>{
  assert.equal(typeof routes.createCodexTurnRouter,'function');
@@ -270,15 +386,18 @@ test('a fixed native model and effort do not invoke an unused classifier',async(
  assert.equal(request.params.model,'deep');assert.equal(request.params.effort,'max');
 });
 test('native rejection clears only a rejected pending dispatch and rerouting is reported explicitly',async()=>{
- const router=routes.createCodexTurnRouter({config:routingPolicy,connectionName:'native',models:catalog,initial:{threadId:'main',status:'completed'},classify:async()=>({answer:newAnswer,source:'A'})});
+ let failSave=true;
+ const router=routes.createCodexTurnRouter({config:routingPolicy,connectionName:'native',models:catalog,initial:{threadId:'main',status:'completed'},classify:async()=>({answer:newAnswer,source:'A'}),
+  save:async state=>{if(state.status==='failed'&&failSave){failSave=false;throw Error('transient rejection save failure');}}});
  const request={id:15,method:'turn/start',params:{threadId:'main',input:[]}};
  await router.request(request);assert.equal(router.state.dispatched,null);
  await router.event({id:15,error:{code:-32602,message:'invalid model'}});assert.equal(router.state.status,'failed');
  await router.request({...request,id:16});
- await router.event({method:'turn/started',params:{threadId:'main',turn:{id:'two'}}});
+ await router.event({id:16,result:{turn:{id:'two',status:'inProgress'}}});
  assert.equal(router.state.dispatched.model,'native/light');
  await router.event({method:'model/rerouted',params:{threadId:'main',turnId:'two',toModel:'different',reason:'capacity'}});
  assert.equal(router.state.dispatched.model,'native/different');assert.equal(router.state.dispatched.rerouted,true);
+ assert.deepEqual(router.state.dispatched.original,{model:'native/light',effort:router.state.decision.effort});
  await router.event({method:'turn/completed',params:{threadId:'main',turn:{id:'two',status:'completed'}}});
  router.setEnabled(false);const raw={...request,id:17};assert.equal(await router.request(raw),raw);assert.equal(router.state.dispatched,null);
 });
@@ -541,13 +660,33 @@ test('native routing bar renders planned and dispatched models and switches Code
  const saved=JSON.stringify(routingPolicy);
  const render=(next=state,launchConfig)=>{at=0;slots[0]=next;return component({sessionId:'s',generation:'g',active:true,available:true,launchConfig,invoke:async(command,args)=>{calls.push({command,args});return {state};},policies:[{id:'c',name:'Codex policy',adapter:'codex',setup:saved},{id:'p',name:'Pi policy',adapter:'pi',setup:'{}'}]});};
  const tree=render();
+ const visible=n=>!n||typeof n!=='object'?typeof n==='string'?n:'':(n.type==='details'&&!n.props.open?n.children.filter(c=>c?.type==='summary'):n.children).map(visible).join(' ');
  const all=n=>[n,...(n?.children??[]).filter(x=>x&&typeof x==='object').flatMap(all)];
  assert.match(JSON.stringify(tree),/Dispatched model: native\/light/);assert.doesNotMatch(JSON.stringify(tree),/Pi policy/);
  const gateway='yam-codex/auto/deepseek-v4-flash',launchConfig=JSON.stringify({...mixedPolicy,connections:{native:routingPolicy.connections.native,'yam-codex':mixedPolicy.connections.local},executionGroups:[{small:gateway,medium:gateway,strong:'native/deep'}]});
  const dispatched=JSON.stringify(render({...state,dispatched:{model:gateway,effort:'high'}},launchConfig));
  assert.match(dispatched,/Dispatched model: Local gateway · Automatic routing · deepseek-v4-flash · high/);
  assert.doesNotMatch(dispatched,/yam-codex/);
- const planned=JSON.stringify(render({...state,policyId:'c',dispatched:null}));
+ const finishedTree=render({...state,phase:'completed',target:{...state.target,selection:{model:'small',effort:'medium'}},
+  dispatched:{model:'native/deep',effort:'unknown',rerouted:true,original:state.dispatched}});
+ const finished=JSON.stringify(finishedTree);
+ assert.match(visible(finishedTree),/Dispatched model: native\/light.*Rerouted model: native\/deep/);
+ assert.doesNotMatch(visible(finishedTree),/Planned route:|Selected for this turn:/);
+ assert.match(finished,/Turn completed/);
+ assert.match(finished,/Planned route: small · medium/);
+ assert.match(finished,/Selected for this turn: native\/light · medium/);
+ assert.match(finished,/Dispatched model: native\/light · medium/);
+ assert.match(finished,/Rerouted model: native\/deep · Reasoning not confirmed/);
+ assert.match(JSON.stringify(render({...state,phase:'failed'})),/Turn failed/);
+ assert.match(JSON.stringify(render({...state,phase:'interrupted'})),/Turn interrupted/);
+ const disabled=JSON.stringify(render({...state,enabled:false,phase:'completed',error:'Lifecycle bridge unavailable'}));
+ assert.match(disabled,/Turn completed/);assert.match(disabled,/Routing is off/);
+ assert.match(disabled,/Dispatched model: native\/light/);
+
+ assert.doesNotMatch(JSON.stringify(render({...state,phase:'classifying'})),/Dispatched model|Selected for this turn/);
+ const plannedTree=render({...state,policyId:'c',dispatched:null}),planned=JSON.stringify(plannedTree);
+ assert.doesNotMatch(visible(tree),/Selected for this turn:|Planned route:/);
+ assert.match(visible(plannedTree),/Selected for this turn:/);assert.doesNotMatch(visible(plannedTree),/Dispatched model:/);
  assert.match(planned,/Selected for this turn: Codex native · ChatGPT subscription · light · medium/);
  await all(tree).find(n=>n.type==='select').props.onChange({target:{value:'c'}});
  assert.equal(calls[0].args.request.revision,8);assert.deepEqual(calls[0].args.request.data,{policy:{id:'c',name:'Codex policy',config:saved}});
@@ -572,7 +711,7 @@ test('an explicit gateway classifier is allowed but never mixed with subscriptio
 test('a native turn with routing off clears the earlier routed continuation choice',async()=>{
  const router=routes.createCodexTurnRouter({config:routingPolicy,connectionName:'native',models:catalog,classify:async()=>({answer:newAnswer,source:'A'}),initial:{threadId:'thread',status:'completed',previous:{v:2,model:'strong',effort:'high',identity:'native/deep'},previousPrompt:'old task'}});
  router.setEnabled(false);const message={id:1,method:'turn/start',params:{threadId:'thread',model:'regular',input:[{type:'text',text:'another task'}]}};
- assert.deepEqual(await router.request(message),message);await router.event({method:'turn/started',params:{threadId:'thread',turn:{id:'off'}}});assert.equal(router.state.previous,null);assert.equal(router.state.previousPrompt,'');
+ assert.deepEqual(await router.request(message),message);await router.event({id:1,result:{turn:{id:'off',status:'inProgress'}}});assert.equal(router.state.previous,null);assert.equal(router.state.previousPrompt,'');
 });
 
 test('resume reconciles a persisted working turn using paginated native turn history',async()=>{
@@ -654,7 +793,7 @@ test('native model snapshot follows accepted manual settings and never a rejecte
  assert.deepEqual(router.state.nativeModel,{model:'light',effort:'medium'});
  await router.event({id:1,error:{code:-32602}});assert.equal(router.state.nativeModel.model,'light');
  await router.request({id:2,method:'turn/start',params:{threadId:'main',collaborationMode:{settings:{model:'deep',reasoning_effort:'max'}},input:[]}});
- await router.event({method:'turn/started',params:{threadId:'main',turn:{id:'turn'}}});assert.deepEqual(router.state.nativeModel,{model:'deep',effort:'max'});
+ await router.event({id:2,result:{turn:{id:'turn',status:'inProgress'}}});assert.deepEqual(router.state.nativeModel,{model:'deep',effort:'max'});
  await router.event({method:'model/rerouted',params:{threadId:'main',turnId:'turn',toModel:'other'}});assert.deepEqual(router.state.nativeModel,{model:'other',effort:null});
 });
 
@@ -697,7 +836,9 @@ test('uncorrelated pending recovery never attributes the older completed turn to
 test('native pending retains its prior turn anchor and terminal-first acceptance records actual dispatch',async()=>{
  const router=routes.createCodexTurnRouter({config:routingPolicy,connectionName:'native',models:catalog,initial:{threadId:'main',status:'completed',turnId:'old'},classify:async()=>({answer:newAnswer,source:'A'})});
  await router.request({id:1,method:'turn/start',params:{threadId:'main',input:[]}});assert.equal(router.state.pendingAfterTurnId,'old');
- await router.event({method:'turn/completed',params:{threadId:'main',turn:{id:'new',status:'completed'}}});assert.deepEqual(router.state.dispatched,{model:'native/light',effort:'medium'});
+ await router.event({method:'turn/completed',params:{threadId:'main',turn:{id:'new',status:'completed'}}});
+ await router.event({id:1,result:{turn:{id:'new',status:'inProgress'}}});
+ assert.deepEqual(router.state.dispatched,{model:'native/light',effort:'medium'});
 });
 
 test('changing native strategy clears only the old continuation binding',async()=>{
@@ -711,7 +852,7 @@ test('legacy Codex continuation retains the actual backup and version like Pi',a
  const config={...routingPolicy,rules:defaultRules,executionGroups:[{small:'native/missing',strong:'native/deep'},{small:'native/light'}]};
  const router=routes.createCodexTurnRouter({config,connectionName:'native',models:catalog,initial:{threadId:'main',status:'idle'},classify:async()=>({answer,source:'A'})});
  assert.equal((await router.request({id:1,method:'turn/start',params:{threadId:'main',input:[]}})).params.model,'light');
- await router.event({method:'turn/completed',params:{threadId:'main',turn:{id:'one',status:'completed'}}});assert.equal(router.state.previous.v,1);
+ await router.event({id:1,result:{turn:{id:'one',status:'completed'}}});assert.equal(router.state.previous.v,1);
  answer={...newAnswer,intent:'continue',context:'dependent'};assert.equal((await router.request({id:2,method:'turn/start',params:{threadId:'main',input:[]}})).params.model,'light');
 });
 
@@ -790,6 +931,18 @@ test('live policy checks the fresh catalog and retains the previous policy when 
   assert.equal(turn.params.model,reason?'light':'new');
  }
 });
+test('live catalog validation cannot satisfy a tier with a backup in a different isolated profile',async()=>{
+ const config={...routingPolicy,connections:{...routingPolicy.connections,other:{billing:'subscription',home:'/private/other'}},
+  classifiers:[],model:'native/light',effort:'high'};
+ const proposed={...config,model:'auto',executionGroups:[{...config.executionGroups[0],small:'native/classifier',medium:'native/light'},{medium:'other/backup'}]};
+ const models=catalog.map(row=>row.key==='native/light'?{...row,levels:['medium']}:row).concat({key:'other/backup',levels:['high']});
+ const router=routes.createCodexTurnRouter({config,connectionName:'native',models:catalog,initial:{threadId:'main',policyId:'previous'},
+  loadCatalog:async()=>({models,checkedConnections:['native','other']})});
+ await router.queuePolicy({id:'unusable',name:'Unusable',config:JSON.stringify(proposed)});
+ await router.settlePolicy();
+ assert.equal(router.state.policyId,'previous');
+ assert.match(router.state.error,/unsupported reasoning high/);
+});
 
 test('cancelling a live policy while its catalog is loading discards the late result',async()=>{
  let entered,release;
@@ -805,6 +958,62 @@ test('cancelling a live policy while its catalog is loading discards the late re
  assert.equal(router.state.pendingPolicy,null);
  assert.equal(router.state.policyId,null);
  assert.equal((await router.request({id:1,method:'turn/start',params:{threadId:'main',input:[]}})).params.model,'light');
+});
+
+test('a submission awaiting a rejected subscription policy never falls back to the old paid route',async()=>{
+ const config={...mixedPolicy,classifiers:[],model:flashKey,effort:'high'};
+ let finishCatalog;
+ const catalogCheck=new Promise(resolve=>finishCatalog=resolve);
+ const router=routes.createCodexTurnRouter({config,connectionName:'local',models:mixedCatalog,
+  initial:{threadId:'main',policyId:'paid'},switchConnection:async()=>assert.fail('unexpected connection change'),
+  loadCatalog:()=>catalogCheck});
+ await router.queuePolicy({id:'subscription',name:'Subscription',config:JSON.stringify({...config,model:'native/deep'})});
+ const turn=id=>({id,method:'turn/start',params:{threadId:'main',input:[]}});
+ const submitted=router.request(turn(1));
+ finishCatalog({models:[],checkedConnections:[]});
+ await assert.rejects(submitted,/catalog unavailable/);
+ assert.equal(router.state.policyId,'paid');
+ assert.equal(router.state.status,'idle');
+ assert.match(router.state.error,/catalog unavailable/);
+ assert.equal((await router.request(turn(2))).params.model,'auto/deepseek-v4-flash');
+});
+
+test('interrupting a submission waiting for lifecycle synchronization prevents dispatch',async()=>{
+ let release,entered=false;
+ const barrier=new Promise(resolve=>release=resolve);
+ const config={...routingPolicy,classifiers:[],model:'native/light',effort:'high'};
+ const saved=[],responses=[];
+ const router=routes.createCodexTurnRouter({config,connectionName:'native',models:catalog,initial:{threadId:'main'},
+  beforeDispatch:()=>{entered=true;return barrier;},save:async state=>saved.push(state)});
+ const turn=id=>({id,method:'turn/start',params:{threadId:'main',input:[]}});
+ const submitted=router.request(turn(1));
+ const outcome=submitted.then(()=>null,error=>error.message);
+ await new Promise(setImmediate);
+ assert.equal(entered,true);
+ const interrupt=await router.request({id:2,method:'turn/interrupt',params:{threadId:'main'}},{respond:result=>responses.push(result)});
+ assert.equal(interrupt,null);
+ assert.deepEqual(responses,[{id:2,result:{}}]);
+ assert.match(await Promise.race([outcome,new Promise(resolve=>setImmediate(()=>resolve('still waiting')))]),/cancelled before task dispatch/);
+ assert.equal(saved.some(state=>state.status==='pending'),false);
+ release();
+ assert.equal((await router.request(turn(3))).params.model,'light');
+});
+
+test('a strategy failure during lifecycle synchronization prevents paid dispatch',async()=>{
+ const config={...mixedPolicy,classifiers:[],model:flashKey,effort:'high'};
+ let releaseLifecycle;
+ const lifecycle=new Promise(resolve=>releaseLifecycle=resolve);
+ const router=routes.createCodexTurnRouter({config,connectionName:'local',models:mixedCatalog,
+  initial:{threadId:'main',policyId:'paid'},switchConnection:async()=>assert.fail('unexpected connection change'),
+  beforeDispatch:()=>lifecycle,loadCatalog:async()=>({models:[],checkedConnections:[]})});
+ await router.queuePolicy({id:'subscription',name:'Subscription',config:JSON.stringify({...config,model:'native/deep'})});
+ const submitted=router.request({id:1,method:'turn/start',params:{threadId:'main',input:[]}});
+ await router.settlePolicy();
+ releaseLifecycle();
+ await assert.rejects(submitted,/catalog unavailable/);
+ assert.equal(router.state.policyId,'paid');
+ assert.equal(router.state.status,'idle');
+ assert.match(router.state.error,/catalog unavailable/);
 });
 
 test('interrupting a submission waiting for a strategy catalog prevents dispatch',async()=>{
@@ -854,4 +1063,81 @@ test('persisted native pending policy validates the original connection and surv
  const idle=make({initial:{threadId:'main',status:'idle'}});await assert.rejects(idle.queuePolicy({name:'wrong',id:'x',config:JSON.stringify(wrong)}),/connection/i);
  let entered;const ready=new Promise(resolve=>entered=resolve);const router=make({initial:{threadId:'main',status:'completed'},classify:({signal})=>new Promise((resolve,reject)=>{entered();signal.addEventListener('abort',()=>reject(Error('cancelled')),{once:true});})});
  const pending=router.request({id:1,method:'turn/start',params:{threadId:'main',input:[]}});await ready;await router.queuePolicy({});await router.request({id:2,method:'turn/interrupt',params:{threadId:'main'}},{respond:()=>{}});await assert.rejects(pending,/cancelled/);assert.deepEqual(router.state.pendingPolicy,{});
+});
+
+test('native routing clears the previous route when the attached thread identity changes',async()=>{
+ const router=routes.createCodexTurnRouter({config:routingPolicy,connectionName:'native',models:catalog,
+  initial:{threadId:'old',status:'completed',decision:{model:'native/light',effort:'medium'},dispatched:{model:'native/light',effort:'medium'}}});
+ await router.request({id:123,method:'thread/resume',params:{threadId:'old'}});
+ await router.event({id:123,result:{thread:{id:'next',turns:[]}}});
+ assert.equal(router.state.threadId,'next');
+ assert.equal(router.state.decision,null);
+ assert.equal(router.state.dispatched,null);
+});
+
+test('a late completion of the previous turn cannot consume a pending new dispatch',async()=>{
+ const router=routes.createCodexTurnRouter({config:routingPolicy,connectionName:'native',models:catalog,
+  initial:{threadId:'main',status:'completed',turnId:'previous'},classify:async()=>({answer:newAnswer,source:'A'})});
+ await router.request({id:99,method:'turn/start',params:{threadId:'main',input:[]}});
+ await router.event({method:'turn/completed',params:{threadId:'main',turn:{id:'previous',status:'completed'}}});
+ assert.equal(router.state.status,'pending');
+ assert.equal(router.state.turnId,null);
+ assert.equal(router.state.dispatched,null);
+ await router.event({id:99,result:{turn:{id:'new',status:'inProgress'}}});
+ assert.equal(router.state.turnId,'new');
+ assert.equal(router.state.dispatched.model,'native/light');
+});
+
+test('a terminal event is attached only to a turn confirmed by the active request',async()=>{
+ let failSave=true;
+ const router=routes.createCodexTurnRouter({config:routingPolicy,connectionName:'native',models:catalog,
+  initial:{threadId:'main',status:'completed',turnId:'second'},classify:async()=>({answer:newAnswer,source:'A'}),
+  save:async state=>{if(state.turnId==='third'&&failSave){failSave=false;throw Error('transient state save failure');}}});
+ await router.request({id:99,method:'turn/start',params:{threadId:'main',input:[]}});
+ const finish=id=>router.event({method:'turn/completed',params:{threadId:'main',turn:{id,status:'completed'}}});
+ await finish('first');
+ await router.event({method:'turn/started',params:{threadId:'main',turn:{id:'first'}}});
+ assert.equal(router.state.status,'pending');
+ assert.equal(router.state.dispatched,null);
+ await finish('third');
+ await router.event({method:'model/rerouted',params:{threadId:'main',turnId:'third',toModel:'different'}});
+ for(let index=0;index<10;index++)await finish('historical-'+index);
+ await router.event({method:'thread/status/changed',params:{threadId:'main',status:{type:'idle'}}});
+ assert.equal(router.state.status,'pending');
+ await router.event({id:99,result:{turn:{id:'third',status:'inProgress'}}});
+ assert.equal(router.state.turnId,'third');
+ assert.equal(router.state.status,'completed');
+ assert.deepEqual(router.state.dispatched,{model:'native/different',effort:'unknown',rerouted:true,original:{model:'native/light',effort:'medium'}});
+});
+
+test('native lifecycle reserves the owner before classification and cancels an undispatched request',async()=>{
+ const sent=[],bridge=routes.createNativeLifecycleBridge({deliver:async(...args)=>sent.push(args)});
+ const router=routes.createCodexTurnRouter({config:routingPolicy,connectionName:'native',models:catalog,
+  initial:{threadId:'main',status:'completed',turnId:'old',dispatched:{model:'native/light',effort:'medium'}},
+  beforeDispatch:()=>bridge.sync(router.state),beginDispatch:thread=>bridge.reserve(thread),
+  cancelDispatch:thread=>bridge.cancel(thread),classify:async()=>{
+   assert.deepEqual(sent.at(-1),['RoutingStarted','main',undefined]);
+   await router.event({method:'turn/completed',params:{threadId:'main',turn:{id:'old',status:'completed'}}});
+   await router.event({method:'model/rerouted',params:{threadId:'main',turnId:'old',toModel:'late'}});
+   assert.equal(router.state.status,'classifying');
+   throw Error('classifier unavailable');
+  }});
+ await assert.rejects(router.request({id:99,method:'turn/start',params:{threadId:'main',input:[]}}),/classifier unavailable/);
+ assert.deepEqual(sent.at(-1),['RoutingCancelled','main',undefined]);
+ assert.equal(router.state.turnId,'old');
+ assert.deepEqual(router.state.dispatched,{model:'native/late',effort:'unknown',rerouted:true,original:{model:'native/light',effort:'medium'}});
+});
+
+test('same-thread recovery does not replace a live dispatch, and late reroute updates that completed turn',async()=>{
+ const router=routes.createCodexTurnRouter({config:routingPolicy,connectionName:'native',models:catalog,
+  initial:{threadId:'main',status:'completed',turnId:'old'},classify:async()=>({answer:newAnswer,source:'A'})});
+ await router.request({id:99,method:'turn/start',params:{threadId:'main',input:[]}});
+ await router.request({id:100,method:'thread/resume',params:{threadId:'main'}});
+ await router.event({id:100,result:{thread:{id:'main',status:{type:'idle'},turns:[{id:'old',status:'completed'}]}}});
+ assert.equal(router.state.status,'pending');
+ await router.event({id:99,result:{turn:{id:'new',status:'completed'}}});
+ await router.event({method:'model/rerouted',params:{threadId:'main',turnId:'new',toModel:'different'}});
+ assert.equal(router.state.turnId,'new');
+ assert.equal(router.state.status,'completed');
+ assert.deepEqual(router.state.dispatched,{model:'native/different',effort:'unknown',rerouted:true,original:{model:'native/light',effort:'medium'}});
 });

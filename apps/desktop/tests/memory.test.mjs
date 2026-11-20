@@ -48,7 +48,7 @@ test('a hung refresh expires the displayed total without waiting for the next po
  const text=readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8');
  const tree=ts.createSourceFile('App.tsx',text,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
  let memory;const parents=[];function visit(node,ancestors=[]){
-  if(ts.isJsxElement(node)&&node.openingElement.getText(tree).startsWith('<span className="memory-usage"')){memory=node;parents.push(...ancestors);}
+  if(ts.isJsxSelfClosingElement(node)&&node.tagName.getText(tree)==='MemoryUsage'){memory=node;parents.push(...ancestors);}
   ts.forEachChild(node,child=>visit(child,[...ancestors,node]));
  }visit(tree);assert.ok(memory);
  assert.ok(!parents.some(node=>ts.isJsxElement(node)&&node.openingElement.getText(tree).includes('session-diagnostics')));
@@ -56,3 +56,39 @@ test('a hung refresh expires the displayed total without waiting for the next po
  assert.ok(!parents.some(node=>ts.isJsxElement(node)&&node.openingElement.getText(tree).includes('diagnostics-details')));
  assert.ok(!parents.some(node=>ts.isBinaryExpression(node)&&node.left.getText(tree)==='session'&&node.operatorToken.kind===ts.SyntaxKind.AmpersandAmpersandToken),'diagnostics survives empty selection');
  });
+
+// Author: Jeff.Liu. Sampling must update the status leaf, never the workspace state owner.
+test('memory sampling owns state in the footer leaf instead of rerendering the workspace',async()=>{
+ const {readFileSync}=await import('node:fs');const ts=(await import('typescript')).default;
+ const text=readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8'),tree=ts.createSourceFile('App.tsx',text,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
+ const functions=new Map();let footer;
+ function scan(n){if(ts.isFunctionDeclaration(n)&&n.name)functions.set(n.name.text,n);if(ts.isJsxElement(n)&&n.openingElement.tagName.getText(tree)==='footer'&&n.openingElement.getText(tree).includes('workspace-footer'))footer=n;ts.forEachChild(n,scan);}scan(tree);
+ assert.ok(functions.has('MemoryUsage'),'memory updates need their own component state owner');
+ assert.ok(ts.isSourceFile(functions.get('MemoryUsage').parent),'stable component identity preserves the polling effect across parent renders');
+ const {t,setLocale,i18n}=await import('../src/i18n.ts');setLocale('en');
+ assert.doesNotMatch(functions.get('App').getText(tree),/startMemoryPolling\(/,'periodic sampling must not update the App state');
+ assert.match(footer.getText(tree),/<MemoryUsage\s*\//,'memory remains in the persistent footer');
+ const effects=[],calls=[];let value=null,stop=0,scope;
+ const React={createElement:(type,props,...children)=>({type,props:{...props,children}})};
+ const render=new Function('React','useState','useEffect','startMemoryPolling','invoke','memoryLabel','t','useTranslation','i18n',ts.transpile(functions.get('MemoryUsage').getText(tree),{target:ts.ScriptTarget.ES2022,jsx:ts.JsxEmit.React})+';return MemoryUsage')(React,()=>[value,next=>value=next],(fn,deps)=>{assert.deepEqual(deps,[]);effects.push(fn);},(read,publish,visible)=>{scope={read,publish,visible};return()=>stop++;},async name=>{calls.push(name);return {application_bytes:1048576,workload_bytes:0,metric:'RSS',sampled_at:Date.now()};},memoryLabel,t,(_,{i18n:instance})=>assert.equal(instance,i18n),i18n);
+ const originalDocument=globalThis.document;
+ try{globalThis.document={visibilityState:'visible',documentElement:{lang:'en'}};
+  let node=render();assert.equal(node.type,'span');assert.equal(node.props.className,'memory-usage');assert.match(node.props.children[0],/unavailable/);
+  const dispose=effects.shift()();assert.equal(scope.visible(),true);globalThis.document.visibilityState='hidden';assert.equal(scope.visible(),false);
+  scope.publish(await scope.read());assert.deepEqual(calls,['memory_usage']);node=render();assert.equal(node.props.children[0],'YAM 1.0 MiB');assert.match(node.props.title,/physical|WebKit/);
+  scope.publish({...value,workload_bytes:2097152});assert.equal(render().props.children[0],'YAM 1.0 MiB · Tasks 2.0 MiB');
+  setLocale('zh-CN');assert.equal(render().props.children[0],memoryLabel(value,Date.now(),t));assert.ok(!render().props.children[0].includes('Tasks'));
+  scope.publish(null);assert.equal(render().props.children[0],t('Memory unavailable'));dispose();assert.equal(stop,1);
+ }finally{setLocale('en');if(originalDocument===undefined)delete globalThis.document;else globalThis.document=originalDocument;}
+});
+
+test('selection release refreshes current controls once without a periodic App render',async()=>{
+ const {readFileSync}=await import('node:fs');const ts=(await import('typescript')).default;
+ const text=readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8'),tree=ts.createSourceFile('App.tsx',text,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);let callback;
+ function scan(n){if(ts.isVariableDeclaration(n)&&n.name.getText(tree)==='finishSelection')callback=n.initializer;ts.forEachChild(n,scan);}scan(tree);assert.ok(callback);
+ for(const options of [{selected:true,live:true,refreshes:1},{selected:false,live:true,refreshes:0},{selected:true,live:false,refreshes:0}]){
+  const view={selecting:true,disposed:!options.live,moving:false};let refreshes=0;
+  const release=new Function('view','id','sessionId','terminalMounted','setRecoveryRevision',ts.transpile('return ('+callback.getText(tree)+');',{target:ts.ScriptTarget.ES2022}))(view,'selected',{current:options.selected?'selected':'other'},{current:true},update=>{assert.equal(update(4),5);refreshes++;});
+  release();assert.equal(view.selecting,false);assert.equal(refreshes,options.refreshes);release();assert.equal(refreshes,options.refreshes,'an unrelated pointerup must not rerender');
+ }
+});

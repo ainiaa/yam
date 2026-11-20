@@ -1,20 +1,20 @@
 // Author: Jeff.Liu. Search state and ownership belong to one terminal view.
-import type {FindScan} from "./terminal-find-worker";
+import {scanFindText,type FindScan} from "./terminal-find-worker.ts";
 type Disposable={dispose():void};
 type Cell={getChars():string;getWidth():number};
-type Line={isWrapped:boolean;length:number;getCell(column:number):Cell|undefined};
+type Line={isWrapped:boolean;length:number;getCell(column:number,target?:Cell):Cell|undefined};
 type Selection={start:{x:number;y:number};end:{x:number;y:number}};
-export type FindTerminal={cols:number;rows:number;buffer:{active:{length:number;baseY:number;cursorY:number;viewportY:number;type:string;getLine(row:number):Line|undefined}};hasSelection():boolean;getSelectionPosition():Selection|undefined;clearSelection():void;select(col:number,row:number,size:number):void;scrollToLine(line:number):void;registerMarker(offset:number):Disposable|undefined;registerDecoration(options:object):Disposable|undefined;onSelectionChange?:(callback:()=>void)=>Disposable};
+export type FindTerminal={cols:number;rows:number;buffer:{active:{length:number;baseY:number;cursorY:number;viewportY:number;type:string;getNullCell?():Cell;getLine(row:number):Line|undefined}};hasSelection():boolean;getSelectionPosition():Selection|undefined;clearSelection():void;select(col:number,row:number,size:number):void;scrollToLine(line:number):void;registerMarker(offset:number):Disposable|undefined;registerDecoration(options:object):Disposable|undefined;onSelectionChange?:(callback:()=>void)=>Disposable};
 export type FindSnapshot={text:string;cells:{start:number;end:number;row:number;col:number;width:number;cellChars:number;cellWidth:number}[]};
 export type FindRange={col:number;row:number;size:number};
-function appendSnapshotRow(snapshot:FindSnapshot,terminal:FindTerminal,row:number){
+function appendSnapshotRow(snapshot:FindSnapshot,terminal:FindTerminal,row:number,scratch?:Cell){
  const buffer=terminal.buffer.active,line=buffer.getLine(row);if(!line)return;
  const next=buffer.getLine(row+1),wrapped=!!next?.isWrapped;let rowText="",cells:FindSnapshot["cells"]=[];
  for(let col=0;col<Math.min(line.length,terminal.cols);col++){
-  const cell=line.getCell(col);if(!cell||cell.getWidth()===0)continue;
-  const chars=cell.getChars();
-  if(wrapped&&col===terminal.cols-1&&!chars&&next?.getCell(0)?.getWidth()===2)continue;
-  const value=chars||" ",start=snapshot.text.length+rowText.length,cellWidth=cell.getWidth(),previous=cells[cells.length-1];
+  const cell=line.getCell(col,scratch);if(!cell||cell.getWidth()===0)continue;
+  const chars=cell.getChars(),cellWidth=cell.getWidth();
+  if(wrapped&&col===terminal.cols-1&&!chars&&next?.getCell(0,scratch)?.getWidth()===2)continue;
+  const value=chars||" ",start=snapshot.text.length+rowText.length,previous=cells[cells.length-1];
   if(previous&&previous.cellChars===value.length&&previous.cellWidth===cellWidth&&previous.col+previous.width===col){previous.end+=value.length;previous.width+=cellWidth;}
   else cells.push({start,end:start+value.length,row,col,width:cellWidth,cellChars:value.length,cellWidth});
   rowText+=value;
@@ -23,12 +23,12 @@ function appendSnapshotRow(snapshot:FindSnapshot,terminal:FindTerminal,row:numbe
  snapshot.cells.push(...cells);snapshot.text+=rowText;if(!wrapped&&row<buffer.length-1)snapshot.text+="\n";
 }
 export function snapshotTerminal(terminal:FindTerminal):FindSnapshot {
- const snapshot:FindSnapshot={text:"",cells:[]};for(let row=0;row<terminal.buffer.active.length;row++)appendSnapshotRow(snapshot,terminal,row);return snapshot;
+ const snapshot:FindSnapshot={text:"",cells:[]},scratch=terminal.buffer.active.getNullCell?.();for(let row=0;row<terminal.buffer.active.length;row++)appendSnapshotRow(snapshot,terminal,row,scratch);return snapshot;
 }
 export async function snapshotTerminalAsync(terminal:FindTerminal,current:()=>boolean,yieldFrame:()=>Promise<void>=()=>new Promise(resolve=>setTimeout(resolve,0))):Promise<FindSnapshot>{
- const snapshot:FindSnapshot={text:"",cells:[]},length=terminal.buffer.active.length;let sliceStart=performance.now(),sliceRows=0;
+ const snapshot:FindSnapshot={text:"",cells:[]},scratch=terminal.buffer.active.getNullCell?.(),length=terminal.buffer.active.length;let sliceStart=performance.now(),sliceRows=0;
  for(let row=0;row<length;row++){
-  if(!current())throw Error("Terminal find cancelled");appendSnapshotRow(snapshot,terminal,row);
+  if(!current())throw Error("Terminal find cancelled");appendSnapshotRow(snapshot,terminal,row,scratch);
   sliceRows++;if(row<length-1&&(sliceRows>=128||performance.now()-sliceStart>=4)){await yieldFrame();sliceStart=performance.now();sliceRows=0;}
  }
  if(!current())throw Error("Terminal find cancelled");return snapshot;
@@ -47,6 +47,7 @@ export function terminalFindShortcut(event:Pick<KeyboardEvent,"key"|"metaKey"|"c
 export type FindWorkerPort={postMessage(value:unknown):void;terminate():unknown;onmessage:((event:MessageEvent<FindScan&{id:number}>)=>unknown)|null;onerror:((event:ErrorEvent)=>unknown)|null};
 export function createFindWorker():FindWorkerPort {return new Worker(new URL("./terminal-find-worker.ts",import.meta.url),{type:"module"});}
 export interface FindRunner{run(text:string,query:string,regex:boolean,caseSensitive:boolean):Promise<FindScan>;cancel():void;dispose():void}
+const MAX_INLINE_FIND_CHARS=1_200_000;
 export class FindWorker implements FindRunner {
  private pending:{port:FindWorkerPort;timer:ReturnType<typeof setTimeout>;reject:(reason:Error)=>void}|null=null;
  private sequence=0;private disposed=false;
@@ -54,9 +55,17 @@ export class FindWorker implements FindRunner {
  constructor(create:()=>FindWorkerPort,deadline=100){this.create=create;this.deadline=deadline;}
  run(text:string,query:string,regex:boolean,caseSensitive:boolean):Promise<FindScan>{
   this.cancel();if(this.disposed)return Promise.reject(Error("Terminal find disposed"));
+  if(!regex&&text.length<=MAX_INLINE_FIND_CHARS){
+   const value=caseSensitive?text:text.toLowerCase(),version=this.sequence;
+   // Bounded, length-preserving literals need no worker VM; other scans remain isolated.
+   if(value.length===text.length)return Promise.resolve().then(()=>{
+    if(this.disposed||version!==this.sequence)throw Error("Terminal find cancelled");
+    return scanFindText(value,caseSensitive?query:query.toLowerCase(),false,true);
+   });
+  }
   return new Promise((resolve,reject)=>{
    let port:FindWorkerPort;try{port=this.create();}catch{reject(Error("Terminal find worker unavailable"));return;}
-   const id=++this.sequence;
+   const id=this.sequence;
    const finish=()=>{if(this.pending?.port!==port)return false;clearTimeout(this.pending.timer);this.pending=null;port.onmessage=null;port.onerror=null;void port.terminate();return true;};
    const timer=setTimeout(()=>{if(finish())reject(Error("Terminal regex search timed out (100 ms). Change the pattern or use literal search."));},this.deadline);
    this.pending={port,timer,reject};
@@ -65,16 +74,15 @@ export class FindWorker implements FindRunner {
    try{port.postMessage({id,text,query,regex,caseSensitive});}catch{if(finish())reject(Error("Terminal find worker unavailable"));}
   });
  }
- cancel(){const pending=this.pending;if(!pending)return;this.pending=null;clearTimeout(pending.timer);pending.port.onmessage=null;pending.port.onerror=null;void pending.port.terminate();pending.reject(Error("Terminal find cancelled"));}
+ cancel(){this.sequence++;const pending=this.pending;if(!pending)return;this.pending=null;clearTimeout(pending.timer);pending.port.onmessage=null;pending.port.onerror=null;void pending.port.terminate();pending.reject(Error("Terminal find cancelled"));}
  dispose(){this.disposed=true;this.cancel();}
 }
-type LiteralAddon={findNext(query:string,options:{regex:false;caseSensitive:boolean}):boolean;findPrevious(query:string,options:{regex:false;caseSensitive:boolean}):boolean;dispose():void};
 export type TerminalFindState={visible:boolean;query:string;caseSensitive:boolean;regex:boolean;count:number;index:number;overflow:boolean;busy:boolean;error:string|null;highlightUnavailable:boolean;focusRevision:number};
 export class TerminalFindController {
  readonly state:TerminalFindState={visible:false,query:"",caseSensitive:false,regex:false,count:0,index:-1,overflow:false,busy:false,error:null,highlightUnavailable:false,focusRevision:0};
- private ranges:FindRange[]=[];private terms:string[]=[];private resultVersion=-1;private anchor:FindRange|null=null;private owned:Selection|undefined;private operating=false;private version=0;private disposed=false;private decorations:Disposable[]=[];
- private selectionListener:Disposable|undefined;private terminal:FindTerminal;private addon:()=>LiteralAddon;private runner:FindRunner;private changed:()=>void;
- constructor(terminal:FindTerminal,addon:()=>LiteralAddon,runner:FindRunner,changed:()=>void){this.terminal=terminal;this.addon=addon;this.runner=runner;this.changed=changed;this.selectionListener=terminal.onSelectionChange?.(()=>this.selectionChanged());}
+ private ranges:FindRange[]=[];private resultVersion=-1;private anchor:FindRange|null=null;private owned:Selection|undefined;private operating=false;private version=0;private disposed=false;private decorations:Disposable[]=[];
+ private selectionListener:Disposable|undefined;private terminal:FindTerminal;private runner:FindRunner;private changed:()=>void;
+ constructor(terminal:FindTerminal,runner:FindRunner,changed:()=>void){this.terminal=terminal;this.runner=runner;this.changed=changed;this.selectionListener=terminal.onSelectionChange?.(()=>this.selectionChanged());}
  open(){if(this.disposed)return;this.state.visible=true;this.state.focusRevision++;this.changed();if(this.state.query)void this.search(false);}
  async setQuery(query:string){if(this.disposed)return;this.state.query=query;this.anchor=null;this.clearOwned();this.state.index=-1;await this.search(true);}
  async setOptions(options:Partial<Pick<TerminalFindState,"caseSensitive"|"regex">>){if(this.disposed)return;Object.assign(this.state,options);this.anchor=null;this.clearOwned();this.state.index=-1;await this.search(true);}
@@ -98,8 +106,8 @@ export class TerminalFindController {
    const snapshot=await snapshotTerminalAsync(this.terminal,()=>!this.disposed&&version===this.version&&current());
    const result=await this.runner.run(snapshot.text,this.state.query,this.state.regex,this.state.caseSensitive);
    if(this.disposed||version!==this.version||!current()||this.blocksProjection())return;
-      this.ranges=[];this.terms=[];
-   for(const [start,end]of result.matches){const range=findCellRange(snapshot,start,end,this.terminal.cols);if(range){this.ranges.push(range);this.terms.push(snapshot.text.slice(start,end));}}
+      this.ranges=[];
+   for(const [start,end]of result.matches){const range=findCellRange(snapshot,start,end,this.terminal.cols);if(range){this.ranges.push(range);}}
    this.resultVersion=version;
    this.state.count=this.ranges.length;this.state.overflow=result.overflow;this.state.index=this.anchor?this.ranges.findIndex(range=>range.col===this.anchor!.col&&range.row===this.anchor!.row&&range.size===this.anchor!.size):-1;this.state.highlightUnavailable=false;
    this.highlight();this.state.busy=false;if(explicit)await this.navigate(1);
@@ -115,12 +123,6 @@ export class TerminalFindController {
   this.operating=true;
   try{
    const range=this.ranges[next];
-   if(!this.state.regex){
-    // The worker chooses the original-coordinate span. Seed a fresh addon with that span;
-    // exact-case localization avoids the addon's expanding case-fold offsets and cached-history reset.
-    this.terminal.select(range.col,range.row,range.size);
-    const addon=this.addon();try{addon.findNext(this.terms[next],{regex:false,caseSensitive:true});}finally{addon.dispose();}
-   }
    const selection=this.terminal.getSelectionPosition();
    if(!selection||selection.start.x!==range.col||selection.start.y!==range.row||(selection.end.y-selection.start.y)*this.terminal.cols+selection.end.x-selection.start.x!==range.size)this.terminal.select(range.col,range.row,range.size);
    const buffer=this.terminal.buffer.active;if(range.row<buffer.viewportY||range.row>=buffer.viewportY+this.terminal.rows)this.terminal.scrollToLine(Math.max(0,range.row-Math.floor(this.terminal.rows/2)));

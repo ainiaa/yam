@@ -1,26 +1,26 @@
 --- a/src/agent_events.rs
 +++ b/src/agent_events.rs
-@@ -317 +317 @@
--        if entry.revision != revision {
+@@ -498 +498 @@
+-__YAM_MUTATION_SCOPE__
 +        if entry.revision != revision {
-@@ -420 +420 @@
--        if record.agent.generation != generation
+@@ -638 +638 @@
+-__YAM_MUTATION_SCOPE__
 +        if record.agent.generation != generation
-@@ -421 +421 @@
--            || !["starting", "running"].contains(&record.status.as_str())
-+            || !["starting", "running"].contains(&record.status.as_str())
-@@ -457 +457 @@
--            if entry.revision != revision {
-+            if entry.revision != revision {
-@@ -500 +500 @@
--                            && e.revision == expected.revision
-+                            && e.revision == expected.revision
-@@ -501 +501 @@
--                            && !e.read
-+                            && !e.read
-@@ -589 +589 @@
--                    .is_some_and(|(next, _)| now < *next)
-+                    .is_some_and(|(next, _)| now < *next)
 @@ -639 +639 @@
--        if !paused {
+-__YAM_MUTATION_SCOPE__
++            || !["starting", "running"].contains(&record.status.as_str())
+@@ -756 +756 @@
+-__YAM_MUTATION_SCOPE__
++            if entry.revision != revision {
+@@ -806 +806 @@
+-__YAM_MUTATION_SCOPE__
++                            && e.revision == expected.revision
+@@ -807 +807 @@
+-__YAM_MUTATION_SCOPE__
++                            && !e.read
+@@ -902 +902 @@
+-__YAM_MUTATION_SCOPE__
++                    .is_some_and(|(next, _)| now < *next)
+@@ -952 +952 @@
+-__YAM_MUTATION_SCOPE__
 +        if !paused {

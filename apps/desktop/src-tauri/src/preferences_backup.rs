@@ -22,6 +22,168 @@ fn fields(value: &Value, allowed: &[&str]) -> bool {
         map.len() == allowed.len() && map.keys().all(|k| allowed.contains(&k.as_str()))
     })
 }
+const TASK_TYPES: &[&str] = &[
+    "transform",
+    "answer",
+    "repository",
+    "coding",
+    "review",
+    "other",
+];
+const RULE_EFFORTS: &[&str] = &["medium", "high", "xhigh", "max"];
+
+fn one_of(value: &Value, choices: &[&str]) -> bool {
+    value.as_str().is_some_and(|value| choices.contains(&value))
+}
+
+fn marker(value: &Value) -> bool {
+    value.as_str().is_some_and(|value| {
+        let mut chars = value.chars();
+        chars.next().is_some_and(char::is_alphanumeric)
+            && chars.clone().count() < 64
+            && chars.all(|ch| ch.is_alphanumeric() || "._:-".contains(ch))
+    })
+}
+
+fn policy_text_control(ch: char) -> bool {
+    // Match the JavaScript rule validator's Unicode control and format categories.
+    ch.is_control()
+        || matches!(
+            ch,
+            '\u{ad}' | '\u{600}'..='\u{605}' | '\u{61c}' | '\u{6dd}' | '\u{70f}'
+                | '\u{890}'..='\u{891}' | '\u{8e2}' | '\u{180e}' | '\u{200b}'..='\u{200f}'
+                | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206f}'
+                | '\u{feff}' | '\u{fff9}'..='\u{fffb}' | '\u{110bd}' | '\u{110cd}'
+                | '\u{13430}'..='\u{1343f}' | '\u{1bca0}'..='\u{1bca3}'
+                | '\u{1d173}'..='\u{1d17a}' | '\u{e0001}' | '\u{e0020}'..='\u{e007f}'
+        )
+}
+
+fn partial_fields(value: &Value, allowed: &[&str]) -> bool {
+    value.as_object().is_some_and(|object| {
+        !object.is_empty() && object.keys().all(|key| allowed.contains(&key.as_str()))
+    })
+}
+
+fn optional_rows<'a>(
+    policy: &'a Value,
+    key: &str,
+    limit: usize,
+    valid: impl FnMut(&'a Value) -> bool,
+) -> bool {
+    policy.get(key).is_none_or(|value| {
+        value
+            .as_array()
+            .is_some_and(|rows| rows.len() <= limit && rows.iter().all(valid))
+    })
+}
+
+fn policy_extensions(policy: &Value, model: impl Fn(&Value) -> bool) -> bool {
+    let mut keys = vec!["v", "rules", "fallback"];
+    for key in ["classificationRules", "executionRules", "workflows"] {
+        if policy.get(key).is_some() {
+            keys.push(key);
+        }
+    }
+    let mut workflow_ids = std::collections::BTreeSet::new();
+    fields(policy, &keys)
+        && optional_rows(policy, "classificationRules", 16, |rule| {
+            fields(rule, &["prefix", "task", "enabled"])
+                && rule["enabled"].is_boolean()
+                && marker(&rule["prefix"])
+                && one_of(&rule["task"], TASK_TYPES)
+        })
+        && optional_rows(policy, "executionRules", 16, |rule| {
+            let when = &rule["when"];
+            let action = &rule["use"];
+            fields(rule, &["when", "use", "enabled"])
+                && rule["enabled"].is_boolean()
+                && partial_fields(when, &["task", "workspace", "depth"])
+                && when.get("task").is_none_or(|task| one_of(task, TASK_TYPES))
+                && when
+                    .get("depth")
+                    .is_none_or(|depth| one_of(depth, &["normal", "deep"]))
+                && when.get("workspace").is_none_or(|value| {
+                    value.as_str().is_some_and(|path| {
+                        path.starts_with('/')
+                            && path.encode_utf16().count() <= 1024
+                            && !path.chars().any(char::is_control)
+                            && !path.split('/').any(|part| matches!(part, "." | ".."))
+                    })
+                })
+                && partial_fields(action, &["model", "effort", "workflow"])
+                && action
+                    .get("model")
+                    .is_none_or(|key| one_of(key, &["small", "medium", "strong"]) || model(key))
+                && action
+                    .get("effort")
+                    .is_none_or(|effort| one_of(effort, RULE_EFFORTS))
+                && action.get("workflow").is_none_or(marker)
+        })
+        && optional_rows(policy, "workflows", 6, |workflow| {
+            let roles: &[&str] = match workflow["preset"].as_str() {
+                Some("delivery") => &["plan", "implement", "review"],
+                Some("review") => &["review", "audit"],
+                _ => return false,
+            };
+            let has_paths = workflow.get("paths").is_some();
+            let allowed = ["id", "name", "preset", "roles", "paths"];
+            fields(workflow, &allowed[..if has_paths { 5 } else { 4 }])
+                && marker(&workflow["id"])
+                && workflow["id"] != "single"
+                && workflow_ids.insert(workflow["id"].as_str().unwrap_or_default())
+                && workflow["name"].as_str().is_some_and(|name| {
+                    !name.trim().is_empty()
+                        && name.encode_utf16().count() <= 80
+                        && !name.chars().any(policy_text_control)
+                })
+                && workflow.get("paths").is_none_or(|value| {
+                    value.as_array().is_some_and(|paths| {
+                        let mut seen = std::collections::BTreeSet::new();
+                        (1..=16).contains(&paths.len())
+                            && paths.iter().all(|value| {
+                                value.as_str().is_some_and(|path| {
+                                    path.encode_utf16().count() <= 320
+                                        && seen.insert(path)
+                                        && !path
+                                            .chars()
+                                            .any(|ch| ch == '\\' || policy_text_control(ch))
+                                        && path.split('/').all(|part| {
+                                            !matches!(part, "" | "." | "..")
+                                                && !part.eq_ignore_ascii_case(".git")
+                                        })
+                                })
+                            })
+                    })
+                })
+                && fields(&workflow["roles"], roles)
+                && roles.iter().all(|role| {
+                    workflow["roles"][*role]
+                        .as_array()
+                        .is_some_and(|candidates| {
+                            (1..=4).contains(&candidates.len())
+                                && candidates.iter().enumerate().all(|(index, candidate)| {
+                                    fields(candidate, &["runner", "model", "effort", "billing"])
+                                        && one_of(&candidate["runner"], &["codex", "model"])
+                                        && (*role != "implement" || candidate["runner"] == "codex")
+                                        && one_of(
+                                            &candidate["billing"],
+                                            &["subscription", "api", "gateway"],
+                                        )
+                                        && (candidate["runner"] != "codex"
+                                            || candidate["billing"] == "subscription")
+                                        && model(&candidate["model"])
+                                        && (one_of(&candidate["effort"], RULE_EFFORTS)
+                                            || one_of(
+                                                &candidate["effort"],
+                                                &["off", "minimal", "low"],
+                                            ))
+                                        && !candidates[..index].contains(candidate)
+                                })
+                        })
+                })
+        })
+}
 fn portable_policy(value: &Value) -> bool {
     let model = |value: &Value| {
         value.as_str().is_some_and(|key| {
@@ -43,7 +205,6 @@ fn portable_policy(value: &Value) -> bool {
             .as_str()
             .is_some_and(|s| !s.trim().is_empty() && s.encode_utf16().count() <= limit)
     };
-    let levels = ["medium", "high", "xhigh", "max"];
     let tiered = value["v"] == 2;
     let mut keys = vec![
         "v",
@@ -66,6 +227,14 @@ fn portable_policy(value: &Value) -> bool {
                         && !backups[..index].contains(key))
             })
     };
+    if let Some(effort) = value.get("classifierEffort") {
+        keys.push("classifierEffort");
+        if !effort.as_str().is_some_and(|level| {
+            ["off", "minimal", "low", "medium", "high", "xhigh", "max"].contains(&level)
+        }) {
+            return false;
+        }
+    }
     if let Some(channel) = value.get("classifierBilling") {
         keys.push("classifierBilling");
         if !channel.as_str().is_some_and(|channel| {
@@ -148,7 +317,7 @@ fn portable_policy(value: &Value) -> bool {
         return false;
     }
     let policy = &value["rules"];
-    if !fields(policy, &["v", "rules", "fallback"])
+    if !policy_extensions(policy, model)
         || !(policy["v"] == 1 || tiered && policy["v"] == 2)
         || policy.to_string().len() > 6000
         || !fields(&policy["fallback"], &["model", "effort"])
@@ -168,15 +337,7 @@ fn portable_policy(value: &Value) -> bool {
         fields(
             rule,
             &["task", "description", "examples", "model", "effort"],
-        ) && [
-            "transform",
-            "answer",
-            "repository",
-            "coding",
-            "review",
-            "other",
-        ]
-        .contains(&task)
+        ) && TASK_TYPES.contains(&task)
             && seen.insert(task)
             && text(&rule["description"], 600)
             && rule["examples"]
@@ -185,7 +346,7 @@ fn portable_policy(value: &Value) -> bool {
             && rule["model"].as_str().is_some_and(|v| {
                 ["small", "strong"].contains(&v) || policy["v"] == 2 && v == "medium"
             })
-            && rule["effort"].as_str().is_some_and(|v| levels.contains(&v))
+            && one_of(&rule["effort"], RULE_EFFORTS)
             && (["transform", "answer"].contains(&task)
                 || (rule["model"] == "strong" || policy["v"] == 2 && rule["model"] == "medium")
                     && rule["effort"] != "medium")
@@ -276,12 +437,80 @@ mod tests {
         }})
     }
     #[test]
+    fn portable_pi_policy_export_keeps_classifier_reasoning_and_rejects_invalid_values() {
+        for level in ["off", "minimal", "low", "medium", "high", "xhigh", "max"] {
+            let mut value = portable_backup();
+            value["piRouting"]["classifierEffort"] = level.into();
+            let encoded = encode(&value.to_string()).unwrap();
+            assert_eq!(serde_json::from_slice::<Value>(&encoded).unwrap(), value);
+        }
+        for invalid in [
+            Value::Null,
+            serde_json::json!("auto"),
+            serde_json::json!(42),
+        ] {
+            let mut value = portable_backup();
+            value["piRouting"]["classifierEffort"] = invalid;
+            assert!(encode(&value.to_string()).is_err());
+        }
+    }
+    #[test]
     fn portable_pi_policy_export_accepts_v2_and_keeps_v1_compatible() {
         let value = portable_backup();
         let result = encode(&value.to_string()).unwrap();
         assert_eq!(serde_json::from_slice::<Value>(&result).unwrap(), value);
         assert!(encode(r#"{"version":2,"settings":{},"connections":[],"piRouting":null}"#).is_ok());
         assert!(encode(r#"{"version":1,"settings":{},"connections":[]}"#).is_ok());
+    }
+    #[test]
+    fn portable_pi_policy_export_keeps_scoped_classification_execution_and_workflow_rules() {
+        let mut value = portable_backup();
+        let rules = &mut value["piRouting"]["rules"];
+        rules["classificationRules"] = serde_json::json!([
+            {"prefix":"yam:review","task":"review","enabled":true}
+        ]);
+        rules["executionRules"] = serde_json::json!([
+            {"when":{"task":"review","workspace":"/repo","depth":"deep"},
+             "use":{"model":"strong","effort":"max","workflow":"review"},"enabled":true}
+        ]);
+        let candidate = serde_json::json!({
+            "runner":"codex","model":"yam-codex/sol","effort":"high","billing":"subscription"
+        });
+        rules["workflows"] = serde_json::json!([{
+            "id":"review","name":"Review","preset":"review","paths":["src"],
+            "roles":{"review":[candidate.clone()],"audit":[candidate]}
+        }]);
+        let result = encode(&value.to_string()).unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&result).unwrap(), value);
+        for (pointer, invalid) in [
+            (
+                "/piRouting/rules/classificationRules/0/prefix",
+                serde_json::json!("two words"),
+            ),
+            (
+                "/piRouting/rules/workflows/0/paths/0",
+                serde_json::json!("../secret"),
+            ),
+            (
+                "/piRouting/rules/workflows/0/name",
+                serde_json::json!("Review\u{202e}"),
+            ),
+            (
+                "/piRouting/rules/workflows/0/paths/0",
+                serde_json::json!("src\u{202e}"),
+            ),
+            (
+                "/piRouting/rules/workflows/0/roles/review/0",
+                serde_json::json!({"apiKey":"private"}),
+            ),
+        ] {
+            let mut bad = value.clone();
+            *bad.pointer_mut(pointer).unwrap() = invalid;
+            assert!(encode(&bad.to_string()).is_err(), "{pointer}");
+        }
+        value["piRouting"]["rules"]["workflows"][0]["roles"]["review"][0]["apiKey"] =
+            "private".into();
+        assert!(encode(&value.to_string()).is_err());
     }
     #[test]
     fn portable_pi_policy_retains_classifier_order_and_rejects_invalid_fallbacks() {

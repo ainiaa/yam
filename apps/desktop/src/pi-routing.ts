@@ -5,7 +5,7 @@ export {piModelCatalogSource,type PiCatalogSource} from '../src-tauri/pi/model-l
 export const piExecutionTiers=['small','medium','strong'] as const;
 export type PiExecutionTier=typeof piExecutionTiers[number];
 type PiExecutionFallbacks=Partial<Record<PiExecutionTier,string[]>>;
-export type PiDraft={gateway:string|null;small:string;medium?:string;strong:string;classifier:string;classifierFallbacks?:string[];classifierBilling?:PiClassifierBilling;executionFallbacks?:PiExecutionFallbacks;model:string;effort:string;rules?:string};
+export type PiDraft={gateway:string|null;small:string;medium?:string;strong:string;classifier:string;classifierFallbacks?:string[];classifierBilling?:PiClassifierBilling;classifierEffort?:string;executionFallbacks?:PiExecutionFallbacks;model:string;effort:string;rules?:string};
 export function hasPiRoutingSelection(draft:PiDraft):boolean {
  return !!(draft.small||draft.medium||draft.strong||draft.classifier||draft.classifierFallbacks?.length||draft.model!=='auto'||draft.effort!=='auto');
 }
@@ -17,14 +17,17 @@ export type NativeFailure={category:'auth'|'quota'|'context'|'capability'|'conne
 export type PiContextBudget={kind:'local-estimate';inputTokens:number|null;reserveTokens:number|null;contextWindow:number|null;maxOutputTokens:number|null;fits:boolean;reason:string|null};
 export type PiExecutionDiagnostics={stage:'discovering'|'preparing'|'starting'|'executing'|'completed'|'failed'|'aborted';failedStage?:string;failure?:'context-budget';handoff?:{mode:'incremental'|'full';reason:'verified-prefix'|'prefix-unverified'|'new-task'|'identity-changed'|'new-session';messages:number;characters:number;budget:number};discoveryMs:number|null;startupMs:number|null;firstResponseMs:number|null;executionMs:number|null};
 export type PiNativeRecovery={failure?:NativeFailure;receiptId:string|null;sessionId:string|null;status:'running'|'failed';reason:'execution-failed'|'cancelled'|'cleanup-unconfirmed'|'unknown';cleanup:'unconfirmed'|'unknown';inProgress:boolean;needsInspection:boolean};
-export type PiClassificationSource='A'|'B'|'C'|'D'|'E'|'F'|'G'|'H'|'local';
+export type PiClassificationSource='A'|'B'|'C'|'D'|'E'|'F'|'G'|'H'|'local'|'rule';
+export type PiRouteMatches={classificationSource?:PiClassificationSource|'fixed';classificationRule?:number;classificationTask?:string;executionRule?:number;workflow?:string};
+export type PiRoutePreview=PiRouteMatches&{selection:{model:string;effort:string};model?:string|null;roles?:Record<string,{model:string;effort:string}[]>|null;rule:string;version:string;latencyMs:number;cost:number|null;supported?:boolean};
+export type PiWorkflowReceipt={id:string;workflow:string;name:string;version:string;status:string;current?:boolean;error?:string;roles:Record<string,{status:string;attempts:{model:string;effort:string;billing:string;status:string;reason?:string;sessionId?:string|null}[]}>};
 export type PiSessionRoutingMode={enabled:boolean;policyId:string|null;policyName:string|null;pending:string|null;pendingPolicyId:string|null;error:string|null;nativeModel:string|null};
-export type PiRoutingState={mode?:PiSessionRoutingMode;failure?:NativeFailure|null;nativeRecovery?:PiNativeRecovery|null;diagnostics?:{configSource:'launch'|'session';billing:'configured'|'subscription';execution:PiExecutionDiagnostics|null};revision:number;generation:string;phase:'starting'|'idle'|'classifying'|'selected'|'working'|'error';config:{small:string;medium?:string|null;strong:string;classifier:string;gateway:string|null};preferences:{model:string;effort:string};rules?:TaskRules;ruleVersion?:string;preview?:{selection:{model:string;effort:string};rule:string;version:string;latencyMs:number;cost:number|null};decision?:{budget?:PiContextBudget;rejected?:{model:string;tier?:string;reason:string;budget?:PiContextBudget}[];planned?:{model:string;effort:string};selected?:{model:string;effort:string};rule:string;ruleVersion:string;classificationSource?:PiClassificationSource;classificationMs:number;classifierCost:number|null;executionCost:number|null;correctionCost:number|null;totalCost:number|null};target:{model:string;effort:string;reason:string}|null;actual:PiConnection&{model:string;effort:string;at:number;usage?:{input?:number;output?:number;cacheRead?:number;cacheWrite?:number}}|null;gatewayError?:string|null;error:string|null;pendingInput:boolean};
+export type PiRoutingState={mode?:PiSessionRoutingMode;failure?:NativeFailure|null;nativeRecovery?:PiNativeRecovery|null;diagnostics?:{configSource:'launch'|'session';billing:'configured'|'subscription';execution:PiExecutionDiagnostics|null};revision:number;generation:string;phase:'starting'|'idle'|'classifying'|'selected'|'working'|'error';config:{small:string;medium?:string|null;strong:string;classifier:string;gateway:string|null};preferences:{model:string;effort:string};rules?:TaskRules;ruleVersion?:string;preview?:PiRoutePreview;workflowReceipt?:PiWorkflowReceipt|null;decision?:PiRouteMatches&{budget?:PiContextBudget;rejected?:{model:string;tier?:string;reason:string;budget?:PiContextBudget}[];planned?:{model:string;effort:string};selected?:{model:string;effort:string};rule:string;ruleVersion:string;classificationSource?:PiClassificationSource;classificationMs:number;classifierCost:number|null;executionCost:number|null;correctionCost:number|null;totalCost:number|null};target:{model:string;effort:string;reason:string}|null;actual:PiConnection&{model:string;effort:string;at:number;usage?:{input?:number;output?:number;cacheRead?:number;cacheWrite?:number}}|null;gatewayError?:string|null;error:string|null;pendingInput:boolean};
 export type PiSnapshot={active:boolean;state:PiRoutingState|null};
 export const piLevels=['low','medium','high','xhigh','max'] as const;
 export const maxPiBackupModels=7;
 export const piSetupStorageKey='yam.piRoutingSetup.v1';
-export type PiRoutingPolicy={v:1|2;small:string;medium?:string;strong:string;classifier:string;classifierFallbacks?:string[];classifierBilling?:PiClassifierBilling;executionFallbacks?:PiExecutionFallbacks;model:string;effort:string;billing:'configured'|'subscription';rules:TaskRules};
+export type PiRoutingPolicy={v:1|2;small:string;medium?:string;strong:string;classifier:string;classifierFallbacks?:string[];classifierBilling?:PiClassifierBilling;classifierEffort?:string;executionFallbacks?:PiExecutionFallbacks;model:string;effort:string;billing:'configured'|'subscription';rules:TaskRules};
 const modelKey=(key:unknown):key is string=>typeof key==='string'&&key.length<=512&&/^[A-Za-z0-9_.-]+\/[^\s\p{Cc}]+$/u.test(key);
 const subscriptionModel=(key:string)=>/^(?:yam-codex|openai-codex|openai)\//.test(key);
 export function piSubscriptionOnly(args:string):boolean {
@@ -36,6 +39,10 @@ export function piSubscriptionCatalog(models:PiModel[]):PiModel[] {
 function validateClassifierBilling(value:unknown):PiClassifierBilling|undefined {
  if(value===undefined||value==='subscription'||value==='gateway'||value==='api')return value;
  throw Error('Invalid classifier billing channel');
+}
+function validateClassifierEffort(value:unknown):string|undefined {
+ if(value===undefined||typeof value==='string'&&['off','minimal',...piLevels].includes(value))return value;
+ throw Error('Invalid classifier reasoning level');
 }
 export function knownClassifierBilling(model?:PiModel):PiClassifierBilling|undefined {
  return model?.billing==='unknown'?undefined:model?.billing;
@@ -64,21 +71,21 @@ function validateExecutionFallbacks(value:unknown,primaries:Pick<PiDraft,PiExecu
  return Object.keys(result).length?result:undefined;
 }
 export function validatePiRoutingPolicy(value:unknown):PiRoutingPolicy {
- const v=value as PiRoutingPolicy,keys=['v','small',...(v?.v===2?['medium']:[]),'strong','classifier','model','effort','billing','rules',...['classifierFallbacks','classifierBilling','executionFallbacks'].filter(key=>v&&Object.prototype.hasOwnProperty.call(v,key))];
+ const v=value as PiRoutingPolicy,keys=['v','small',...(v?.v===2?['medium']:[]),'strong','classifier','model','effort','billing','rules',...['classifierFallbacks','classifierBilling','classifierEffort','executionFallbacks'].filter(key=>v&&Object.prototype.hasOwnProperty.call(v,key))];
  if(!v||typeof v!=='object'||Array.isArray(v)||Object.keys(v).length!==keys.length||!keys.every(k=>Object.prototype.hasOwnProperty.call(v,k))||![1,2].includes(v.v)||v.v===2&&!modelKey(v.medium)||![v.small,v.strong,v.classifier].every(key=>modelKey(key)||v.model!=='auto'&&key==='')||v.model!=='auto'&&!modelKey(v.model)||!['auto','off','minimal',...piLevels].includes(v.effort)||!['configured','subscription'].includes(v.billing))throw Error('Invalid Pi routing policy');
  const classifierFallbacks=validateClassifierFallbacks(v.classifierFallbacks,v.classifier);
- const classifierBilling=validateClassifierBilling(v.classifierBilling),executionFallbacks=validateExecutionFallbacks(v.executionFallbacks,v);
+ const classifierBilling=validateClassifierBilling(v.classifierBilling),classifierEffort=validateClassifierEffort(v.classifierEffort),executionFallbacks=validateExecutionFallbacks(v.executionFallbacks,v);
  if(v.billing==='subscription'&&(classifierBilling&&classifierBilling!=='subscription'||[v.small,...v.v===2?[v.medium!]:[],v.strong,v.classifier,...classifierFallbacks??[],...Object.values(executionFallbacks??{}).flat(),...v.model==='auto'?[]:[v.model]].some(key=>key&&!subscriptionModel(key))))throw Error('Subscription-only billing requires a Codex subscription model.');
  if(v.v===1&&validateRules(v.rules).v===2)throw Error('Three-tier task rules require a medium model');
- return {v:v.v,small:v.small,...v.v===2?{medium:v.medium}:{},strong:v.strong,classifier:v.classifier,...classifierFallbacks?{classifierFallbacks}:{},...classifierBilling?{classifierBilling}:{},...executionFallbacks?{executionFallbacks}:{},model:v.model,effort:v.effort,billing:v.billing,rules:validateRules(v.rules)};
+ return {v:v.v,small:v.small,...v.v===2?{medium:v.medium}:{},strong:v.strong,classifier:v.classifier,...classifierFallbacks?{classifierFallbacks}:{},...classifierBilling?{classifierBilling}:{},...classifierEffort?{classifierEffort}:{},...executionFallbacks?{executionFallbacks}:{},model:v.model,effort:v.effort,billing:v.billing,rules:validateRules(v.rules)};
 }
 function readPiSetup(raw:string){
  if(raw.length>65536)throw Error('Invalid Pi routing policy');
- const v=JSON.parse(raw),required=['gateway','small','strong','classifier'],allowed=[...required,'classifierFallbacks','classifierBilling','executionFallbacks','medium','billing','model','effort','rules'];
+ const v=JSON.parse(raw),required=['gateway','small','strong','classifier'],allowed=[...required,'classifierFallbacks','classifierBilling','classifierEffort','executionFallbacks','medium','billing','model','effort','rules'];
  if(!v||typeof v!=='object'||Array.isArray(v)||!required.every(k=>Object.prototype.hasOwnProperty.call(v,k))||Object.keys(v).some(k=>!allowed.includes(k)))throw Error('Invalid Pi routing policy');
  if(['medium','billing','model','effort','rules'].some(k=>Object.prototype.hasOwnProperty.call(v,k)&&v[k]===null))throw Error('Invalid Pi routing policy');
  if(Object.prototype.hasOwnProperty.call(v,'medium')&&(typeof v.medium!=='string'||!v.medium))throw Error('Invalid Pi routing policy');
- const policy=validatePiRoutingPolicy({v:v.medium?2:1,small:v.small,...v.medium?{medium:v.medium}:{},strong:v.strong,classifier:v.classifier,classifierFallbacks:v.classifierFallbacks,classifierBilling:v.classifierBilling,executionFallbacks:v.executionFallbacks,model:v.model??'auto',effort:v.effort??'auto',billing:v.billing??'configured',rules:v.rules??(v.medium?defaultTierRules:defaultRules)});
+ const policy=validatePiRoutingPolicy({v:v.medium?2:1,small:v.small,...v.medium?{medium:v.medium}:{},strong:v.strong,classifier:v.classifier,classifierFallbacks:v.classifierFallbacks,classifierBilling:v.classifierBilling,classifierEffort:v.classifierEffort,executionFallbacks:v.executionFallbacks,model:v.model??'auto',effort:v.effort??'auto',billing:v.billing??'configured',rules:v.rules??(v.medium?defaultTierRules:defaultRules)});
  const draft:PiDraft={...policy,gateway:v.gateway,rules:JSON.stringify(policy.rules)},models=[policy.small,...policy.medium?[policy.medium]:[],policy.strong,policy.classifier,policy.model].map(key=>({key,name:key,levels:['off','minimal',...piLevels],context_window:1}));
  if(validatePiDraft(draft,models))throw Error('Invalid Pi routing policy');
  return {gateway:v.gateway as string|null,policy,rulesPresent:v.rules!==undefined};
@@ -86,7 +93,7 @@ function readPiSetup(raw:string){
 export function portablePiRoutingPolicy(raw:string|null):PiRoutingPolicy|null {return raw===null?null:readPiSetup(raw).policy;}
 export function importPiRoutingPolicy(policy:PiRoutingPolicy,currentSetup:string|null=null):string {
  const current=currentSetup===null?null:readPiSetup(currentSetup),checked=validatePiRoutingPolicy({...policy,billing:current?.policy.billing==='subscription'?'subscription':policy.billing}),gateway=current?.gateway??null;
- return JSON.stringify({gateway,small:checked.small,...checked.medium?{medium:checked.medium}:{},strong:checked.strong,classifier:checked.classifier,classifierFallbacks:checked.classifierFallbacks,classifierBilling:checked.classifierBilling,executionFallbacks:checked.executionFallbacks,model:checked.model,effort:checked.effort,rules:checked.rules,...checked.billing==='subscription'?{billing:'subscription'}:{}});
+ return JSON.stringify({gateway,small:checked.small,...checked.medium?{medium:checked.medium}:{},strong:checked.strong,classifier:checked.classifier,classifierFallbacks:checked.classifierFallbacks,classifierBilling:checked.classifierBilling,classifierEffort:checked.classifierEffort,executionFallbacks:checked.executionFallbacks,model:checked.model,effort:checked.effort,rules:checked.rules,...checked.billing==='subscription'?{billing:'subscription'}:{}});
 }
 export function selectPiSetupModel(models:PiModel[],preferred:string):string {
  const compatible=models.filter(m=>m.levels.includes('high'));
@@ -141,16 +148,16 @@ export async function verifyPiSetup(args:string,cwd:string,model:string,invoke:<
 }
 export function piSetupMapping(draft:PiDraft,args:string,models?:PiModel[]){
  const {billing}=readArgs(args),classifier=draft.classifier||draft.small,classifierFallbacks=validateClassifierFallbacks(draft.classifierFallbacks,classifier);
- const classifierBilling=validateClassifierBilling(draft.classifierBilling),executionFallbacks=validateExecutionFallbacks(draft.executionFallbacks,draft);
- const mapping={gateway:draft.gateway,small:draft.small,...draft.medium?{medium:draft.medium}:{},strong:draft.strong,classifier,...classifierFallbacks?{classifierFallbacks}:{},...classifierBilling?{classifierBilling}:{},...executionFallbacks?{executionFallbacks}:{}};
+ const classifierBilling=validateClassifierBilling(draft.classifierBilling),classifierEffort=validateClassifierEffort(draft.classifierEffort),executionFallbacks=validateExecutionFallbacks(draft.executionFallbacks,draft);
+ const mapping={gateway:draft.gateway,small:draft.small,...draft.medium?{medium:draft.medium}:{},strong:draft.strong,classifier,...classifierFallbacks?{classifierFallbacks}:{},...classifierBilling?{classifierBilling}:{},...classifierEffort?{classifierEffort}:{},...executionFallbacks?{executionFallbacks}:{}};
  if(billing!==undefined&&!['configured','subscription'].includes(billing))throw Error('Invalid billing policy');
  const selected=[mapping.small,mapping.medium,mapping.strong,classifier,draft.model,...classifierFallbacks??[],...Object.values(executionFallbacks??{}).flat()];
  if(billing==='subscription'&&models?.some(model=>selected.includes(model.key)&&(model.billing==='api'||model.billing==='gateway')))throw Error('Subscription-only billing requires a Codex subscription model.');
- const policy=validatePiRoutingPolicy({v:mapping.medium?2:1,small:mapping.small,...mapping.medium?{medium:mapping.medium}:{},strong:mapping.strong,classifier:mapping.classifier,classifierFallbacks,classifierBilling,executionFallbacks,model:draft.model,effort:draft.effort,rules:draft.rules===undefined?(draft.medium?defaultTierRules:defaultRules):JSON.parse(draft.rules),billing:billing??'configured'});
+ const policy=validatePiRoutingPolicy({v:mapping.medium?2:1,small:mapping.small,...mapping.medium?{medium:mapping.medium}:{},strong:mapping.strong,classifier:mapping.classifier,classifierFallbacks,classifierBilling,classifierEffort,executionFallbacks,model:'auto',effort:'auto',rules:draft.rules===undefined?(draft.medium?defaultTierRules:defaultRules):JSON.parse(draft.rules),billing:billing??'configured'});
  return {...mapping,model:policy.model,effort:policy.effort,rules:policy.rules,...(billing==='subscription'?{billing}: {})};
 }
 const routingOffFlag='--yam-routing-off';
-const owned=['--yam-small','--yam-medium','--yam-strong','--yam-classifier','--yam-classifier-fallbacks','--yam-classifier-billing','--yam-execution-fallbacks','--yam-gateway','--yam-fixed-model','--yam-effort','--yam-rules','--model','--thinking'];
+const owned=['--yam-small','--yam-medium','--yam-strong','--yam-classifier','--yam-classifier-fallbacks','--yam-classifier-billing','--yam-classifier-effort','--yam-execution-fallbacks','--yam-gateway','--yam-fixed-model','--yam-effort','--yam-rules','--model','--thinking'];
 function tokens(args:string):{value:string;raw:string}[]{
  const result=[];let i=0;
  while(i<args.length){while(/\s/.test(args[i]??'')&&i<args.length)i++;if(i===args.length)break;const start=i;let value='',quote='';
@@ -161,6 +168,44 @@ function tokens(args:string):{value:string;raw:string}[]{
   if(quote)throw Error('Unclosed Pi argument quote');result.push({value,raw:args.slice(start,i).trimEnd()});
  }
  return result;
+}
+function nativeArguments(adapter:'pi'|'codex',args:string){
+ const items=tokens(args),extra:string[]=[];let model='',effort='',terminator=-1;
+ const valued=new Set(['--append-system-prompt','--system-prompt','--extension','-e','--skill','--theme','--tools','--provider','--profile','-p','--session','--session-dir','--prompt-template','--export']);
+ for(let index=0;index<items.length;index++){
+  const item=items[index],equals=item.value.indexOf('='),flag=equals<0?item.value:item.value.slice(0,equals);
+  if(item.value==='--'){terminator=extra.length;extra.push(...items.slice(index).map(item=>item.raw));break;}
+  if(['--model','-m',...(adapter==='pi'?['--thinking']:['-c','--config'])].includes(flag)){
+   const value=equals<0?items[++index]?.value:item.value.slice(equals+1);
+   if(value===undefined)throw Error('Missing model or reasoning argument');
+   if(flag==='--model'||flag==='-m')model=value;
+   else if(flag==='--thinking')effort=value;
+   else {
+    const config=/^(model|model_reasoning_effort)\s*=\s*"?([^"\s]+)"?$/.exec(value);
+    if(config){if(config[1]==='model')model=config[2];else effort=config[2];}
+    else extra.push(item.raw,...(equals<0?[items[index].raw]:[]));
+   }
+  }else{
+   extra.push(item.raw);
+   if(equals<0&&valued.has(flag)&&items[index+1])extra.push(items[++index].raw);
+  }
+ }
+ if(adapter==='pi'){
+  const parts=model.split(':'),suffix=parts[parts.length-1];
+  if(['off','minimal',...piLevels].includes(suffix)){model=model.slice(0,-suffix.length-1);effort||=suffix;}
+  if(model==='yam/auto')model='';
+ }
+ return {model,effort,extra,terminator};
+}
+export function parseNativeModelDefaults(adapter:'pi'|'codex',args:string){
+ const {model,effort}=nativeArguments(adapter,args);return {model,effort};
+}
+export function buildNativeModelArgs(adapter:'pi'|'codex',args:string,selection:{model:string;effort:string}):string {
+ if(selection.model&&!/^[\p{L}\p{N}_.:@/-]{1,512}$/u.test(selection.model))throw Error('Invalid default model');
+ if(selection.effort&&!['off','minimal',...piLevels].includes(selection.effort))throw Error('Invalid default reasoning level');
+ const {extra,terminator}=nativeArguments(adapter,args),quote=(value:string)=>`'${value.split("'").join("'\\''")}'`;
+ const selected=[...selection.model?['--model',quote(selection.model)]:[],...selection.effort?adapter==='pi'?['--thinking',quote(selection.effort)]:['-c',quote(`model_reasoning_effort="${selection.effort}"`)]:[]];
+ return [...(terminator<0?extra:extra.slice(0,terminator)),...selected,...(terminator<0?[]:extra.slice(terminator))].join(' ');
 }
 function readArgs(args:string,removeBilling=false){
  const flags=new Map<string,string>(),extra:string[]=[];const items=tokens(args);let connectionExplicit=false,routingOff=false,billing:string|undefined,terminator=-1;
@@ -197,20 +242,23 @@ export function parsePiDraft(args:string):PiDraft {
  const explicitEffort=flags.get('--thinking')??inline;
  const small=flags.get('--yam-small')??'',classifier=flags.get('--yam-classifier')??'',raw=flags.get('--yam-classifier-fallbacks');
  const classifierFallbacks=raw===undefined?undefined:validateClassifierFallbacks(JSON.parse(raw),classifier||small);
- const classifierBilling=validateClassifierBilling(flags.get('--yam-classifier-billing'));
+ const classifierBilling=validateClassifierBilling(flags.get('--yam-classifier-billing')),classifierEffort=validateClassifierEffort(flags.get('--yam-classifier-effort'));
  const roles={small,...flags.has('--yam-medium')?{medium:flags.get('--yam-medium')}:{},strong:flags.get('--yam-strong')??''};
  const executionRaw=flags.get('--yam-execution-fallbacks'),executionFallbacks=executionRaw===undefined?undefined:validateExecutionFallbacks(JSON.parse(executionRaw),roles);
- return {gateway:flags.get('--yam-gateway')??null,...roles,classifier,...classifierFallbacks?{classifierFallbacks}:{},...classifierBilling?{classifierBilling}:{},...executionFallbacks?{executionFallbacks}:{},model,effort:explicitEffort!==undefined?explicitEffort:flags.get('--yam-effort')??'auto',...(flags.has('--yam-rules')?{rules:flags.get('--yam-rules')}: {})};
+ return {gateway:flags.get('--yam-gateway')??null,...roles,classifier,...classifierFallbacks?{classifierFallbacks}:{},...classifierBilling?{classifierBilling}:{},...classifierEffort?{classifierEffort}:{},...executionFallbacks?{executionFallbacks}:{},model,effort:explicitEffort!==undefined?explicitEffort:flags.get('--yam-effort')??'auto',...(flags.has('--yam-rules')?{rules:flags.get('--yam-rules')}: {})};
 }
 export function buildPiArgs(args:string,draft:PiDraft):string {
  const classifierFallbacks=validateClassifierFallbacks(draft.classifierFallbacks,draft.classifier||draft.small);
  const executionFallbacks=validateExecutionFallbacks(draft.executionFallbacks,draft);
- const {extra,terminator}=readArgs(args),pairs=[['--yam-small',draft.small],['--yam-medium',draft.medium??null],['--yam-strong',draft.strong],['--yam-classifier',draft.classifier],['--yam-classifier-fallbacks',classifierFallbacks?JSON.stringify(classifierFallbacks):null],['--yam-classifier-billing',validateClassifierBilling(draft.classifierBilling)??null],['--yam-execution-fallbacks',executionFallbacks?JSON.stringify(executionFallbacks):null],['--yam-gateway',draft.gateway],['--yam-fixed-model',draft.model],['--yam-effort',draft.effort],['--yam-rules',draft.rules??null]];
+ const {extra,terminator}=readArgs(args),pairs=[['--yam-small',draft.small],['--yam-medium',draft.medium??null],['--yam-strong',draft.strong],['--yam-classifier',draft.classifier],['--yam-classifier-fallbacks',classifierFallbacks?JSON.stringify(classifierFallbacks):null],['--yam-classifier-billing',validateClassifierBilling(draft.classifierBilling)??null],['--yam-classifier-effort',validateClassifierEffort(draft.classifierEffort)??null],['--yam-execution-fallbacks',executionFallbacks?JSON.stringify(executionFallbacks):null],['--yam-gateway',draft.gateway],['--yam-fixed-model',draft.model],['--yam-effort',draft.effort],['--yam-rules',draft.rules??null]];
  const configured=pairs.filter(([,v])=>v!==null&&v!=='').flatMap(([k,v])=>[k,`'${v!.split("'").join("'\\''")}'`]);
  // Keep a literal prompt terminator last. Native Pi still owns prompt parsing.
  return [...(terminator<0?extra:extra.slice(0,terminator)),...configured,...(terminator<0?[]:extra.slice(terminator))].join(' ');
 }
 export function validatePiDraft(draft:PiDraft,models?:PiModel[],args=''):string|null {
+ try{validateClassifierEffort(draft.classifierEffort);}catch{return 'Invalid classifier reasoning level';}
+ const classifierModel=models?.find(model=>model.key===(draft.classifier||draft.small));
+ if(draft.classifierEffort&&classifierModel&&!classifierModel.levels.includes(draft.classifierEffort))return 'Unsupported classifier reasoning level';
  if(draft.rules!==undefined){try{if(validateRules(JSON.parse(draft.rules)).v===2&&!draft.medium&&draft.model==='auto')return 'Choose a medium model';}catch{return 'Invalid task rules';}}
  if(draft.gateway!==null){try{const u=new URL(draft.gateway);if(u.username||u.password||u.search||u.hash||!['https:','http:'].includes(u.protocol)||(u.protocol==='http:'&&!['127.0.0.1','localhost','[::1]'].includes(u.hostname)))return 'Gateway requires HTTPS or loopback HTTP without credentials/query';}catch{return 'Invalid gateway URL';}}
  if(draft.model==='auto'&&!draft.small)return 'Choose a lightweight model';

@@ -1,4 +1,5 @@
 export type OutputChunk = {
+  parser?: {instance:string;control_revision:number};
   session_id: string;
   data: string;
   offset: number;

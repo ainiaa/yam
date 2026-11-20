@@ -2,6 +2,16 @@
 
 当前会话导航：侧栏统一切换会话；单终端取消常驻会话标签栏，分屏仅展示当前会话标题，布局菜单并入现有视图工具栏。保留旧布局读取与后台任务，文件编辑标签继续使用。历史记录中的终端标签拖拽、排序和标签内重命名不再作为当前界面入口。
 
+## 2026-11-13 易用性与稳定性增量（当前源码）
+
+作者：Jeff.Liu。当前源码版本为 `0.1.12`，本节不代表发布或安装包验收；公开发布基线以 README 的 Release baseline 为准。计划及本轮验证边界见 [实施计划](plans/2026-11-13-usability-reliability.md)。
+
+- 设置导航复用同一套未保存修改确认，覆盖页面跳转、Esc、关闭与取消；中文组合态的 Esc 不触发离开。确认放弃 Profile 修改时恢复已保存草稿。保存失败继续沿用原有草稿保留机制。
+- 命令面板查询后台普通和归档历史，不再依赖侧栏已加载页。沿用现有分页上限，未检索完时提供继续搜索入口；归档页可能没有匹配项但仍有下一页，不将其误报为全历史无结果。名称、目录及已有别名使用现有历史搜索合同；已加载会话仍保留 Agent 与状态词筛选。结果打开不启动或重跑任务。
+- 连接详情区分已保存配置、CLI 启动、运行与可信回执、集成不可用、历史会话、后台断连。断连时旧回执不作为当前连接证明，提供原有后台重连入口；不推断实际模型、认证或计费成功。
+- 性能设置增加成功且仍有效的就绪视图切换耗时，窗口内最多保留 32 个数字样本。计时截至视图附着，不包含按键到像素的测量；新增样本不改变原有诊断导出格式。
+- 多会话基线复用无界面 xterm 夹具；1/8/16 会话分别三轮，每轮约 10 秒，测量解析与轮流序列化。不是实际 GUI、PTY、推理负载、空闲 CPU 或长期泄漏验收。
+
 ## 本轮工作流优化（2026-10-27，作者：Jeff.Liu）
 
 | 能力 | 当前范围与边界 |
@@ -22,7 +32,7 @@
 
 # YAM 当前能力与验收入口
 
-作者：Jeff.Liu。最后公开版本：0.1.9；当前工作区正在执行 [体验优化计划](superpowers/plans/2026-10-24-yam-experience.md)。下方多轮记录均为历史快照，不能代替当前版本结论。
+作者：Jeff.Liu。以下为 `0.1.9` 与 [2026-10-24 体验优化计划](superpowers/plans/2026-10-24-yam-experience.md) 的历史快照，不作为当前版本或发布结论。
 
 | 能力 | 当前状态 |
 | --- | --- |
@@ -494,7 +504,7 @@ F1–F6源码与有限smoke helper已通过独立源码复审。当前实际检�
 
 [F7当前证据](evidence/yam-functional-f7/README.md)区分first candidate/R1、真实RED/harness、构建及原生阶段输入、最终自动检查和未覆盖边界；formal provider coverage仍uncovered。
 
-| 独立浏览器窗口 C01a | main More actions → Browser，HTTP(S)URL与Show/Reload/Close；固定单独窗口，native identity gate和exact WebView plugin scope，generation/Destroyed保留不确定关闭状态 | [C01a回执](superpowers/plans/2026-10-09-yam-cmux-c01a.md)；60/1073front、599Rust+2原ignored/10target，独立60+10 PASS。124-file frontend/security投影绑定；native iframe/plugin/render/ReactDOM/跨平台/full C01/Suite未验，旧debug138未含，updater暂停 |
+| 网页链接 | 终端中的 HTTP(S) 链接使用系统默认浏览器打开。已移除「更多操作」中的独立浏览器窗口。 | [原 C01a 回执](superpowers/plans/2026-10-09-yam-cmux-c01a.md) |
 
 | A11有限owner/parser测量 | 隔离F7实跑r6完成：300/300 submission→parser P95 30.329208ms，writeRPC P95 15.197292ms，3251476bytes exact drain；cleanup真实wait/absent | [回执](superpowers/plans/2026-10-09-yam-cmux-a11-fixture.md)：高档1MiB/s offered仅544755.82B/s、stall4.938s；134 helper/独立sol，原失败和清理recoverable错误保留。非paint/ACK起点；nativeGUI/ReactDOM/cmux/RSS/full A11/Suite仍open，updater暂停 |
 

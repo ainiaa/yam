@@ -335,10 +335,17 @@ pub(super) fn write_selected(
     destination: Option<&Path>,
     bytes: &[u8],
 ) -> Result<bool, &'static str> {
+    write_selected_with_limit(destination, bytes, MAX_BYTES)
+}
+pub(super) fn write_selected_with_limit(
+    destination: Option<&Path>,
+    bytes: &[u8],
+    limit: usize,
+) -> Result<bool, &'static str> {
     let Some(target) = destination else {
         return Ok(false);
     };
-    if bytes.len() > MAX_BYTES {
+    if bytes.len() > limit {
         return Err("size_limit");
     }
     let parent = target

@@ -1383,6 +1383,11 @@ pub(super) fn prepare(
     assets: &std::path::Path,
     _environment: Option<&super::provider_launch::Environment>,
 ) -> Result<Prepared, String> {
+    if launch.adapter == "omp" && launch.mode == "interactive" {
+        let mut prepared = Prepared::lifecycle()?;
+        prepared.cli_version = pi_version(executable);
+        return Ok(prepared);
+    }
     if launch.adapter == "pi" && launch.mode == "interactive" {
         super::pi_router::validate_runtime(executable, assets, _cwd)?;
         return Ok(Prepared {
@@ -1397,6 +1402,7 @@ pub(super) fn prepare(
     if launch.adapter == "opencode" && launch.mode == "interactive" {
         validate_interactive_args("opencode", &super::parse_agent_args(&launch.extra_args)?)?;
         let plain = super::AgentLaunch {
+            omp: None,
             codex: None,
             prompt: None,
             extra_args: String::new(),
@@ -1429,6 +1435,7 @@ pub(super) fn prepare(
     if launch.adapter == "claude" && launch.mode == "interactive" {
         validate_interactive_args("claude", &super::parse_agent_args(&launch.extra_args)?)?;
         let plain = super::AgentLaunch {
+            omp: None,
             codex: None,
             prompt: None,
             extra_args: String::new(),
@@ -1473,6 +1480,7 @@ pub(super) fn prepare(
     #[cfg(not(target_os = "macos"))]
     {
         let plain = super::AgentLaunch {
+            omp: None,
             claude_context: None,
             codex: launch.codex.clone(),
             provider: launch.provider.clone(),
@@ -1560,6 +1568,7 @@ mod tests {
         std::fs::create_dir(&root).unwrap();
         let executable = root.join("pi");
         let launch = crate::AgentLaunch {
+            omp: None,
             adapter: "pi".into(),
             mode: "interactive".into(),
             claude_context: None,
@@ -1954,6 +1963,7 @@ mod tests {
                     command: None,
                     status: "running".into(),
                     launch: Some(AgentLaunch {
+                        omp: None,
                         claude_context: None,
                         codex: None,
                         provider: None,
@@ -2717,6 +2727,7 @@ read end
         std::fs::write(&executable, script).unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
         let launch = super::super::AgentLaunch {
+            omp: None,
             claude_context: None,
             adapter: "codex".into(),
             mode: "interactive".into(),
@@ -2933,6 +2944,7 @@ read end
             "--worktree",
         ] {
             let launch = super::super::AgentLaunch {
+                omp: None,
                 claude_context: None,
                 codex: None,
                 provider: None,

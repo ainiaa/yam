@@ -13,7 +13,7 @@ export default async function(pi) {
  const discover=createAgentDiscovery();
  const native=createNativeCodex(pi,{discover,createStream:createAssistantMessageEventStream,normalizeContext,getTools:context=>context.tools??getCurrentTools(context.messages),getSystemPrompt:context=>context.systemPrompt??getCurrentSystemPrompt(context.messages),validateImage});
  const routing=await install(pi,getSupportedThinkingLevels,Text,native,{estimateMessageTokens,getReserveTokens:model=>SettingsManager.inMemory(pi.getSettings()).getCompactionReserveTokens(model)});
- installAgents(pi,routing,{validateImage,discover});
+ installAgents(pi,routing,{validateImage,discover,createStream:createAssistantMessageEventStream});
  return routing;
  } catch(error) {
   if(process.argv.includes('--yam-catalog-probe')||process.argv.includes('--yam-runtime-probe'))console.log(JSON.stringify({type:'yam_catalog',error:'Pi cannot load the required YAM routing extension APIs; update or configure Pi and retry'}));

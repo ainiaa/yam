@@ -542,7 +542,7 @@ class NoticeTests(unittest.TestCase):
     def test_real_locked_inputs_are_bound_to_reviewed_npm_seed(self):
         root = pathlib.Path(__file__).resolve().parents[1]
         found = notices.inputs(root)
-        self.assertEqual(found["pnpm_lock"], "c82ae95c7d8638e8709dd9b1535c95d383834091755250d1ad2eedab1c496ab3")
+        self.assertEqual(found["pnpm_lock"], "3ff56cc27dca73c33d9e5c51eefd5e2cf3b202807ff097b4a9ca678a65749a8d")
         self.assertEqual(found["declarations"], "dd2e50921eb8f0275863b35f3b954149dbf62c9d6aac20b70dec85e8f8c51925")
 
 
@@ -550,7 +550,7 @@ class ApprovedInventoryTests(unittest.TestCase):
     def test_current_real_571_manifest_material_binding_includes_closed_cohort(self):
         root = pathlib.Path(__file__).resolve().parents[1]
         trusted = notices.read_json(root/"scripts/third-party-notices/manifest.json")
-        approved = "8438c5b9ea7070ecb57f75b8aacdfe8b2fbb9fbb77d53a28b57cd6442daf3a47"
+        approved = "b15f9583ac026cabd25d4c6e3e996a96b5f38b18c4fe364061c13632be2c5e2f"
         self.assertEqual(notices.digest(notices.canonical(trusted)),approved)
         with mock.patch.object(notices,"APPROVED_MANIFEST_SHA256",approved,create=True):
             content, report = notices.render(root,trusted,mode="developer")
@@ -942,7 +942,7 @@ class MaterialBatch01Tests(unittest.TestCase):
       'main': ['a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2',
                'fea1d5bf3dd71605ce5d7d2ff695c1837e914c77195e523a86b5391716477960'],
       'supp': []}]
-    APPROVED = '8438c5b9ea7070ecb57f75b8aacdfe8b2fbb9fbb77d53a28b57cd6442daf3a47'
+    APPROVED = 'b15f9583ac026cabd25d4c6e3e996a96b5f38b18c4fe364061c13632be2c5e2f'
 
     def _current(self):
         root = pathlib.Path(__file__).resolve().parents[1]

@@ -60,7 +60,7 @@ function changeActualCli(adapter,provider,target,previousEdits={}) {
  const body=compileCliChange(readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8'));
  const selected={adapter,provider,edits:previousEdits};
  const formLaunch={adapter,provider,mode:'interactive',extra_args:'--verbose',prompt:'keep prompt'};
- const bindings={adapter:{id:target},useProjectSettings:false,launchWorktreeAttempt:undefined,launchDirectoryOverride:"/project",formLaunch,formAdapter:adapter,providerPreset,providerChoice,supportsProvider,setError:value=>selected.error=value,setLaunchDraft:update=>{const next=update({adapter:selected.adapter,provider:selected.provider});selected.adapter=next.adapter;selected.provider=next.provider;},setProjectLaunchEdits:update=>selected.edits=update(selected.edits)};
+ const bindings={readLastConnection:(_storage,_adapter,fallback)=>fallback,localStorage:{},sessionCopy:null,adapter:{id:target},useProjectSettings:false,launchWorktreeAttempt:undefined,launchDirectoryOverride:"/project",formLaunch,formAdapter:adapter,providerPreset,providerChoice,supportsProvider,setError:value=>selected.error=value,setLaunchDraft:update=>{const next=update({adapter:selected.adapter,provider:selected.provider});selected.adapter=next.adapter;selected.provider=next.provider;},setProjectLaunchEdits:update=>selected.edits=update(selected.edits)};
  const change=new Function(...Object.keys(bindings),body)(...Object.values(bindings));
  change();return selected;
 }
@@ -72,7 +72,7 @@ test('explicit CLI switching follows the DeepSeek default protocol in both direc
   const endpoint=providerPreset(to==='claude'?'deepseek-claude':'deepseek').provider.base_url;
   assert.equal(result.adapter,to);assert.deepEqual(result.provider,{...original,base_url:endpoint});
   assert.deepEqual(original,saved,'selection must not mutate saved input');
-  assert.deepEqual(result.edits,{adapter:to,provider:result.provider});
+  assert.deepEqual(result.edits,{adapter:to,omp:undefined,provider:result.provider});
  }
 });
 
@@ -82,7 +82,7 @@ test('CLI switching preserves manual endpoints, native mode and other Provider s
  for(const [from,current,to] of [['codex',customEndpoint,'claude'],['codex',customProvider,'claude'],['codex',null,'claude'],['codex',provider,'codex']]){
   const result=changeActualCli(from,current,to);
   assert.equal(result.adapter,to);assert.equal(result.provider,current);
-  assert.deepEqual(result.edits,{adapter:to});
+  assert.deepEqual(result.edits,{adapter:to,omp:undefined});
  }
 });
 
@@ -90,7 +90,7 @@ test('CLI switching merges trusted project edits without resetting model, prompt
  const original={...provider,model:'project-model',api_key_env:'PROJECT_KEY_REF'};
  const edits={prompt:'project prompt',extra_args:'--verbose',mode:'interactive',env_refs:{CUSTOM:'CUSTOM_REF'},provider:original};
  const result=changeActualCli('codex',original,'claude',edits);
- assert.deepEqual(result.edits,{...edits,adapter:'claude',provider:{...original,base_url:providerPreset('deepseek-claude').provider.base_url}});
+ assert.deepEqual(result.edits,{...edits,adapter:'claude',omp:undefined,provider:{...original,base_url:providerPreset('deepseek-claude').provider.base_url}});
  assert.equal(edits.provider,original);assert.equal(edits.provider.base_url,'https://api.deepseek.com');
 });
 

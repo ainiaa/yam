@@ -131,5 +131,5 @@ test('Codex session creation forwards the selected strategy exactly once',async(
  const start=actual('startNewSession',{formAdapter:'codex',formLaunch:{command:null,provider:null,extra_args:''},shellWindows:false,
   useProjectSettings:false,launchWorktreeAttempt:undefined,startSession:async(...args)=>{calls.push(args);},setError:assert.fail});
  await start(undefined,route);
- assert.deepEqual(calls,[[undefined,undefined,undefined,route]]);
+ assert.deepEqual(calls,[[undefined,undefined,'',route]]);
 });

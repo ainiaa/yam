@@ -137,7 +137,7 @@ test('Node auth helper uses installed Pi API, coalesces reads, excludes refresh 
   'package.json':JSON.stringify({name:'@earendil-works/pi-coding-agent',version:'1.5.0',type:'module'}),
   'dist/core/auth-storage.js':"export const AuthStorage={create:path=>({path})};",
   'node_modules/@earendil-works/pi-ai/package.json':JSON.stringify({type:'module'}),
-  'node_modules/@earendil-works/pi-ai/dist/auth/oauth/openai-chatgpt.js':"export const openaiChatGPTOAuth={name:'new-chatgpt'};",
+  'node_modules/@earendil-works/pi-ai/dist/auth/oauth/openai-chatgpt.js':"export const openaiChatGPTOAuth={name:'new-chatgpt',refresh(){},toAuth(){}};",
   'node_modules/@earendil-works/pi-ai/dist/auth/resolve.js':`import {readFile,appendFile} from 'node:fs/promises';export async function refreshStoredOAuthCredential(store,id,oauth){if(id!=='openai'||oauth.name!=='new-chatgpt')throw Error('wrong provider');await appendFile(store.path+'.calls','x');return JSON.parse(await readFile(store.path,'utf8'));}`,
  };
  try{
@@ -147,8 +147,14 @@ test('Node auth helper uses installed Pi API, coalesces reads, excludes refresh 
   const a=read(),b=read();assert.equal(a,b);const result=await a;assert.equal(result.access,'test-oauth-access');assert.equal(result.refresh,undefined);
   const {readFile}=await import('node:fs/promises');assert.equal(await readFile(authPath+'.calls','utf8'),'x');
   await writeFile(authPath,'SECRET malformed');await assert.rejects(read(),e=>!/SECRET/.test(e.message)&&/helper failed/.test(e.message));
-  await writeFile(join(dir,'package.json'),JSON.stringify({name:'@earendil-works/pi-coding-agent',version:'unknown'}));
-  await assert.rejects(loadPiCredentialReader(dir,authPath),/Pi 1.5.0/);
+  // Version metadata is diagnostic only; the installed interfaces decide compatibility.
+  await writeFile(authPath,JSON.stringify(credential()));
+  for(const version of ['1.5.0','1.5.2','2.0.0','unknown']){
+   await writeFile(join(dir,'package.json'),JSON.stringify({name:'@earendil-works/pi-coding-agent',version,type:'module'}));
+   assert.equal((await (await loadPiCredentialReader(dir,authPath))()).access,'test-oauth-access');
+  }
+  await writeFile(join(dir,'package.json'),JSON.stringify({name:'unrelated',version:'1.5.0'}));
+  await assert.rejects(loadPiCredentialReader(dir,authPath),/Pi/);
   await assert.rejects(createSubprocessCredentialReader({node:join(dir,'missing'),packageDir:dir,authPath})(),/helper failed/);
  }finally{await rm(dir,{recursive:true,force:true});}
 });
@@ -159,5 +165,70 @@ test('native failures and truncation retain partial output and usage while sanit
   const x=setup({stream:()=> (async function*(){yield type==='error'?{type,reason:'error',error:partial}:{type,reason:'length',message:partial};})()});
   const result=(await collect(x.provider.stream({id:'test-primary'},{}))).at(-1);
   assert.deepEqual(result.error.content,partial.content);assert.deepEqual(result.error.usage,partial.usage);assert.doesNotMatch(JSON.stringify(result),/SECRET/);
+ }
+});
+
+
+test('Pi compatibility fails safely on missing or malformed authentication interfaces',async()=>{
+ const valid={
+  'dist/core/auth-storage.js':'export const AuthStorage={create:()=>({})};',
+  'node_modules/@earendil-works/pi-ai/dist/auth/resolve.js':'export async function refreshStoredOAuthCredential(){}',
+  'node_modules/@earendil-works/pi-ai/dist/auth/oauth/openai-chatgpt.js':'export const openaiChatGPTOAuth={refresh(){},toAuth(){}};',
+ };
+ for(const [path,source] of [
+  ['dist/core/auth-storage.js',null],
+  ['dist/core/auth-storage.js','export const AuthStorage={create:42};'],
+  ['node_modules/@earendil-works/pi-ai/dist/auth/resolve.js','export const refreshStoredOAuthCredential=42;'],
+  ['node_modules/@earendil-works/pi-ai/dist/auth/oauth/openai-chatgpt.js','export const openaiChatGPTOAuth={toAuth(){}};'],
+  ['node_modules/@earendil-works/pi-ai/dist/auth/oauth/openai-chatgpt.js','export const openaiChatGPTOAuth={refresh(){}};'],
+ ]){
+  const dir=await mkdtemp(join(tmpdir(),'yam-incompatible-pi-'));
+  try{
+   const files={
+    ...valid,
+    'package.json':JSON.stringify({name:'@earendil-works/pi-coding-agent',version:'1.5.0',type:'module'}),
+    'node_modules/@earendil-works/pi-ai/package.json':JSON.stringify({type:'module'}),
+   };
+   if(source===null)delete files[path];else files[path]=source;
+   for(const [path,data] of Object.entries(files)){await mkdir(join(dir,path,'..'),{recursive:true});await writeFile(join(dir,path),data);}
+   await assert.rejects(loadPiCredentialReader(dir,join(dir,'unused')),/compatible Pi authentication interfaces/);
+  }finally{await rm(dir,{recursive:true,force:true});}
+ }
+});
+
+test('OMP launcher accepts upgraded CLI without consulting a version allowlist',async()=>{
+ const {execFile}=await import('node:child_process');
+ const {promisify}=await import('node:util');
+ const code=`
+  import {mock} from 'node:test';
+  import assert from 'node:assert/strict';
+  import {EventEmitter} from 'node:events';
+  mock.module('node:fs/promises',{namedExports:{access:async()=>{},open:async()=>{throw Error('No policy file requested');}}});
+  mock.module('node:child_process',{namedExports:{
+   execFileSync:(file,args)=>{if(args[0]==='--version')return 'omp/99.0.0';assert.equal(args[0],'--proxy');return 'HTTPSEnable : 1\\nHTTPSProxy : localhost\\nHTTPSPort : 8080';},
+   spawn:(file,args,{env})=>{assert.ok(args.includes('--extension'));assert.ok(args.includes('--no-extensions'));assert.equal(env.YAM_PI_PACKAGE_DIR,'/fake-pi');console.log('spawned-compatible-omp');const child=new EventEmitter();child.kill=()=>{};setImmediate(()=>child.emit('exit',0));return child;}
+  }});
+  mock.module(${JSON.stringify(new URL('../../../extensions/omp-chatgpt/runtime.mjs',import.meta.url).href)},{namedExports:{yamAuthDirectory:()=>'/fake-yam-auth',createYamSubprocessCredentialReader:()=>{throw Error('YAM reader must not run in Pi backup fixture');},findPiPackage:async()=>'/fake-pi',parseSystemProxy:()=> 'http://localhost:8080',launchEnvironment:()=>({YAM_PI_PACKAGE_DIR:'/fake-pi'})}});
+  process.argv=['node','run','--yam-auth','pi'];await import(${JSON.stringify(new URL('../../../extensions/omp-chatgpt/run.mjs',import.meta.url).href)});
+ `;
+ const {stdout}=await promisify(execFile)(process.execPath,['--experimental-test-module-mocks','--input-type=module','-e',code],{timeout:10000});
+ assert.match(stdout,/spawned-compatible-omp/);
+});
+
+test('thrown and unterminated subscription streams preserve their latest partial content and usage',async()=>{
+ const partial={role:'assistant',provider:'yam-chatgpt',model:'test-primary',content:[{type:'text',text:'partial answer'}],usage:{input:10,output:2,totalTokens:12}};
+ for(const mode of ['throw','eof','abort']){
+  const cancel=new AbortController();
+  const x=setup({stream:()=> (async function*(){yield {type:'text_delta',delta:'partial answer',partial};if(mode==='abort')cancel.abort();if(mode!=='eof')throw Error('PRIVATE network diagnostic');})()});
+  const last=(await collect(x.provider.stream({id:'test-primary'},{},{signal:cancel.signal}))).at(-1);
+  assert.deepEqual(last.error.content,partial.content);assert.deepEqual(last.error.usage,partial.usage);assert.equal(last.reason,mode==='abort'?'aborted':'error');assert.doesNotMatch(JSON.stringify(last),/PRIVATE/);
+ }
+});
+
+test('terminal abort errors cannot overwrite observed partial output or usage with absent data',async()=>{
+ const partial={role:'assistant',content:[{type:'text',text:'kept answer'}],usage:{input:10,output:2,totalTokens:12}};
+ for(const error of [{role:'assistant',errorMessage:'aborted'},{role:'assistant',content:[],usage:{input:0,output:0,totalTokens:0},errorMessage:'aborted'}]){
+  const cancel=new AbortController(),x=setup({stream:()=> (async function*(){yield {type:'text_delta',partial};cancel.abort();yield {type:'error',error};})()});
+  const last=(await collect(x.provider.stream({id:'test-primary'},{},{signal:cancel.signal}))).at(-1);assert.deepEqual(last.error.content,partial.content);assert.deepEqual(last.error.usage,partial.usage);assert.equal(last.reason,'aborted');
  }
 });

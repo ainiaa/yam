@@ -1,8 +1,89 @@
 import assert from 'node:assert/strict';
+import {nativeError} from '../src-tauri/pi/failure.mjs';
 import {test} from 'node:test';
 import {readFileSync} from 'node:fs';
 const api=await import('../src-tauri/pi/agent-orchestrator.mjs').catch(e=>{if(e.code==='ERR_MODULE_NOT_FOUND')return {};throw e;});
 const uuid='01234567-1234-1234-1234-0123456789ab';
+const candidate=(model,runner='model')=>({model,runner,effort:'high',billing:runner==='codex'?'subscription':'api'});
+const delivery={id:'deliver',name:'Delivery',preset:'delivery',roles:{
+ plan:[candidate('p/sol'),candidate('p/glm')],
+ implement:[candidate('yam-codex/sol','codex')],
+ review:[candidate('p/reviewer')],
+}};
+const workflowRequest={workflow:delivery,prompt:'Fix the problem',cwd:'/repo',billing:'configured'};
+function roleFixture(run){
+ const entries=[],calls=[];
+ const runner=api.createWorkflowRunner({
+  resolve:async(choice,role)=>({choice,role}),snapshot:async()=>'git evidence',
+  execute:async(resolved,options)=>{calls.push({resolved,options});return run?.(resolved,options)??({
+   plan:{text:'{"summary":"verified plan","steps":["fix"],"acceptance":["passes"]}'},
+   implement:{text:'implementation',sessionId:uuid},
+   review:{text:'{"summary":"reviewed","findings":[]}'},
+  })[resolved.role];},
+  append:(type,data)=>entries.push({type:'custom',customType:type,data}),
+ });
+ return {runner,entries,calls};
+}
+test('workflow falls back only the failed role and passes validated outputs downstream',async()=>{
+ const f=roleFixture((resolved)=>{if(resolved.choice.model==='p/sol')throw nativeError('not-logged-in','unavailable');});
+ const result=await f.runner.run(workflowRequest);
+ assert.equal(result.status,'completed');
+ assert.deepEqual(f.calls.map(call=>call.resolved.choice.model),['p/sol','p/glm','yam-codex/sol','p/reviewer']);
+ assert.match(f.calls[2].options.prompt,/verified plan/);
+ assert.match(f.calls[3].options.prompt,/git evidence/);
+ assert.deepEqual(result.roles.plan.attempts.map(attempt=>attempt.status),['unavailable','completed']);
+});
+test('workflow preserves partial writes and blocks replay after restart',async()=>{
+ const request={...workflowRequest,version:'v1',workflow:{...delivery,roles:{...delivery.roles,
+  implement:[...delivery.roles.implement,candidate('yam-codex/backup','codex')],
+ }}};
+ const f=roleFixture((resolved)=>{if(resolved.role==='implement')throw Object.assign(Error('Lost runner'),{mayBeRunning:true});});
+ const first=await f.runner.run(request);
+ assert.equal(first.status,'needs-inspection');
+ assert.equal(first.roles.plan.status,'completed');
+ const restored=roleFixture();
+ restored.runner.restore(f.entries);
+ await assert.rejects(restored.runner.run(request),/inspect/i);
+ assert.equal(restored.calls.length,0);
+ restored.runner.authorizeResume();
+ await assert.rejects(restored.runner.run({...request,prompt:'A different task'}),/same request/);
+ const resumed=await restored.runner.run(request);
+ assert.equal(resumed.status,'completed');
+ assert.deepEqual(restored.calls.map(call=>call.resolved.choice.model),['yam-codex/backup','p/reviewer']);
+ assert.match(restored.calls[0].options.prompt,/Reconcile.*verified plan/s);
+});
+test('readonly workflow result gets one format retry and a finding is not a candidate failure',async()=>{
+ let attempt=0;
+ const f=roleFixture((resolved)=>{
+  if(resolved.role==='plan'&&++attempt===1)return {text:'invalid'};
+  if(resolved.role==='review')return {text:'{"summary":"verified","findings":["file.js:1 has a race"]}'};
+ });
+ const result=await f.runner.run(workflowRequest);
+ assert.equal(result.status,'needs-fix');
+ assert.deepEqual(f.calls.map(call=>call.resolved.choice.model),['p/sol','p/sol','yam-codex/sol','p/reviewer']);
+ assert.equal(result.roles.review.status,'completed');
+});
+
+test('resumed review repeats completed reviewers when the scoped workspace evidence changed',async()=>{
+ const reviewer=candidate('p/reviewer'),auditor=candidate('p/auditor');
+ const workflow={id:'review',name:'Review',preset:'review',paths:['src'],roles:{review:[reviewer],audit:[auditor]}};
+ const request={workflow,prompt:'Review the change',cwd:'/repo',billing:'configured'};
+ let evidence='old diff',available=false;
+ const calls=[];
+ const runner=api.createWorkflowRunner({
+  snapshot:async()=>evidence,append(){},resolve:async(choice,role)=>({choice,role}),
+  execute:async({role},{prompt})=>{
+   calls.push({role,prompt});
+   if(role==='audit'&&!available)throw nativeError('not-logged-in','unavailable');
+   return {text:'{"summary":"reviewed","findings":[]}'};
+  },
+ });
+ assert.equal((await runner.run(request)).status,'failed');
+ runner.authorizeResume();available=true;evidence='new diff';
+ assert.equal((await runner.run(request)).status,'completed');
+ assert.deepEqual(calls.map(call=>call.role),['review','audit','review','audit']);
+ assert.ok(calls.slice(-2).every(call=>call.prompt.includes('new diff')));
+});
 const task=(id,executor,dependsOn=[])=>({id,executor,goal:id,requires:['text'],dependsOn,resume:null});
 const plan=tasks=>({version:1,intent:'new',billing:'configured',reason:'Use native capabilities',clarification:null,tasks});
 function fixture(answer=plan([task('article','pi-small'),task('cover','codex',['article'])])){

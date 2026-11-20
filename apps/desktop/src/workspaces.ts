@@ -10,6 +10,12 @@ export function projectKey(path: string) {
   return path.trim().replace(/[\\/]+$/, "") || "/";
 }
 
+export function projectDeletionPath(path: string, windows: boolean) {
+  const normalized = path.replace(windows ? /[\\/]+$/ : /\/+$/, "");
+  if (windows && /^[A-Za-z]:$/.test(normalized) && normalized !== path) return normalized + "\\";
+  return normalized || "/";
+}
+
 export function projectName(path: string) {
   const parts = projectKey(path).split(/[\\/]/).filter(Boolean);
   return parts[parts.length - 1] || path;

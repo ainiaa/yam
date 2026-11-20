@@ -42,6 +42,28 @@ pub(super) fn base64(bytes: &[u8]) -> String {
     }
     result
 }
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub(super) struct OutputIdentity {
+    pub instance: String,
+    pub control_revision: u64,
+}
+fn output_identity(value: &Value, session: &str, instance: &str) -> Option<OutputIdentity> {
+    if value.as_object()?.len() != 4
+        || value["version"] != 1
+        || value["session"] != session
+        || value["instance"] != instance
+    {
+        return None;
+    }
+    let control_revision = value["control_revision"]
+        .as_u64()
+        .filter(|n| *n < 9_007_199_254_740_991)?;
+    Some(OutputIdentity {
+        instance: instance.to_owned(),
+        control_revision,
+    })
+}
+
 pub(super) fn validate_snapshot(
     value: &Value,
     session: &str,
@@ -430,7 +452,11 @@ impl Runtime {
             let _ = child.wait();
         }
     }
-    pub(super) fn output(&self, session: &str, bytes: &[u8]) -> Result<(), String> {
+    pub(super) fn output(
+        &self,
+        session: &str,
+        bytes: &[u8],
+    ) -> Result<Option<OutputIdentity>, String> {
         self.output_observed(session, bytes, None)
     }
     pub(super) fn output_observed(
@@ -438,14 +464,14 @@ impl Runtime {
         session: &str,
         bytes: &[u8],
         stages: Option<&mut CallStages>,
-    ) -> Result<(), String> {
+    ) -> Result<Option<OutputIdentity>, String> {
         self.call_observed(
             "write",
             session,
             serde_json::json!({"data":base64(bytes)}),
             stages,
         )
-        .map(|_| ())
+        .map(|value| output_identity(&value, session, &self.instance))
     }
 }
 impl Drop for Runtime {
@@ -459,6 +485,42 @@ impl Drop for Runtime {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    #[test]
+    fn output_identity_requires_the_current_parser_session_and_safe_control_generation() {
+        let instance = "a".repeat(64);
+        let good = serde_json::json!({"version":1,"instance":instance,"session":"s-one","control_revision":0});
+        let parsed = super::output_identity(&good, "s-one", &instance).unwrap();
+        assert_eq!(parsed.instance, instance);
+        assert_eq!(parsed.control_revision, 0);
+        assert_eq!(
+            serde_json::to_value(parsed).unwrap(),
+            serde_json::json!({"instance":instance,"control_revision":0})
+        );
+        for (field, value) in [
+            ("version", serde_json::json!(2)),
+            ("instance", serde_json::json!("b".repeat(64))),
+            ("session", serde_json::json!("s-other")),
+            ("control_revision", serde_json::json!(-1)),
+            ("control_revision", serde_json::json!(true)),
+            ("control_revision", serde_json::json!(1.5)),
+            (
+                "control_revision",
+                serde_json::json!(9_007_199_254_740_991u64),
+            ),
+        ] {
+            let mut bad = good.clone();
+            bad[field] = value;
+            assert!(super::output_identity(&bad, "s-one", &instance).is_none());
+        }
+        for value in [
+            serde_json::Value::Null,
+            serde_json::json!({}),
+            serde_json::json!({"version":1,"instance":instance,"session":"s-one","control_revision":0,"extra":true}),
+        ] {
+            assert!(super::output_identity(&value, "s-one", &instance).is_none());
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     fn service_children_do_not_allocate_a_console_window() {
@@ -534,6 +596,7 @@ if(r.op==='exit'){process.exit(0);return;}
 if(r.op==='wrong'){emit({id:r.id+1,ok:true,data:null});return;}
 if(r.op==='error'||(refuseWrite&&r.op==='write')){emit({id:r.id,ok:false,error:'safe fixture refusal'});return;}
 if(r.op==='snapshot'){emit({id:r.id,ok:true,data:{instance:'wrong',session:r.session}});return;}
+if(r.op==='write'&&(r.session==='identified'||r.session.startsWith('s-'))){emit({id:r.id,ok:true,data:{version:1,instance,session:r.session,control_revision:7}});return;}
 emit({id:r.id,ok:true,data:null});});
 "#;
         let mut file = std::fs::OpenOptions::new()
@@ -665,6 +728,16 @@ emit({id:r.id,ok:true,data:null});});
             observed.serial.count, 4,
             "unobserved call must not alter caller-owned counters"
         );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn output_identity_actual_runtime_keeps_legacy_replies_and_forwards_validated_receipts() {
+        let fixture = stage_fixture(false);
+        let runtime = &fixture.runtime;
+        assert!(runtime.output("legacy", b"line\r\n").unwrap().is_none());
+        let identity = runtime.output("identified", b"line\r\n").unwrap().unwrap();
+        assert_eq!(identity.instance, runtime.instance());
+        assert_eq!(identity.control_revision, 7);
     }
     #[cfg(unix)]
     #[test]

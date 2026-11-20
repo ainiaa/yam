@@ -9,11 +9,40 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {createServer} from 'node:http';
-import {connect} from 'node:net';
+import {connect,createServer as createTcpServer} from 'node:net';
+import {createCodexTurnRouter} from '../../../scripts/codex-auto-route.mjs';
+import {defaultTierRules} from '../src-tauri/pi/task-rules.mjs';
+
+test('native preview explains matched local and execution rules without sending a turn',async()=>{
+ const rules={...defaultTierRules,classificationRules:[{enabled:true,prefix:'yam:review',task:'review'}],
+  executionRules:[{enabled:true,when:{task:'review',workspace:'/repo'},use:{workflow:'deep-review'}}]};
+ const config={rules,connections:{native:{billing:'subscription',native:true}},classifiers:['native/classifier'],
+  executionGroups:[{small:'native/light',medium:'native/regular',strong:'native/deep'}]};
+ let classified=0,writes=0;
+ const router=createCodexTurnRouter({config,cwd:'/repo',connectionName:'native',models:[],initial:{threadId:'main'},
+  classify:async()=>{classified++;throw Error('Preview should use the local rule');},save:async()=>{writes++;}});
+ const p=await router.preview('yam:review Inspect the change');
+ assert.equal(p.classificationRule,1);
+ assert.equal(p.executionRule,1);
+ assert.equal(p.model,'native/deep');
+ assert.equal(p.selection.effort,'high');
+ assert.equal(p.workflow,'deep-review');
+ assert.equal(p.supported,false);
+ assert.equal(classified,0);
+ assert.equal(writes,0);
+ assert.equal(router.state.status,'idle');
+ await assert.rejects(router.request({id:1,method:'turn/start',params:{threadId:'main',input:[
+  {type:'image',url:'data:image/png;base64,AA=='},
+  {type:'text',text:'yam:flow:deep-review Inspect the attachment',text_elements:[{byte_range:{start:21,end:27}}]},
+ ]}}),/collaboration workflow requires a Pi session/);
+ assert.equal(classified,0);
+ assert.equal(router.state.status,'idle');
+});
 
 const runner=fileURLToPath(new URL('../../../scripts/codex-auto-route.mjs',import.meta.url));
-const threadId='11111111-1111-1111-1111-111111111111',turnId='22222222-2222-2222-2222-222222222222';
+const threadId='11111111-1111-1111-1111-111111111111';
 const fakeCodex=String.raw`#!/usr/bin/env node
+const {randomUUID}=require('node:crypto');
 const {appendFileSync,readFileSync}=require('node:fs');
 const {createInterface}=require('node:readline');
 const args=process.argv.slice(2),env=process.env;
@@ -21,7 +50,8 @@ const record=data=>appendFileSync(env.ROUTING_TEST_LOG,JSON.stringify(data)+'\n'
 let output=message=>console.log(JSON.stringify(message));
 const send=(id,result)=>output({id,result});
 const event=(method,params)=>output({method,params});
-const threadId='11111111-1111-1111-1111-111111111111',turnId='22222222-2222-2222-2222-222222222222';
+const threadId='11111111-1111-1111-1111-111111111111';
+let turnId;
 const finish=status=>event('turn/completed',{threadId,turn:{id:turnId,status}});
 function encode(message,masked=false){
  const data=Buffer.from(JSON.stringify(message)),header=Buffer.alloc(data.length<126?2:4);header[0]=129;header[1]=(masked?128:0)|(data.length<126?data.length:126);if(data.length>=126)header.writeUInt16BE(data.length,2);
@@ -65,7 +95,7 @@ else if(args.includes('--remote')){
   if(method==='account/read')send(id,{account:{type:'chatgpt'}});
   if(method==='model/list'){
    const names=env.ROUTING_TEST_CASE==='live-policy'?JSON.parse(readFileSync(env.ROUTING_TEST_LOG+'.models','utf8')):['offline','fast','deepseek-v4-pro','deepseek-v4-flash'];
-   send(id,{data:names.map(model=>({model,supportedReasoningEfforts:['medium','high','max'].map(reasoningEffort=>({reasoningEffort}))})),nextCursor:null});
+   send(id,{data:names.map(model=>({model,supportedReasoningEfforts:(env.ROUTING_TEST_CASE==='cold-backup'&&model==='deepseek-v4-flash'?['medium']:['medium','high','max']).map(reasoningEffort=>({reasoningEffort}))})),nextCursor:null});
   }
   if(method==='initialize')send(id,{userAgent:'fake-codex'});
   if(method==='thread/start'||method==='thread/resume'){
@@ -78,7 +108,8 @@ else if(args.includes('--remote')){
   if(method==='thread/unsubscribe'){record({method,params});loaded=false;event('thread/status/changed',{threadId,status:{type:'notLoaded'}});send(id,{status:'unsubscribed'});}
   if(method==='thread/loaded/list'){record({method,params});send(id,{data:loaded?[threadId]:[],nextCursor:null});}
   if(method==='turn/start'){
-   record({method,params});
+   turnId=randomUUID();
+   record({method,params,turnId});
    if(env.ROUTING_TEST_CASE==='unknown'){process.exit(0);return;}
    if(['interrupt','cancel-race','double-interrupt'].includes(env.ROUTING_TEST_CASE)){
     event('turn/started',{threadId,turn:{id:turnId,status:'inProgress'}});
@@ -87,6 +118,12 @@ else if(args.includes('--remote')){
     return;
    }
    event('turn/started',{threadId,turn:{id:turnId,status:'inProgress'}});
+   if(env.ROUTING_TEST_CASE==='early-approval'){
+    output({id:'early-approval',method:'item/commandExecution/requestApproval',params:{threadId,turnId}});
+    send(id,{turn:{id:turnId,status:'inProgress'}});
+    setTimeout(()=>finish('completed'),30);
+    return;
+   }
    if(env.ROUTING_TEST_CASE==='rerouted')event('model/rerouted',{threadId,turnId,fromModel:params.model,toModel:'unexpected',reason:'fallback'});
    event('item/completed',{threadId,turnId,item:{type:'agentMessage',text:'fixture response'}});
    finish('completed');
@@ -183,11 +220,11 @@ AbortSignal.timeout=ms=>{
   }finally{clearTimeout(guard);clearInterval(monitor);}
  }
  async function events(){return (await readFile(log,'utf8')).trim().split('\n').filter(Boolean).map(JSON.parse);}
- async function desktop(prompts,mode='',beforeInput){
+ async function desktop(prompts,mode='',beforeInput,bridge={}){
   const {codex,...policy}=config;
   const controlFile=log+'.control',generation='e'.repeat(64);
   const child=spawn(process.execPath,[runner,'--interactive','--session',session,'--codex',codex],{
-   cwd:paths.project,env:{...process.env,CODEX_HOME:paths.global,YAM_TEST_API_KEY:'fixture-key',
+   cwd:paths.project,env:{...process.env,...bridge,CODEX_HOME:paths.global,YAM_TEST_API_KEY:'fixture-key',
     ...beforeInput?{YAM_PI_CONTROL_FILE:controlFile,YAM_PI_GENERATION:generation}:{},
     YAM_CODEX_ROUTE_CONFIG:JSON.stringify(policy),ROUTING_TEST_CASE:mode,ROUTING_TEST_LOG:log,ROUTING_TEST_PROJECT:paths.project},stdio:['pipe','pipe','pipe'],
   });
@@ -238,9 +275,45 @@ test('desktop terminal dispatches through the selected route and reopens the sam
  assert.equal(requests.filter(event=>event.method==='thread/resume').length,1);
  const turns=requests.filter(event=>event.method==='turn/start');
  assert.equal(turns.length,3);
+ assert.equal(new Set(turns.map(event=>event.turnId)).size,3);
  assert.equal(new Set(turns.map(event=>event.params.threadId)).size,1);
  assert.ok(turns.every(event=>event.params.model==='deepseek-v4-pro'&&event.params.effort==='high'));
  assert.deepEqual(turns.map(event=>event.params.input[0].text),['Implement fixture','Follow-up','After reopening']);
+});
+
+test('desktop relay delivers an early pending approval after registering the exact turn with the owner',async t=>{
+ const {desktop}=await fixture(t);
+ const accepted=[],attempts=[];
+ const owner=createTcpServer(socket=>{
+  let wire='';
+  socket.setEncoding('utf8').on('data',chunk=>{wire+=chunk;}).on('end',()=>{
+   const {event}=JSON.parse(wire);
+   attempts.push(event);
+   const valid=event.kind!=='PermissionRequest'||accepted.some(prior=>prior.kind==='UserPromptSubmit'&&prior.turn_id===event.turn_id);
+   if(valid)accepted.push(event);
+   socket.end(JSON.stringify({accepted:valid}));
+  });
+ });
+ owner.listen(0,'127.0.0.1');await once(owner,'listening');t.after(()=>new Promise(resolve=>owner.close(resolve)));
+ const result=await desktop(['Implement fixture','/exit'],'early-approval',undefined,{
+  YAM_AGENT_ADDRESS:'127.0.0.1:'+owner.address().port,YAM_AGENT_TOKEN:'a'.repeat(64),
+ });
+ assert.equal(result.code,0,result.stderr);
+ const events=attempts.filter(event=>['UserPromptSubmit','PermissionRequest','TurnComplete'].includes(event.kind));
+ assert.deepEqual(events.map(event=>event.kind),['UserPromptSubmit','PermissionRequest','TurnComplete']);
+ assert.equal(new Set(events.map(event=>event.turn_id)).size,1);
+});
+
+test('desktop cold start chooses the first same-billing candidate supporting the required reasoning',async t=>{
+ const {config,desktop,events}=await fixture(t);
+ config.connections={native:{billing:'subscription',native:true}};
+ config.classifiers=['native/fast'];
+ config.executionGroups=[{small:'native/fast',medium:'native/deepseek-v4-flash',strong:'native/deepseek-v4-pro'},{medium:'native/deepseek-v4-pro'}];
+ const result=await desktop(['Implement fixture','/exit'],'cold-backup');
+ assert.equal(result.code,0,result.stderr);
+ const records=await events();
+ assert.ok(records.some(row=>row.method==='server'&&row.overrides.includes('model="deepseek-v4-pro"')));
+ assert.equal(records.find(row=>row.method==='turn/start').params.model,'deepseek-v4-pro');
 });
 
 test('desktop terminal preserves the no-paid-dispatch guard when subscription classification fails',async t=>{
@@ -251,10 +324,68 @@ test('desktop terminal preserves the no-paid-dispatch guard when subscription cl
  assert.equal((await events()).filter(event=>event.method==='turn/start').length,0);
 });
 
+test('desktop recovers an empty legacy lock left before owner publication',async t=>{
+ const {desktop,session,events}=await fixture(t);
+ await mkdir(session,{mode:0o700});
+ await mkdir(join(session,'.native-lock'),{mode:0o700});
+ const result=await desktop(['Implement fixture','/exit'],'',async controlFile=>{
+  for(let attempt=0;attempt<150;attempt++){
+   const ready=await readFile(controlFile,'utf8').then(()=>true,error=>{if(error.code==='ENOENT')return false;throw error;});
+   if(ready){
+    const legacy=join(session,'.native-lock'),owner=join(legacy,'owner.json');
+    await assert.rejects(mkdir(legacy,{mode:0o700}),{code:'EEXIST'});
+    await assert.rejects(writeFile(owner,JSON.stringify({pid:process.pid}),{flag:'wx'}),{code:'EEXIST'});
+    if(process.platform==='darwin')await assert.rejects(rm(legacy,{recursive:true}),{code:'EPERM'});
+    assert.equal(JSON.parse(await readFile(owner,'utf8')).version,2);
+    return;
+   }
+   await delay(20);
+  }
+  assert.fail('desktop did not publish its control descriptor');
+ });
+ assert.equal(result.code,0,result.stderr);
+ assert.equal((await events()).filter(row=>row.method==='turn/start').length,1);
+ await mkdir(join(session,'.native-lock'),{mode:0o700});
+ await writeFile(join(session,'.native-lock','owner.json'),JSON.stringify({pid:process.pid}),{mode:0o600});
+ const blocked=await desktop(['Must not run','/exit']);
+ assert.notEqual(blocked.code,0);
+ assert.match(blocked.stderr,/older Codex routing lock/);
+ assert.equal((await events()).filter(row=>row.method==='turn/start').length,1);
+});
+
+test('desktop cannot start while its process lock is held and can reopen after its holder is killed',async t=>{
+ const {desktop,session,events}=await fixture(t);
+ await mkdir(session,{mode:0o700});
+ await mkdir(join(session,'.native-lock'),{mode:0o700});
+ await writeFile(join(session,'.native-lock','owner.json'),'{"version":2}',{mode:0o600});
+ const hold=`
+  import {open} from 'node:fs/promises';
+  import {spawnSync} from 'node:child_process';
+  const file=await open(process.argv[1],'wx+',0o600);
+  const mac=process.platform==='darwin';
+  const result=spawnSync(mac?'/usr/bin/lockf':'/usr/bin/flock',mac?['-s','-t','0','3']:['-n','3'],{stdio:['ignore','ignore','ignore',file.fd]});
+  if(result.status!==0)process.exit(1);
+  console.log('ready');
+  setInterval(()=>{},1000);
+ `;
+ const holder=spawn(process.execPath,['--input-type=module','-e',hold,join(session,'.native-owner.lock')],{stdio:['ignore','pipe','pipe']});
+ const closed=once(holder,'close');
+ t.after(async()=>{if(holder.exitCode===null&&holder.signalCode===null)holder.kill('SIGKILL');await closed;});
+ assert.equal(await Promise.race([once(holder.stdout,'data').then(([chunk])=>String(chunk).trim()),closed.then(()=>null)]),'ready');
+ const blocked=await desktop(['Implement fixture','/exit']);
+ assert.notEqual(blocked.code,0);
+ assert.match(blocked.stderr,/already running/);
+ assert.deepEqual(await events(),[]);
+ holder.kill('SIGKILL');await closed;
+ const reopened=await desktop(['Implement fixture','/exit']);
+ assert.equal(reopened.code,0,reopened.stderr);
+ assert.equal((await events()).filter(row=>row.method==='turn/start').length,1);
+});
+
 test('desktop control refreshes a live strategy catalog before dispatching on the existing thread',async t=>{
  const {config,desktop,events,session,log}=await fixture(t);
  config.connections={native:{native:true,billing:'subscription'}};
- config.classifiers=[];config.executionGroups=[{}];config.model='native/fast';config.effort='high';
+ config.classifiers=[];config.executionGroups=[{small:'native/fast',medium:'native/fast',strong:'native/fast'}];
  const {codex,...policy}=config;
  await writeFile(log+'.models',JSON.stringify(['fast']));
  const result=await desktop(['Use newly discovered model','/exit'],'live-policy',async(controlFile,generation)=>{
@@ -270,7 +401,7 @@ test('desktop control refreshes a live strategy catalog before dispatching on th
    const {token,port,state}=await waitFor(state=>state.threadId===threadId&&!state.pending);
    const socket=connect({host:'127.0.0.1',port});socket.setTimeout(2000,()=>socket.destroy(Error('Routing control timed out')));
    await once(socket,'connect');
-   socket.end(JSON.stringify({token,generation,revision:state.revision,action:'mode',data:{policy:{id,name:id,config:JSON.stringify({...policy,model})}}}));
+   socket.end(JSON.stringify({token,generation,revision:state.revision,action:'mode',data:{policy:{id,name:id,config:JSON.stringify({...policy,executionGroups:[{small:model,medium:model,strong:model}]})}}}));
    socket.setEncoding('utf8');let raw='';for await(const chunk of socket)raw+=chunk;
    assert.equal(JSON.parse(raw).ok,true);
   }
@@ -283,7 +414,7 @@ test('desktop control refreshes a live strategy catalog before dispatching on th
  });
  assert.equal(result.code,0,result.stderr);assert.equal(result.stdout,'');
  const state=JSON.parse(await readFile(join(session,'state.json'),'utf8'));
- assert.equal(state.config.model,'native/fresh');assert.equal(state.policyId,'fresh');
+ assert.equal(state.config.executionGroups[0].strong,'native/fresh');assert.equal(state.config.model,undefined);assert.equal(state.policyId,'fresh');
  const turns=(await events()).filter(row=>row.method==='turn/start');
  assert.deepEqual(turns.map(row=>[row.params.threadId,row.params.model]),[[threadId,'fresh']]);
 });
@@ -363,8 +494,9 @@ test('SIGINT interrupts the exact accepted turn and prevents replay',async t=>{
  assert.match(aborted.stderr,/turn interrupted/);
  const next=await run();assert.equal(next.code,0,next.stderr);
  const records=await events();
- assert.equal(records.filter(record=>record.method==='turn/start').length,2);
- assert.deepEqual(records.find(record=>record.method==='turn/interrupt').params,{threadId,turnId});
+ const turns=records.filter(record=>record.method==='turn/start');
+ assert.equal(turns.length,2);
+ assert.deepEqual(records.find(record=>record.method==='turn/interrupt').params,{threadId,turnId:turns[0].turnId});
 });
 
 test('a provider-side model reroute cannot be recorded as a pinned completed turn',async t=>{

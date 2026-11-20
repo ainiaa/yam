@@ -55,3 +55,11 @@ export function applyPreferencesImport(storage:Pick<Storage,'getItem'|'setItem'|
  try{for(const [key,value]of Object.entries(writes))storage.setItem(key,value);}
  catch{let failed=false;for(const [key,value]of Object.entries(previous))try{if(value===null)storage.removeItem(key);else storage.setItem(key,value);}catch{failed=true;}throw Error(failed?'Import failed and rollback was incomplete. Keep the backup and review settings.':'Import failed. Previous preferences were restored.');}
 }
+
+export async function publishImportedPreferences(writes:Record<string,string>,publish:(key:string,value:string)=>Promise<void>):Promise<void>{
+ let failed=false;
+ for(const [key,value]of Object.entries(writes)){
+  try{await publish(key,value);}catch{failed=true;}
+ }
+ if(failed)throw Error('Preferences were imported locally, but window synchronization is incomplete. Confirm import again to retry synchronization.');
+}

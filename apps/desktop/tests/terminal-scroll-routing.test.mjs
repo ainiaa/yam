@@ -11,7 +11,7 @@ function fixture(mac=true){
  const calls=[],errors=[],buffer={type:'normal',baseY:200,viewportY:100},view={desktopGeneration:1,frameInstance:'owner',attachVersion:1,lifecycleRevision:1,viewportRevision:0,disposed:false,moving:false,ready:true,live:true,persisted:false,projection:true,scroll:createTerminalScroll(),element:{dataset:{sessionId:'s-a'},isConnected:true,inert:false,style:{visibility:'visible'}},instance:{buffer:{active:buffer},modes:{mouseTrackingMode:'none'},hasSelection:()=>false}};view.scroll.held=true;
  let pool=view,focused=true,visible=true,modal=false,pending=[];const refs={sessionId:{current:'s-a'},terminalViews:{current:{get:()=>pool}},ownerConnectionAvailable:{current:{available:true,version:1}},terminalMounted:{current:true},terminalTabDrag:{current:null},layoutRestore:{current:{pending:false}},terminalMoveTaskRef:{current:null},terminalMoveOperationRef:{current:false}};
  const bindings={...refs,Element:Target,navigator:{platform:mac?'MacIntel':'Linux'},document:{querySelector:()=>modal?{}:null},resolveAppShortcut,shortcutsRef:{current:defaultAppShortcuts(mac)},terminalWindowClaim:()=>1,terminalHasInputFocus:()=>focused,terminalPaneVisible:()=>visible,createTerminalScroll,updateTerminalScroll,setRecoveryRevision(){},setError:e=>errors.push(e),invoke:(name,args)=>{calls.push({name,args});return new Promise((resolve,reject)=>pending.push({resolve,reject}));}};
- const api=new Function(...Object.keys(bindings),ts.transpileModule(code.join('\n'),{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText+';return {handleShortcut,handleTerminalScroll,returnTerminalToLive};')(...Object.values(bindings));
+ const api=new Function(...Object.keys(bindings),ts.transpileModule(code.join('\n'),{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText+';return {handleShortcut,handleTerminalScroll,returnTerminalToLive,refreshTerminalScroll};')(...Object.values(bindings));
  view.instance.scrollPages=delta=>{calls.push('page:'+delta);const old=buffer.viewportY;buffer.viewportY=Math.max(0,Math.min(buffer.baseY,old+delta*23));if(old!==buffer.viewportY)api.handleTerminalScroll(view,'s-a',buffer.viewportY);};view.instance.scrollToBottom=()=>{calls.push('local-bottom');buffer.viewportY=buffer.baseY;};
  const event=(key='PageUp',extra={})=>({key,metaKey:mac,ctrlKey:!mac,shiftKey:!mac,altKey:false,keyCode:0,isComposing:false,repeat:false,defaultPrevented:false,target:new Target(),preventDefault(){calls.push('prevent');},stopPropagation(){calls.push('stop');},...extra});
  return {api,calls,errors,view,buffer,refs,pending,event,fire:(key,extra)=>api.handleShortcut(event(key,extra)),focus:v=>focused=v,visible:v=>visible=v,modal:v=>modal=v,replace:v=>pool=v};
@@ -54,3 +54,24 @@ for(const mac of [true,false])for(const key of ['toString','constructor','__prot
  test('A05a2 actual resolver rejects inherited key '+key+' mac='+mac,()=>{const h=fixture(mac);assert.equal(resolveAppShortcut(h.event(key),defaultAppShortcuts(mac),mac),null);});
  test('A05a2 actual capture preserves inherited key '+key+' mac='+mac,()=>{const h=fixture(mac);assert.doesNotThrow(()=>h.fire(key));assert.deepEqual(h.calls,[]);assert.deepEqual(h.errors,[]);});
 }
+
+test('terminal scrollbar stays visible and draggable after xterm fades without forcing an empty track',()=>{
+ const css=rawReadFileSync(new URL('../src/App.css',import.meta.url),'utf8');
+ const rule=css.match(/\.terminal-view\[data-scrollback="true"\] \.xterm \.xterm-scrollable-element > \.scrollbar\.vertical\s*\{([^}]+)\}/)?.[1];
+ assert.ok(rule,'override the installed xterm fade selector for terminal scrollbars');
+ for(const declaration of [/opacity:\s*1\s*;/,/pointer-events:\s*auto\s*;/,/transition:\s*none\s*;/,/z-index:\s*11\s*;/])assert.match(rule,declaration);
+ assert.doesNotMatch(rule,/display\s*:|height\s*:/,'xterm still hides the scrollbar when there is no history');
+ assert.match(css,/\.terminal-view \.xterm \.xterm-scrollable-element > \.scrollbar > \.slider\s*\{[^}]*var\(--muted\)/);
+});
+
+test('terminal scrollbar visibility follows history after parse and clears for empty and alternate buffers',()=>{
+ const h=fixture();
+ for(const [type,baseY,expected] of [['normal',200,'true'],['normal',0,'false'],['normal',1,'true'],['alternate',200,'false']]){
+  h.buffer.type=type;h.buffer.baseY=baseY;h.api.refreshTerminalScroll(h.view);
+  assert.equal(h.view.element.dataset.scrollback,expected);
+ }
+ for(const flag of ['disposed','moving','projecting']){
+  h.view.element.dataset.scrollback='unchanged';h.view[flag]=true;h.api.refreshTerminalScroll(h.view);
+  assert.equal(h.view.element.dataset.scrollback,'unchanged');h.view[flag]=false;
+ }
+});

@@ -11,9 +11,52 @@ const sessions=[{id:"s-a",title:"Unicode 中😀",status:"running"},{id:"s-b",ti
 const event={key:"p",metaKey:true,ctrlKey:false,shiftKey:true,altKey:false,isComposing:false,repeat:false};
 
 test("T10 palette provides finite existing actions and filters without execution",()=>{
- let effects=0;const entries=palette.paletteEntries("",sessions,false);assert.deepEqual(entries.filter(x=>x.action!=="switch").map(x=>x.action),['appearance','clear-display','second-window','new','previous','search','logs','inbox','diagnostics','settings','profiles','paste-settings','keyboard-shortcuts','larger','smaller','reset']);
+ let effects=0;const entries=palette.paletteEntries("",sessions,false);assert.deepEqual(entries.filter(x=>x.action!=="switch").map(x=>x.action),['appearance','clear-display','second-window','new','previous','search','logs','inbox','diagnostics','settings','profiles','paste-settings','keyboard-shortcuts','pi-routing','updates','launch-settings','larger','smaller','reset']);
  assert.ok(palette.paletteEntries("",sessions,true).some(x=>x.action==="resume"));assert.deepEqual(palette.paletteEntries("中😀",sessions,false).map(x=>x.sessionId),['s-a']);assert.equal(effects,0);
  assert.ok(!entries.some(x=>['stop','delete','run_again'].includes(x.action)));assert.equal(palette.paletteEntries('no-match',sessions,false).length,0);
+});
+
+test('global palette lookup queries hot and archived history independently of the loaded sidebar',async()=>{
+ assert.equal(typeof palette.PaletteHistorySearch,'function','Global history search must be available');
+ const search=new palette.PaletteHistorySearch(),calls=[],request={page_size:100,cursor:null,query:'old task',status:'all',matched_session_ids:[],matched_project_paths:[]};
+ const invoke=async(command,args)=>{calls.push([command,args]);return {items:[{summary:{session_id:command==='list_session_summaries'?'s-old':'s-archive',title:'old task'}}],next_cursor:null};};
+ await search.load(invoke,request);assert.deepEqual(search.items.map(x=>[x.summary.session_id,x.archived]),[['s-old',false],['s-archive',true]]);assert.equal(search.loading,false);assert.equal(search.error,null);assert.equal(search.hasMore,false);
+ assert.deepEqual(calls.map(c=>c[0]),['list_session_summaries','list_archived_sessions']);assert.ok(calls.every(c=>c[1].request.query==='old task'));
+});
+test('global palette pages retain results, deduplicate IDs and do not hide matches beyond 100 entries',async()=>{
+ assert.equal(typeof palette.PaletteHistorySearch,'function');const search=new palette.PaletteHistorySearch(),calls=[];
+ const cursor={revision:'r',offset:100,context:'q'},request={page_size:100,cursor:null,query:'task',status:'all',matched_session_ids:[],matched_project_paths:[]};
+ const invoke=async(command,{request})=>{calls.push([command,request.cursor]);return command==='list_archived_sessions'?{items:[],next_cursor:null}:request.cursor?{items:[{summary:{session_id:'s-0'}},{summary:{session_id:'s-next'}}],next_cursor:null}:{items:Array.from({length:100},(_,i)=>({summary:{session_id:'s-'+i}})),next_cursor:cursor};};
+ await search.load(invoke,request);assert.equal(search.hasMore,true);await search.load(invoke,request,true);assert.equal(search.items.length,101);assert.equal(search.items.at(-1).summary.session_id,'s-next');assert.deepEqual(calls.map(c=>c[0]),['list_session_summaries','list_archived_sessions','list_session_summaries']);
+});
+test('global palette rejects old query responses and cancellation, and retries errors without executing tasks',async()=>{
+ assert.equal(typeof palette.PaletteHistorySearch,'function');const search=new palette.PaletteHistorySearch();let release;
+ const gate=new Promise(resolve=>{release=resolve;}),old=search.load(()=>gate,{query:'old'});search.cancel();const stopped=structuredClone(search.items);
+ await search.load(async()=>{throw Error('offline');},{query:'new'});assert.match(search.error,/search/i);assert.equal(search.loading,false);
+ await search.load(async()=>({items:[{summary:{session_id:'s-new'}}],next_cursor:null}),{query:'new'});assert.equal(search.error,null);assert.ok(search.items.every(x=>x.summary.session_id==='s-new'));assert.deepEqual(stopped,[]);
+ release({items:[{summary:{session_id:'s-old'}}],next_cursor:null});await old;assert.ok(search.items.every(x=>x.summary.session_id==='s-new'));
+});
+
+test('actual palette merges remote archive results beyond the loaded-page cap and keeps saved names',async()=>{
+ const fs=await import('node:fs/promises'),ts=await import('typescript'),source=await englishUiReadAsync(fs.readFile,new URL('../src/App.tsx',import.meta.url),'utf8'),tree=ts.default.createSourceFile('App.tsx',source,ts.default.ScriptTarget.Latest,true,ts.default.ScriptKind.TSX);let expression;
+ const walk=n=>{if(ts.default.isVariableDeclaration(n)&&n.name.getText(tree)==='allCommandEntries')expression=n.initializer.getText(tree);ts.default.forEachChild(n,walk);};walk(tree);assert.ok(expression);
+ const items=Array.from({length:105},(_,i)=>({summary:{session_id:'s-remote-'+i,cwd:'/project',title:'Old task',adapter:'codex'},status:'succeeded',archived:true}));
+ const values={commandEntries:[{action:'new',label:'New session'}],paletteHistory:{query:'task',items},paletteQuery:'task',titleFor:summary=>summary.session_id==='s-remote-104'?'Saved alias':summary.title,projects:[],projectKey:x=>x,projectName:()=> 'Project',t:x=>x,statusLabels:{succeeded:'Completed'}};
+ const run=()=>new Function(...Object.keys(values),ts.default.transpile('return '+expression,{target:ts.default.ScriptTarget.ES2022}))(...Object.values(values));
+ assert.equal(run().length,106);assert.equal(run().at(-1).label,'Saved alias');assert.match(run().at(-1).detail,/Archived/);values.paletteQuery='changed';assert.equal(run().length,1);
+});
+
+test('palette settings commands reuse the settings navigation and never execute a session',async()=>{
+ const calls=[],values={paletteOpen:true,paletteVersion:{current:0},executePaletteEntry:palette.executePaletteEntry,openSettingsSection:page=>calls.push(page),setError:assert.fail,closeCommandPalette:()=>{}};
+ const choose=await actualAppAction('choosePaletteEntry',values);for(const action of ['pi-routing','updates','launch-settings'])await choose({action});assert.deepEqual(calls,['pi-routing','updates','launch-settings']);
+});
+
+test('a remote result arriving after an empty search is immediately keyboard-selectable',async()=>{
+ const fs=await import('node:fs/promises'),ts=await import('typescript'),source=await englishUiReadAsync(fs.readFile,new URL('../src/TerminalSettings.tsx',import.meta.url),'utf8'),tree=ts.default.createSourceFile('TerminalSettings.tsx',source,ts.default.ScriptTarget.Latest,true,ts.default.ScriptKind.TSX),fn=tree.statements.find(n=>ts.default.isFunctionDeclaration(n)&&n.name?.text==='CommandPalette');
+ const React={createElement:(type,props,...children)=>({type,props:props??{},children:children.flat(Infinity)})},values={React,useRef:()=>({current:null}),useEffect:()=>{},useState:()=>[{query:'old task',entry:undefined},()=>{}]};
+ const render=new Function(...Object.keys(values),ts.default.transpile(fn.getText(tree).replace('export ',''),{target:ts.default.ScriptTarget.ES2022,jsx:ts.default.JsxEmit.React})+';return CommandPalette;')(...Object.values(values));
+ const entry={action:'switch',sessionId:'s-old',label:'old task'},chosen=[],view=render({query:'old task',onQuery(){},entries:[entry],onChoose:value=>chosen.push(value),onClose(){}}),nodes=n=>[n,...(n.children??[]).filter(x=>x&&typeof x==='object').flatMap(nodes)];
+ nodes(view).find(n=>n.type==='form').props.onSubmit({preventDefault(){}});assert.deepEqual(chosen,[entry]);
 });
 
 test('palette distinguishes same-title sessions and searches existing project, directory, agent and status',()=>{
@@ -110,6 +153,21 @@ test('explicit openSession validity is passed through to the attachment boundary
   const captures=[],valid=()=>true,values={detailVersion:{current:0},terminalStatuses:new Set(['succeeded']),invoke:async()=>({summary:{session_id:'s-next'},status}),openHistory:async(...args)=>{captures.push(args[4]);},openTerminal:async(...args)=>{captures.push(args[3]);},setError:assert.fail};
   const open=await actualAppAction('openSession',values);await open('s-next',undefined,valid);assert.deepEqual(captures,[valid]);
  }
+});
+
+test('session switching records only a current ready attachment and never records failed navigation',async()=>{
+ for(const ready of [true,false]){
+  const measures=[],detailVersion={current:0},layoutRestore={current:{version:0,pending:false}},view={record:{summary:{session_id:'s-next'}},attachVersion:1,ready,disposed:false};
+  const values={detailVersion,layoutRestore,terminalStatuses:new Set(['succeeded']),sessionId:{current:'s-next'},terminalViews:{current:{get:()=>view}},invoke:async()=>({summary:{session_id:'s-next'},status:'succeeded'}),openHistory:async()=>({view,attachment:1,detail:detailVersion.current,intent:layoutRestore.current.version}),openTerminal:assert.fail,setError:assert.fail,performance:{now:()=>10,getEntriesByName:()=>[],measure:(...args)=>measures.push(args),clearMeasures:assert.fail}};
+  const open=await actualAppAction('openSession',values);await open('s-next');assert.equal(measures.length,ready?1:0);if(ready){assert.equal(measures[0][0],'yam.view.switch');assert.deepEqual(measures[0][1],{start:10,end:10});}
+ }
+});
+
+test('successful switches retain exactly the latest 32 timings across the capacity boundary',async()=>{
+ const samples=[],ticks=Array.from({length:40},(_,i)=>[(i+1)*100,(i+1)*101]).flat(),detailVersion={current:0},layoutRestore={current:{version:0,pending:false}},view={record:{summary:{session_id:'s-next'}},attachVersion:1,ready:true,disposed:false};
+ const values={detailVersion,layoutRestore,terminalStatuses:new Set(['succeeded']),sessionId:{current:'s-next'},terminalViews:{current:{get:()=>view}},invoke:async()=>({summary:{session_id:'s-next'},status:'succeeded'}),openHistory:async()=>({view,attachment:1,detail:detailVersion.current,intent:layoutRestore.current.version}),openTerminal:assert.fail,setError:assert.fail,performance:{now:()=>ticks.shift(),getEntriesByName:name=>samples.filter(sample=>sample.name===name),measure:(name,{start,end})=>samples.push({name,startTime:start,duration:end-start}),clearMeasures:name=>{assert.equal(name,'yam.view.switch');samples.length=0;}}};
+ const open=await actualAppAction('openSession',values);for(let i=0;i<40;i++)assert.equal(await open('s-next'),true);
+ assert.equal(samples.length,32);assert.deepEqual(samples.map(sample=>sample.duration),Array.from({length:32},(_,i)=>i+9));assert.equal(ticks.length,0);
 });
 test('successful palette dismissal preserves the committed navigation for its queued fit callback',async()=>{
  let scope,open=true;const values={paletteOpen:true,paletteVersion:{current:0},previousSession:{current:null},executePaletteEntry:palette.executePaletteEntry,setError:assert.fail,setPaletteOpen:value=>{open=value;},openSession:async(_id,_attached,valid)=>{scope=valid;return true;}};

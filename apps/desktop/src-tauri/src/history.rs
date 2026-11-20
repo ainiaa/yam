@@ -493,8 +493,7 @@ impl HistoryStore {
             if matches!(record.status.as_str(), "starting" | "running") {
                 record.status = "needs_attention".to_string();
                 record.summary.status = "needs_attention".to_string();
-                record.reason =
-                    Some("The background owner restarted; the previous terminal process cannot be reattached".to_string());
+                record.reason = Some(OWNER_RESTART_REASON.into());
                 record.ended_at = Some(unix_timestamp());
                 record.notification_pending = true;
                 changed = true;
@@ -573,6 +572,52 @@ pub(crate) struct Overview {
 pub(crate) struct InboxItem {
     pub session: HistoryItem,
     pub receipt: agent_events::AgentReceipt,
+    #[serde(default)]
+    pub current: bool,
+}
+
+pub(super) fn current_inbox_receipt(
+    record: &SessionRecord,
+    receipt: &agent_events::AgentReceipt,
+) -> bool {
+    let agent = &record.agent;
+    if receipt.read
+        || !matches!(record.status.as_str(), "starting" | "running")
+        || agent.integration != "connected"
+        || agent.route_pending
+        || agent.generation.is_empty()
+        || receipt.turn_id.is_empty()
+        || agent.turn_id.as_deref() != Some(receipt.turn_id.as_str())
+        || receipt.kind != agent.phase
+        || !receipt
+            .id
+            .starts_with(&format!("{}:{}:", agent.generation, receipt.turn_id))
+        || receipt.revision == 0
+        || receipt.revision > agent.revision
+    {
+        return false;
+    }
+    if receipt.kind == "needs_permission" {
+        return receipt
+            .permission_key
+            .as_ref()
+            .map_or(receipt.revision == agent.revision, |key| {
+                agent.permission_keys.contains(key)
+                    && !agent
+                        .inbox
+                        .iter()
+                        .rev()
+                        .take_while(|newer| newer.revision > receipt.revision)
+                        .any(|newer| {
+                            newer.turn_id == receipt.turn_id
+                                && newer.permission_key.as_ref() == Some(key)
+                        })
+            });
+    }
+    matches!(
+        receipt.kind.as_str(),
+        "response_finished" | "needs_attention" | "failed" | "interrupted"
+    )
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(deny_unknown_fields)]
@@ -837,7 +882,23 @@ impl HistoryStore {
             self.revision.load(Ordering::Acquire)
         );
         let offset = request.offset(&revision, &context)?;
-        let mut items = records
+        let mut priority: Vec<_> = records
+            .iter()
+            .rev()
+            .flat_map(|record| {
+                record.agent.inbox.iter().rev().filter_map(move |receipt| {
+                    (matches!(receipt.kind.as_str(), "needs_permission" | "failed")
+                        && current_inbox_receipt(record, receipt))
+                    .then_some((record, receipt))
+                })
+            })
+            .collect();
+        priority.sort_by_key(|(_, receipt)| receipt.kind != "needs_permission");
+        let prioritized: std::collections::HashSet<_> = priority
+            .iter()
+            .map(|(record, receipt)| (record.summary.session_id.as_str(), receipt.id.as_str()))
+            .collect();
+        let ordinary = records
             .iter()
             .rev()
             .flat_map(|record| {
@@ -848,13 +909,24 @@ impl HistoryStore {
                     .filter(|entry| !entry.read)
                     .map(move |receipt| (record, receipt))
             })
-            .skip(offset)
-            .take(size + 1)
-            .map(|(record, receipt)| InboxItem {
-                session: item(record),
-                receipt: receipt.clone(),
-            })
-            .collect::<Vec<_>>();
+            .filter(|(record, receipt)| {
+                !prioritized.contains(&(record.summary.session_id.as_str(), receipt.id.as_str()))
+            });
+        let mut items =
+            priority
+                .into_iter()
+                .map(|(record, receipt)| (record, receipt, true))
+                .chain(ordinary.map(|(record, receipt)| {
+                    (record, receipt, current_inbox_receipt(record, receipt))
+                }))
+                .skip(offset)
+                .take(size + 1)
+                .map(|(record, receipt, current)| InboxItem {
+                    session: item(record),
+                    receipt: receipt.clone(),
+                    current,
+                })
+                .collect::<Vec<_>>();
         let next_cursor = (items.len() > size).then(|| PageCursor {
             revision: revision.clone(),
             offset: offset + size,
@@ -1478,12 +1550,19 @@ fn staged_path(stage: &Path, id: &str, role: &DeleteRole) -> PathBuf {
         DeleteRole::Frame => format!("{id}.frame.json"),
     })
 }
+const OWNER_RESTART_REASON: &str =
+    "The background owner restarted; the previous terminal process cannot be reattached";
+
+fn archive_terminal(record: &SessionRecord) -> bool {
+    super::is_terminal(&record.status)
+        && (record.status != "needs_attention" || record.ended_at.is_some())
+}
 fn eligible(
     record: &SessionRecord,
     claims: &std::collections::HashSet<String>,
     active: &std::collections::HashSet<String>,
 ) -> Result<(), String> {
-    if !matches!(record.status.as_str(), "succeeded" | "failed" | "stopped") {
+    if !archive_terminal(record) {
         return Err("Session is not eligible for archive".into());
     }
     if record.notification_pending
@@ -1588,6 +1667,7 @@ impl HistoryStore {
                 .filter(|r| {
                     r.ended_at
                         .is_some_and(|ended| ended < now.saturating_sub(30 * 86400))
+                        && r.status != "needs_attention"
                         && eligible(r, claims, active).is_ok()
                 })
                 .take(5)
@@ -1641,6 +1721,9 @@ impl HistoryStore {
             .archive_record(id)
             .map_err(|_| "Unknown or unavailable archived session")?;
         eligible(&record, claims, active)?;
+        // The owner can exit after writing output and before committing terminal history.
+        let recovered = record.status == "needs_attention"
+            && record.reason.as_deref() == Some(OWNER_RESTART_REASON);
         let location: ArchiveLocation = archive_read(&dir.join(format!("{id}.index.json")), 4096)?;
         let mut files = Vec::new();
         for role in [DeleteRole::Shard, DeleteRole::Log, DeleteRole::Frame] {
@@ -1651,13 +1734,16 @@ impl HistoryStore {
                     archive_read(&path, 64 * 1024 * 1024).map_err(|_| "Unsafe deletion file")?;
                 super::terminal_runtime::validate_snapshot(&frame.projection, id, None)
                     .map_err(|_| "Unsafe deletion file")?;
-                if frame.end_offset != record.output_end_offset || frame.status != record.status {
+                let matches_history =
+                    frame.end_offset == record.output_end_offset && frame.status == record.status;
+                if !(matches_history || recovered && super::is_terminal(&frame.status)) {
                     return Err("Unsafe deletion file".into());
                 }
             }
             if matches!(role, DeleteRole::Log)
                 && data.as_ref().is_some_and(|(_, p)| {
-                    p.length > record.output_end_offset || p.length > super::MAX_SESSION_LOG_BYTES
+                    p.length > super::MAX_SESSION_LOG_BYTES
+                        || !recovered && p.length > record.output_end_offset
                 })
             {
                 return Err("Unsafe deletion file".into());
@@ -1681,6 +1767,7 @@ impl HistoryStore {
         ids: &[String],
         claims: &std::collections::HashSet<String>,
         active: &std::collections::HashSet<String>,
+        validate_only: bool,
     ) -> Result<serde_json::Value, String> {
         if ids.is_empty() || ids.len() > 20 || ids.iter().any(|id| !archive_id(id)) {
             return Err("Invalid deletion selection".into());
@@ -1699,6 +1786,9 @@ impl HistoryStore {
             let (target, time) = self.deletion_target(&records, &dir, id, claims, active)?;
             targets.push(target);
             times.push(time);
+        }
+        if validate_only {
+            return Ok(serde_json::Value::Null);
         }
         let bytes = targets
             .iter()
@@ -2197,7 +2287,7 @@ fn archive_read<T: serde::de::DeserializeOwned>(path: &Path, budget: u64) -> Res
     }
     serde_json::from_slice(&bytes).map_err(|_| "Invalid archive file".into())
 }
-fn archive_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn archive_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     if let Ok(metadata) = fs::symlink_metadata(path) {
         if linked(&metadata) || !metadata.is_file() {
             return Err("Unsafe archive destination".into());
@@ -2341,9 +2431,7 @@ impl HistoryStore {
         }
         let record: SessionRecord =
             archive_read(&dir.join(format!("{id}.json")), MAX_SESSION_HISTORY_BYTES)?;
-        if record.summary.session_id != id
-            || !matches!(record.status.as_str(), "succeeded" | "failed" | "stopped")
-        {
+        if record.summary.session_id != id || !archive_terminal(&record) {
             return Err("Invalid archive record".into());
         }
         Ok(record)
@@ -2414,29 +2502,7 @@ impl HistoryStore {
                 .ok_or("Unknown session")?
         };
         if !restore {
-            if !matches!(record.status.as_str(), "succeeded" | "failed" | "stopped") {
-                return Err("Session is not eligible for archive".into());
-            }
-            if record.notification_pending
-                || record
-                    .agent
-                    .inbox
-                    .iter()
-                    .any(|r| !r.read || matches!(r.delivery.as_str(), "pending" | "failed"))
-            {
-                return Err("Session has pending notifications".into());
-            }
-            if record
-                .agent
-                .agent_session_id
-                .as_ref()
-                .is_some_and(|id| claims.contains(id))
-            {
-                return Err("Session is being resumed".into());
-            }
-            if active.contains(id) {
-                return Err("Session is still finalizing".into());
-            }
+            eligible(&record, claims, active)?;
         }
         let mut updated = records.clone();
         updated.retain(|r| r.summary.session_id != id);
@@ -2979,12 +3045,45 @@ mod tests {
     fn deletion_preview(history: &HistoryStore, ids: &[&str]) -> serde_json::Value {
         let ids = ids.iter().map(|id| (*id).to_string()).collect::<Vec<_>>();
         let result =
-            history.preview_archive_deletion(&ids, &Default::default(), &Default::default());
+            history.preview_archive_deletion(&ids, &Default::default(), &Default::default(), false);
         assert!(
             result.is_ok(),
             "eligible archived fixtures must produce a bounded preview: {result:?}"
         );
         result.unwrap()
+    }
+    #[test]
+    fn validating_archive_deletion_preserves_the_existing_confirmation() {
+        let fixture = retention_fixture(2, 0);
+        let history = &fixture.history;
+        let preview = deletion_preview(history, &["s-00000"]);
+        let path = history.root.join("archive/deletion-preview.json");
+        let original = fs::read(&path).unwrap();
+        let validate = |id: &str| {
+            history.preview_archive_deletion(
+                &[id.into()],
+                &Default::default(),
+                &Default::default(),
+                true,
+            )
+        };
+        assert_eq!(validate("s-00001").unwrap(), serde_json::Value::Null);
+        let mut log = OpenOptions::new()
+            .append(true)
+            .open(history.log_path("s-00001"))
+            .unwrap();
+        log.write_all(b"extra").unwrap();
+        assert_eq!(validate("s-00001").unwrap_err(), "Unsafe deletion file");
+        assert_eq!(fs::read(path).unwrap(), original);
+        let deleted = history
+            .confirm_archive_deletion(
+                preview["preview_id"].as_str().unwrap(),
+                &Default::default(),
+                &Default::default(),
+            )
+            .unwrap();
+        assert_eq!(deleted, ["s-00000"]);
+        assert!(history.get("s-00001").is_ok());
     }
     fn assert_fixture_intact(fixture: &RetentionFixture, ids: &[&str]) {
         for id in ids {
@@ -3163,6 +3262,7 @@ mod tests {
                 (3, "failed", true),
             ] {
                 records[index].agent.inbox.push(agent_events::AgentReceipt {
+                    permission_key: None,
                     id: format!("r-{index}"),
                     revision: 1,
                     turn_id: "turn".into(),
@@ -3268,7 +3368,7 @@ mod tests {
         ] {
             let error = fixture
                 .history
-                .preview_archive_deletion(&ids, &Default::default(), &Default::default())
+                .preview_archive_deletion(&ids, &Default::default(), &Default::default(), false)
                 .unwrap_err();
             assert!(
                 matches!(
@@ -3299,6 +3399,7 @@ mod tests {
                     record.notification_pending = true;
                 } else {
                     record.agent.inbox.push(agent_events::AgentReceipt {
+                        permission_key: None,
                         id: "r-race".into(),
                         revision: 1,
                         turn_id: "turn".into(),
@@ -3395,6 +3496,7 @@ mod tests {
                     &["s-00000".into()],
                     &Default::default(),
                     &Default::default(),
+                    false,
                 )
                 .unwrap_err();
             assert!(
@@ -3790,6 +3892,7 @@ mod tests {
                     &["s-00000".into()],
                     &Default::default(),
                     &Default::default(),
+                    false,
                 )
                 .unwrap_err();
             assert!(
@@ -3988,6 +4091,7 @@ mod tests {
                 &["s-00000".into()],
                 &Default::default(),
                 &Default::default(),
+                false,
             );
             if mode == 0o644 {
                 let preview = result.expect(
@@ -4179,7 +4283,11 @@ mod tests {
         let history = archive_fixture(1);
         let original = history.get("s-00000").unwrap();
         for status in ["running", "starting", "needs_attention", "unknown"] {
-            history.records.lock().unwrap()[0].status = status.into();
+            {
+                let mut records = history.records.lock().unwrap();
+                records[0].status = status.into();
+                records[0].ended_at = None;
+            }
             assert_eq!(
                 archive_one(&history, "s-00000").unwrap_err(),
                 "Session is not eligible for archive"
@@ -4195,6 +4303,7 @@ mod tests {
         for (delivery, read) in [("sent", false), ("pending", true), ("failed", true)] {
             let mut record = original.clone();
             record.agent.inbox.push(agent_events::AgentReceipt {
+                permission_key: None,
                 id: "receipt".into(),
                 revision: 1,
                 turn_id: "turn".into(),
@@ -4456,6 +4565,7 @@ mod tests {
             record.summary.cwd = history.root.to_string_lossy().into();
             record.summary.command = None;
             record.summary.launch = Some(super::super::AgentLaunch {
+                omp: None,
                 claude_context: None,
                 codex: None,
                 provider: None,
@@ -5008,6 +5118,7 @@ mod tests {
         let mut agent = record;
         agent.summary.command = None;
         agent.summary.launch = Some(super::super::AgentLaunch {
+            omp: None,
             claude_context: None,
             codex: None,
             adapter: "codex".into(),
@@ -5271,6 +5382,7 @@ mod tests {
             let mut records = store.records.lock().unwrap();
             records[0].agent.inbox = (0..101)
                 .map(|index| agent_events::AgentReceipt {
+                    permission_key: None,
                     id: format!("r-{index}"),
                     revision: 1,
                     turn_id: "turn".into(),
@@ -5301,6 +5413,7 @@ mod tests {
             record.agent.integration = "connected".into();
             record.agent.phase = "needs_permission".into();
             record.agent.inbox.push(agent_events::AgentReceipt {
+                permission_key: None,
                 id: "permission".into(),
                 revision: 1,
                 turn_id: "turn".into(),
@@ -5338,6 +5451,96 @@ mod tests {
         fs::remove_dir_all(store.root).unwrap();
     }
     #[test]
+    fn recovered_session_can_be_deleted_after_its_pending_notification_is_acknowledged() {
+        let fixture = retention_fixture(0, 1);
+        let history = &fixture.history;
+        let path = history.root.join("s-00000.frame.json");
+        let mut frame: serde_json::Value = archive_read(&path, MAX_SESSION_HISTORY_BYTES).unwrap();
+        frame["persisted"] = serde_json::json!(false);
+        archive_json(&path, &frame, MAX_SESSION_HISTORY_BYTES).unwrap();
+        {
+            let mut records = history.records.lock().unwrap();
+            records[0].status = "running".into();
+            records[0].summary.status = "running".into();
+            records[0].output_end_offset = 0;
+            history.save_locked(&records).unwrap();
+        }
+        history.recover_running().unwrap();
+        assert!(archive_one(history, "s-00000").is_err());
+        history
+            .acknowledge_notification("s-00000", "needs_attention")
+            .unwrap();
+        archive_one(history, "s-00000").unwrap();
+        assert_eq!(
+            history.archive_page(Default::default()).unwrap().items[0].status,
+            "needs_attention"
+        );
+        let preview = deletion_preview(history, &["s-00000"]);
+        let result = history
+            .delete_result(
+                preview["preview_id"].as_str().unwrap(),
+                &Default::default(),
+                &Default::default(),
+            )
+            .unwrap();
+        assert!(result.complete);
+        assert_eq!(result.deleted_ids, ["s-00000"]);
+        assert!(!history.log_path("s-00000").exists());
+        assert!(!history.root.join("s-00000.frame.json").exists());
+    }
+    #[test]
+    fn project_deletion_flow_removes_records_and_unread_receipts_durably() {
+        let history = archive_fixture(2);
+        {
+            let mut records = history.records.lock().unwrap();
+            for record in records.iter_mut() {
+                record.agent.inbox.push(agent_events::AgentReceipt {
+                    permission_key: None,
+                    id: "response".into(),
+                    revision: 1,
+                    turn_id: "turn".into(),
+                    kind: "response_finished".into(),
+                    delivery: "accepted".into(),
+                    read: false,
+                    error: None,
+                });
+            }
+            records[0].notification_pending = true;
+            history.save_locked(&records).unwrap();
+        }
+        assert_eq!(history.overview().unwrap().unread_receipts, 2);
+        assert!(archive_one(&history, "s-00000").is_err());
+        history
+            .acknowledge_notification("s-00000", "succeeded")
+            .unwrap();
+        history
+            .read_agent_receipt("s-00000", "response", 1)
+            .unwrap();
+        archive_one(&history, "s-00000").unwrap();
+        let preview = deletion_preview(&history, &["s-00000"]);
+        let result = history
+            .delete_result(
+                preview["preview_id"].as_str().unwrap(),
+                &Default::default(),
+                &Default::default(),
+            )
+            .unwrap();
+        assert!(result.complete);
+        assert_eq!(result.deleted_ids, vec!["s-00000"]);
+        let reopened = HistoryStore::open(history.root.clone()).unwrap();
+        assert!(reopened.get("s-00000").is_err());
+        assert!(reopened
+            .archive_page(Default::default())
+            .unwrap()
+            .items
+            .is_empty());
+        assert_eq!(reopened.overview().unwrap().unread_receipts, 1);
+        let inbox = reopened.inbox(Default::default()).unwrap();
+        assert_eq!(inbox.items.len(), 1);
+        assert_eq!(inbox.items[0].session.summary.session_id, "s-00001");
+        fs::remove_dir_all(history.root).unwrap();
+    }
+    #[test]
     fn history_read_current_permission_precedes_unread_response() {
         let store = store(2);
         {
@@ -5346,6 +5549,7 @@ mod tests {
             records[0].agent.integration = "connected".into();
             records[0].agent.phase = "needs_permission".into();
             records[1].agent.inbox.push(agent_events::AgentReceipt {
+                permission_key: None,
                 id: "response".into(),
                 revision: 1,
                 turn_id: "turn".into(),
@@ -5363,6 +5567,146 @@ mod tests {
         fs::remove_dir_all(store.root).unwrap();
     }
     #[test]
+    fn inbox_current_receipt_excludes_previous_turn_and_read_current_receipt() {
+        let store = store(1);
+        {
+            let mut records = store.records.lock().unwrap();
+            let record = &mut records[0];
+            record.status = "running".into();
+            record.agent.generation = "generation".into();
+            record.agent.phase = "needs_permission".into();
+            record.agent.integration = "connected".into();
+            record.agent.turn_id = Some("new".into());
+            record.agent.revision = 2;
+            for (turn, revision) in [("old", 1), ("new", 2)] {
+                record.agent.inbox.push(agent_events::AgentReceipt {
+                    permission_key: None,
+                    id: format!("generation:{turn}:PermissionRequest:{revision}"),
+                    turn_id: turn.into(),
+                    revision,
+                    kind: "needs_permission".into(),
+                    delivery: "accepted".into(),
+                    read: false,
+                    error: None,
+                });
+            }
+        }
+        let page = serde_json::to_value(store.inbox(Default::default()).unwrap()).unwrap();
+        assert_eq!(page["items"][0]["receipt"]["turn_id"], "new");
+        assert_eq!(page["items"][0]["current"], true);
+        assert_eq!(page["items"][1]["current"], false);
+        store.records.lock().unwrap()[0].agent.inbox[1].read = true;
+        let page = serde_json::to_value(store.inbox(Default::default()).unwrap()).unwrap();
+        assert_eq!(page["items"].as_array().unwrap().len(), 1);
+        assert_eq!(page["items"][0]["current"], false);
+        fs::remove_dir_all(store.root).unwrap();
+    }
+    #[test]
+    fn inbox_current_receipt_uses_latest_permission_and_prioritizes_before_paging() {
+        let store = store(2);
+        let notice = |revision, kind: &str| agent_events::AgentReceipt {
+            permission_key: None,
+            id: format!("generation:turn:{kind}:{revision}"),
+            turn_id: "turn".into(),
+            revision,
+            kind: kind.into(),
+            delivery: "accepted".into(),
+            read: false,
+            error: None,
+        };
+        {
+            let mut records = store.records.lock().unwrap();
+            let record = &mut records[0];
+            record.status = "running".into();
+            record.agent.generation = "generation".into();
+            record.agent.phase = "needs_permission".into();
+            record.agent.integration = "connected".into();
+            record.agent.turn_id = Some("turn".into());
+            record.agent.revision = 2;
+            record.agent.inbox = vec![notice(1, "needs_permission"), notice(2, "needs_permission")];
+            records[1].agent.inbox = (1..=100)
+                .map(|revision| notice(revision, "response_finished"))
+                .collect();
+        }
+        let first = store.inbox(Default::default()).unwrap();
+        assert_eq!(first.items[0].receipt.revision, 2);
+        let last = store
+            .inbox(PageRequest {
+                cursor: first.next_cursor,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(last.items.len(), 2);
+        store.records.lock().unwrap()[0].agent.inbox[1].read = true;
+        let first = store.inbox(Default::default()).unwrap();
+        let last = store
+            .inbox(PageRequest {
+                cursor: first.next_cursor,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(last.items.len(), 1);
+        let value = serde_json::to_value(last).unwrap();
+        assert_eq!(value["items"][0]["current"], false);
+        fs::remove_dir_all(store.root).unwrap();
+    }
+    #[test]
+    fn inbox_current_receipt_tracks_each_live_approval_and_keeps_completion_current() {
+        let store = store(1);
+        let event = |kind: &str, key: Option<&str>| agent_events::AgentEvent {
+            kind: kind.into(),
+            agent_session_id: "native".into(),
+            turn_id: (kind != "SessionStart").then(|| "turn".into()),
+            permission_key: key.map(str::to_string),
+            source: None,
+        };
+        {
+            let mut records = store.records.lock().unwrap();
+            let record = &mut records[0];
+            record.status = "running".into();
+            record.agent.generation = "generation".into();
+            for (kind, key) in [
+                ("SessionStart", None),
+                ("UserPromptSubmit", None),
+                ("PermissionRequest", Some("first")),
+                ("PermissionRequest", Some("second")),
+                ("ToolProgress", Some("second")),
+            ] {
+                record.agent.apply(&event(kind, key)).unwrap();
+            }
+        }
+        let page = store.inbox(Default::default()).unwrap();
+        assert_eq!(page.items[0].receipt.revision, 3);
+        assert!(page.items[0].current);
+        assert!(!page.items[1].current);
+        let resolved = &page.items[1].receipt;
+        store
+            .read_current_agent_receipt("s-00000", &resolved.id, resolved.revision)
+            .unwrap();
+        let unchanged = store.inbox(Default::default()).unwrap();
+        assert!(unchanged
+            .items
+            .iter()
+            .any(|item| item.receipt.id == resolved.id));
+        let pending = &page.items[0].receipt;
+        store
+            .read_current_agent_receipt("s-00000", &pending.id, pending.revision)
+            .unwrap();
+        let read = store.inbox(Default::default()).unwrap();
+        assert!(!read.items.iter().any(|item| item.receipt.id == pending.id));
+        store.records.lock().unwrap()[0]
+            .agent
+            .apply(&event("TurnComplete", None))
+            .unwrap();
+        let page = store.inbox(Default::default()).unwrap();
+        assert_eq!(page.items.iter().filter(|item| item.current).count(), 1);
+        assert!(page
+            .items
+            .iter()
+            .any(|item| item.current && item.receipt.kind == "response_finished"));
+        fs::remove_dir_all(store.root).unwrap();
+    }
+    #[test]
     fn history_global_inbox_attention_and_agent_writes_are_independent_of_loaded_page() {
         let store = store(201);
         {
@@ -5371,6 +5715,7 @@ mod tests {
             record.status = "running".into();
             record.agent.inbox = (0..101)
                 .map(|index| agent_events::AgentReceipt {
+                    permission_key: None,
                     id: format!("r-{index}"),
                     revision: 1,
                     turn_id: "turn".into(),
@@ -5439,6 +5784,7 @@ mod tests {
             let mut records = store.records.lock().unwrap();
             records[0].summary.command = None;
             records[0].summary.launch = Some(super::super::AgentLaunch {
+                omp: None,
                 claude_context: None,
                 codex: None,
                 provider: None,
@@ -5485,6 +5831,7 @@ mod tests {
         {
             let mut records = store.records.lock().unwrap();
             records[0].summary.launch = Some(super::super::AgentLaunch {
+                omp: None,
                 claude_context: None,
                 codex: None,
                 provider: None,

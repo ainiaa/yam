@@ -9,8 +9,8 @@ import ts from 'typescript';
 import * as providers from '../src/provider-config.ts';
 import * as templates from '../src/launch-templates.ts';
 const app=readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8');
-const ast=ts.createSourceFile('App.tsx',app,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
-function actual(name,bindings){let code;const visit=n=>{if(ts.isFunctionDeclaration(n)&&n.name?.text===name)code=n.getText(ast);ts.forEachChild(n,visit);};visit(ast);assert.ok(code,`real ${name} exists`);return new Function(...Object.keys(bindings),ts.transpile(code,{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2022})+`;return ${name};`)(...Object.values(bindings));}
+const appAst=ts.createSourceFile('App.tsx',app,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
+function actual(name,bindings){const ast=name==='ProviderPortCheck'?ts.createSourceFile('ProviderPortCheck.tsx',readFileSync(new URL('../src/ProviderPortCheck.tsx',import.meta.url),'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX):appAst;let code;const visit=n=>{if(ts.isFunctionDeclaration(n)&&n.name?.text===name)code=n.getText(ast);ts.forEachChild(n,visit);};visit(ast);assert.ok(code,`real ${name} exists`);return new Function(...Object.keys(bindings),ts.transpile(code,{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2022})+`;return ${name};`)(...Object.values(bindings));}
 const React={createElement:(type,props,...children)=>({type,props:props??{},children})};
 function nodes(tree){const result=[];const visit=n=>{if(n&&typeof n==='object'){result.push(n);for(const child of n.children??[])if(Array.isArray(child))child.forEach(visit);else visit(child);}};visit(tree);return result;}
 function text(n){return(n?.children??[]).map(x=>typeof x==='string'?x:Array.isArray(x)?x.map(text).join(''):text(x)).join('');}
@@ -18,7 +18,7 @@ const provider={id:'custom',model:'gateway/model',base_url:'http://127.0.0.1:342
 const template={id:'11111111-1111-4111-8111-111111111111',name:'Magpie',adapter:'claude',mode:'interactive',extra_args:'',prompt:null,command:null,provider};
 test('T4 existing template can be applied repeatedly with only credential references',()=>{
  const saved=templates.decodeLaunchTemplates(templates.encodeLaunchTemplates([templates.createLaunchTemplate('Magpie',{...template,env:{GATEWAY_API_KEY:'SECRET_VALUE'}},()=>template.id)]))[0];
- let state={},edits={};const bindings={projectLaunchFields:templates.projectLaunchFields,launchSettingsDialog:{current:null},launchDialog:{current:null},editLaunch:fields=>{Object.assign(state,fields);Object.assign(edits,fields);}};
+ let state={},edits={};const bindings={projectLaunchFields:templates.projectLaunchFields,launchSettingsDialog:{current:null},launchDialog:{current:null},setRoutingPolicySelection(){},editLaunch:fields=>{Object.assign(state,fields);Object.assign(edits,fields);}};
  const apply=actual('applyLaunchTemplate',bindings);apply(saved);apply(saved);
  assert.deepEqual(state.provider,provider);assert.deepEqual(edits.provider,provider);assert.equal(state.adapter,'claude');assert.equal(JSON.stringify(saved).includes('SECRET_VALUE'),false);
 });
@@ -30,7 +30,7 @@ test('T4 template list shows sanitized CLI, model, endpoint and environment refe
 });
 function probeHarness(){let state=null;const ref={current:false};let endpoint=provider.base_url;const calls=[],pending=[];
  const bindings={React,useRef:()=>ref,useState:()=>[state,v=>state=v],invoke:(name,args)=>{calls.push([name,args]);return new Promise((resolve,reject)=>pending.push({resolve,reject}));}};
- const Component=actual('ProviderPortCheck',bindings);return{calls,pending,render:()=>Component({endpoint}),setEndpoint:v=>endpoint=v};}
+ const Component=actual('ProviderPortCheck',bindings);return{calls,pending,render:()=>Component({endpoint,invoke:bindings.invoke}),setEndpoint:v=>endpoint=v};}
 test('T4 port check is explicit, suppresses duplicate clicks and ignores old endpoint results',async()=>{
  const h=probeHarness();let tree=h.render();assert.equal(h.calls.length,0);let button=nodes(tree).find(n=>n.type==='button');assert.match(text(button),/Check local port/);
  const first=button.props.onClick();button.props.onClick();assert.equal(h.calls.length,1);assert.deepEqual(h.calls[0],['probe_provider_endpoint',{endpoint:provider.base_url}]);assert.equal(nodes(h.render()).find(n=>n.type==='button').props.disabled,true);

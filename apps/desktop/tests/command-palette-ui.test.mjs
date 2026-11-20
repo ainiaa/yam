@@ -44,6 +44,10 @@ test('default highlighted result also retains its identity until the query chang
  const f=fixture();f.refresh({entries:[b,a]});f.submit();assert.equal(f.chosen[0].sessionId,'s-a');
  const removed=fixture();removed.refresh({entries:[b]});removed.submit();assert.deepEqual(removed.chosen,[]);
 });
+test('the first asynchronous result acquires a stable identity and does not silently choose its replacement',()=>{
+ const f=fixture([]);f.refresh({entries:[a,b]});f.submit();assert.equal(f.chosen[0]?.sessionId,'s-a');
+ f.refresh({entries:[b]});f.submit();assert.equal(f.chosen.length,1,'Removing the asynchronous default must require a new choice');
+});
 
 test('removed selection cannot submit another session; keyboard or new query explicitly selects again',()=>{
  const f=fixture();f.key('ArrowDown');f.refresh({entries:[a]});f.submit();assert.deepEqual(f.chosen,[]);assert.equal(f.selected.length,0);

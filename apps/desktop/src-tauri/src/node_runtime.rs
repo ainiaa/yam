@@ -115,7 +115,7 @@ fn candidates(path: &std::ffi::OsStr) -> Vec<PathBuf> {
 fn probe(node: &Path, script: &Path) -> Result<(), String> {
     let runtime = crate::terminal_runtime::Runtime::start_node(node, script, |_, _| Ok(()))?;
     runtime.call("create", "probe", serde_json::json!({"cols":20,"rows":8}))?;
-    runtime.output("probe", "中文 😀".as_bytes())?;
+    let _ = runtime.output("probe", "中文 😀".as_bytes())?;
     let frame = runtime.call("snapshot", "probe", serde_json::json!({}))?;
     if !frame["data"]
         .as_str()

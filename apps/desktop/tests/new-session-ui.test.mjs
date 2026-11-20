@@ -8,7 +8,9 @@ import assert from 'node:assert/strict';
 import {readFileSync as rawReadFileSync} from 'node:fs';
 import ts from 'typescript';
 import * as providers from '../src/provider-config.ts';
+import {readLastConnection,rememberConnection} from '../src/saved-connections.ts';
 import {resolveLaunchDefaults} from '../src/project-config.ts';
+import {projectLaunchFields} from '../src/launch-templates.ts';
 import {shellStartError} from '../src/shell-launch.ts';
 import * as layout from '../src/terminal-layout.ts';
 
@@ -27,12 +29,14 @@ function formFixture(initial=draft){
  return {state,bindings};
 }
 
-test('new session keeps directory, CLI and terminal target outside closed advanced options',()=>{
+test('new session keeps directory, CLI, OMP authentication and terminal target outside closed advanced options',()=>{
  assert.ok(launchDialog);
  const controls=nodes(n=>(ts.isJsxElement(n)||ts.isJsxSelfClosingElement(n))&&(['input','Select','textarea'].includes((n.openingElement??n).tagName.getText(file))||attribute(n,'aria-label')?.text==='Startup program'),launchDialog);
  const primary=controls.filter(n=>!advanced(n)&&attribute(n,'value')?.expression?.getText(file)!=='copyName');
- assert.equal(primary.length,3,'directory, CLI and terminal target are primary inputs');
+ assert.equal(primary.length,4,'directory, CLI, OMP authentication and terminal target are primary inputs');
  assert.ok(primary.some(n=>attribute(n,'aria-label')?.text==='Startup program'));
+ const auth=primary.find(n=>attribute(n,'aria-label')?.text==='ChatGPT authentication');assert.ok(auth);
+ assert.match(auth.parent.parent.getText(file),/formAdapter\s*===\s*["']omp["']/);
  assert.doesNotMatch(launchDialog.getText(file),/Run mode|Model source|<GitChanges|<LaunchTemplates|Save current fields as application defaults/);
  for(const detail of nodes(n=>ts.isJsxElement(n)&&n.openingElement.tagName.getText(file)==='details',launchDialog))assert.equal(attribute(detail,'open'),undefined);
 });
@@ -93,6 +97,29 @@ test('new session does not persist draft changes or inherit one-shot task prompt
  const bindings={cancelLayoutRestore(){},setCwd(){},cancelProjectPreview(){},setProjectLaunchEdits:v=>state.edits=v,setLaunchDraft:v=>state.draft=v,globalLaunchDefaults:{...draft,mode:'task',prompt:'old task',command:'old command'},adapters:[{id:'codex',available:true}],readPreference:(key,fallback)=>fallback,localStorage:{setItem:(...args)=>state.writes.push(args)},setError(){},launchDialog:{current:{showModal(){},querySelectorAll(){return [];}}}};
  callback('newSession',bindings)('/project');assert.equal(state.draft.mode,'interactive');assert.equal(state.draft.prompt,null);assert.equal(state.draft.command,null);assert.deepEqual(state.writes,[]);
 });
+test('successful connection is restored when opening another session or selecting Codex',async()=>{
+ const data=new Map(),storage={getItem:key=>data.get(key)??null,setItem:(key,value)=>data.set(key,value)};
+ const provider={id:'custom',model:'group/model',base_url:'http://127.0.0.1:3425',api_key_env:'GATEWAY_KEY'};
+ const action=callback('startNewSession',{formLaunch:{...draft,provider},localStorage:storage,rememberConnection,startSession:async()=>({launch:{adapter:'codex',provider}}),setError:assert.fail});
+ await action();assert.deepEqual(readLastConnection(storage,'codex',null),provider);
+ let next;callback('newSession',{globalLaunchDefaults:draft,adapters:[{id:'codex',available:true}],readPreference:()=> 'codex',readLastConnection,localStorage:storage,supportsProvider:providers.supportsProvider,cancelLayoutRestore(){},cancelProjectPreview(){},setProjectLaunchEdits(){},setLaunchDraft:v=>next=v,setError(){},launchDialog:{current:null}})('/repo');
+ assert.deepEqual(next.provider,provider);
+ const f=formFixture({...draft,adapter:'shell',provider:null});callback('changeAdapter',{...f.bindings,localStorage:storage,readLastConnection})('codex');assert.deepEqual(f.state.draft.provider,provider);
+});
+test('failed, routed, copied and project starts do not replace the remembered direct connection',async()=>{
+ const provider=providers.providerPreset('custom').provider;
+ for(const scenario of [{result:undefined},{route:{}},{project:true},{copy:true}]){
+  const writes=[],action=callback('startNewSession',{formLaunch:{...draft,extra_args:'',provider:scenario.route?null:provider},useProjectSettings:!!scenario.project,sessionCopy:scenario.copy?{settings:{}}:null,localStorage:{setItem:(...args)=>writes.push(args)},rememberConnection,startSession:async()=>scenario.result===undefined&&'result' in scenario?undefined:{launch:{adapter:'codex',provider:scenario.route?null:provider}},setError:assert.fail,shellWindows:false});
+  if(scenario.route){await action(undefined,{name:'Auto',config:'{}'});}else await action();
+  assert.equal(writes.some(([key])=>key.startsWith('yam.lastConnection.')),false);
+ }
+});
+test('explicitly saving application defaults replaces an older remembered connection',async()=>{
+ const data=new Map(),localStorage={getItem:key=>data.get(key)??null,setItem:(key,value)=>data.set(key,value)};
+ rememberConnection(localStorage,'codex',providers.providerPreset('custom').provider);
+ await callback('saveLaunchDefaults',{formLaunch:{...draft,provider:null},projectLaunchFields,rememberConnection,localStorage,invoke:async()=>{},setGlobalLaunchDefaults(){},setLaunchDefaultsNotice(){}})();
+ assert.equal(readLastConnection(localStorage,'codex',null),null);
+});
 
 test('editing trusted fields keeps the effective draft rather than reviving hidden manual values',()=>{
  const effective={...draft,adapter:'claude',provider:providers.providerPreset('claude-api').provider};
@@ -105,7 +132,7 @@ test('remembered CLI is saved only after success, and storage failure does not r
  for(const result of [undefined,{launch:{adapter:'claude'}}]){
   const calls=[],errors=[];
   const action=callback('startNewSession',{startSession:async()=>{calls.push('start');return result;},localStorage:{setItem:(key,value)=>calls.push([key,JSON.parse(value)])},setError:v=>errors.push(v)});
-  await action();assert.deepEqual(errors,[]);assert.deepEqual(calls,result?['start',['yam.lastSessionCli','claude']]:['start']);
+  await action();assert.deepEqual(errors,[]);assert.deepEqual(calls,result?['start',['yam.lastSessionCli','claude'],['yam.lastConnection.claude',null]]:['start']);
  }
  let starts=0;const errors=[];
  await callback('startNewSession',{startSession:async()=>{starts++;return {launch:{adapter:'codex'}};},localStorage:{setItem(){throw Error('quota');}},setError:v=>errors.push(v)})();
@@ -190,4 +217,46 @@ test('explicit custom commands remain visible and editable in either window, inc
  for(const isMainWindow of [true,false])for(const formAdapter of ['shell','custom']){
   const element=new Function('React','t','formAdapter','isMainWindow','formLaunch','editLaunch',js)({createElement:(type,props,...children)=>({type,props,children})},s=>s,formAdapter,isMainWindow,{command:'printf reviewed'},()=>{});assert.ok(element,'the command cannot become a hidden launch argument');
  }
+});
+
+async function launchSummaryFixture(){
+ const React=(await import('react')).default,{renderToStaticMarkup}=await import('react-dom/server');
+ const {parseNativeModelDefaults,piSubscriptionOnly}=await import('../src/pi-routing.ts'),{codexRoutingConfig}=await import('../src/routing-policies.ts');
+ const source=ts.createSourceFile('PiRouting.tsx',readFileSync(new URL('../src/PiRouting.tsx',import.meta.url),'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
+ const declaration=source.statements.find(n=>ts.isFunctionDeclaration(n)&&n.name?.text==='LaunchConfigurationSummary');assert.ok(declaration,'effective launch summary');
+ const bindings={React,parseNativeModelDefaults,piSubscriptionOnly,codexRoutingConfig,...providers,t:(s,v={})=>s.replace(/{{(.*?)}}/g,(_,k)=>v[k]??'')};
+ const component=new Function(...Object.keys(bindings),ts.transpileModule(declaration.getText(source).replace(/^export /,''),{compilerOptions:{target:ts.ScriptTarget.ES2022,jsx:ts.JsxEmit.React}}).outputText+';return LaunchConfigurationSummary;')(...Object.values(bindings));
+ return props=>renderToStaticMarkup(component(props));
+}
+test('launch explanation uses resolved routing or fixed model without leaking private connection fields',async()=>{
+ const render=await launchSummaryFixture(),launch={adapter:'codex',extra_args:'--model deepseek -c model_reasoning_effort="high"'},label='Codex';
+ assert.match(render({launch,label}),/Codex executes.*Fixed model: deepseek.*high.*Inherited CLI configuration/);
+ const provider={id:'custom',model:'deepseek-v4',base_url:'http://127.0.0.1:3425/v1',api_key_env:'PRIVATE_API_KEY'};
+ const fixed=render({launch:{...launch,provider},label});assert.match(fixed,/Fixed model: deepseek-v4.*Local gateway/);assert.doesNotMatch(fixed,/PRIVATE_API_KEY|127.0.0.1/);
+ const routingConfig=JSON.stringify({connections:{native:{native:true,billing:'subscription',home:'/private/me'},local:{gateway:true,billing:'paid',baseUrl:'http://127.0.0.1:3425'},unused:{billing:'paid',apiKeyEnv:'SECRET'}},classifiers:['native/a'],executionGroups:[{small:'local/deepseek',strong:'native/sol'}]});
+ const routed=render({launch,label,routingName:'Daily development',routingConfig});assert.match(routed,/Automatic routing · Daily development.*Routing channels: ChatGPT subscription.*Local gateway/);assert.doesNotMatch(routed,/Fixed model:|private|SECRET|API connection/);
+ assert.match(render({launch:{adapter:'pi',extra_args:'--yam-billing subscription'},label:'Pi',routingName:'Pi policy'}),/Pi executes.*Automatic routing · Pi policy.*Subscription only/);
+ assert.match(render({launch:{adapter:'pi',extra_args:''},label:'Pi'}),/Pi executes.*Use CLI defaults/);
+ assert.match(render({launch:{adapter:'gemini',extra_args:''},label:'Gemini'}),/Gemini executes.*Inherited CLI configuration/);
+ assert.doesNotMatch(render({launch:{adapter:'shell',extra_args:''},label:'Terminal'}),/Fixed model|Automatic routing|CLI configuration/);
+});
+test('launch explanation marks malformed or unresolved configuration without inventing an effective model',async()=>{
+ const render=await launchSummaryFixture(),launch={adapter:'codex',extra_args:'--model "unterminated'};
+ assert.match(render({launch,label:'Codex'}),/Launch configuration needs attention/);
+ assert.match(render({launch:{...launch,extra_args:''},label:'Codex',routingName:'Missing policy',invalid:true}),/Launch configuration needs attention/);
+ assert.match(render({launch:{...launch,extra_args:''},label:'Codex',routingName:'Bad policy',routingConfig:'{'}),/Launch configuration needs attention/);
+});
+test('new-session explanation is bound to final launch values rather than saved drafts',()=>{
+ const summary=nodes(n=>ts.isJsxSelfClosingElement(n)&&n.tagName.getText(file)==='LaunchConfigurationSummary',launchDialog)[0];assert.ok(summary);
+ assert.match(attribute(summary,'launch').expression.getText(file),/formLaunch.*extra_args:piLaunchArgs\?\?formLaunch.extra_args/);
+ assert.match(attribute(summary,'routingName').expression.getText(file),/routingChoice/);
+ assert.match(attribute(summary,'routingConfig').expression.getText(file),/codexRoute/);
+ assert.match(attribute(summary,'invalid').expression.getText(file),/piFormValid.*codexRoute/);
+});
+
+// Preferred CLI remains explicit even when another CLI is available.
+for(const preferred of ['codex','claude'])test(`unavailable preferred ${preferred} is preserved without starting or installing`,()=>{
+ let next;const calls=[];const adapters=[{id:'codex',available:preferred!=='codex'},{id:'claude',available:preferred!=='claude'},{id:'shell',available:true}];
+ callback('newSession',{globalLaunchDefaults:{...draft,adapter:preferred},adapters,readPreference:(key,fallback,valid)=>valid(preferred)?preferred:fallback,readLastConnection:()=>null,supportsProvider:()=>false,localStorage:{},cancelLayoutRestore(){},cancelProjectPreview(){},setProjectLaunchEdits(){},setLaunchDraft:v=>next=v,setError(){},invoke:(...v)=>calls.push(v),launchDialog:{current:null}})('/project');
+ assert.equal(next.adapter,preferred);assert.deepEqual(calls,[]);
 });

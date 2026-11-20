@@ -9,7 +9,7 @@ export const MAX_LAUNCH_TEMPLATE_STORAGE_CODE_UNITS=524288;
 export const LAUNCH_TEMPLATE_WRITE_ERROR="Could not save launch templates.";
 export const LAUNCH_TEMPLATE_READ_ERROR="Could not read launch templates. Original data has not been changed. Copy it before resetting templates.";
 
-export type LaunchTemplateFields={adapter:string;mode:string;extra_args:string;prompt:string|null;command:string|null;provider?:ProviderConfig|null;codex?:CodexOptions};
+export type LaunchTemplateFields={adapter:string;mode:string;extra_args:string;prompt:string|null;command:string|null;provider?:ProviderConfig|null;codex?:CodexOptions;omp?:{policy:string|null;auth?:'yam'|'pi'}};
 export type LaunchTemplate=LaunchTemplateFields&{id:string;name:string};
 
 const templateKeys=["id","name","adapter","mode","extra_args","prompt","command"];
@@ -36,9 +36,9 @@ function densePlainArray(value:unknown):value is unknown[]{
 }
 function validFields(value:unknown):value is LaunchTemplateFields{return isLaunchDefaults(value);}
 function validTemplate(value:unknown):value is LaunchTemplate{
- if(!exactDataRecord(value,[...templateKeys,...["provider","codex"].filter(key=>Object.prototype.hasOwnProperty.call(value??{},key))]))return false;
+ if(!exactDataRecord(value,[...templateKeys,...["provider","codex","omp"].filter(key=>Object.prototype.hasOwnProperty.call(value??{},key))]))return false;
  const item=value as Record<string,unknown>;
- const fields={adapter:item.adapter,mode:item.mode,extra_args:item.extra_args,prompt:item.prompt,command:item.command,...(item.provider!==undefined?{provider:item.provider}:{}),...(item.codex!==undefined?{codex:item.codex}:{})};
+ const fields={adapter:item.adapter,mode:item.mode,extra_args:item.extra_args,prompt:item.prompt,command:item.command,...(item.provider!==undefined?{provider:item.provider}:{}),...(item.codex!==undefined?{codex:item.codex}:{}),...(item.omp!==undefined?{omp:item.omp}:{})};
  return typeof item.id==="string"&&uuid.test(item.id)&&typeof item.name==="string"&&item.name.length>0&&[...item.name].length<=MAX_LAUNCH_TEMPLATE_NAME_CODEPOINTS&&item.name===item.name.trim()&&validFields(fields)&&fieldLengthOk(fields);
 }
 function requireTarget(templates:LaunchTemplate[],id:string):number{
@@ -58,7 +58,7 @@ function fieldLengthOk(fields:LaunchTemplateFields):boolean{return [fields.extra
 export function projectLaunchFields(value:unknown):LaunchTemplateFields{
  if(!value||typeof value!=="object"||Array.isArray(value))throw new Error("Launch settings are invalid.");
  const source=value as Record<string,unknown>;
- const fields={adapter:source.adapter,mode:source.mode,extra_args:source.extra_args,prompt:source.prompt,command:source.command,...(source.provider!==undefined?{provider:source.provider}:{}),...(source.codex!==undefined?{codex:{image_mode:(source.codex as CodexOptions)?.image_mode}}:{})};
+ const fields={adapter:source.adapter,mode:source.mode,extra_args:source.extra_args,prompt:source.prompt,command:source.command,...(source.omp!==undefined?{omp:{policy:(source.omp as {policy:string|null})?.policy,...(source.omp as {auth?:'yam'|'pi'})?.auth?{auth:(source.omp as {auth:'yam'|'pi'}).auth}:{}}}:{}),...(source.provider!==undefined?{provider:source.provider}:{}),...(source.codex!==undefined?{codex:{image_mode:(source.codex as CodexOptions)?.image_mode}}:{})};
  if(!validFields(fields)||!fieldLengthOk(fields))throw new Error("Launch settings are invalid.");
  return {...fields,...(fields.provider?{provider:copyProviderConfig(fields.provider)}:{})};
 }
@@ -101,6 +101,7 @@ export function encodeLaunchTemplates(templates:LaunchTemplate[]):string{
   for(const key of templateKeys)clean[key]=(template as unknown as Record<string,unknown>)[key];
   if(template.provider!==undefined)clean.provider=template.provider===null?null:Object.assign(Object.create(null),copyProviderConfig(template.provider));
   if(template.codex!==undefined)clean.codex={image_mode:template.codex.image_mode};
+  if(template.omp!==undefined)clean.omp={policy:template.omp.policy,...template.omp.auth?{auth:template.omp.auth}:{}};
   serializedRows.push(clean);
  }
  const cleanRows=serializedRows;Object.setPrototypeOf(cleanRows,null);

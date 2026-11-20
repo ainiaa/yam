@@ -217,3 +217,33 @@ test('stream snapshot refuses partial parser tokens and succeeds after their com
   assert.equal(ready.ok,true);assert.equal(ready.data.session,'handoff');
  }
 }));
+
+test('native CLI indexed and truecolor output survives backend snapshots without flattening',async()=>fixture(async({call,greeting})=>{
+ const {createRequire}=await import('node:module');const require=createRequire(import.meta.url);const {Terminal}=require('@xterm/headless');
+ await greeting;await call({op:'create',session:'cli-colors',cols:40,rows:8});
+ await call({op:'write',session:'cli-colors',data:data('\x1b[31mR\x1b[38;5;123mI\x1b[38;2;203;166;247mT\x1b[0mN')});
+ const frame=(await call({op:'snapshot',session:'cli-colors'})).data;
+ const restored=new Terminal({cols:40,rows:8,allowProposedApi:true});
+ try{
+  await new Promise(resolve=>restored.write(frame.data,resolve));const line=restored.buffer.active.getLine(0);
+  assert.equal(line.getCell(0).getChars(),'R');assert.equal(line.getCell(0).getFgColor(),1);
+  assert.equal(line.getCell(1).getChars(),'I');assert.equal(line.getCell(1).getFgColor(),123);
+  assert.equal(line.getCell(2).getChars(),'T');assert.equal(line.getCell(2).getFgColor(),0xcba6f7);assert.ok(line.getCell(2).isFgRGB());
+  assert.equal(line.getCell(3).getChars(),'N');assert.ok(line.getCell(3).isFgDefault());
+ }finally{restored.dispose();}
+}));
+
+test('write receipts and snapshots bind the same parser identity and every successful control mutation',async()=>fixture(async({call,greeting})=>{
+ await greeting;await call({op:'create',session:'append',cols:100,rows:24});
+ let revision=0;
+ const check=async()=>{const reply=await call({op:'write',session:'append',data:data('中文🙂\r\n')});assert.deepEqual(reply.data,{version:1,instance:'d'.repeat(64),session:'append',control_revision:revision});const frame=(await call({op:'snapshot',session:'append'})).data;assert.equal(frame.control_revision,revision);assert.equal(frame.plain_append,true);};
+ await check();await call({op:'resize',session:'append',cols:101,rows:25});revision++;await check();
+ await call({op:'viewport',session:'append',line:0});revision++;await check();
+ await call({op:'clear_display',session:'append',expected_instance:'d'.repeat(64)});revision++;await check();
+ const before=(await call({op:'snapshot',session:'append'})).data.control_revision;await call({op:'resize',session:'append',cols:0,rows:0});assert.equal((await call({op:'snapshot',session:'append'})).data.control_revision,before);
+ await call({op:'create',session:'restore-append',cols:100,rows:24});await call({op:'restore',session:'restore-append',data:data('old\r\n')});assert.equal((await call({op:'snapshot',session:'restore-append'})).data.control_revision,1);
+}));
+test('control generation saturates rather than wrapping into a previously accepted stream',async()=>{
+ const service=(await import('../terminal-service.cjs')).default;assert.equal(typeof service.advanceControl,'function');
+ for(const [value,expected] of [[0,1],[Number.MAX_SAFE_INTEGER-1,Number.MAX_SAFE_INTEGER],[Number.MAX_SAFE_INTEGER,Number.MAX_SAFE_INTEGER],[undefined,Number.MAX_SAFE_INTEGER],[-1,Number.MAX_SAFE_INTEGER],[NaN,Number.MAX_SAFE_INTEGER]]){const entry={controlRevision:value};service.advanceControl(entry);assert.equal(entry.controlRevision,expected);}
+});

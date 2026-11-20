@@ -10,8 +10,8 @@
   --ui-menu-shadow: 0 12px 32px var(--shadow), 0 2px 6px var(--shadow);
   font-size: 13px;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  color: #ececec;
-  background: #202020;
+  color: var(--text);
+  background: var(--background);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -1040,6 +1040,9 @@ input::placeholder {
 .workspace-actions {display:flex;align-items:center;gap:4px;margin-left:auto;}
 .workspace-actions button {display:flex;align-items:center;gap:6px;background:transparent;border:0;border-radius:4px;padding:5px 8px;color:var(--muted);font-size:12px;}
 .workspace-actions button:hover {background:var(--hover);color:var(--text);}
+.workspace-actions .workspace-changes {min-width:0;white-space:nowrap;}
+.workspace-branch {max-width:clamp(54px,16vw,190px);overflow:hidden;text-overflow:ellipsis;}
+.run-worktree {overflow-wrap:anywhere;}
 .changes-dot,.filter-active {width:5px;height:5px;border-radius:50%;background:var(--accent);flex-shrink:0;}
 .filter-active {position:absolute;right:3px;top:3px;}
 .terminal-tools > button {font-size:12px;border:0;min-height:28px;padding:4px 8px;border-radius:4px;color:var(--muted);background:transparent;}
@@ -1147,6 +1150,10 @@ input::placeholder {
 /* xterm 6 paints its live scroll layer; the legacy viewport must not expose its black default. */
 .terminal-view .xterm-viewport { background-color:transparent; }
 .terminal-view .xterm-scrollable-element { min-height:100%; }
+.terminal-view[data-scrollback="true"] .xterm .xterm-scrollable-element > .scrollbar.vertical { opacity:1; pointer-events:auto; transition:none; z-index:11; }
+.terminal-view .xterm .xterm-scrollable-element > .scrollbar > .slider { background:color-mix(in srgb,var(--muted) 65%,transparent); border-radius:4px; }
+.terminal-view .xterm .xterm-scrollable-element > .scrollbar > .slider:hover,
+.terminal-view .xterm .xterm-scrollable-element > .scrollbar > .slider.active { background:var(--muted); }
 .appearance-dialog[open] { width:min(600px,calc(100vw - 32px)); max-height:min(720px,calc(100dvh - 48px)); }
 .appearance-dialog > form { max-height:inherit; }
 .appearance-dialog .dialog-header { padding:20px 24px; }
@@ -1301,7 +1308,7 @@ input::placeholder {
  .project-tools-open > .main-panel,.project-tools-open > .main-panel * { visibility:hidden !important; }
  .project-workspace-resizer { display:none; }
 }
-@media(max-width:700px){
+@media(max-width:900px){
  .project-workspace { grid-column:1/-1; }
  .project-tools-open > .sidebar { visibility:hidden; }
  .project-workspace-header { padding:16px; }
@@ -1423,7 +1430,8 @@ button {border-radius:var(--ui-radius-control);}
 
 /* Quiet, session-grouped inbox and shared confirmation hierarchy. */
 .inbox-session-group {margin:0 0 8px;border:1px solid var(--border);border-radius:var(--ui-radius-control);overflow:hidden;}
-.inbox-session-group > header {display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 10px 0;}
+.inbox-priority-heading {grid-column:1/-1;margin:0;font-size:var(--ui-caption-size);font-weight:600;color:var(--muted);}
+.inbox-session-group > header {display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px;padding:10px 10px 0;}
 .inbox-session-group > header strong {min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--ui-caption-size);}
 .inbox-session-group > header span {flex-shrink:0;}
 .inbox-session-group .attention-card {padding:10px;border:0;border-radius:0;font-size:var(--ui-caption-size);}
@@ -1508,3 +1516,14 @@ button {border-radius:var(--ui-radius-control);}
 .cli-setup button { flex:none; color:var(--accent); }
 .cli-setup summary { color:var(--muted); font-size:12px; cursor:pointer; }
 .cli-setup code { display:block; margin-top:8px; font-size:11px; line-height:1.5; white-space:pre-wrap; overflow-wrap:anywhere; }
+
+.project-backup { overflow-wrap:anywhere; }
+.project-backup ul {max-height:180px;overflow:auto;}
+.launch-preflight code {overflow-wrap:anywhere;}
+
+.error-recovery { flex:1;min-width:0; }
+.error-recovery p { margin:0 0 8px; }
+.error-recovery pre { white-space:pre-wrap;overflow-wrap:anywhere; }
+.error-recovery-actions { display:flex;flex-wrap:wrap;gap:8px;margin-top:8px; }
+
+.inbox-filters{border:0;padding:0;margin:0 0 12px;min-width:0}.inbox-filters label{display:flex;align-items:center;gap:6px;margin:6px 0}.inbox-filters p{font-size:11px;overflow-wrap:anywhere;color:var(--text-muted)}

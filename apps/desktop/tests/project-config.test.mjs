@@ -17,6 +17,24 @@ test("T09 launch defaults use UI > trusted project > application defaults withou
  assert.deepEqual(globalDefaults,baseline);assert.deepEqual(project,approved);
  assert.deepEqual(config.resolveLaunchDefaults(globalDefaults,null,{}),globalDefaults);
 });
+test('OMP options follow the adapter at every project defaults layer without accepting explicit foreign options',()=>{
+ const global={...globalDefaults,adapter:'omp',omp:{policy:'{}'}};
+ for(const [project,ui,expected] of [[{adapter:'claude'},{},undefined],[{}, {adapter:'pi'},undefined],[{adapter:'claude'},{adapter:'omp'},undefined],[{extra_args:''},{},{policy:'{}'}],[{adapter:'omp'},{omp:{policy:null}},{policy:null}]]){
+  const resolved=config.resolveLaunchDefaults(global,project,ui);assert.deepEqual(resolved.omp,expected);assert.equal(config.isLaunchDefaults(resolved),true);
+ }
+ assert.equal(config.isLaunchDefaults(config.resolveLaunchDefaults(global,{adapter:'claude',omp:{policy:'{}'}},{})),false);
+ assert.deepEqual(config.resolveLaunchDefaults(globalDefaults,{omp:{policy:'{}'}},{adapter:'omp'}).omp,{policy:'{}'});
+ assert.deepEqual(global.omp,{policy:'{}'});
+});
+test('actual App project form preserves the defaults and template merge boundary',async()=>{
+ const fs=await import('node:fs/promises'),ts=await import('typescript'),app=await fs.readFile(new URL('../src/App.tsx',import.meta.url),'utf8'),tree=ts.createSourceFile('App.tsx',app,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX),expressions={};
+ const visit=n=>{if(ts.isVariableDeclaration(n)&&['projectDefaults','formLaunch'].includes(n.name.getText(tree)))expressions[n.name.getText(tree)]=n.initializer.getText(tree);ts.forEachChild(n,visit);};visit(tree);
+ for(const [defaults,template,expected]of [[{adapter:'omp',omp:{policy:'{}'}},{adapter:'claude'},undefined],[{omp:{policy:'{}'}},{adapter:'omp'},{policy:'{}'}],[{adapter:'omp',omp:{policy:'{}'}},{adapter:'omp',omp:{policy:null}},{policy:null}]]){
+  const bindings={globalLaunchDefaults:{...globalDefaults,adapter:'claude'},projectPreview:{trusted:true,config:{defaults,templates:[{name:'selected',...template}]}},projectTemplate:'selected',projectLaunchEdits:{},useProjectSettings:true,launchDraft:{},resolveLaunchDefaults:config.resolveLaunchDefaults};
+  const evaluate=expression=>new Function(...Object.keys(bindings),'return ('+expression+');')(...Object.values(bindings));bindings.projectDefaults=evaluate(expressions.projectDefaults);const launch=evaluate(expressions.formLaunch);
+  assert.equal(launch.adapter,template.adapter);assert.deepEqual(launch.omp,expected);
+ }
+});
 test("T09 private global defaults reject corrupt fields and retain explicit empty overrides",()=>{
  assert.equal(config.isLaunchDefaults(globalDefaults),true);
  for(const value of [null,[],{...globalDefaults,adapter:"unknown"},{...globalDefaults,adapter:["codex"]},{...globalDefaults,mode:["interactive"]},{...globalDefaults,mode:"fast"},{...globalDefaults,extra_args:3},{...globalDefaults,env:{KEY:"SECRET"}},{...globalDefaults,unexpected:true}])assert.equal(config.isLaunchDefaults(value),false);

@@ -1,8 +1,18 @@
+mod app_lifecycle;
+mod project_backup;
+mod project_notifications;
+#[cfg(all(test, target_os = "macos"))]
+use app_lifecycle::handle_native_reopen;
+#[cfg(test)]
+use app_lifecycle::{claim_session_exit, complete_session_exit, keep_background_event_loop};
 mod agent_bridge;
 mod agent_cli;
 mod agent_events;
 mod background;
-mod browser_window;
+mod background_contract;
+mod background_events;
+mod background_relay;
+mod background_wire;
 mod claude_context;
 mod claude_resume;
 mod cli;
@@ -20,10 +30,12 @@ mod git_context;
 #[cfg(target_os = "macos")]
 mod gui_startup;
 mod history;
+mod input_leases;
 mod interactive_shell;
 mod memory;
 mod native_menu;
 mod node_runtime;
+mod omp_router;
 mod pi_packages;
 mod pi_router;
 mod preferences_backup;
@@ -36,6 +48,7 @@ mod provider_native_tests;
 mod provider_probe;
 mod run_changes;
 mod session_logs;
+mod session_manager;
 mod shell_command_report;
 mod shell_cwd;
 mod ssh_launch;
@@ -157,6 +170,8 @@ pub struct HealthReport {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AgentLaunch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub omp: Option<omp_router::Options>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_context: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -391,7 +406,7 @@ fn resume_record_source(record: SessionRecord) -> Result<(String, AgentLaunch, S
     if record.summary.command.is_some()
         || !matches!(
             launch.adapter.as_str(),
-            "codex" | "claude" | "gemini" | "pi"
+            "codex" | "claude" | "gemini" | "pi" | "omp"
         )
         || launch.mode != "interactive"
     {
@@ -496,7 +511,7 @@ fn resume_command(
     if !valid_resume_id(id)
         || !matches!(
             launch.adapter.as_str(),
-            "codex" | "claude" | "gemini" | "pi"
+            "codex" | "claude" | "gemini" | "pi" | "omp"
         )
         || launch.mode != "interactive"
         || launch.prompt.is_some()
@@ -686,6 +701,8 @@ struct SessionMessage {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct SessionOutput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parser: Option<terminal_runtime::OutputIdentity>,
     session_id: String,
     data: String,
     offset: u64,
@@ -1499,11 +1516,11 @@ pub struct SessionManager {
     background_owner: bool,
     cli_namespace: std::sync::OnceLock<String>,
     background_client: Mutex<Option<Arc<background::Client>>>,
-    background_events: Mutex<background::EventPoll>,
+    background_events: Mutex<background_events::EventPoll>,
     background_initialized: Mutex<bool>,
     background_starting: AtomicBool,
     relay: Mutex<background::Relay>,
-    input_leases: Mutex<background::InputLeases>,
+    input_leases: Mutex<input_leases::InputLeases>,
     started: Instant,
     desktop_focus: Mutex<(Instant, bool)>,
     desktop_connected: AtomicBool,
@@ -1530,11 +1547,11 @@ impl Default for SessionManager {
             background_owner: false,
             cli_namespace: std::sync::OnceLock::new(),
             background_client: Mutex::new(None),
-            background_events: Mutex::new(background::EventPoll::default()),
+            background_events: Mutex::new(background_events::EventPoll::default()),
             background_initialized: Mutex::new(false),
             background_starting: AtomicBool::new(false),
             relay: Mutex::new(background::Relay::default()),
-            input_leases: Mutex::new(background::InputLeases::default()),
+            input_leases: Mutex::new(input_leases::InputLeases::default()),
             started: Instant::now(),
             desktop_focus: Mutex::new((Instant::now(), false)),
             desktop_connected: AtomicBool::new(false),
@@ -1547,219 +1564,6 @@ impl Default for SessionManager {
             system_entry_busy: AtomicBool::new(false),
             system_entry_native: Mutex::new(None),
         }
-    }
-}
-
-impl SessionManager {
-    fn acquire_history_owner(&self, root: &Path) -> Result<(), String> {
-        if self.background_owner {
-            return Ok(());
-        }
-        let mut owner = self
-            .history_owner
-            .lock()
-            .map_err(|_| "History owner lock poisoned")?;
-        if owner.is_none() {
-            *owner = Some(background::OwnerLock::acquire(root)?);
-        }
-        Ok(())
-    }
-    #[cfg(test)]
-    fn shutdown(&self) -> Result<(), String> {
-        self.shutdown_with(|session| {
-            if session
-                .pending_finish
-                .lock()
-                .map_err(|_| "Session finalization lock poisoned")?
-                .is_some()
-            {
-                return Err(
-                    "Session persistence is incomplete; the application remains open".into(),
-                );
-            }
-            Ok(())
-        })
-    }
-    fn shutdown_for<R: tauri::Runtime>(
-        &self,
-        app: &AppHandle<R>,
-        native_notify: impl Fn(&AppHandle<R>, &str, &str),
-    ) -> Result<(), String> {
-        self.shutdown_with(|session| {
-            finish_session_with(app, &self.sessions, session, None, &native_notify)
-        })
-    }
-    fn shutdown_with(
-        &self,
-        retry_finish: impl Fn(&Session) -> Result<(), String>,
-    ) -> Result<(), String> {
-        let sessions: Vec<_> = self
-            .sessions
-            .lock()
-            .map_err(|_| "Session manager lock poisoned".to_string())?
-            .values()
-            .cloned()
-            .collect();
-        for session in &sessions {
-            retry_finish(session)?;
-            if !*session
-                .completed
-                .0
-                .lock()
-                .map_err(|_| "Completion lock poisoned")?
-            {
-                request_session_stop(session)?;
-            }
-        }
-        let deadline = Instant::now() + Duration::from_secs(5);
-        for session in &sessions {
-            let (lock, ready) = &session.completed;
-            let completed = lock
-                .lock()
-                .map_err(|_| "Completion lock poisoned".to_string())?;
-            let (completed, _) = ready
-                .wait_timeout_while(
-                    completed,
-                    deadline.saturating_duration_since(Instant::now()),
-                    |done| !*done,
-                )
-                .map_err(|_| "Completion lock poisoned".to_string())?;
-            if !*completed {
-                return Err("Session cleanup timed out; the application remains open".into());
-            }
-        }
-        let history = self
-            .history
-            .lock()
-            .map_err(|_| "Session history lock poisoned")?
-            .clone();
-        if let Some(history) = history {
-            history.save_pending_start_failures()?;
-        }
-        let mut runtime = self
-            .agent_bridge
-            .lock()
-            .map_err(|_| "Agent bridge lock poisoned")?;
-        if let Some(bridge) = runtime.as_ref() {
-            bridge.stop_until(deadline)?;
-        }
-        runtime.take();
-        if let Some(parser) = self
-            .terminal_runtime
-            .lock()
-            .map_err(|_| "Terminal runtime lock poisoned")?
-            .take()
-        {
-            parser.stop();
-        }
-        self.shutdown_complete.store(true, Ordering::Release);
-        Ok(())
-    }
-}
-
-impl SessionManager {
-    fn acknowledge_selection(&self, session_id: &str) -> Result<(), String> {
-        let mut pending = self
-            .notification_selection
-            .lock()
-            .map_err(|_| "Notification selection lock poisoned".to_string())?;
-        if pending.as_deref() == Some(session_id) {
-            *pending = None;
-        }
-        Ok(())
-    }
-
-    fn history<R: tauri::Runtime>(&self, app: &AppHandle<R>) -> Result<Arc<HistoryStore>, String> {
-        if self
-            .background_client
-            .lock()
-            .map_err(|_| "Background client lock poisoned")?
-            .is_some()
-        {
-            return Err("Desktop cannot open owner history directly".into());
-        }
-        let mut history = self
-            .history
-            .lock()
-            .map_err(|_| "Session manager lock poisoned".to_string())?;
-        if let Some(store) = history.as_ref() {
-            return Ok(Arc::clone(store));
-        }
-        let root = app
-            .path()
-            .app_data_dir()
-            .map_err(|error| format!("Failed to resolve app data directory: {error}"))?;
-        self.acquire_history_owner(&root.join("background"))?;
-        let root = root.join("sessions");
-        let store = Arc::new(HistoryStore::open(root)?);
-        store.recover_running()?;
-        *history = Some(Arc::clone(&store));
-        Ok(store)
-    }
-    fn start_agent_runtime(
-        &self,
-        app: &AppHandle,
-        history: Arc<HistoryStore>,
-    ) -> Result<(), String> {
-        let mut runtime = self
-            .agent_bridge
-            .lock()
-            .map_err(|_| "Agent bridge lock poisoned")?;
-        agent_bridge::Bridge::retire_stopped(&mut runtime)?;
-        if runtime.is_none() {
-            let emitter = app.clone();
-            *runtime = Some(agent_bridge::Bridge::start(
-                history.clone(),
-                move |id, error| {
-                    let event = if error.is_some() {
-                        "session-error"
-                    } else {
-                        "agent-state"
-                    };
-                    let _ = emitter.emit(
-                        event,
-                        SessionMessage {
-                            session_id: id.into(),
-                            data: error.unwrap_or_else(|| "updated".into()),
-                        },
-                    );
-                    if event == "session-error" {
-                        let _ = emitter.emit(
-                            "agent-state",
-                            SessionMessage {
-                                session_id: id.into(),
-                                data: "degraded".into(),
-                            },
-                        );
-                    }
-                },
-            )?);
-        }
-        let bridge = runtime.as_ref().ok_or("Agent bridge unavailable")?;
-        bridge.start_delivery(app.clone())
-    }
-    fn connect_agent(
-        &self,
-        app: &AppHandle,
-        history: Arc<HistoryStore>,
-        id: &str,
-        prepared: &agent_bridge::Prepared,
-        builder: &mut CommandBuilder,
-    ) -> Result<(), String> {
-        self.start_agent_runtime(app, history.clone())?;
-        let runtime = self
-            .agent_bridge
-            .lock()
-            .map_err(|_| "Agent bridge lock poisoned")?;
-        let bridge = runtime.as_ref().ok_or("Agent bridge unavailable")?;
-        history.configure_agent_version(
-            id,
-            &prepared.generation,
-            prepared.cli_version.as_deref(),
-            builder.get_argv().first().and_then(|path| path.to_str()),
-        )?;
-        bridge.register(id, &prepared.token, &prepared.generation)?;
-        prepared.install(builder, bridge.address)
     }
 }
 
@@ -1966,8 +1770,21 @@ fn append_log(log: &mut File, data: &[u8], max_bytes: u64) -> std::io::Result<()
 #[cfg(all(test, unix))]
 mod terminal_environment_tests;
 
+mod terminal_input;
+
+#[cfg(test)]
+mod terminal_input_tests;
+
+#[cfg(test)]
+mod input_leases_tests;
+
 #[cfg(unix)]
 fn configure_terminal_environment(builder: &mut CommandBuilder) {
+    // Desktop/automation launchers can suppress their own output with NO_COLOR.
+    // The embedded PTY is a color terminal; explicit session env is applied later.
+    builder.env_remove("NO_COLOR");
+    builder.env("COLORTERM", "truecolor");
+    builder.env("TERM_PROGRAM", "YAM");
     // Launchers may omit TERM or inherit dumb, which disables zsh's terminal key bindings.
     if builder
         .get_env("TERM")
@@ -2383,6 +2200,7 @@ fn cold_gui_path_finds_user_cli_and_preserves_existing_precedence() {
     let command = agent_command(
         Path::new("codex"),
         &AgentLaunch {
+            omp: None,
             claude_context: None,
             codex: None,
             provider: None,
@@ -2411,6 +2229,7 @@ fn agent_adapters() -> Vec<AgentAdapter> {
         ("gemini", "Gemini CLI", Some("gemini")),
         ("opencode", "OpenCode", Some("opencode")),
         ("pi", "Pi 自动路由", Some("pi")),
+        ("omp", "OMP", Some("omp")),
     ]
     .into_iter()
     .map(|(id, label, executable)| {
@@ -2896,6 +2715,7 @@ fn publish_output<R: tauri::Runtime>(
     let Ok(mut log) = locked else {
         return;
     };
+    let mut parser_identity = None;
     if let Some(terminal) = session.terminal.as_ref() {
         let started = stages.as_ref().map(|_| Instant::now());
         let result = if let Some(row) = stages.as_deref_mut() {
@@ -2913,15 +2733,18 @@ fn publish_output<R: tauri::Runtime>(
             row.parser_total
                 .finish(started, result.is_err(), &mut row.overflow);
         }
-        if let Err(error) = result {
-            if !terminal.reported.swap(true, Ordering::AcqRel) {
-                let _ = app.emit(
-                    "session-error",
-                    SessionMessage {
-                        session_id: session.summary.session_id.clone(),
-                        data: error,
-                    },
-                );
+        match result {
+            Ok(identity) => parser_identity = identity,
+            Err(error) => {
+                if !terminal.reported.swap(true, Ordering::AcqRel) {
+                    let _ = app.emit(
+                        "session-error",
+                        SessionMessage {
+                            session_id: session.summary.session_id.clone(),
+                            data: error,
+                        },
+                    );
+                }
             }
         }
     }
@@ -2949,6 +2772,14 @@ fn publish_output<R: tauri::Runtime>(
     let emitted = app.emit(
         "session-output",
         SessionOutput {
+            parser: if app
+                .try_state::<SessionManager>()
+                .is_some_and(|manager| manager.background_owner)
+            {
+                parser_identity
+            } else {
+                None
+            },
             session_id: session.summary.session_id.clone(),
             data,
             offset,
@@ -3284,8 +3115,13 @@ fn spawn_session_threads(
     session: Arc<Session>,
     reader: Box<dyn Read + Send>,
 ) {
-    let _ =
-        spawn_session_threads_with(app, sessions, session, reader, background::notify_lifecycle);
+    let _ = spawn_session_threads_with(
+        app,
+        sessions,
+        session,
+        reader,
+        background_events::notify_lifecycle,
+    );
 }
 
 fn spawn_session_threads_with<R: tauri::Runtime>(
@@ -3573,12 +3409,14 @@ fn preview_archive_deletion<R: tauri::Runtime>(
     app: AppHandle<R>,
     manager: State<'_, SessionManager>,
     session_ids: Vec<String>,
+    validate_only: Option<bool>,
 ) -> Result<serde_json::Value, String> {
-    proxy!(
-        manager,
-        "preview_archive_deletion",
-        serde_json::json!({"session_ids":session_ids})
-    );
+    let validate_only = validate_only.unwrap_or(false);
+    let mut args = serde_json::json!({"session_ids":session_ids});
+    if validate_only {
+        args["validate_only"] = serde_json::json!(true);
+    }
+    proxy!(manager, "preview_archive_deletion", args);
     let history = manager.history(&app)?;
     let active = manager
         .sessions
@@ -3594,7 +3432,7 @@ fn preview_archive_deletion<R: tauri::Runtime>(
         .resume_claims
         .lock()
         .map_err(|_| "Resume claim lock poisoned")?;
-    history.preview_archive_deletion(&session_ids, &claims, &active)
+    history.preview_archive_deletion(&session_ids, &claims, &active, validate_only)
 }
 #[tauri::command]
 fn cancel_archive_deletion_preview<R: tauri::Runtime>(
@@ -4247,7 +4085,7 @@ fn create_session_owner_with_directory_reporting(
         |app, history, id, prepared, builder| {
             manager.connect_agent(app, history, id, prepared, builder)
         },
-        background::notify_lifecycle,
+        background_events::notify_lifecycle,
         spawn_session_threads,
     )
 }
@@ -4561,6 +4399,10 @@ fn create_session_with_effects<R: tauri::Runtime>(
         resumed_check = worktree_manager::prepare_start(private_root, resumed_cwd, None)?;
         &resumed_check
     };
+    let mut launch = launch;
+    if let Some(launch) = launch.as_mut() {
+        omp_router::prepare_launch(launch, resume_id.is_some())?;
+    }
     let id = start_check
         .session_id
         .clone()
@@ -4610,7 +4452,20 @@ fn create_session_with_effects<R: tauri::Runtime>(
             )
         })?;
         launch_executable = Some(executable.clone());
-        if codex_routing::route(launch).is_some() {
+        if launch.adapter == "omp" {
+            let file = resume_id
+                .as_deref()
+                .map(|native| {
+                    omp_router::validate_session(
+                        &history.root,
+                        launch,
+                        native,
+                        Path::new(cwd.as_deref().ok_or("Missing OMP directory")?),
+                    )
+                })
+                .transpose()?;
+            omp_router::command(&executable, launch, &history.root, file.as_deref())?
+        } else if codex_routing::route(launch).is_some() {
             codex_routing::command(&executable, launch, &history.root)?
         } else if let Some(id) = resume_id.as_deref() {
             let directory = Path::new(cwd.as_deref().ok_or("Resume directory is missing")?);
@@ -5213,45 +5068,7 @@ fn write_session(
     session_id: String,
     data: String,
 ) -> Result<(), String> {
-    proxy!(
-        manager,
-        "write_session",
-        serde_json::json!({"session_id":session_id,"data":data})
-    );
-    let session = manager
-        .sessions
-        .lock()
-        .map_err(|_| "Session manager lock poisoned".to_string())?
-        .get(&session_id)
-        .cloned()
-        .ok_or_else(|| format!("Unknown session: {session_id}"))?;
-    let deadline = Instant::now() + Duration::from_secs(3);
-    #[cfg(unix)]
-    let fd = input_lock(&session.master, deadline, &session.stop_requested)?
-        .as_ref()
-        .ok_or("PTY is closed")?
-        .as_raw_fd()
-        .ok_or("PTY input does not support bounded native writes")?;
-    let mut writer = input_lock(&session.writer, deadline, &session.stop_requested)?;
-    #[cfg(unix)]
-    write_input_until(
-        writer.as_mut(),
-        fd,
-        data.as_bytes(),
-        deadline,
-        &session.stop_requested,
-    )?;
-    #[cfg(windows)]
-    write_windows_input(
-        writer.as_mut(),
-        data.as_bytes(),
-        deadline,
-        &session.stop_requested,
-    )?;
-    if let Ok(mut activity) = session.last_activity.lock() {
-        *activity = Instant::now();
-    }
-    Ok(())
+    terminal_input::write_session_guarded(manager, session_id, data, None)
 }
 
 fn resize_session(
@@ -5374,7 +5191,12 @@ fn retry_session_finish(
         "retry_session_finish",
         serde_json::json!({"session_id":session_id})
     );
-    retry_session_finish_with(&app, &manager, &session_id, background::notify_lifecycle)
+    retry_session_finish_with(
+        &app,
+        &manager,
+        &session_id,
+        background_events::notify_lifecycle,
+    )
 }
 
 #[tauri::command]
@@ -5401,7 +5223,7 @@ async fn notify_session(
     session_id: String,
     title: String,
     expected_status: String,
-) -> Result<(), String> {
+) -> Result<Option<bool>, String> {
     proxy!(
         manager,
         "notify_session",
@@ -5431,7 +5253,7 @@ async fn notify_session(
                     )
                 },
             )
-            .map(|_| ())
+            .map(Some)
     })
     .await
     .map_err(|error| format!("Notification worker failed: {error}"))?
@@ -5632,15 +5454,18 @@ fn read_agent_receipt<R: tauri::Runtime>(
     session_id: String,
     receipt: String,
     revision: u64,
+    only_current: Option<bool>,
 ) -> Result<(), String> {
-    proxy!(
-        manager,
-        "read_agent_receipt",
-        serde_json::json!({"session_id":session_id,"receipt":receipt,"revision":revision})
-    );
-    manager
-        .history(&app)?
-        .read_agent_receipt(&session_id, &receipt, revision)
+    proxy!(manager, "read_agent_receipt", {
+        let mut args =
+            serde_json::json!({"session_id":session_id,"receipt":receipt,"revision":revision});
+        if only_current == Some(true) {
+            args["only_current"] = true.into();
+        }
+        args
+    });
+    let history = manager.history(&app)?;
+    agent_events::read_receipt(&history, &session_id, &receipt, revision, only_current)
 }
 
 #[tauri::command]
@@ -6396,7 +6221,6 @@ pub fn run() {
                 return;
             }
             if matches!(event, tauri::WindowEvent::Destroyed) {
-                browser_window::main_destroyed(window.app_handle());
                 if let Ok(mut table) = window.state::<SessionManager>().desktop_windows.lock() {
                     table.note_destroyed(desktop_windows::Slot::Main, 1);
                 }
@@ -6473,12 +6297,11 @@ pub fn run() {
             Ok(())
         })
         .manage(SessionManager::default())
-        .manage(browser_window::Browser::<tauri::Wry>::default())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(|invoke| {
             let webview = invoke.message.webview_ref().label().to_owned();
             let window = invoke.message.webview_ref().window().label().to_owned();
-            browser_window::invoke_gate(
+            desktop_windows::invoke_gate(
                 &webview,
                 &window,
                 invoke,
@@ -6570,11 +6393,6 @@ pub fn run() {
                     desktop_windows::set_terminal_viewport,
                     desktop_windows::navigate_reported_prompt,
                     desktop_windows::clear_terminal_display,
-                    browser_window::browser_status,
-                    browser_window::browser_open,
-                    browser_window::browser_show,
-                    browser_window::browser_reload,
-                    browser_window::browser_close,
                     provider_probe::probe_provider_endpoint,
                     provider_probe::list_local_gateways,
                     external_terminal::list_external_terminals,
@@ -6596,6 +6414,10 @@ pub fn run() {
                     desktop_windows::set_notification_locale,
                     node_runtime::initialize_background,
                     export_preferences,
+                    project_backup::project_backup,
+                    project_notifications::project_notification_policy,
+                    project_backup::choose_project_backup,
+                    project_backup::export_project_backup,
                     test_notification,
                     run_changes::get_run_baseline_info,
                     run_changes::capture_run_baseline,
@@ -6617,189 +6439,8 @@ pub fn run() {
         })
         .build(app_context())
         .expect("error while building YAM")
-        .run(handle_owner_exit);
+        .run(app_lifecycle::handle_owner_exit);
 }
-fn keep_background_event_loop(owner: bool, stopping: bool) -> bool {
-    owner && !stopping
-}
-#[cfg(target_os = "macos")]
-fn handle_native_reopen(
-    reopen: bool,
-    manager: &SessionManager,
-    hide_owner: impl FnOnce() -> Result<(), String>,
-    open_owner: impl FnOnce() -> Result<(), String>,
-    show_desktop: impl FnOnce() -> Result<(), String>,
-) -> Result<(), String> {
-    if !reopen || manager.shutting_down.load(Ordering::Acquire) {
-        return Ok(());
-    }
-    if manager.background_owner {
-        hide_owner()?;
-        open_owner()
-    } else {
-        show_desktop()
-    }
-}
-
-fn handle_owner_exit(app: &AppHandle, event: tauri::RunEvent) {
-    let manager = app.state::<SessionManager>();
-    #[cfg(target_os = "macos")]
-    if handle_native_reopen(
-        matches!(event, tauri::RunEvent::Reopen { .. }),
-        &manager,
-        || {
-            // Launch Services can promote the resident owner when reopening the regular app bundle.
-            app.set_activation_policy(tauri::ActivationPolicy::Accessory)
-                .map_err(|_| "system_entry_open_failed".to_string())
-        },
-        || system_entry::open_native(app),
-        || system_entry::show_desktop(app),
-    )
-    .is_err()
-    {
-        eprintln!("[YAM] Native reopen failed");
-    }
-    if let tauri::RunEvent::ExitRequested { code, api, .. } = &event {
-        if manager.background_owner {
-            eprintln!(
-                "[YAM] Background exit request: code={code:?}, stopping={}",
-                manager.shutting_down.load(Ordering::Acquire)
-            );
-        }
-        if keep_background_event_loop(
-            manager.background_owner,
-            manager.shutting_down.load(Ordering::Acquire),
-        ) {
-            // The zero-window owner must stay alive until shutdown or its idle deadline.
-            api.prevent_exit();
-            return;
-        }
-    }
-    let controller = if manager.background_owner {
-        None
-    } else {
-        app.try_state::<Arc<updater::Controller>>()
-    };
-    let request = if let tauri::RunEvent::ExitRequested { code, .. } = &event {
-        Some(code.unwrap_or(0))
-    } else {
-        None
-    };
-    if handle_gui_exit_with(
-        &manager,
-        controller.as_ref().map(|state| state.inner()),
-        request,
-        matches!(event, tauri::RunEvent::Exit),
-        || {
-            if let tauri::RunEvent::ExitRequested { api, .. } = &event {
-                api.prevent_exit();
-            }
-        },
-        |controller, code| {
-            let handle = app.clone();
-            thread::spawn(move || {
-                controller.shutdown_and_join();
-                handle.exit(code);
-            });
-        },
-    ) {
-        return;
-    }
-    if matches!(event, tauri::RunEvent::Exit) {
-        let manager = app.state::<SessionManager>();
-        if !manager.shutdown_complete.load(Ordering::Acquire) {
-            manager.shutting_down.store(true, Ordering::Release);
-            if let Err(error) = manager.shutdown_for(app, background::notify_lifecycle) {
-                eprintln!("[YAM] Final exit cleanup failed: {error}");
-            }
-        }
-    }
-    if let tauri::RunEvent::ExitRequested { api, .. } = event {
-        let manager = app.state::<SessionManager>();
-        if claim_session_exit(&manager, || api.prevent_exit()) {
-            let app = app.clone();
-            thread::spawn(move || {
-                let manager = app.state::<SessionManager>();
-                complete_session_exit(
-                    &manager,
-                    || manager.shutdown_for(&app, background::notify_lifecycle),
-                    || app.exit(0),
-                    |error| {
-                        let _ = app.emit(
-                            "session-error",
-                            SessionMessage {
-                                session_id: String::new(),
-                                data: error,
-                            },
-                        );
-                    },
-                );
-            });
-        }
-    }
-}
-
-fn handle_gui_exit_with(
-    manager: &SessionManager,
-    controller: Option<&Arc<updater::Controller>>,
-    request: Option<i32>,
-    exiting: bool,
-    prevent_exit: impl FnOnce(),
-    start_cleanup: impl FnOnce(Arc<updater::Controller>, i32),
-) -> bool {
-    // GUI update work is fenced and exactly joined before the detached-client early return.
-    if !manager.background_owner {
-        if let Some(controller) = controller {
-            if let Some(code) = request {
-                if controller.prepare_exit() {
-                    prevent_exit();
-                    if controller.claim_exit_cleanup() {
-                        start_cleanup(controller.clone(), code);
-                    }
-                    return true;
-                }
-            }
-            if exiting {
-                controller.shutdown_and_join();
-            }
-        }
-    }
-    if manager
-        .background_client
-        .lock()
-        .is_ok_and(|client| client.is_some())
-    {
-        if exiting || request.is_some() {
-            manager.shutting_down.store(true, Ordering::Release);
-        }
-        return true;
-    }
-    false
-}
-
-fn claim_session_exit(manager: &SessionManager, prevent_exit: impl FnOnce()) -> bool {
-    if manager.shutdown_complete.load(Ordering::Acquire) {
-        return false;
-    }
-    prevent_exit();
-    !manager.shutting_down.swap(true, Ordering::AcqRel)
-}
-
-fn complete_session_exit(
-    manager: &SessionManager,
-    shutdown: impl FnOnce() -> Result<(), String>,
-    exit: impl FnOnce(),
-    report: impl FnOnce(String),
-) {
-    match shutdown() {
-        Ok(()) => exit(),
-        Err(error) => {
-            manager.shutting_down.store(false, Ordering::Release);
-            report(error);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #[cfg(unix)]
@@ -7856,13 +7497,14 @@ mod tests {
     #[test]
     fn built_in_adapters_include_shell_and_agent_entries() {
         let adapters = agent_adapters();
-        assert_eq!(adapters.len(), 6);
+        assert_eq!(adapters.len(), 7);
         assert_eq!(adapters[0].id, "shell");
         assert!(adapters[0].available);
         assert!(adapters.iter().any(|adapter| adapter.id == "codex"));
         assert!(adapters.iter().any(|adapter| adapter.id == "claude"));
         assert!(adapters.iter().any(|adapter| adapter.id == "gemini"));
         assert!(adapters.iter().any(|adapter| adapter.id == "pi"));
+        assert!(adapters.iter().any(|adapter| adapter.id == "omp"));
     }
 
     #[test]
@@ -8178,6 +7820,38 @@ mod tests {
             status: std::sync::Mutex::new("running".into()),
         });
         (session, reader, root)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_backup_rejects_an_active_log_with_a_writer_error() {
+        let (session, _, root) = test_session("exit 0");
+        session.child.lock().unwrap().wait().unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(
+            session.history.log_path(&session.summary.session_id),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let manager = super::SessionManager::default();
+        manager
+            .sessions
+            .lock()
+            .unwrap()
+            .insert(session.summary.session_id.clone(), session.clone());
+        let request = serde_json::json!({"action":"create","project":session.summary.cwd,"logs":true,"layout":null,"titles":{}});
+        assert!(crate::project_backup::handle(&session.history, &request, &manager).is_ok());
+        session.log.lock().unwrap().error = Some("Fixture log rotation failed".into());
+        assert_eq!(
+            crate::project_backup::handle(&session.history, &request, &manager).unwrap_err(),
+            "Fixture log rotation failed"
+        );
+        let mut metadata_only = request;
+        metadata_only["logs"] = serde_json::json!(false);
+        assert!(crate::project_backup::handle(&session.history, &metadata_only, &manager).is_ok());
+        drop(manager);
+        drop(session);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]
@@ -8666,6 +8340,7 @@ mod tests {
             command: None,
             status: "stopped".into(),
             launch: Some(super::AgentLaunch {
+                omp: None,
                 claude_context: None,
                 codex: None,
                 provider: None,
@@ -8709,6 +8384,7 @@ mod tests {
             command: None,
             status: "stopped".into(),
             launch: Some(super::AgentLaunch {
+                omp: None,
                 claude_context: None,
                 codex: None,
                 provider: None,
@@ -8815,6 +8491,7 @@ mod tests {
     #[test]
     fn opencode_uses_native_prompt_options_without_shell_interpretation() {
         let mut launch = super::AgentLaunch {
+            omp: None,
             claude_context: None,
             codex: None,
             provider: None,
@@ -8864,6 +8541,7 @@ mod tests {
     fn claude_resume_preserves_safe_options_and_never_replays_the_prompt() {
         let id = "446cd50d-099d-4a12-bcbc-5ab13ffa6944";
         let mut launch = super::AgentLaunch {
+            omp: None,
             claude_context: None,
             codex: None,
             provider: None,
@@ -8901,6 +8579,7 @@ mod tests {
     fn agent_launch_passes_prompt_as_one_literal_argument() {
         let prompt = "fix C:\\work & echo unsafe | 'quote' \"double\" %PATH%";
         let launch = super::AgentLaunch {
+            omp: None,
             claude_context: None,
             codex: None,
             provider: None,
@@ -8943,6 +8622,7 @@ mod tests {
         assert!(super::parse_agent_args("--model 'broken").is_err());
         assert!(super::parse_agent_args("bad\0arg").is_err());
         let launch = super::AgentLaunch {
+            omp: None,
             claude_context: None,
             codex: None,
             provider: None,
@@ -9237,6 +8917,54 @@ mod tests {
             (true, true, Some("true")),
         ] {
             assert!(!output_stage_enabled(developer, owner, value));
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn output_identity_publish_binds_parsed_bytes_and_preserves_error_fallback() {
+        use tauri::{Listener, Manager};
+        for (owner, failed) in [(false, false), (true, false), (true, true)] {
+            let app = tauri::test::mock_app();
+            app.manage(super::SessionManager {
+                background_owner: owner,
+                ..Default::default()
+            });
+            let events = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+            let captured = events.clone();
+            app.listen("session-output", move |event| {
+                captured
+                    .lock()
+                    .unwrap()
+                    .push(serde_json::from_str(event.payload()).unwrap());
+            });
+            let (mut session, _, root) = test_session("exit 0");
+            session.child.lock().unwrap().wait().unwrap();
+            let fixture = terminal_runtime::tests::stage_fixture(failed);
+            let id = session.summary.session_id.clone();
+            Arc::get_mut(&mut session).unwrap().terminal = Some(TerminalAttachment {
+                command_reporting: false,
+                runtime: fixture.runtime.clone(),
+                session: id,
+                reported: AtomicBool::new(false),
+            });
+            let data = "中文🙂\r\n";
+            super::publish_output(app.handle(), &session, data.into(), None);
+            let rows = events.lock().unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0]["data"], data);
+            assert_eq!(rows[0]["offset"], 0);
+            assert_eq!(rows[0]["end_offset"], data.len());
+            assert_eq!(session.log.lock().unwrap().end_offset, data.len() as u64);
+            if failed || !owner {
+                assert!(rows[0].get("parser").is_none());
+            } else {
+                assert_eq!(rows[0]["parser"]["instance"], fixture.runtime.instance());
+                assert_eq!(rows[0]["parser"]["control_revision"], 7);
+            }
+            drop(rows);
+            drop(session);
+            drop(fixture);
+            let _ = std::fs::remove_dir_all(root);
         }
     }
     #[cfg(unix)]
@@ -10165,6 +9893,7 @@ mod a01a_home_tests {
         let fixture = Fixture::new();
         fixture.home(Err("must not query home".into()));
         let launch = || AgentLaunch {
+            omp: None,
             claude_context: None,
             codex: None,
             provider: None,
@@ -10511,6 +10240,7 @@ mod a01b_shell_tests {
             let before = SESSION_ID_ALLOCATIONS.with(|count| count.get());
             let command = (index == 0).then(String::new);
             let launch = (index == 1).then(|| AgentLaunch {
+                omp: None,
                 claude_context: None,
                 codex: None,
                 provider: None,
@@ -10821,6 +10551,7 @@ mod a02b_profile_env_tests {
             T09_ALLOCATION_BOUNDARY.with(|v| v.set(0));
             let command = (index == 0).then(String::new);
             let launch = (index == 1).then(|| AgentLaunch {
+                omp: None,
                 claude_context: None,
                 codex: None,
                 provider: None,
@@ -11353,3 +11084,6 @@ fn preference_export_rejects_unknown_keys_and_credentials() {
     }
     assert!(preferences_backup::encode(r#"{"version":1,"settings":{},"connections":[]}"#).is_ok());
 }
+
+#[cfg(all(test, target_os = "macos"))]
+mod omp_router_tests;

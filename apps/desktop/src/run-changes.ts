@@ -20,7 +20,7 @@ function report(v:unknown,baseline:BaselineInfo,selected:string|null):v is RunRe
 }
 export class RunChangesController {
  scope='';sessionId='';baseline:BaselineInfo|null=null;report:RunReport|null=null;busy=false;error:string|null=null;private generation=0;
- select(sessionId:string|null,root:string):void{const scope=JSON.stringify([sessionId,root]);if(scope===this.scope)return;this.cancel();this.scope=scope;this.sessionId=sessionId??'';this.baseline=null;this.report=null;this.error=null;}
+ select(sessionId:string|null,root:string,owner:string|number=0):void{const scope=JSON.stringify([sessionId,root,owner]);if(scope===this.scope)return;this.cancel();this.scope=scope;this.sessionId=sessionId??'';this.baseline=null;this.report=null;this.error=null;}
  cancel():void{this.generation++;this.busy=false;}
  private async request(invoke:FilesInvoke,name:string,args:Record<string,unknown>,accept:(value:unknown)=>void):Promise<void>{
   if(this.busy||!this.sessionId)return;const generation=this.generation;this.busy=true;this.error=null;

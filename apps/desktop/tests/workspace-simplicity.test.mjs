@@ -26,7 +26,8 @@ test('search owns a closed status filter while Settings stays directly reachable
  assert.ok(filter);assert.ok(inside(filter,search));assert.ok(inDisclosure(filter));assert.ok(!attribute(inDisclosure(filter),'open'));
  const settings=elements.find(node=>tag(node)==='button'&&node.getText(source).includes('openSettingsSection("appearance")'));
  assert.ok(inside(settings,findClass('sidebar-footer')));assert.equal(inDisclosure(settings),undefined);
- assert.doesNotMatch(findClass('sidebar').getText(source),/<time\b|<small\b/);
+ assert.doesNotMatch(findClass('sidebar').getText(source),/<time\b/);
+ assert.match(findClass('session-title').getText(source),/interactive.*starting.*running.*needs_attention.*<small/);
  assert.ok(elements.some(node=>tag(node)==='button'&&node.getText(source).includes('openCommandPalette')&&inDisclosure(node)),'session finder remains reachable');
 });
 
@@ -67,8 +68,8 @@ test('persistent status bar keeps directory and memory visible for empty, active
  const footer=findClass('workspace-footer');assert.equal(tag(footer),'footer');
  assert.ok(!ts.isBinaryExpression(footer.parent),'footer must not depend on scroll or shared sessions');
  for(const session of [null,{cwd:'/repo',status:'running'},{cwd:'/repo',status:'stopped'}]){
-  const tree=render(footer,{session,currentProject:null,history:[],health:{status:'ready'},visibleGitContext:null,showScrollControl:false,memory:null,memoryLabel:()=> 'YAM 120 MiB',Folder:'folder',GitBranch:'branch'});
-  assert.ok(nodes(tree).some(node=>node.props.children.includes('YAM 120 MiB')));
+  const tree=render(footer,{session,currentProject:null,history:[],engineStatus:{label:'Local engine ready',ready:true},health:{status:'ready'},visibleGitContext:null,showScrollControl:false,memory:null,memoryLabel:()=> 'YAM 120 MiB',MemoryUsage:'memory-usage-fixture',Folder:'folder',GitBranch:'branch'});
+  assert.ok(nodes(tree).some(node=>node.type==='memory-usage-fixture'));
   if(session)assert.ok(nodes(tree).some(node=>node.props.title==='/repo'));
  }
  const menu=elements.find(node=>hasClass(node,'toolbar-more-actions')&&node.getText(source).includes('Session details'));

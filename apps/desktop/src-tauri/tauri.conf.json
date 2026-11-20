@@ -17,8 +17,8 @@
         "theme": "Dark",
         "width": 1180,
         "height": 768,
-        "minWidth": 1024,
-        "minHeight": 768,
+        "minWidth": 720,
+        "minHeight": 600,
         "center": true
       }
     ],

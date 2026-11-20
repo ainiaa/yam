@@ -138,6 +138,9 @@ impl Default for Table {
     }
 }
 impl Table {
+    pub(super) fn observes_output(&self, id: &str) -> bool {
+        !self.initialized || self.claims.contains_key(id) || self.pending_move(id)
+    }
     fn pending_move(&self, id: &str) -> bool {
         self.moves
             .iter()
@@ -880,8 +883,30 @@ impl Table {
             .cloned()
     }
 }
+pub(super) fn trusted_pair(webview: &str, window: &str) -> bool {
+    matches!(
+        (webview, window),
+        ("main", "main") | ("terminal-secondary", "terminal-secondary")
+    )
+}
+
+pub(super) fn invoke_gate<I>(
+    webview: &str,
+    window: &str,
+    invoke: I,
+    dispatch: impl FnOnce(I) -> bool,
+    reject: impl FnOnce(I),
+) -> bool {
+    if trusted_pair(webview, window) {
+        dispatch(invoke)
+    } else {
+        reject(invoke);
+        true
+    }
+}
+
 fn slot_for_pair(webview: &str, window: &str) -> Result<Slot, String> {
-    if !super::browser_window::trusted_pair(webview, window) {
+    if !trusted_pair(webview, window) {
         return Err(ERROR.into());
     }
     Slot::parse(webview)
@@ -1587,6 +1612,7 @@ pub(super) fn write_session<R: tauri::Runtime>(
     desktop_generation: u64,
     session_id: String,
     data: String,
+    expected_agent: Option<super::terminal_input::DraftInputGuard>,
 ) -> Result<(), String> {
     trusted_slot(&window)?;
     let mut ticket = Ticket::begin(
@@ -1596,12 +1622,18 @@ pub(super) fn write_session<R: tauri::Runtime>(
         &session_id,
         desktop_generation,
     )?;
-    ticket.call(
-        &manager,
-        "write_session",
-        serde_json::json!({"session_id":session_id,"data":data}),
-        || super::write_session(manager.clone(), session_id, data),
-    )
+    let mut args = serde_json::json!({"session_id":session_id,"data":data});
+    if let Some(guard) = &expected_agent {
+        args["expected_agent"] = serde_json::to_value(guard).map_err(|e| e.to_string())?;
+    }
+    ticket.call(&manager, "write_session", args, || {
+        super::terminal_input::write_session_guarded(
+            manager.clone(),
+            session_id,
+            data,
+            expected_agent,
+        )
+    })
 }
 #[tauri::command(async)]
 pub(super) fn resize_session<R: tauri::Runtime>(
@@ -1835,12 +1867,12 @@ fn create_secondary<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<(), String>
     .title("YAM — second terminal window")
     .theme(Some(tauri::Theme::Dark))
     .inner_size(1180.0, 768.0)
-    .min_inner_size(1024.0, 768.0)
+    .min_inner_size(720.0, 600.0)
     .initialization_script(native_ready_script(epoch))
     .on_page_load(move |handle, payload| {
         let webview: &tauri::Webview<R> = handle.as_ref();
         if payload.event() == tauri::webview::PageLoadEvent::Finished
-            && super::browser_window::trusted_pair(webview.label(), webview.window().label())
+            && trusted_pair(webview.label(), webview.window().label())
         {
             let _ = webview.eval(native_ready_script(epoch));
         }
@@ -2363,6 +2395,60 @@ mod tests {
     #[cfg(unix)]
     include!("coverage_window_tests.rs");
 
+    #[test]
+    fn invoke_gate_trusted_identity_dispatches_once() {
+        for label in ["main", "terminal-secondary"] {
+            let dispatch = std::cell::Cell::new(0);
+            let reject = std::cell::Cell::new(0);
+            assert!(invoke_gate(
+                label,
+                label,
+                (),
+                |_| {
+                    dispatch.set(dispatch.get() + 1);
+                    true
+                },
+                |_| reject.set(reject.get() + 1)
+            ));
+            assert_eq!(dispatch.get(), 1);
+            assert_eq!(reject.get(), 0);
+        }
+    }
+    #[test]
+    fn invoke_gate_rejects_remote_local_frames_and_forged_payload_identity() {
+        for (webview, window) in [
+            ("browser-preview", "browser-preview"),
+            ("browser-preview", "main"),
+            ("main", "browser-preview"),
+            ("other", "other"),
+            ("terminal-secondary", "main"),
+        ] {
+            for source in [
+                "https://example.test/",
+                "http://localhost:1420/iframe",
+                "about:srcdoc",
+            ] {
+                let dispatch = std::cell::Cell::new(0);
+                let reject = std::cell::Cell::new(0);
+                let payload = (source, "main", "terminal-secondary");
+                assert!(invoke_gate(
+                    webview,
+                    window,
+                    payload,
+                    |_| {
+                        dispatch.set(dispatch.get() + 1);
+                        false
+                    },
+                    |value| {
+                        assert_eq!(value, payload);
+                        reject.set(reject.get() + 1)
+                    }
+                ));
+                assert_eq!(dispatch.get(), 0, "{webview}/{window}/{source}");
+                assert_eq!(reject.get(), 1);
+            }
+        }
+    }
     #[test]
     fn native_identity_exact_pairs_preserve_budget_and_reject_guests() {
         for label in ["main", "terminal-secondary"] {
@@ -2888,6 +2974,28 @@ mod b05b_tests {
             panic!("prepare")
         };
         receipt
+    }
+    #[test]
+    fn output_delivery_observes_every_existing_move_handoff_phase() {
+        let (mut t, g) = source();
+        assert!(t.observes_output("s-1-1"));
+        let r = prepared(&mut t, g);
+        assert!(t.observes_output("s-1-1"));
+        assert!(matches!(
+            t.ack_move(Slot::Main, 1, "s-1-1", g, r.token),
+            MoveReply::Pending { .. }
+        ));
+        assert!(t.observes_output("s-1-1"));
+        assert!(matches!(
+            t.accept_move(Slot::Secondary, 1, r.token),
+            MoveReply::Pending { .. }
+        ));
+        assert!(t.observes_output("s-1-1"));
+        assert!(matches!(
+            t.complete_move(Slot::Secondary, 1, r.token),
+            MoveReply::Completed { .. }
+        ));
+        assert!(t.observes_output("s-1-1"));
     }
     #[test]
     fn b05b_disposal_ack_accept_complete_idempotent_and_old_release_safe() {
@@ -3447,5 +3555,327 @@ mod d03a_unknown_start_tests {
         let ticket = t.reserve(Slot::Main, 1).unwrap();
         t.starts.remove(&ticket);
         assert!(t.reserve(Slot::Main, 1).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod native_identity_tests {
+    use tauri::{LogicalPosition, LogicalSize, Manager, Webview, WebviewBuilder, WebviewUrl};
+
+    #[tauri::command]
+    fn identity_probe(window: Webview<tauri::test::MockRuntime>) -> String {
+        window.window().label().to_owned()
+    }
+
+    #[test]
+    fn native_identity_multi_child_command_argument_retains_parent() {
+        let app = tauri::test::mock_builder()
+            .invoke_handler(tauri::generate_handler![identity_probe])
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let parent = tauri::WebviewWindowBuilder::new(&app, "main", WebviewUrl::default())
+            .build()
+            .unwrap();
+        let leaf = app.get_webview("main").unwrap();
+        leaf.window()
+            .add_child(
+                WebviewBuilder::new("identity-guest", WebviewUrl::default()),
+                LogicalPosition::new(0.0, 0.0),
+                LogicalSize::new(10.0, 10.0),
+            )
+            .unwrap();
+        assert!(app.get_webview_window("main").is_none());
+        assert!(app.get_window("main").is_some());
+        assert_eq!(leaf.window().label(), "main");
+        let response = tauri::test::get_ipc_response(
+            &parent,
+            tauri::webview::InvokeRequest {
+                cmd: "identity_probe".into(),
+                callback: tauri::ipc::CallbackFn(0),
+                error: tauri::ipc::CallbackFn(1),
+                url: "tauri://localhost".parse().unwrap(),
+                body: tauri::ipc::InvokeBody::default(),
+                headers: Default::default(),
+                invoke_key: tauri::test::INVOKE_KEY.to_string(),
+            },
+        )
+        .map(|body| body.deserialize::<String>().unwrap());
+        assert_eq!(response, Ok("main".to_owned()));
+        drop(parent);
+    }
+}
+
+#[cfg(test)]
+mod native_identity_acl_tests {
+    use tauri::{LogicalPosition, LogicalSize, Webview, WebviewBuilder, WebviewUrl};
+    type Mock = tauri::test::MockRuntime;
+    // Public test helper requires AsRef; this borrowed adapter does not alter IPC.
+    struct Leaf<'a>(&'a Webview<Mock>);
+    impl AsRef<Webview<Mock>> for Leaf<'_> {
+        fn as_ref(&self) -> &Webview<Mock> {
+            self.0
+        }
+    }
+    #[tauri::command]
+    fn open_url() -> &'static str {
+        "opener-sentinel"
+    }
+    #[tauri::command]
+    fn open() -> &'static str {
+        "dialog-sentinel"
+    }
+    #[tauri::command]
+    fn custom_sentinel() -> &'static str {
+        "trusted-custom"
+    }
+    fn invoke(
+        leaf: &Webview<Mock>,
+        cmd: &str,
+        url: &str,
+    ) -> Result<serde_json::Value, serde_json::Value> {
+        let body = if cmd == "plugin:event|listen" {
+            serde_json::json!({"event":"identity-test", "target":{"kind":"Any"}, "handler":42})
+        } else {
+            serde_json::json!({})
+        };
+        tauri::test::get_ipc_response(
+            &Leaf(leaf),
+            tauri::webview::InvokeRequest {
+                cmd: cmd.into(),
+                callback: tauri::ipc::CallbackFn(0),
+                error: tauri::ipc::CallbackFn(1),
+                url: url.parse().unwrap(),
+                body: tauri::ipc::InvokeBody::Json(body),
+                headers: Default::default(),
+                invoke_key: tauri::test::INVOKE_KEY.to_string(),
+            },
+        )
+        .map(|body| body.deserialize().unwrap())
+    }
+    #[test]
+    fn native_identity_configured_acl_positive_controls_and_guest_denials() {
+        let app = tauri::test::mock_builder()
+            .invoke_handler(|invoke| {
+                let leaf = invoke.message.webview_ref().label().to_owned();
+                let parent = invoke.message.webview_ref().window().label().to_owned();
+                super::invoke_gate(
+                    &leaf,
+                    &parent,
+                    invoke,
+                    tauri::generate_handler![custom_sentinel],
+                    |invoke| invoke.resolver.reject("untrusted_webview"),
+                )
+            })
+            .plugin(
+                tauri::plugin::Builder::<Mock>::new("opener")
+                    .invoke_handler(tauri::generate_handler![open_url])
+                    .build(),
+            )
+            .plugin(
+                tauri::plugin::Builder::<Mock>::new("dialog")
+                    .invoke_handler(tauri::generate_handler![open])
+                    .build(),
+            )
+            .build(super::super::generated_context())
+            .unwrap();
+        for label in ["main", "terminal-secondary"] {
+            let handle = tauri::WebviewWindowBuilder::new(&app, label, WebviewUrl::default())
+                .build()
+                .unwrap();
+            let leaf: &Webview<Mock> = handle.as_ref();
+            for cmd in [
+                "custom_sentinel",
+                "plugin:event|listen",
+                "plugin:opener|open_url",
+                "plugin:dialog|open",
+            ] {
+                assert!(
+                    invoke(leaf, cmd, "tauri://localhost").is_ok(),
+                    "trusted positive {label} {cmd}"
+                );
+            }
+            let guest = leaf
+                .window()
+                .add_child(
+                    WebviewBuilder::new(format!("guest-{label}"), WebviewUrl::default()),
+                    LogicalPosition::new(0.0, 0.0),
+                    LogicalSize::new(10.0, 10.0),
+                )
+                .unwrap();
+            for url in [
+                "tauri://localhost",
+                "http://localhost:1420",
+                "https://example.com",
+            ] {
+                for cmd in [
+                    "custom_sentinel",
+                    "plugin:event|listen",
+                    "plugin:opener|open_url",
+                    "plugin:dialog|open",
+                ] {
+                    assert!(
+                        invoke(&guest, cmd, url).is_err(),
+                        "guest denial {label} {url} {cmd}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod output_delivery_tests {
+    use super::*;
+    use tauri::{Listener, Manager};
+
+    #[test]
+    fn output_delivery_claims_recover_unopened_scenes_without_forwarding_their_bytes() {
+        let mut table = Table::default();
+        assert!(table.observes_output("s-1-1"));
+        table.bootstrap(&[], &[], &[]).unwrap();
+        assert!(!table.observes_output("s-1-1"));
+        let ticket = table.reserve(Slot::Main, 1).unwrap();
+        table.created(ticket, "s-1-1").unwrap();
+        assert!(
+            table.observes_output("s-1-1"),
+            "creation already reserves a claim for immediate output"
+        );
+        let generation = table.attach(Slot::Main, 1, "s-1-1").unwrap();
+        assert!(table.observes_output("s-1-1"));
+        table.note_status("s-1-1", "stopped");
+        assert!(table.observes_output("s-1-1"));
+        table
+            .release_view(Slot::Main, 1, "s-1-1", generation)
+            .unwrap();
+        assert!(!table.observes_output("s-1-1"));
+    }
+
+    #[test]
+    fn output_delivery_actual_emitter_filters_only_unobserved_raw_output() {
+        let app = tauri::test::mock_app();
+        app.manage(crate::SessionManager::default());
+        let events = Arc::new(Mutex::new(Vec::<(String, serde_json::Value)>::new()));
+        for name in [
+            "session-output",
+            "session-state",
+            "session-error",
+            "terminal-frame-invalidated",
+        ] {
+            let events = events.clone();
+            app.listen(name, move |event| {
+                events
+                    .lock()
+                    .unwrap()
+                    .push((name.into(), serde_json::from_str(event.payload()).unwrap()))
+            });
+        }
+        let output = serde_json::json!({"session_id":"s-1-1","offset":0,"end_offset":5,"data":"one\r\n","parser":{"instance":"a".repeat(64),"control_revision":0}});
+        crate::background_events::emit_desktop_event(
+            app.handle(),
+            "session-output",
+            output.clone(),
+        );
+        assert_eq!(
+            events.lock().unwrap().len(),
+            1,
+            "startup compatibility must keep raw bytes"
+        );
+        app.state::<crate::SessionManager>()
+            .desktop_windows
+            .lock()
+            .unwrap()
+            .bootstrap(&[], &[], &[])
+            .unwrap();
+        crate::background_events::emit_desktop_event(
+            app.handle(),
+            "session-output",
+            output.clone(),
+        );
+        assert_eq!(events.lock().unwrap().len(), 1);
+        for (name, payload) in [
+            (
+                "session-state",
+                serde_json::json!({"session_id":"s-1-1","status":"stopped"}),
+            ),
+            (
+                "session-error",
+                serde_json::json!({"session_id":"s-1-1","data":"failure"}),
+            ),
+            (
+                "terminal-frame-invalidated",
+                serde_json::json!({"session_id":"s-1-1"}),
+            ),
+        ] {
+            crate::background_events::emit_desktop_event(app.handle(), name, payload.clone());
+            assert_eq!(events.lock().unwrap().last(), Some(&(name.into(), payload)));
+        }
+        let generation = {
+            let manager = app.state::<crate::SessionManager>();
+            let mut table = manager.desktop_windows.lock().unwrap();
+            let ticket = table.reserve(Slot::Main, 1).unwrap();
+            table.created(ticket, "s-1-1").unwrap();
+            table.attach(Slot::Main, 1, "s-1-1").unwrap()
+        };
+        crate::background_events::emit_desktop_event(
+            app.handle(),
+            "session-output",
+            output.clone(),
+        );
+        assert_eq!(
+            events.lock().unwrap().last(),
+            Some(&("session-output".into(), output.clone()))
+        );
+        app.state::<crate::SessionManager>()
+            .desktop_windows
+            .lock()
+            .unwrap()
+            .release_view(Slot::Main, 1, "s-1-1", generation)
+            .unwrap();
+        let count = events.lock().unwrap().len();
+        crate::background_events::emit_desktop_event(
+            app.handle(),
+            "session-output",
+            output.clone(),
+        );
+        assert_eq!(events.lock().unwrap().len(), count);
+        let unknown = serde_json::json!({"legacy":true});
+        crate::background_events::emit_desktop_event(
+            app.handle(),
+            "session-output",
+            unknown.clone(),
+        );
+        assert_eq!(
+            events.lock().unwrap().last(),
+            Some(&("session-output".into(), unknown))
+        );
+    }
+
+    #[test]
+    fn output_delivery_poisoned_registry_preserves_existing_error_fallback() {
+        let app = tauri::test::mock_app();
+        app.manage(crate::SessionManager::default());
+        let table = app.state::<crate::SessionManager>().desktop_windows.clone();
+        assert!(std::thread::spawn(move || {
+            let _guard = table.lock().unwrap();
+            panic!("fixture registry unavailable")
+        })
+        .join()
+        .is_err());
+        let events = Arc::new(Mutex::new(Vec::<String>::new()));
+        let captured = events.clone();
+        app.listen("session-output", move |event| {
+            captured.lock().unwrap().push(event.payload().into())
+        });
+        let payload = serde_json::json!({"session_id":"s-1-1","data":"retained"});
+        crate::background_events::emit_desktop_event(
+            app.handle(),
+            "session-output",
+            payload.clone(),
+        );
+        assert_eq!(events.lock().unwrap().len(), 1);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&events.lock().unwrap()[0]).unwrap(),
+            payload
+        );
     }
 }

@@ -1,3 +1,7 @@
 // Author: Jeff.Liu. Durations are observations, never a claim of native CLI readiness.
-import test from 'node:test';import assert from 'node:assert/strict';import {startupTimings} from '../src/startup-timings.ts';
+import test from 'node:test';import assert from 'node:assert/strict';import * as timing from '../src/startup-timings.ts';const {startupTimings}=timing;
 test('startup diagnostics include only bounded numeric observations and percentiles',()=>{const rows=[{name:'yam.start.create',duration:40},{name:'yam.start.create',duration:80},{name:'yam.start.frame',duration:300},{name:'/private/secret',duration:123},{name:'yam.start.create',duration:NaN},{name:'yam.start.create',duration:-1}];assert.deepEqual(startupTimings(rows),{create_ms:[40,80],view_ready_ms:[300]});assert.equal(startupTimings(Array.from({length:100},()=>rows[0])).create_ms.length,32);});
+test('view switching observations are bounded numbers and do not expand the exported startup contract',()=>{
+ assert.equal(typeof timing.timingSamples,'function');const rows=[...Array.from({length:40},(_,i)=>({name:'yam.view.switch',duration:i+.4})),...[-1,NaN,Infinity,3600001].map(duration=>({name:'yam.view.switch',duration})),{name:'s-private',duration:33}];
+ const values=timing.timingSamples(rows,'yam.view.switch');assert.equal(values.length,32);assert.deepEqual(values,Array.from({length:32},(_,i)=>i+8));assert.deepEqual(startupTimings(rows),{create_ms:[],view_ready_ms:[]});assert.equal(timing.timingPercentile(values,.5),23);assert.equal(timing.timingPercentile(values,.95),38);
+});

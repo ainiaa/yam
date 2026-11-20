@@ -88,12 +88,27 @@ fn validate_settings(value: &Value, template: bool) -> Result<(), String> {
             "env",
             "provider",
             "codex",
+            "omp",
         ]
         .contains(&key.as_str())
         {
             return Err(code("project_config_invalid"));
         }
-        if key == "codex" {
+        if key == "omp" {
+            let options: crate::omp_router::Options = serde_json::from_value(value.clone())
+                .map_err(|_| code("project_config_invalid"))?;
+            if options.session.is_some()
+                || fields
+                    .get("adapter")
+                    .and_then(Value::as_str)
+                    .is_some_and(|a| a != "omp")
+            {
+                return Err(code("project_config_invalid"));
+            }
+            options
+                .validate()
+                .map_err(|_| code("project_config_invalid"))?;
+        } else if key == "codex" {
             if fields
                 .get("adapter")
                 .and_then(Value::as_str)
@@ -149,7 +164,7 @@ fn validate_settings(value: &Value, template: bool) -> Result<(), String> {
             }
             if key == "adapter"
                 && ![
-                    "shell", "custom", "codex", "claude", "gemini", "opencode", "pi",
+                    "shell", "custom", "codex", "claude", "gemini", "opencode", "pi", "omp",
                 ]
                 .contains(&text)
             {
@@ -471,6 +486,12 @@ pub(crate) fn set_global(private: &Path, global: &LaunchSettings) -> Result<(), 
     store.global = global.clone();
     write_store(private, &store)
 }
+fn extend_settings(settings: &mut BTreeMap<String, Value>, layer: BTreeMap<String, Value>) {
+    if layer.get("adapter").is_some_and(|adapter| adapter != "omp") && !layer.contains_key("omp") {
+        settings.remove("omp");
+    }
+    settings.extend(layer);
+}
 pub(crate) fn prepare(
     project: &Path,
     private: &Path,
@@ -493,7 +514,7 @@ pub(crate) fn prepare(
     let mut settings = store.global.0;
     if let Some(config) = &current.config {
         if let Some(defaults) = config.get("defaults").and_then(Value::as_object) {
-            settings.extend(defaults.clone());
+            extend_settings(&mut settings, defaults.clone().into_iter().collect());
         }
         if let Some(name) = template {
             let item = config
@@ -505,18 +526,20 @@ pub(crate) fn prepare(
                         .find(|item| item.get("name").and_then(Value::as_str) == Some(name))
                 })
                 .ok_or_else(|| code("project_config_template_missing"))?;
-            settings.extend(
+            extend_settings(
+                &mut settings,
                 item.as_object()
                     .unwrap()
                     .iter()
                     .filter(|(key, _)| key.as_str() != "name")
-                    .map(|(k, v)| (k.clone(), v.clone())),
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
             );
         }
     } else if template.is_some() {
         return Err(code("project_config_template_missing"));
     }
-    settings.extend(ui.0.clone());
+    extend_settings(&mut settings, ui.0.clone());
     validate_settings(
         &serde_json::to_value(&settings).map_err(|_| code("project_config_invalid"))?,
         false,
@@ -556,6 +579,11 @@ pub(crate) fn prepare(
             .filter(|path| path.is_file())
             .ok_or_else(|| code("project_config_cli_missing"))?;
         let launch = crate::AgentLaunch {
+            omp: settings
+                .get("omp")
+                .map(|value| serde_json::from_value(value.clone()))
+                .transpose()
+                .map_err(|_| code("project_config_invalid"))?,
             claude_context: None,
             codex: if adapter == "codex" {
                 Some(
@@ -586,7 +614,15 @@ pub(crate) fn prepare(
             extra_args: text("extra_args").unwrap_or_default(),
             prompt: text("prompt"),
         };
-        crate::agent_command(&executable, &launch).map_err(|_| code("project_config_invalid"))?;
+        if launch.adapter == "omp" {
+            let mut checked = launch.clone();
+            checked.omp.get_or_insert_with(Default::default);
+            crate::omp_router::validate_launch(&checked)
+                .map_err(|_| code("project_config_invalid"))?;
+        } else {
+            crate::agent_command(&executable, &launch)
+                .map_err(|_| code("project_config_invalid"))?;
+        }
         Some(launch)
     };
     let references = settings
@@ -728,6 +764,92 @@ mod tests {
         }
     }
 
+    #[test]
+    fn omp_project_adapter_overrides_drop_only_inherited_options() {
+        for (defaults, templates, template, ui, expected) in [
+            (
+                json!({"adapter":"claude"}),
+                json!([]),
+                None,
+                json!({}),
+                None,
+            ),
+            (
+                json!({}),
+                json!([{"name":"native","adapter":"claude"}]),
+                Some("native"),
+                json!({}),
+                None,
+            ),
+            (
+                json!({}),
+                json!([]),
+                None,
+                json!({"adapter":"claude"}),
+                None,
+            ),
+            (
+                json!({"extra_args":""}),
+                json!([]),
+                None,
+                json!({}),
+                Some(Some("{}")),
+            ),
+            (
+                json!({}),
+                json!([]),
+                None,
+                json!({"omp":{"policy":null}}),
+                Some(None),
+            ),
+        ] {
+            let f = Fixture::new();
+            set_global(
+                &f.private,
+                &settings(json!({"adapter":"omp","mode":"interactive","omp":{"policy":"{}"}})),
+            )
+            .unwrap();
+            f.source(json!({"version":1,"defaults":defaults,"templates":templates}));
+            f.approve();
+            let prepared = prepare(
+                &f.project,
+                &f.private,
+                template,
+                &settings(ui),
+                &|_| Some(f.cli.clone()),
+                &|_| None,
+            )
+            .unwrap();
+            assert_eq!(
+                prepared.launch.unwrap().omp.map(|options| options.policy),
+                expected.map(|policy| policy.map(str::to_string))
+            );
+            assert!(f
+                .prepare(settings(json!({"adapter":"claude","omp":{"policy":"{}"}})))
+                .is_err());
+        }
+        let f = Fixture::new();
+        set_global(
+            &f.private,
+            &settings(json!({"adapter":"claude","mode":"interactive"})),
+        )
+        .unwrap();
+        f.source(json!({"version":1,"defaults":{"omp":{"policy":"{}"}},"templates":[{"name":"omp","adapter":"omp"}]}));
+        f.approve();
+        let prepared = prepare(
+            &f.project,
+            &f.private,
+            Some("omp"),
+            &settings(json!({})),
+            &|_| Some(f.cli.clone()),
+            &|_| None,
+        )
+        .unwrap();
+        assert_eq!(
+            prepared.launch.unwrap().omp.unwrap().policy.as_deref(),
+            Some("{}")
+        );
+    }
     #[test]
     fn t09_v1_normal_config_and_optional_absence_are_valid() {
         assert_eq!(

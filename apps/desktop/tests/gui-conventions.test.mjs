@@ -5,9 +5,9 @@ import './fixtures/i18n-test-init.mjs';
 import test from 'node:test';import assert from 'node:assert/strict';import {existsSync,readFileSync as rawReadFileSync} from 'node:fs';import ts from 'typescript';
 const read=name=>readFileSync(new URL('../src/'+name,import.meta.url),'utf8');
 const app=read('App.tsx'),settings=read('TerminalSettings.tsx'),layout=read('TerminalLayout.tsx'),css=read('App.css');
-test('both terminal windows enforce a 1024 × 768 logical minimum and start within it',()=>{
+test('both terminal windows enforce a 720 × 600 logical minimum and start within it',()=>{
  const main=JSON.parse(rawReadFileSync(new URL('../src-tauri/tauri.conf.json',import.meta.url),'utf8')).app.windows[0];
- assert.deepEqual([main.minWidth,main.minHeight],[1024,768]);
+ assert.deepEqual([main.minWidth,main.minHeight],[720,600]);
  assert.ok(main.width>=main.minWidth&&main.height>=main.minHeight,'main window starts above its minimum');
  const native=rawReadFileSync(new URL('../src-tauri/src/desktop_windows.rs',import.meta.url),'utf8');
  const secondary=native.slice(native.indexOf('fn create_secondary<'),native.indexOf('fn create_secondary<')+2500);

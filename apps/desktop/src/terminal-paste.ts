@@ -15,6 +15,9 @@ export function inspectTerminalPaste(text:string):TerminalPasteText{
  const bytes=new TextEncoder().encode(text).length;if(bytes>131072)throw Error("Pasted text exceeds the 128 KiB limit. Nothing was sent.");const points=[...text];const controls=(text.match(/[\u0000-\u0008\u000a-\u001f\u007f-\u009f]/g)??[]).length;
  return{text,display:points.slice(0,4096).join(""),bytes,lines:text===""?0:(text.match(/\r\n|\r|\n/g)??[]).length+1,controls,truncated:points.length>4096,risky:controls>0};
 }
+export function terminalPasteAllowed(content:TerminalPasteText,managedCodex:boolean):boolean{
+ return !managedCodex||!content.risky;
+}
 export function terminalPasteInputEligible(view:{disposed:boolean;availability?:string;live:boolean;projection:boolean;cursor:number|null;ready:boolean;firstAttachment:boolean},available:boolean):boolean{return !view.disposed&&available&&view.availability!=="owner_unavailable"&&view.live&&(view.projection||(view.cursor!==null&&(view.ready||view.firstAttachment)));}
 export type TerminalPasteTarget<V=unknown,I=unknown>={sessionId:string;view:V;instance:I;frameInstance:string|null;attachVersion:number|undefined;lifecycleRevision:number;connectionVersion:number;paneId:string;selectionVersion:number;layoutRevision:number};
 export type PendingTerminalPaste<V=unknown,I=unknown>={target:TerminalPasteTarget<V,I>;content:TerminalPasteText};

@@ -232,13 +232,12 @@ test("F4 actual component exposes explicit non-submit CRUD and Apply buttons and
 test("F4 actual App Apply callback changes five launch fields and preserves cwd/project/environment state",async()=>{
  const fs=await import("node:fs/promises"),ts=await import("typescript"),app=await englishUiReadAsync(fs.readFile,new URL("../src/App.tsx",import.meta.url),"utf8"),tree=ts.default.createSourceFile("App.tsx",app,ts.default.ScriptTarget.Latest,true,ts.default.ScriptKind.TSX);let fn;
  const visit=n=>{if(ts.default.isFunctionDeclaration(n)&&n.name?.text==="applyLaunchTemplate")fn=n.getText(tree);ts.default.forEachChild(n,visit);};visit(tree);assert.ok(fn,"actual App Apply callback exists");
- const values={projectLaunchFields:templates.projectLaunchFields,editLaunch:fields=>{Object.assign(state,fields);Object.assign(state.projectLaunchEdits,fields);},launchSettingsDialog:{current:null},launchDialog:{current:null}};const state={cwd:"/trusted/project",env:{TOKEN:"OWNER_SECRET"},projectPreview:{root:"/trusted/project"},useProjectSettings:true,projectLaunchEdits:{},adapter:"old",mode:"old",extra_args:"old",prompt:"old",command:"old",provider:{id:"deepseek"}};
+ const values={projectLaunchFields:templates.projectLaunchFields,setRoutingPolicySelection:choice=>state.routingChoice=choice,editLaunch:fields=>{Object.assign(state,fields);Object.assign(state.projectLaunchEdits,fields);},launchSettingsDialog:{current:null},launchDialog:{current:null}};const state={cwd:"/trusted/project",env:{TOKEN:"OWNER_SECRET"},projectPreview:{root:"/trusted/project"},useProjectSettings:true,projectLaunchEdits:{},adapter:"old",mode:"old",extra_args:"old",prompt:"old",command:"old",provider:{id:"deepseek"},routingChoice:"old-strategy"};
  new Function(...Object.keys(values),ts.default.transpile(fn,{target:ts.default.ScriptTarget.ES2022})+";return applyLaunchTemplate;")(...Object.values(values))(stored({command:""}));
  assert.deepEqual({adapter:state.adapter,mode:state.mode,extra_args:state.extra_args,prompt:state.prompt,command:state.command},{adapter:"codex",mode:"interactive",extra_args:"--safe",prompt:"hello",command:""});
  assert.equal(state.cwd,"/trusted/project");assert.deepEqual(state.env,{TOKEN:"OWNER_SECRET"});assert.deepEqual(state.projectPreview,{root:"/trusted/project"});assert.equal(state.useProjectSettings,true);
- assert.deepEqual(state.projectLaunchEdits,{adapter:"codex",mode:"interactive",extra_args:"--safe",prompt:"hello",command:"",provider:null,codex:{image_mode:"native"}});assert.equal(state.provider,null);
- const body=app.slice(app.indexOf("function applyLaunchTemplate("),app.indexOf("function ",app.indexOf("function applyLaunchTemplate(")+10));
- assert.doesNotMatch(body,/startSession|create_session|take_terminal_control|approveProjectConfig|trust_project_config|cancelProjectPreview|owner/i);
+ assert.deepEqual(state.projectLaunchEdits,{adapter:"codex",mode:"interactive",extra_args:"--safe",prompt:"hello",command:"",provider:null,codex:{image_mode:"native"},omp:undefined});assert.equal(state.provider,null);assert.equal(state.routingChoice,null);
+ assert.doesNotMatch(fn,/startSession|create_session|take_terminal_control|approveProjectConfig|trust_project_config|cancelProjectPreview|owner/i);
 });
 
 test("F4 actual App Save projects real resolved trusted defaults before storage and masks write failures",async()=>{

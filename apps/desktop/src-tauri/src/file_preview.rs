@@ -969,6 +969,7 @@ mod tests {
                         "cwd" => record.summary.cwd.push_str("/changed"),
                         "launch" => {
                             record.summary.launch = Some(crate::AgentLaunch {
+                                omp: None,
                                 claude_context: None,
                                 codex: None,
                                 env_refs: Default::default(),

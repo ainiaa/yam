@@ -33,7 +33,7 @@ export function PiPlugins({invoke,navigation,onClose,onBusyChange,onOpenCatalog}
   catch(e){if(mounted.current)setError(String(e));}
   finally{await refresh();working.current=false;if(mounted.current){setBusy(false);setPending(null);}onBusyChange(false);}
  }
- function close(){if(working.current)return;if(pending)setPending(null);else onClose();}
+ function close(){if(working.current)return;if(pending)setPending(null);onClose();}
  async function openCatalog(){try{await onOpenCatalog();}catch{if(mounted.current)setError('Could not open the Pi package catalog.');}}
  const canInstall=!!state?.pi_available&&!reading&&!loadError&&!busy;
  const installedCount=state?state.packages.length+state.other_count:null;
@@ -69,6 +69,6 @@ export function PiPlugins({invoke,navigation,onClose,onBusyChange,onOpenCatalog}
     </>}
    </>}
    {loadError&&<p role="alert">{t(loadError)}</p>}{error&&<p role="alert">{t(error)}</p>}{message&&<p role="status">{t(message)}</p>}
-  </div><footer className="dialog-footer"><button type="button" disabled={busy} onClick={close}>{t('Close')}</button></footer>
+  </div><footer className="dialog-footer"><button type="button" disabled={busy} data-settings-close onClick={close}>{t('Close')}</button></footer>
  </dialog>;
 }

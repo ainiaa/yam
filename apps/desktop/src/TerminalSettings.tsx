@@ -59,25 +59,28 @@ export function TerminalSettings({fonts=["SFMono-Regular","Menlo","Monaco","Cons
     </section>}
     {(error||settingsError||retentionError||lineHeightError||cursorError||shellError)&&<p role="alert">{t(error||settingsError||retentionError||lineHeightError||cursorError||shellError||"")}</p>}
    </div>
-   <footer className="dialog-actions"><button type="button" onClick={onClose}>{t("Cancel")}</button><button type="submit" className="primary-button">{t("Save settings")}</button></footer>
+   <footer className="dialog-actions"><button type="button" data-settings-close onClick={onClose}>{t("Cancel")}</button><button type="submit" className="primary-button">{t("Save settings")}</button></footer>
   </form>
  </dialog>;
 }
 
-export function CommandPalette({query,onQuery,entries,onChoose,onClose}:{query:string;onQuery:(value:string)=>void;entries:PaletteEntry[];onChoose:(entry:PaletteEntry)=>void;onClose:()=>void}){
+export function CommandPalette({query,onQuery,entries,onChoose,onClose,loading=false,searchError=null,hasMore=false,onMore,onRetry}:{query:string;onQuery:(value:string)=>void;entries:PaletteEntry[];onChoose:(entry:PaletteEntry)=>void;onClose:()=>void;loading?:boolean;searchError?:string|null;hasMore?:boolean;onMore?:()=>void;onRetry?:()=>void}){
  const dialog=useRef<HTMLDialogElement>(null),input=useRef<HTMLInputElement>(null),composing=useRef(false),[selected,setSelected]=useState<{query:string;entry?:PaletteEntry}>(()=>({query,entry:entries[0]}));
  useEffect(()=>{dialog.current?.showModal();input.current?.focus();},[]);
- useEffect(()=>setSelected({query,entry:entries[0]}),[query]);
- const index=selected.query===query?entries.findIndex(entry=>entry.action===selected.entry?.action&&entry.sessionId===selected.entry?.sessionId):entries.length?0:-1;
+ useEffect(()=>{setSelected(current=>current.query!==query||(!current.entry&&entries[0])?{query,entry:entries[0]}:current);},[query,entries]);
+ const index=selected.query===query&&selected.entry?entries.findIndex(entry=>entry.action===selected.entry?.action&&entry.sessionId===selected.entry?.sessionId):entries.length?0:-1;
  useEffect(()=>{dialog.current?.querySelector("button.selected")?.scrollIntoView({block:"nearest"});},[index,query]);
  function cancel(){dialog.current?.close();onClose();}
  return <dialog ref={dialog} className="app-dialog command-palette-dialog" aria-labelledby="command-palette-title" onCancel={event=>{event.preventDefault();cancel();}}>
   <header className="dialog-header"><h2 id="command-palette-title">{t("Command palette")}</h2><button type="button" onClick={cancel}>{t("Close")}</button></header>
   <form className="dialog-fields" onSubmit={event=>{event.preventDefault();if(!composing.current&&entries[index])onChoose(entries[index]);}}>
-   <label>{t("Find an action or loaded session")}<input ref={input} aria-label={t("Command query")} maxLength={256} value={query} onCompositionStart={()=>{composing.current=true;}} onCompositionEnd={()=>{composing.current=false;}} onChange={event=>onQuery(event.target.value)} onKeyDown={event=>{if(composing.current||event.nativeEvent.isComposing)return;if(event.key==="ArrowDown"||event.key==="ArrowUp"){event.preventDefault();const entry=entries[Math.max(0,Math.min(entries.length-1,index+(event.key==="ArrowDown"?1:-1)))];if(entry)setSelected({query,entry});}}}/></label>
+   <label>{t("Find an action or session in all history")}<input ref={input} aria-label={t("Command query")} maxLength={256} value={query} onCompositionStart={()=>{composing.current=true;}} onCompositionEnd={()=>{composing.current=false;}} onChange={event=>onQuery(event.target.value)} onKeyDown={event=>{if(composing.current||event.nativeEvent.isComposing)return;if(event.key==="ArrowDown"||event.key==="ArrowUp"){event.preventDefault();const entry=entries[Math.max(0,Math.min(entries.length-1,index+(event.key==="ArrowDown"?1:-1)))];if(entry)setSelected({query,entry});}}}/></label>
    <ul className="command-palette-results" aria-label={t("Commands")}>{entries.map((entry,i)=><li key={`${entry.action}:${entry.sessionId??""}`}><button type="button" className={i===index?"selected":""} aria-current={i===index?"true":undefined} onClick={()=>onChoose(entry)}><span>{entry.label}</span>{entry.detail&&<small className="command-palette-detail">{entry.detail}</small>}</button></li>)}</ul>
-   {!entries.length&&<p role="status">{t("No matching action or loaded session.")}</p>}
-   <p className="log-note">{t("Filtering performs no action. Choose a result to run it. Session results use the loaded history page.")}</p>
+   {loading&&<p role="status">{t("Searching all history…")}</p>}
+   {searchError&&<p role="alert">{t(searchError)} <button type="button" disabled={loading} onClick={onRetry}>{t("Retry")}</button></p>}
+   {hasMore&&<button type="button" disabled={loading} onClick={onMore}>{t("Search more history pages")}</button>}
+   {!entries.length&&!loading&&!searchError&&<p role="status">{t(hasMore?"No matches on the searched pages. More history pages remain.":"No matching action or session.")}</p>}
+   <p className="log-note">{t("Search includes saved and archived sessions. More pages can be searched without loading the sidebar. Opening history does not restart a task.")}</p>
   </form>
  </dialog>;
 }
