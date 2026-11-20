@@ -22,7 +22,7 @@ class WebKitStartup(unittest.TestCase):
         module = self.smoke()
         module.SWIFT = module.SWIFT.replace(
             'window.__yamDelayMs=0;', 'window.__yamDelayMs=2000;',
-        )
+        ).replace('window.__yamStartupOnly=false;', 'window.__yamStartupOnly=true;')
         module.main(os.environ.get('YAM_WEBKIT_FIXTURE_DIST'))
 
     def test_real_react_settings_keep_and_discard_are_verified_before_success(self):
@@ -69,6 +69,27 @@ if __name__ == '__main__':
     unittest.main()
 
 class WebKitBuildBudget(unittest.TestCase):
+    def test_probe_waits_for_bootstrap_on_the_initial_empty_document(self):
+        module = WebKitStartup().smoke()
+        probe = module.SWIFT.split('view.evaluateJavaScript(#"""', 1)[1].split('"""#)', 1)[0]
+        js = "globalThis.window={}; globalThis.document={querySelector:()=>null,querySelectorAll:()=>[]};\n"
+        js += "const snapshot=JSON.parse(" + probe + "); if(snapshot.bootstrap!==false)throw Error('Expected bootstrap to be pending');"
+        subprocess.run(['node', '-e', js], check=True, capture_output=True, text=True, timeout=10)
+
+    def test_startup_only_probe_does_not_drive_settings(self):
+        module = WebKitStartup().smoke()
+        probe = module.SWIFT.split('view.evaluateJavaScript(#"""', 1)[1].split('"""#)', 1)[0]
+        js = """globalThis.window={__yamStartupOnly:true,__yamPending:0,__yamErrors:[],__yamDiagnosticsWithPending:true};
+globalThis.document={querySelector:selector=>{
+ if(selector==='.memory-usage')return {textContent:'YAM 100.0 MiB'};
+ if(selector==='.diagnostics-details')return {};
+ if(selector==='.appearance-dialog[open]')return null;
+ throw Error('Startup-only probe touched the settings controls');
+},querySelectorAll:()=>[]};
+"""
+        js += "const snapshot=JSON.parse(" + probe + "); if(!snapshot.startup_only||!snapshot.startup_overlap||snapshot.settings_verified||snapshot.errors.length)throw Error('Invalid startup-only snapshot');"
+        subprocess.run(['node', '-e', js], check=True, capture_output=True, text=True, timeout=10)
+
     def test_compile_budget_is_separate_from_browser_execution(self):
         module = WebKitStartup().smoke()
         with tempfile.TemporaryDirectory() as directory:
@@ -96,5 +117,22 @@ window.__TAURI_INTERNALS__.invoke('memory_usage');
 if(window.__yamPending!==1)throw Error('Repeated polling counted as startup');
 pending[0]();
 if(window.__yamPending!==0)throw Error('First startup request did not settle');
+"""
+        subprocess.run(['node', '-e', js], check=True, capture_output=True, text=True, timeout=10)
+
+    def test_only_first_health_request_proves_delayed_diagnostics_overlap(self):
+        module = WebKitStartup().smoke()
+        bootstrap = module.SWIFT.split('let bootstrap = """', 1)[1].split('"""', 1)[0]
+        js = """globalThis.window=globalThis; globalThis.document={querySelector:()=>({})};
+globalThis.addEventListener=()=>{}; const pending=[];
+globalThis.setTimeout=fn=>pending.push(fn);
+""" + bootstrap + """
+window.__TAURI_INTERNALS__.invoke('memory_usage');
+pending.shift()();
+if(window.__yamDiagnosticsWithPending)throw Error('Memory sampling is not startup overlap');
+window.__TAURI_INTERNALS__.invoke('health_check');
+if(window.__yamPending!==1)throw Error('Expected a delayed startup health check');
+pending.shift()();
+if(!window.__yamDiagnosticsWithPending||window.__yamPending!==0)throw Error('Delayed startup overlap was not recorded');
 """
         subprocess.run(['node', '-e', js], check=True, capture_output=True, text=True, timeout=10)
